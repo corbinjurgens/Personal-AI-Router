@@ -3,6 +3,7 @@
 
 import { type IEngineApi, createEngineApi } from '@/ui/api/engine-api'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
+import { createRoutingHistory } from './routing-history'
 import type {
     AvailableNode,
     AskToJoinRequest,
@@ -128,7 +129,8 @@ export interface IWorkloadsApi {
     cancel(request: WorkloadCancelRequest): Promise<{ ok: boolean }>
 }
 
-interface IRoutingApi {
+interface IRoutingApi extends Pick<ReturnType<typeof createRoutingHistory>,
+    'subscribe' | 'unsubscribe' | 'getInitial' | 'onChanged' | 'consumeCurrent' | 'size' | 'loading'> {
     /** Cancel an origin-local routing request using its complete process identity. */
     cancel(request: RoutingCancelParams): Promise<RoutingCancelResult>
     /** Read the origin-local active request keys without model or content details. */
@@ -192,6 +194,7 @@ export interface IPairApi {
 // ---------------------------------------------------------------------------
 
 export function createPairApi(transport: ServiceTransport): IPairApi {
+    const history = createRoutingHistory(transport)
     return {
         app: {
             getInitial: () => transport.invoke('app:get-initial')
@@ -270,6 +273,13 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
             cancel: request => transport.invoke('workloads:cancel', request)
         },
         routing: {
+            subscribe: () => history.subscribe(),
+            unsubscribe: () => history.unsubscribe(),
+            getInitial: history.getInitial,
+            get size() { return history.size },
+            get loading() { return history.loading },
+            consumeCurrent: (index, consume) => history.consumeCurrent(index, consume),
+            onChanged: callback => history.onChanged(callback),
             cancel: request => transport.invoke('routing:cancel', request),
             active: () => transport.invoke('routing:active', {})
         },

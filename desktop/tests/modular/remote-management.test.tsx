@@ -601,7 +601,12 @@ describe('permission and pairing API contracts', () => {
             ).rejects.toBe(refusal)
             const invoke = vi.fn<PreloadServiceTransport['invoke']>()
             invoke.mockResolvedValue({ success: false, error: 'service refused', code })
-            const preload = { ...mockTransport(), invoke } satisfies PreloadServiceTransport
+            const preload = {
+                ...mockTransport(), invoke,
+                invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
+                    throw new Error('Unexpected history invoke in ordinary transport fixture')
+                })
+            } satisfies PreloadServiceTransport
             const result = createPairApi(
                 serviceTransport(preload)
             ).cluster.getRemoteManagementForNode('target')

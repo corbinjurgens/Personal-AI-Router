@@ -28,6 +28,7 @@ import {
 import { engineProgressKey } from '@/shared/utils/engine-progress'
 import { workloadKey } from '@/shared/utils/workloads'
 import { emitBridgePush } from './broadcaster'
+import { applyRoutingHistoryChanged, applyRoutingHistoryInitial } from './routing'
 import { isModelCopyTerminal, modelCopyProgress, parseModelCopyFrame } from './model-copy'
 import { mergePullProgressPercent } from './pull-error-handling'
 import type { JsonRpcNotification, JsonValue } from './json-rpc-client'
@@ -254,6 +255,11 @@ class ModularBridgeState {
     /** Supervisor-registered hook to re-pull the local discovery engine's
      *  authoritative `list_models` when discovery reports its model set changed. */
     private onLocalDiscoveryModelsChanged: ((engine: ProxyEngine) => void) | null = null
+
+    applyRoutingHistory(raw: Uint8Array, initial: boolean): void {
+        if (initial) applyRoutingHistoryInitial(raw)
+        else applyRoutingHistoryChanged(raw)
+    }
     /**
      * Optimistic transitional process status for a local engine while a
      * user-initiated lifecycle op is in flight. `nvpair-engine-manager` never emits

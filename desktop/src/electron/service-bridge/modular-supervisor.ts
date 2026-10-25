@@ -70,6 +70,7 @@ import { defaultServiceEndpointEnvironment, resolveServiceEndpoint } from './ser
 import { parseAvailabilityChange, parsePolicyChange } from './node-policy'
 import { NodeAvailabilityState, type AvailabilityMenuItem } from './node-availability'
 import { PerformanceSubscription } from './performance'
+import { RoutingHistorySubscription } from './routing'
 import {
     legacyManualNodesPath,
     manualNodesFileOps,
@@ -386,6 +387,10 @@ function emptyLocalEngineBridge(): LocalEngineBridge {
  *   for telemetry (see `node-info-poller.ts`).
  */
 class ModularSupervisor {
+    private readonly routingHistory = new RoutingHistorySubscription((raw, initial) => {
+        getModularBridgeState().applyRoutingHistory(raw, initial)
+        return undefined
+    })
     private processes = new Map<ModularProcessName, JsonRpcSocketClient>()
     private readinessWaiters = new Map<number, ReadinessWaiter>()
     private nextReadinessWaiterId = 0
@@ -666,6 +671,7 @@ class ModularSupervisor {
         // Mark teardown first so the connection closing during teardown is
         // treated as deliberate, not a crash.
         this.shuttingDown = true
+        this.routingHistory.sourceReset()
         this.brokerSessionGeneration++
         getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateEngineLocks()
@@ -715,6 +721,7 @@ class ModularSupervisor {
         for (const child of processes) {
             try {
                 await close(child)
+                if (child.name === 'broker') this.routingHistory.disconnected()
             } catch (err) {
                 log.warn({
                     sublevel: child.name,
@@ -779,6 +786,10 @@ class ModularSupervisor {
         // notification arrives after the process map is cleared during stop().
         if (!child) return Promise.reject(new Error(`${name} is not running`))
         return child.call(method, params, timeoutMs)
+    }
+
+    setRoutingHistorySubscribed(subscribed: boolean): void {
+        this.routingHistory.setWanted(subscribed)
     }
 
     /**
@@ -956,6 +967,7 @@ class ModularSupervisor {
         child.on('disconnected', () => {
             if (!isCurrent()) return
             log.warn({ sublevel: child.name, message: 'Lost the connection to the service' })
+            this.routingHistory.disconnected()
             this.resetBrokerSession()
             this.onConnectionLost?.()
         })
@@ -965,6 +977,7 @@ class ModularSupervisor {
         child.on('broker-restarted', () => {
             if (!isCurrent()) return
             log.warn({ sublevel: child.name, message: 'The service restarted the broker' })
+            this.routingHistory.sourceReset()
             this.resetBrokerSession()
             this.onConnectionLost?.()
         })
@@ -972,6 +985,7 @@ class ModularSupervisor {
             if (!isCurrent()) return
             this.processes.delete(child.name as ModularProcessName)
             if (child.name === 'broker') {
+                this.routingHistory.disconnected()
                 this.brokerSessionGeneration++
                 getModularBridgeState().applyEngineIntent(null)
                 getModularBridgeState().invalidateEngineLocks()
@@ -1077,6 +1091,8 @@ class ModularSupervisor {
 
     private async onBrokerReady(): Promise<void> {
         const generation = this.brokerSessionGeneration
+        const historyPeer = this.processes.get('broker')
+        if (historyPeer) this.routingHistory.connect(historyPeer)
         const subscribe = async (method: string, label: string): Promise<void> => {
             try {
                 await this.callProcess('broker', method)

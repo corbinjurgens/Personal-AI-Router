@@ -6,6 +6,7 @@ import type { ModularLogLevel } from '@/shared/constants/modular-runtime'
 import type { ServiceBridgeInvokeRequest } from './service-bridge'
 import type { UpdateStatus } from '@/shared/types/update'
 import type { DemoState } from '@/shared/types/inference-demo'
+import type { RoutingHistoryConsumed, RoutingHistoryConsumption, RoutingHistoryPull, RoutingHistoryTransfer } from './routing'
 
 /**
  * IPC contract types for Electron-native operations only.
@@ -66,6 +67,8 @@ export interface ServiceVersions {
 export type BootstrapPayload = { port: number; token: string } | null
 
 export interface IpcChannelMap {
+    'routing-history:pull': { request: RoutingHistoryPull; response: RoutingHistoryTransfer }
+    'routing-history:consumed': { request: RoutingHistoryConsumed; response: RoutingHistoryConsumption }
     // -- Window --
     'window:close': { request: void; response: void }
     'window:open-overview': { request: void; response: void }

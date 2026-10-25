@@ -431,7 +431,12 @@ describe('join request API and bridge propagation', () => {
             const invoke = vi
                 .fn<PreloadServiceTransport['invoke']>()
                 .mockResolvedValue({ success: false, error: refusal.message, code })
-            const preload = { ...mockTransport(), invoke } satisfies PreloadServiceTransport
+            const preload = {
+                ...mockTransport(), invoke,
+                invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
+                    throw new Error('Unexpected history invoke in ordinary transport fixture')
+                })
+            } satisfies PreloadServiceTransport
             const result = createPairApi(serviceTransport(preload)).cluster.askToJoin({
                 address: 'member.local',
                 replaceSoloCluster: false

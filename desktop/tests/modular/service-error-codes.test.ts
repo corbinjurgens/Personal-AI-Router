@@ -72,6 +72,9 @@ describe('service error codes across the IPC boundary', () => {
         return {
             connected: true,
             invoke: () => Promise.resolve(result),
+            invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
+                throw new Error('Unexpected history invoke in ordinary transport fixture')
+            }),
             subscribePush: () => () => {},
             onConnect: () => () => {},
             onDisconnect: () => () => {},
