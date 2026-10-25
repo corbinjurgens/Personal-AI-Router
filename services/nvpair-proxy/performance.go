@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"hash"
 	"io"
 	"net/http"
@@ -890,7 +891,8 @@ func (a *performanceAttempt) finish(sc *statusCapture, returned bool) {
 		return
 	}
 	m := performancewire.Measurement{Outcome: performancewire.OutcomeFailed, AdmissionWaitMs: performanceMilliseconds(a.wait), HeaderMs: a.header, FirstBodyMs: a.firstBody, TotalMs: performanceMilliseconds(time.Since(a.start))}
-	if a.parent.Err() != nil {
+	parentCause := context.Cause(a.parent)
+	if parentCause != nil && !errors.Is(parentCause, context.DeadlineExceeded) {
 		m.Outcome = performancewire.OutcomeCancelled
 	}
 	if a.reader != nil {
@@ -905,7 +907,7 @@ func (a *performanceAttempt) finish(sc *statusCapture, returned bool) {
 		m.PromptTokens, m.CachedPromptTokens, m.OutputTokens = n.PromptTokens, n.CachedPromptTokens, n.OutputTokens
 		m.PrefillNs, m.DecodeNs, m.LoadNs = n.PrefillNs, n.DecodeNs, n.LoadNs
 		m.EngineDecodeNs, m.EngineDecodeTokensPerSecond = n.EngineDecodeNs, n.EngineDecodeTokensPerSecond
-		if result.Outcome == streamOutcomeCancelled {
+		if result.Outcome == streamOutcomeCancelled && !errors.Is(context.Cause(a.parent), context.DeadlineExceeded) {
 			m.Outcome = performancewire.OutcomeCancelled
 		}
 		if complete {

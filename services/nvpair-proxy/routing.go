@@ -231,6 +231,19 @@ func (r *routingSpend) deadlineExpired() bool {
 	return r.cancelled && r.reason == routingDeadlineReason
 }
 
+// The request owner arbitrates deadline expiry against commitment. Preserve
+// its winning reason when cancelling a dispatch, without bounding live streams.
+func (r *routingSpend) attemptContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	return ctx, func() {
+		if r.deadlineExpired() {
+			cancel(context.DeadlineExceeded)
+		} else {
+			cancel(context.Canceled)
+		}
+	}
+}
+
 func (a *publicAttemptLifecycle) abandon() bool {
 	if a == nil || a.request == nil {
 		return false
@@ -1373,7 +1386,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// distinction is load-bearing: the disconnect watcher and the terminal
 		// classification both read r.Context(), the parent, so cancelling a
 		// child cannot be mistaken for the client going away.
-		attemptCtx, cancelAttempt := context.WithCancel(r.Context())
+		attemptCtx, cancelAttempt := ctl.attemptContext(r.Context())
 		att, err := ctl.newDispatchAttempt(attemptCtx, cancelAttempt, cand.id, destinationDescriptor(candModel, cand.id, candEngine, false))
 		if err != nil {
 			cancelAttempt()
