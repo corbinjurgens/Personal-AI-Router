@@ -435,11 +435,13 @@ it dispatched under its admission mutex. The broker must return its result as an
 ```
 
 A refusal is `result:{"dispatched":false,"reason":"reservation-revoked"}`.
-Reasons are `reservation-revoked`, `reservation-unknown`, or any shared
-`ModelConfigurationReason`: `engine-off`, `no-fit`, `paused`, `engine-locked`,
+Reasons are `reservation-revoked`, `reservation-unknown`, or a shared resident
+refusal reason: `engine-off`, `no-fit`, `paused`, `engine-locked`,
 `paused-local`, `engine-off-local` (older inbound reasons), `not-served`, `not-installed`, `unqualified`,
-`unsupported-load`, `switch-busy`, `load-failed`, `operation-timeout`, `observation-unknown`,
-`projection-unknown`. A relay error instead has
+`unsupported-load`, `switch-busy`, `operation-timeout`, `observation-unknown`,
+`projection-unknown`. The prepare and dispatch validators reject `load-failed`:
+it describes a completed load in model-configuration status, not refusal of
+permission to load. A relay error instead has
 `error:{"code":-32000,"message":"bounded explanation"}`, with no result.
 Exactly one of result/error is required. Null, duplicate/case-variant/unknown
 envelope keys and malformed results cannot grant permission. A request named

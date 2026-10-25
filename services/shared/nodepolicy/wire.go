@@ -252,7 +252,7 @@ func (r DispatchResidentReason) Validate() error {
 	if r == DispatchReasonReservationRevoked || r == DispatchReasonReservationUnknown {
 		return nil
 	}
-	return ModelConfigurationReason(r).Validate()
+	return validateResidentRefusalReason(ModelConfigurationReason(r))
 }
 
 // DispatchResidentResult is an explicit final grant or a typed refusal.
@@ -417,11 +417,23 @@ type ResidentRefusal struct {
 	Reason ModelConfigurationReason `json:"reason"`
 }
 
+// Admission refusals precede the load. Keep their codes independent of status
+// reasons so a completed load failure cannot become a prepare/dispatch refusal.
+func validateResidentRefusalReason(r ModelConfigurationReason) error {
+	switch r {
+	case ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal,
+		ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad,
+		ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
+		return nil
+	}
+	return errors.New("unknown model configuration reason")
+}
+
 func (r ResidentRefusal) Validate() error {
 	if err := validateResidentRef(r.Engine, r.Model); err != nil {
 		return err
 	}
-	return r.Reason.Validate()
+	return validateResidentRefusalReason(r.Reason)
 }
 
 // PrepareResidentResult is a disjoint grant/refusal: refusal never reserves.
