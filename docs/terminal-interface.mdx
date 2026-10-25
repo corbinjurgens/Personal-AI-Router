@@ -375,16 +375,28 @@ finish or reconcile.
 If a response is lost or the connection drops, read back the **original request
 ID**; the TUI does not automatically resend. Unknown or unreachable outcomes
 stay unknown. `recoveryRequired` is shown independently of a terminal failure.
-Readback only observes state: it does not cancel, force, roll back, resume or
+Status reads only observe state: they do not cancel, force, roll back, resume or
 perform recovery. Use the existing operator recovery procedures on the target.
 
-An absent receipt does **not** prove the request cannot arrive later. The broker
-has no fence or tombstone for a sent request it has not accepted. In the current
-TUI, that request ID remains blocked for the node-detail visit, potentially
-indefinitely if it never arrives. Closing the panel retains it; leaving node
-detail (a second `esc`) forgets it. Reopening may allow a new request after an
-idle read, but navigation does not resolve the old outcome or prevent its late
-acceptance. A reconnect, restart or idle status alone is not proof of abandonment.
+An absent receipt does **not** prove the request cannot arrive later. After the
+exact unknown-receipt response for its own sent but unacknowledged request, the
+TUI automatically calls `engine:switch-fence` for that original ID. This is a
+separate mutation that durably prevents acceptance; status readback alone only
+observes state. Only a valid matching acknowledgement reports **Not accepted;
+original request fenced**. The TUI then reads a fresh configuration baseline
+before a deliberate new switch can allocate a fresh ID.
+
+If acceptance won the race, the fence returns the owned receipt and the TUI
+follows the real operation without cancelling it. A denied, lost or invalid
+fence result retains uncertainty and the original ID; `r` retries readback and,
+if still absent, the same fence. Accepted receipts and another client's observed
+activity are never fenced. Fencing does not start engines, establish model
+residency or perform recovery.
+
+Correlation remains scoped to the node-detail visit. Closing the panel retains
+the ID; leaving node detail (a second `esc`) forgets it. Leaving without a fence
+acknowledgement does not resolve the old outcome or prevent late acceptance.
+A reconnect, restart or idle status alone is not proof of abandonment.
 
 ### Startup Arguments
 

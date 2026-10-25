@@ -505,6 +505,50 @@ func TestNodeDetailSwitchExitCancelsPendingRPC(t *testing.T) {
 	}
 }
 
+func TestNodeDetailFenceLifecycleCancelsPendingRPC(t *testing.T) {
+	for _, action := range []string{"reset", "close", "escape", "route", "disconnect"} {
+		t.Run(action, func(t *testing.T) {
+			d, f := switchDetail(t, false)
+			v := newNodesView(f.client)
+			v.detail = d
+			id, fence := switchAbsentFence(t, d, f)
+			done := holdReplacementCommand(t, f, fence, enginesettings.SwitchFenceMethod)
+			ctx := d.engineSwitch.ctx
+			switch action {
+			case "reset":
+				v.reset()
+			case "close":
+				v.close()
+			case "escape":
+				d.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+			case "route":
+				row := d.node
+				row.address = "changed-route"
+				d.followNode(row, true)
+			case "disconnect":
+				d.update(DisconnectedMsg{})
+			}
+			if !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatal("lifecycle left fence context alive")
+			}
+			select {
+			case late := <-done:
+				d.update(late)
+			case <-time.After(time.Second):
+				t.Fatal("lifecycle left pending fence RPC")
+			}
+			if d.engineSwitch.state == switchFenced {
+				t.Fatal("cancelled fence wait claimed non-acceptance")
+			}
+			if action == "route" || action == "disconnect" {
+				if d.engineSwitch.requestID != id || !d.engineSwitch.outcomeUnknown() || d.submitSwitch() != nil {
+					t.Fatal("transport retirement lost unresolved original")
+				}
+			}
+		})
+	}
+}
+
 func TestReplacementInterruptsEngineOperationStatus(t *testing.T) {
 	f := newReconnectUIFixture(t)
 	v := newNodesView(f.client)

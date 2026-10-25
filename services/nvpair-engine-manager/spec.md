@@ -1178,7 +1178,7 @@ process lifecycle, intent, ownership checks and local veto. Only the parent
 stdio/IPC channel exposes `engine:switch-prepare`, `engine:switch-step` and
 `engine:switch-reconcile`. Internal execution results contain the shared durable
 checkpoint, observations and coded error; no settings-worker error flattening is
-permitted. Apply/status ec routes relay to the broker, never to those executor
+permitted. Apply/status/fence ec routes relay to the broker, never to those executor
 methods, and never provision or forward another hop.
 
 Construction of the broker-managed Manager closes its independent direct ec
@@ -1299,6 +1299,43 @@ Switch relay requests use independent IDs and a bounded pending map. Replies
 preserve numeric error codes; waiter cancellation sends `engine:switch-cancel`
 and does not cancel an accepted operation. The existing pin gate supplies caller
 identity and the target replaces the incoming node alias.
+
+`engine:remote-switch-fence` resolves the peer through the existing pinned
+client and sends POST `/v1/engine-switch/fence`. The route is a management
+mutation, requiring a fresh grant, and relays local `engine:switch-fence` with
+the authenticated caller. Validated shared `SwitchFenceRequest` is
+`{nodeId?, requestId}`. The target normalizes node identity; no onward hop,
+executor effect or payload-supplied caller is allowed. `SwitchFenceResult`
+validates exactly `{nodeId, requestId, fenced:true}` or
+`{nodeId, requestId, fenced:false, receipt}` with matching receipt identities.
+An owned accepted receipt wins unchanged; a foreign receipt is not revealed.
+Absent fences persist before acknowledgement. Broker journal `tombstones`
+holds at most 32 insertion-ordered `{caller, requestId}` pairs, with oldest
+insertion eviction and nonempty ASCII identities of at most 128 bytes each.
+Duplicate pairs do not write; other callers may use the same ID with a fresh
+revision. Receipts keep their global ID ownership rules and never evict.
+Retained owned tombstones refuse switch mutation with kind `fenced` and code
+`-32010`. The unchanged journal generation increment makes the original
+payload's expected revision stale after eviction/restart as well. No new token
+is returned: clients obtain a fresh baseline after acknowledgement. Byte
+capacity preserves active terminal reservations. Capacity, cancellation or
+storage failure is not acknowledgement, including an uncertain replacement
+retried within the same process; trusted restart may read the durable journal.
+
+Shared `DecodeSwitchFenceResult` is the acknowledgement decoder: exact unique
+field names, an explicit boolean `fenced`, the validated exclusive union, no
+explicit null receipt and no trailing JSON. The receipt and its nested objects
+reject duplicate, unknown and case-variant keys; existing `SwitchReceipt`
+validation owns values and identity. Other switch decoders remain unchanged.
+
+An authoritative broker RPC operation error uses existing `writeCodedError`
+and the HTTP 409 envelope with `code:"operation_error"`, preserving numeric
+`-32000` and the exact target message at the outbound switch client. This keeps
+`Unknown switch receipt for this caller.` distinguishable from generic
+transport/coordinator failure without matching diagnostic suffixes. The relay
+does not carry `SwitchError.Kind`, so no distinct unknown-receipt kind is
+inferred. Existing aliases and other control families' classification remain
+unchanged. Plain failures remain uncertain and cannot establish absence.
 
 ### Download lifecycle and content admission
 

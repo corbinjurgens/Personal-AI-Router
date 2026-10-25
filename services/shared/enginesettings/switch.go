@@ -22,17 +22,21 @@ import (
 const (
 	SwitchMethod              = "engine:switch"
 	SwitchStatusMethod        = "engine:switch-status"
+	SwitchFenceMethod         = "engine:switch-fence"
 	SwitchChangedNotification = "engine:switch-changed"
 	SwitchPrepareMethod       = "engine:switch-prepare"
 	SwitchStepMethod          = "engine:switch-step"
 	SwitchReconcileMethod     = "engine:switch-reconcile"
 	RemoteSwitchMethod        = "engine:remote-switch"
 	RemoteSwitchStatusMethod  = "engine:remote-switch-status"
+	RemoteSwitchFenceMethod   = "engine:remote-switch-fence"
 	SwitchApplyPath           = "/v1/engine-switch/apply"
 	SwitchStatusPath          = "/v1/engine-switch/status"
+	SwitchFencePath           = "/v1/engine-switch/fence"
 
 	SwitchVersion              = 1
 	MaxSwitchReceipts          = 256
+	MaxSwitchTombstones        = 32
 	MaxSwitchJournalBytes      = 2 * 1024 * 1024
 	MaxSwitchRequestIDBytes    = 128
 	MaxSwitchErrorMessageBytes = 1024
@@ -84,6 +88,7 @@ const (
 	SwitchErrorInvalidRequest        = "invalid_request"
 	SwitchErrorReusedID              = "reused_id"
 	SwitchErrorConfigurationConflict = "configuration_conflict"
+	SwitchErrorFenced                = "fenced"
 	SwitchErrorRemoteVeto            = "remote_veto"
 	SwitchErrorEngineLocked          = "engine_locked"
 	SwitchErrorUnknownReceipt        = "unknown_receipt"
@@ -113,6 +118,27 @@ type SwitchStatusRequest struct {
 	NodeID        string  `json:"nodeId,omitempty"`
 	RequestID     string  `json:"requestId,omitempty"`
 	AfterSequence *uint64 `json:"afterSequence,omitempty"`
+}
+
+type SwitchFenceRequest struct {
+	NodeID    string `json:"nodeId,omitempty"`
+	RequestID string `json:"requestId"`
+}
+
+// SwitchFenceResult either confirms a durable absence fence or returns an
+// existing owned receipt unchanged. It supplies no new configuration token.
+type SwitchFenceResult struct {
+	NodeID    string         `json:"nodeId"`
+	RequestID string         `json:"requestId"`
+	Fenced    bool           `json:"fenced"`
+	Receipt   *SwitchReceipt `json:"receipt,omitempty"`
+}
+
+// SwitchTombstone fences only this authenticated caller's request identity.
+// Journal slice order is insertion order; duplicate retries never reorder it.
+type SwitchTombstone struct {
+	Caller    string `json:"caller"`
+	RequestID string `json:"requestId"`
 }
 
 type SwitchObserved struct {
@@ -175,6 +201,7 @@ type SwitchJournal struct {
 	ActiveRequestID  string                           `json:"activeRequestId"`
 	Receipts         map[string]SwitchReceipt         `json:"receipts"`
 	LocalObligations map[string]SwitchLocalObligation `json:"localObligations,omitempty"`
+	Tombstones       []SwitchTombstone                `json:"tombstones,omitempty"`
 }
 
 // SwitchLocalObligation is internal broker journal state, never a public receipt.
@@ -282,6 +309,38 @@ func (r SwitchStatusRequest) Validate() error {
 	return switchSize(r, MaxSwitchRequestBytes)
 }
 
+func (r SwitchFenceRequest) Validate() error {
+	if !switchRequestID.MatchString(r.RequestID) {
+		return errors.New("requestId must be a nonempty ASCII identity of at most 128 bytes")
+	}
+	return switchSize(r, MaxSwitchRequestBytes)
+}
+
+func (r SwitchFenceResult) Validate() error {
+	if r.NodeID == "" || !switchRequestID.MatchString(r.RequestID) {
+		return errors.New("fence result requires nodeId and a valid requestId")
+	}
+	if r.Fenced == (r.Receipt != nil) {
+		return errors.New("fence result requires exactly a fence or an existing receipt")
+	}
+	if r.Receipt != nil {
+		if err := r.Receipt.Validate(); err != nil {
+			return err
+		}
+		if r.Receipt.NodeID != r.NodeID || r.Receipt.RequestID != r.RequestID {
+			return errors.New("fence result identity does not match receipt")
+		}
+	}
+	return switchSize(r, MaxSwitchJournalBytes)
+}
+
+func (t SwitchTombstone) Validate() error {
+	if !switchRequestID.MatchString(t.Caller) || !switchRequestID.MatchString(t.RequestID) {
+		return errors.New("tombstone caller and requestId must be nonempty ASCII identities of at most 128 bytes")
+	}
+	return nil
+}
+
 func IsTerminal(phase string) bool {
 	switch phase {
 	case SwitchCompleted, SwitchFailedValidation, SwitchFailedDrain, SwitchFailedSourceStop,
@@ -342,7 +401,7 @@ func (e SwitchError) Validate() error {
 	switch e.Kind {
 	case SwitchErrorInvalidRequest, SwitchErrorReusedID:
 		code = SwitchInvalidParamsCode
-	case SwitchErrorConfigurationConflict:
+	case SwitchErrorConfigurationConflict, SwitchErrorFenced:
 		code = SwitchConfigurationConflictCode
 	case SwitchErrorRemoteVeto:
 		code = SwitchRemoteVetoCode
@@ -415,6 +474,22 @@ func (j SwitchJournal) Validate() error {
 	if j.Receipts == nil || len(j.Receipts) > MaxSwitchReceipts {
 		return errors.New("switch journal requires a bounded receipts map")
 	}
+	if len(j.Tombstones) > MaxSwitchTombstones {
+		return errors.New("switch journal tombstone capacity exceeded")
+	}
+	seen := make(map[SwitchTombstone]bool, len(j.Tombstones))
+	for _, tombstone := range j.Tombstones {
+		if err := tombstone.Validate(); err != nil {
+			return err
+		}
+		if seen[tombstone] {
+			return errors.New("duplicate switch tombstone caller/requestId pair")
+		}
+		seen[tombstone] = true
+		if receipt, ok := j.Receipts[tombstone.RequestID]; ok && receipt.Caller == tombstone.Caller {
+			return errors.New("switch tombstone conflicts with owned receipt")
+		}
+	}
 	for id, obligation := range j.LocalObligations {
 		r, ok := j.Receipts[id]
 		if !ok || r.Caller == SwitchOriginLocal || (!obligation.SourceOff && !obligation.TargetOff && !obligation.Pause) {
@@ -449,7 +524,7 @@ func (j SwitchJournal) Validate() error {
 			return errors.New("invalid activeRequestId")
 		}
 	}
-	if len(j.Receipts) > 0 && j.Generation == 0 {
+	if (len(j.Receipts) > 0 || len(j.Tombstones) > 0) && j.Generation == 0 {
 		return errors.New("nonempty switch journal requires generation")
 	}
 	return switchSize(j, MaxSwitchJournalBytes)
@@ -500,6 +575,107 @@ func DecodeSwitchStatusRequest(data []byte) (SwitchStatusRequest, error) {
 		err = r.Validate()
 	}
 	return r, err
+}
+
+func DecodeSwitchFenceRequest(data []byte) (SwitchFenceRequest, error) {
+	r, err := decodeSwitchJSON[SwitchFenceRequest](data, MaxSwitchRequestBytes)
+	if err == nil {
+		err = r.Validate()
+	}
+	return r, err
+}
+
+// DecodeSwitchFenceResult rejects ambiguous proof before typed decoding. This
+// stricter acknowledgement boundary does not change ordinary switch decoders.
+func DecodeSwitchFenceResult(data []byte) (SwitchFenceResult, error) {
+	fields, err := decodeSwitchFenceObject(data, "nodeId", "requestId", "fenced", "receipt")
+	if err != nil {
+		return SwitchFenceResult{}, err
+	}
+	fenced := bytes.TrimSpace(fields["fenced"])
+	if !bytes.Equal(fenced, []byte("true")) && !bytes.Equal(fenced, []byte("false")) {
+		return SwitchFenceResult{}, errors.New("fence result requires an explicit boolean fenced field")
+	}
+	if receipt, ok := fields["receipt"]; ok {
+		if bytes.Equal(bytes.TrimSpace(receipt), []byte("null")) {
+			return SwitchFenceResult{}, errors.New("fence result receipt must not be null")
+		}
+		if err := validateSwitchFenceReceiptKeys(receipt); err != nil {
+			return SwitchFenceResult{}, err
+		}
+	}
+	r, err := decodeSwitchJSON[SwitchFenceResult](data, MaxSwitchJournalBytes)
+	if err == nil {
+		err = r.Validate()
+	}
+	if err != nil {
+		return SwitchFenceResult{}, err
+	}
+	return r, nil
+}
+
+// Keep receipt values and identity validation at SwitchReceipt.Validate; these
+// field checks additionally reject duplicate keys and Go's case-folded aliases
+// at every object boundary in the receipt carried by a fence acknowledgement.
+func validateSwitchFenceReceiptKeys(data []byte) error {
+	fields, err := decodeSwitchFenceObject(data, "version", "nodeId", "requestId", "caller", "payloadHash", "request",
+		"expectedRevision", "acceptedRevision", "sequence", "phase", "terminal", "acceptedAt", "updatedAt", "deadline",
+		"finishedAt", "source", "target", "error", "recoveryRequired")
+	if err != nil {
+		return err
+	}
+	if request, ok := fields["request"]; ok {
+		if _, err := decodeSwitchFenceObject(request, "nodeId", "requestId", "sourceEngine", "targetEngine", "expectedRevision"); err != nil {
+			return err
+		}
+	}
+	for _, name := range []string{"source", "target"} {
+		if state, ok := fields[name]; ok {
+			if _, err := decodeSwitchFenceObject(state, "intent", "running", "healthy", "observedAt", "terminationVerified"); err != nil {
+				return err
+			}
+		}
+	}
+	if failure, ok := fields["error"]; ok && !bytes.Equal(bytes.TrimSpace(failure), []byte("null")) {
+		if _, err := decodeSwitchFenceObject(failure, "code", "kind", "message"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func decodeSwitchFenceObject(data []byte, allowed ...string) (map[string]json.RawMessage, error) {
+	if len(data) > MaxSwitchJournalBytes {
+		return nil, errors.New("fence result JSON exceeds byte limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return nil, errors.New("fence result JSON must be an object")
+	}
+	fields := make(map[string]json.RawMessage, len(allowed))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, ok := token.(string)
+		if !ok || fields[name] != nil || !slices.Contains(allowed, name) {
+			return nil, errors.New("unknown or duplicate fence result JSON field")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		fields[name] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errors.New("fence result JSON contains trailing data")
+	}
+	return fields, nil
 }
 
 func DecodeSwitchJournal(data []byte) (SwitchJournal, error) {

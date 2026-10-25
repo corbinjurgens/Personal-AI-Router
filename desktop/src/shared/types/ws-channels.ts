@@ -25,6 +25,8 @@
  */
 import type {
     SwitchRequest,
+    SwitchFenceRequest,
+    SwitchFenceResult,
     SwitchStatusRequest,
     SwitchStatus,
     SwitchReceipt,
@@ -166,6 +168,7 @@ export interface WsInvokeChannelMap {
     'engines:get-settings': { request: EngineSettingsTarget; response: EngineSettingsSnapshot }
     'engines:switch': { request: SwitchRequest; response: { receipt: SwitchReceipt } }
     'engines:switch-status': { request: SwitchStatusRequest; response: SwitchStatus }
+    'engines:switch-fence': { request: SwitchFenceRequest; response: SwitchFenceResult }
     'engines:preview-settings': { request: EngineSettingsRequest; response: EngineSettingsPreview }
     'engines:apply-settings': { request: EngineSettingsRequest; response: EngineSettingsReceipt }
     'engine:command': { request: EngineCommandPayload; response: null }

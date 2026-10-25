@@ -104,3 +104,33 @@ func TestSwitchRelaySendFailureAndSuccessReleaseSlot(t *testing.T) {
 		t.Fatalf("status = %+v, %v", status, err)
 	}
 }
+
+func TestSwitchFenceRelayPreservesCallerAndMethod(t *testing.T) {
+	r := &switchRelay{}
+	r.send = func(_ context.Context, method string, value any) error {
+		request, ok := value.(switchRelayRequest)
+		if !ok || method != "engine:switch-request" || request.Method != settings.SwitchFenceMethod || request.Caller != "pinned-peer" {
+			t.Fatalf("relay: %s %+v", method, value)
+		}
+		raw, err := json.Marshal(switchRelayReply{ID: request.ID, Result: json.RawMessage(`{"nodeId":"target","requestId":"lost","fenced":true}`)})
+		if err != nil {
+			return err
+		}
+		r.reply(raw)
+		return nil
+	}
+	raw, err := r.call(context.Background(), settings.SwitchFenceMethod, "pinned-peer", json.RawMessage(`{"requestId":"lost"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result settings.SwitchFenceResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Fenced || len(r.pending) != 0 {
+		t.Fatal("fence reply or waiter lost")
+	}
+}

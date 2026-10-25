@@ -109,6 +109,42 @@ The TUI's current `policy:get` consumers read availability and pause provenance;
 they do not decode or render `modelConfiguration` reasons. Desktop policy
 get/set/push consumers preserve the bounded reason through their strict bridge.
 
+`engine:switch-fence {nodeId?, requestId}` resolves an absent switch without
+executing or cancelling engine work. Under the same `engineConfigMu` used at
+both switch admission lookups, it returns exactly one of
+`{nodeId, requestId, fenced:true}` or
+`{nodeId, requestId, fenced:false, receipt}`. An existing caller-owned receipt
+is returned unchanged, including accepted or terminal work; a foreign receipt
+is neither disclosed nor overwritten. Local identity and the authenticated
+pinned peer identity are the existing switch identities. Peer fencing requires
+a fresh remote-management mutation grant at HTTP entry and broker admission.
+There is no payload-supplied caller and no onward hop.
+
+For an absent receipt, the acknowledgement follows durable journal persistence.
+Optional `tombstones` contains insertion-ordered `{caller, requestId}` entries,
+globally bounded to 32, evicting the oldest insertion. Both fields use the
+nonempty ASCII identity syntax and 128-byte bound of switch request IDs.
+Uniqueness and refusal are scoped to the pair: a foreign tombstone does not
+reserve another caller's ID and may coexist with that caller's receipt.
+An identical fence retry neither appends nor advances generation, including
+when another caller subsequently accepted the same ID. The retained confirmed
+own tombstone wins over foreign receipt refusal without disclosing that receipt;
+a foreign receipt without prior own proof still refuses fencing. Storage
+uncertainty blocks fence acknowledgement even when a foreign receipt exists.
+A retained owned tombstone refuses switch acceptance with kind `fenced`, code `-32010`,
+before effects, regardless of payload. Receipts remain non-evicting and unchanged.
+
+Fence writes use the existing journal generation increment, without changing
+the version or revision algorithm. Even after eviction and trusted restart,
+the exact original payload's old `expectedRevision` remains stale. The result
+supplies no configuration token; read a fresh baseline before a deliberate new
+submission. Count/byte limits preserve the active receipt's terminal reservation.
+Capacity, cancellation and persistence failures do not acknowledge a fence.
+An uncertain replacement is adopted conservatively but its storage error stays
+latched in-process, including on retry; only a trusted restart can read that
+journal as durable evidence. Fence transport uses the existing manager relay,
+`engine:remote-switch-fence` and pinned POST `/v1/engine-switch/fence`.
+
 The [engine settings protocol](ENGINE_SETTINGS.md) documents local/paired
 launch and port editing, revision checks, serialized application and recovery.
 Its [engine switching contract](ENGINE_SETTINGS.md#engine-switching) covers

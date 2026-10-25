@@ -54,6 +54,8 @@ const (
 	switchAccepted
 	switchObservedOther
 	switchObservedInactive
+	// A durable acknowledgement resolves non-acceptance, not engine state.
+	switchFenced
 )
 
 type switchEvent int
@@ -68,6 +70,7 @@ const (
 	switchReadOK
 	switchReadAbsent
 	switchReadError
+	switchFenceOK
 	switchReset
 	switchClose
 )
@@ -86,6 +89,7 @@ const (
 	switchNoRead switchEffect = iota
 	switchReadRequest
 	switchReadBaseline
+	switchFenceRequest
 )
 
 // Correlation and its evidence have one owner. Transport/UI flags never decide
@@ -150,7 +154,7 @@ func (r *retainedSwitchRequest) transition(e switchTransition) switchEffect {
 				r.state = switchObservedOther
 			}
 		}
-		if r.requestID != "" && (r.state != switchRefused || e.id == r.requestID) {
+		if r.requestID != "" && r.state != switchFenced && (r.state != switchRefused || e.id == r.requestID) {
 			return switchReadRequest
 		}
 	case switchReadAbsent:
@@ -159,15 +163,21 @@ func (r *retainedSwitchRequest) transition(e switchTransition) switchEffect {
 		if r.state == switchUncertain && r.receipt == nil {
 			r.state = switchAbsent
 			r.absentAt = time.Now().UTC()
-			return switchReadBaseline
+			return switchFenceRequest
 		}
 		if r.state == switchAbsent {
 			r.absentAt = time.Now().UTC()
+			return switchFenceRequest
+		}
+	case switchFenceOK:
+		if r.state == switchAbsent && r.receipt == nil {
+			r.state = switchFenced
+			return switchReadBaseline
 		}
 	case switchReadError:
 		// Read failure changes availability, not acceptance evidence.
 	case switchSubmitOK, switchReadOK:
-		if r.requestID == "" {
+		if r.requestID == "" || r.state == switchFenced {
 			return switchNoRead
 		}
 		if e.event == switchSubmitOK && r.state != switchSubmitting {
@@ -191,6 +201,8 @@ type detailSwitchMsg struct {
 	transport           uint64
 	requestID           string
 	submit              bool
+	fence               bool
+	fenceResult         enginesettings.SwitchFenceResult
 	status              enginesettings.SwitchStatus
 	err                 error
 }
@@ -223,7 +235,8 @@ func (d *nodeDetail) switchCommand(method string, params any, requestID string, 
 	s.started = true
 	ctx := s.ctx
 	stamp := detailSwitchMsg{visit: d.telemetryGen, route: d.telemetryRoute, epoch: s.epoch,
-		transport: clientGeneration(d.client), requestID: requestID, submit: submit}
+		transport: clientGeneration(d.client), requestID: requestID, submit: submit,
+		fence: method == enginesettings.SwitchFenceMethod}
 	client := d.client
 	return d.own(func() tea.Msg {
 		bounded, cancel := context.WithTimeout(ctx, callTimeout)
@@ -231,7 +244,9 @@ func (d *nodeDetail) switchCommand(method string, params any, requestID string, 
 		msg, err := client.CallGeneration(bounded, stamp.transport, method, params)
 		stamp.err = err
 		if err == nil {
-			if submit {
+			if stamp.fence {
+				stamp.fenceResult, stamp.err = enginesettings.DecodeSwitchFenceResult(msg.Result)
+			} else if submit {
 				var result enginesettings.SwitchResult
 				stamp.err = json.Unmarshal(msg.Result, &result)
 				stamp.status.Receipt = &result.Receipt
@@ -308,16 +323,40 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 	if msg.visit != d.telemetryGen || msg.route != d.telemetryRoute || msg.epoch != s.epoch ||
 		!d.switchConnected() || (d.client != nil && !d.client.IsCurrent(msg.transport)) ||
 		(msg.requestID != "" && msg.requestID != s.requestID) ||
+		(msg.requestID != "" && s.state == switchFenced) ||
+		(msg.fence && (s.state != switchAbsent || s.receipt != nil)) ||
 		(msg.submit && s.state != switchSubmitting) {
 		return nil
 	}
 	s.inFlight = false
+	if msg.fence && msg.err == nil {
+		result := msg.fenceResult
+		if err := result.Validate(); err != nil || result.RequestID != s.requestID || !d.switchNodeMatches(result.NodeID) {
+			msg.err = errors.New("invalid fence acknowledgement or identity mismatch; outcome unknown")
+		} else if result.Fenced {
+			s.err = nil
+			s.fresh, s.dirty = false, false
+			s.transition(switchTransition{event: switchFenceOK})
+			return d.switchStatusCmd(true)
+		} else {
+			// Acceptance won serialization. The fence never cancels that work.
+			msg.status.Receipt = result.Receipt
+		}
+	}
 	s.err = msg.err
 	if msg.err != nil {
 		if msg.requestID == "" {
 			s.fresh = false
 		}
 		var refusal *rpc.RPCError
+		if msg.fence {
+			// Lost, denied or invalid acknowledgement preserves the original ID.
+			// A later readback may recover a receipt or retry the same fence.
+			if errors.As(msg.err, &refusal) && refusal.Code == -32012 {
+				d.remotePermissionFresh = false
+			}
+			return nil
+		}
 		if msg.submit && errors.As(msg.err, &refusal) &&
 			(refusal.Code == -32010 || refusal.Code == -32011 || refusal.Code == -32012 || refusal.Code == -32013 || refusal.Code == -32602) {
 			s.transition(switchTransition{event: switchSubmitRefused, err: msg.err})
@@ -343,9 +382,10 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 				refusal.Message == "Unknown switch receipt for this caller." {
 				event = switchReadAbsent
 			}
-			if s.transition(switchTransition{event: event}) == switchReadBaseline {
+			if s.transition(switchTransition{event: event}) == switchFenceRequest {
 				s.fresh = false
-				return d.switchStatusCmd(true)
+				return d.switchCommand(enginesettings.SwitchFenceMethod,
+					enginesettings.SwitchFenceRequest{NodeID: d.nodeArg(), RequestID: s.requestID}, s.requestID, false)
 			}
 		}
 		return nil
@@ -500,6 +540,12 @@ func (d *nodeDetail) switchView() string {
 	}
 	if s.state == switchAbsent {
 		lines = append(lines, "Not accepted as of "+s.absentAt.Format(time.RFC3339Nano)+"; it may still be accepted. Original request retained for readback.")
+	}
+	if s.state == switchFenced {
+		lines = append(lines, "Not accepted; original request fenced by the broker.")
+		if !s.fresh {
+			lines = append(lines, "Fresh revision readback required before another switch.")
+		}
 	}
 	if s.state == switchObservedInactive {
 		if s.receipt == nil {

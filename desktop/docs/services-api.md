@@ -28,6 +28,7 @@
 - ⚠️ nvpair-engine-manager → engine:remote-get-settings
 - ⚠️ nvpair-engine-manager → engine:remote-preview-settings
 - ⚠️ nvpair-engine-manager → engine:remote-switch
+- ⚠️ nvpair-engine-manager → engine:remote-switch-fence
 - ⚠️ nvpair-engine-manager → engine:remote-switch-status
 - ⚠️ nvpair-engine-manager → engine:restart
 - ⚠️ nvpair-engine-manager → engine:set-port
@@ -171,6 +172,7 @@
 | `engine:remote-start` | request (we call) | ✅ yes |
 | `engine:remote-stop` | request (we call) | ✅ yes |
 | `engine:remote-switch` | request (we call) | ⚠️ not called |
+| `engine:remote-switch-fence` | request (we call) | ⚠️ not called |
 | `engine:remote-switch-status` | request (we call) | ⚠️ not called |
 | `engine:remote-unload-model` | request (we call) | ✅ yes |
 | `engine:restart` | request (we call) | ⚠️ not called |
@@ -431,6 +433,7 @@
 | `engine:switch` | request (we call) | ✅ yes |
 | `engine:switch-cancel` | request (we call) | ➖ ignored |
 | `engine:switch-changed` | request (we call) | ✅ yes |
+| `engine:switch-fence` | request (we call) | ✅ yes |
 | `engine:switch-request` | request (we call) | ➖ ignored |
 | `engine:switch-status` | request (we call) | ✅ yes |
 | `engine:uninstall` | request (we call) | ✅ yes |

@@ -324,6 +324,15 @@ the desktop; the destination's Go service fetches the source artifacts.
   node, source, target, fresh request ID and the revision just read. It is not a
   pair of lifecycle commands. `onSwitchChanged(callback)` invalidates status;
   receipts are merged only for the matching node/request and increasing sequence.
+- `fenceSwitch({nodeId?, requestId})` invokes the atomic caller-owned broker fence.
+  `SwitchFenceResult` is exactly `fenced: true` without a receipt, or
+  `fenced: false` with the already accepted owned receipt. The result's node is canonical;
+  an input discovery alias need not equal it. Request IDs must match, and any
+  receipt must match the result's node and request. Only acknowledged fencing
+  resolves non-acceptance; read a fresh revision before deliberate replacement.
+  Lost, denied or invalid results leave the original uncertain. Accepted work
+  continues; fencing does not cancel it. This is a programmatic API, with no
+  additional desktop control or change to read-only engine status.
 
 The expanded node engine settings expose **Switch engine**, **From**, **To**
 and **Switch**, plus **Refresh readback**. The node-scoped switch store owns
@@ -343,11 +352,13 @@ changes belong on the target device.
 After an uncertain submit, read the original ID; no automatic resend occurs.
 Unknown/unreachable outcomes remain unknown. Refresh only reads: it cannot
 force, cancel, roll back, restart the source or perform recovery. An absent
-receipt is not proof of non-acceptance: the broker has no fence/tombstone for a
-sent request it has not accepted, so a late arrival remains possible. Clearing
-client state, reconnecting or seeing an idle baseline does not resolve that
-uncertainty. The TUI's visit-scoped limitation is described in the
-[operator guide](../../docs/terminal-interface.mdx#switch-engine).
+receipt is not proof of non-acceptance. The desktop controls retain their
+readback behavior; callers of `fenceSwitch` must explicitly handle its confirmed
+result and obtain a fresh baseline before replacement. The TUI automatically
+requests the fence after exact absence of its own unacknowledged request.
+Clearing client state, reconnecting or seeing an idle baseline does not resolve
+uncertainty. TUI correlation remains visit-scoped: leaving without an
+acknowledgement can forget an unresolved ID and does not prevent late acceptance.
 
 `EngineType` currently includes `ollama`, `lm-studio`, and `llama-cpp`.
 `searchHub(engineType, query?)` serves Ollama's locked local catalog and cached
@@ -419,6 +430,7 @@ Commands return no state. Renderer stores update from
 | `engines:apply-settings`    | `EngineSettingsRequest`      | `EngineSettingsReceipt`   |
 | `engines:switch`            | `SwitchRequest`              | `{ receipt: SwitchReceipt }` |
 | `engines:switch-status`     | `SwitchStatusRequest`        | `SwitchStatus`            |
+| `engines:switch-fence`      | `SwitchFenceRequest`         | `SwitchFenceResult`       |
 | `engine:command`            | `EngineCommandPayload`       | `null`                    |
 | `engine:copy-model`         | `ModelCopyRequest`           | `ModelCopyResponse`       |
 | `engine:model-copy-capabilities` | `{ nodeId, engine }` | `ModelCopyCapabilities` |

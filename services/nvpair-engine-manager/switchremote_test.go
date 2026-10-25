@@ -37,12 +37,13 @@ func switchTestClient(handler http.Handler) *remoteClient {
 }
 
 func TestSwitchRouteTables(t *testing.T) {
-	if len(switchRemoteMethods) != 2 || len(switchRouteMethods) != 2 {
+	if len(switchRemoteMethods) != 3 || len(switchRouteMethods) != 3 {
 		t.Fatalf("unexpected route tables: outbound=%v inbound=%v", switchRemoteMethods, switchRouteMethods)
 	}
 	for _, tc := range []struct{ remote, path, local string }{
 		{settings.RemoteSwitchMethod, settings.SwitchApplyPath, settings.SwitchMethod},
 		{settings.RemoteSwitchStatusMethod, settings.SwitchStatusPath, settings.SwitchStatusMethod},
+		{settings.RemoteSwitchFenceMethod, settings.SwitchFencePath, settings.SwitchFenceMethod},
 	} {
 		t.Run(tc.remote, func(t *testing.T) {
 			if switchRemoteMethods[tc.remote] != tc.path || switchRouteMethods[tc.path] != tc.local {
@@ -56,10 +57,15 @@ func TestSwitchPinnedRoundTrip(t *testing.T) {
 	for _, tc := range []struct{ method, path, local, body string }{
 		{settings.RemoteSwitchMethod, settings.SwitchApplyPath, settings.SwitchMethod, switchApplyFixture},
 		{settings.RemoteSwitchStatusMethod, settings.SwitchStatusPath, settings.SwitchStatusMethod, `{"nodeId":"transport-alias","requestId":"switch-42","afterSequence":3}`},
+		{settings.RemoteSwitchFenceMethod, settings.SwitchFencePath, settings.SwitchFenceMethod, `{"nodeId":"transport-alias","requestId":"switch-42"}`},
 	} {
 		t.Run(tc.method, func(t *testing.T) {
 			calls := 0
-			handler := switchHandler("target-self", switchTestGate, func(_ context.Context, method, caller string, params json.RawMessage) (json.RawMessage, error) {
+			target := "target-self"
+			if tc.local == settings.SwitchFenceMethod {
+				target = "resolved-peer"
+			}
+			handler := switchHandler(target, switchTestGate, func(_ context.Context, method, caller string, params json.RawMessage) (json.RawMessage, error) {
 				calls++
 				if method != tc.local || caller != "pinned-principal" {
 					t.Fatalf("relay identity: method=%q caller=%q", method, caller)
@@ -72,11 +78,14 @@ func TestSwitchPinnedRoundTrip(t *testing.T) {
 				if err := json.Unmarshal(params, &p); err != nil {
 					t.Fatal(err)
 				}
-				if p.NodeID != "target-self" || p.RequestID != "switch-42" {
+				if p.NodeID != target || p.RequestID != "switch-42" {
 					t.Fatalf("relay params: %+v", p)
 				}
 				if tc.local == settings.SwitchStatusMethod && (p.AfterSequence == nil || *p.AfterSequence != 3) {
 					t.Fatalf("status sequence lost: %+v", p)
+				}
+				if tc.local == settings.SwitchFenceMethod {
+					return json.Marshal(settings.SwitchFenceResult{NodeID: target, RequestID: p.RequestID, Fenced: true})
 				}
 				return json.RawMessage(`{"configurationRevision":"test-revision"}`), nil
 			})
@@ -116,6 +125,19 @@ func TestSwitchPinnedRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if tc.local == settings.SwitchFenceMethod {
+				var fence settings.SwitchFenceResult
+				if err := json.Unmarshal(result, &fence); err != nil {
+					t.Fatal(err)
+				}
+				if err := fence.Validate(); err != nil {
+					t.Fatal(err)
+				}
+				if !fence.Fenced || fence.NodeID != target || fence.RequestID != "switch-42" || calls != 1 {
+					t.Fatalf("fence = %+v calls=%d", fence, calls)
+				}
+				return
+			}
 			var status settings.SwitchStatus
 			if err := json.Unmarshal(result, &status); err != nil {
 				t.Fatal(err)
@@ -127,10 +149,89 @@ func TestSwitchPinnedRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSwitchFenceRemoteReplyMustMatchCanonicalRequest(t *testing.T) {
+	for _, tc := range []struct{ name, result string }{
+		{"wrong node", `{"nodeId":"other","requestId":"lost","fenced":true}`},
+		{"wrong ID", `{"nodeId":"peer","requestId":"other","fenced":true}`},
+		{"neither outcome", `{"nodeId":"peer","requestId":"lost","fenced":false}`},
+		{"null", `null`},
+		{"case variant discriminant", `{"nodeId":"peer","requestId":"lost","fenced":false,"Fenced":true}`},
+		{"duplicate discriminant", `{"nodeId":"peer","requestId":"lost","fenced":false,"fenced":true}`},
+		{"duplicate node", `{"nodeId":"other","nodeId":"peer","requestId":"lost","fenced":true}`},
+		{"duplicate request", `{"nodeId":"peer","requestId":"other","requestId":"lost","fenced":true}`},
+		{"unknown field", `{"nodeId":"peer","requestId":"lost","fenced":true,"extra":true}`},
+		{"null receipt", `{"nodeId":"peer","requestId":"lost","fenced":true,"receipt":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := switchTestClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.result)) }))
+			result, err := callRemoteSwitch(context.Background(), settings.RemoteSwitchFenceMethod, json.RawMessage(`{"nodeId":"alias","requestId":"lost"}`),
+				func(string) (ecPeer, bool) { return ecPeer{nodeID: "peer"}, true },
+				func(context.Context, ecPeer) (*remoteClient, error) { return client, nil })
+			if err == nil || result != nil {
+				t.Fatalf("invalid reply accepted: %s %v", result, err)
+			}
+		})
+	}
+}
+
+func TestSwitchAuthoritativeAbsentHTTPRoundTripPreservesCodeAndMessage(t *testing.T) {
+	const message = "Unknown switch receipt for this caller."
+	handler := switchHandler("peer", switchTestGate, func(_ context.Context, method, caller string, raw json.RawMessage) (json.RawMessage, error) {
+		if method != settings.SwitchStatusMethod || caller != "pinned-principal" {
+			t.Fatalf("wrong status relay: %s %s", method, caller)
+		}
+		request, err := settings.DecodeSwitchStatusRequest(raw)
+		if err != nil {
+			return nil, err
+		}
+		if request.NodeID != "peer" || request.RequestID != "lost" {
+			t.Fatalf("status params = %+v", request)
+		}
+		return nil, &codedError{code: settings.SwitchOperationErrorCode, message: message}
+	})
+	params := json.RawMessage(`{"nodeId":"peer","requestId":"lost"}`)
+	recorder := httptest.NewRecorder()
+	handler(recorder, httptest.NewRequest(http.MethodPost, settings.SwitchStatusPath, strings.NewReader(string(params))))
+	var body codedBody
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("absence is not a coded envelope: %v; %s", err, recorder.Body.String())
+	}
+	if recorder.Code != http.StatusConflict || body.Error != message || body.Code != "operation_error" {
+		t.Fatalf("absence envelope = %d %+v", recorder.Code, body)
+	}
+	result, err := switchTestClient(handler).postSwitch(context.Background(), settings.SwitchStatusPath, params)
+	var coded *codedError
+	if !errors.As(err, &coded) || rpcCode(err) != settings.SwitchOperationErrorCode || err.Error() != message || result != nil {
+		t.Fatalf("authoritative absence = %s %v (code %d)", result, err, rpcCode(err))
+	}
+}
+
+func TestSwitchGenericHTTPFailuresDoNotEstablishAbsence(t *testing.T) {
+	const message = "Unknown switch receipt for this caller."
+	for _, tc := range []struct {
+		name     string
+		relayErr error
+	}{
+		{"uncoded coordinator error", errors.New(message)},
+		{"different authoritative operation error", &codedError{code: settings.SwitchOperationErrorCode, message: "Coordinator storage unavailable."}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := switchHandler("peer", switchTestGate, func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+				return nil, tc.relayErr
+			})
+			result, err := switchTestClient(handler).postSwitch(context.Background(), settings.SwitchStatusPath, json.RawMessage(`{"requestId":"lost"}`))
+			if err == nil || err.Error() == message || result != nil {
+				t.Fatalf("generic error established absence: %s %v", result, err)
+			}
+		})
+	}
+}
+
 func TestSwitchStrictDecode(t *testing.T) {
 	for _, route := range []struct{ name, path, method, body string }{
 		{"apply", settings.SwitchApplyPath, settings.RemoteSwitchMethod, switchApplyFixture},
 		{"status", settings.SwitchStatusPath, settings.RemoteSwitchStatusMethod, `{"nodeId":"target","requestId":"switch-42"}`},
+		{"fence", settings.SwitchFencePath, settings.RemoteSwitchFenceMethod, `{"nodeId":"target","requestId":"switch-42"}`},
 	} {
 		t.Run(route.name, func(t *testing.T) {
 			for _, tc := range []struct{ name, body string }{

@@ -985,12 +985,42 @@ the target, independent of a pending lifecycle stop request. Release shares the
 durable Off admission gate and refuses a committed target with an uncleaned
 veto, retaining its reservation until reconciliation verifies target Off.
 
-The existing pinned ec listener exposes `/v1/engine-switch/apply` and `/status`,
-relaying to the target broker with `engine:switch-request/reply/cancel`. The
+The existing pinned ec listener exposes `/v1/engine-switch/apply`, `/status`
+and `/fence`, relaying to the target broker with
+`engine:switch-request/reply/cancel`. The
 cancel notification retires only the wait, never accepted broker-owned work.
 Pending waits are bounded; settings relay correlation is separate.
-`engine:remote-switch` and `engine:remote-switch-status` use the existing pinned
-peer client. Neither route provisions engines or falls back to remote start/stop.
+`engine:remote-switch`, `engine:remote-switch-status` and
+`engine:remote-switch-fence` use the existing pinned peer client. These routes
+do not provision engines or fall back to remote start/stop.
+
+Fence is a management mutation, requiring the fresh pinned caller's grant at
+the HTTP gate and again at broker admission. Its strict request is
+`{nodeId?, requestId}`; the target replaces the node alias and relays only
+`engine:switch-fence` with certificate-derived caller identity. It returns
+`{nodeId, requestId, fenced:true}` after the broker's durable absence fence, or
+`{nodeId, requestId, fenced:false, receipt}` for an existing owned receipt.
+It never cancels accepted work, calls an executor or forwards another hop.
+The broker bounds caller/request-ID tombstones globally to 32, evicting the
+oldest insertion, while retaining the existing generation-based revision fence
+after eviction. A foreign tombstone does not reserve another caller's ID.
+Receipts remain unchanged and non-evicting; callers read a fresh configuration
+baseline after acknowledgement. Failure, including uncertain persistence, is
+not acknowledgement. See the broker README for durability and capacity rules.
+
+Fence acknowledgements use shared `DecodeSwitchFenceResult`: field names are
+case-sensitive and unique, `fenced` is an explicit boolean, and the exact union
+rejects a null receipt or trailing JSON. Nested receipt objects reject unknown,
+duplicate and case-variant fields before the existing receipt validator checks
+values and identities. Ordinary switch request/journal decoding is unchanged.
+
+Authoritative broker operation errors travel through the existing coded HTTP
+409 envelope as `operation_error` (`-32000`). The switch client preserves their
+exact target message, including `Unknown switch receipt for this caller.`;
+absence still establishes no fence by itself. The relay carries only numeric
+code and message, so it does not supply a distinct `unknown_receipt` wire kind.
+Uncoded transport/coordinator failures remain uncertain diagnostics. Existing
+policy/conflict/veto/permission/lock aliases retain their meanings.
 
 ## Target-owned model downloads
 

@@ -39,6 +39,10 @@ const maxPullStreamFrameBytes = 2 << 20
 // Typed JSON-RPC error codes both remote families carry end to end: the node
 // policy relay and the engine routes.
 const (
+	// codeOperationError preserves an authoritative RPC operation failure. Its
+	// message, rather than this generic code alone, distinguishes receipt absence.
+	codeOperationError = -32000
+	operationErrorWire = "operation_error"
 	// codePolicyConflict is a policy set whose expected revision is not the
 	// persisted one.
 	codePolicyConflict = -32010
@@ -81,9 +85,13 @@ type codedBody struct {
 // writeCodedError refuses an ec request with a typed code: HTTP 409 and
 // {"error": message, "code": <wire name>}.
 func writeCodedError(w http.ResponseWriter, code int, message string) {
+	wire := wireCodes[code]
+	if code == codeOperationError {
+		wire = operationErrorWire
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusConflict)
-	_ = json.NewEncoder(w).Encode(codedBody{Error: message, Code: wireCodes[code]})
+	_ = json.NewEncoder(w).Encode(codedBody{Error: message, Code: wire})
 }
 
 // remoteStatusError is the error for an ec response with a non-2xx status. A
@@ -100,6 +108,12 @@ func remoteStatusError(prefix string, status int, body []byte) error {
 
 // codeOfWire is the typed code a wire name stands for.
 func codeOfWire(name string) (int, bool) {
+	// Generic RPC failure envelopes are emitted only by owners that explicitly
+	// call writeCodedError for them. Keep wireCodes' existing family membership
+	// unchanged for stream codes and policy/settings relay classification.
+	if name == operationErrorWire {
+		return codeOperationError, true
+	}
 	for code, wire := range wireCodes {
 		if name != "" && wire == name {
 			return code, true
@@ -118,7 +132,7 @@ func rpcCode(err error) int {
 	if errors.As(err, &coded) && coded.code != 0 {
 		return coded.code
 	}
-	return -32000
+	return codeOperationError
 }
 
 // remoteClient talks to one peer's ec surface.

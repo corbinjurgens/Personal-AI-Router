@@ -637,6 +637,143 @@ func TestSwitchStatusDecode(t *testing.T) {
 	}
 }
 
+func TestSwitchFenceContract(t *testing.T) {
+	checkSwitchWire(t, SwitchFenceRequest{RequestID: "lost"}, "requestId")
+	checkSwitchWire(t, SwitchFenceResult{NodeID: "node", RequestID: "lost", Fenced: true}, "nodeId requestId fenced")
+	for _, raw := range []string{`{}`, `null`, `{"requestId":"bad id"}`, `{"requestId":"lost","caller":"spoof"}`, `{"requestId":"lost"} {}`, `{"requestId":"` + strings.Repeat("x", 129) + `"}`} {
+		if _, err := DecodeSwitchFenceRequest([]byte(raw)); err == nil {
+			t.Errorf("accepted fence request %s", raw)
+		}
+	}
+	if _, err := DecodeSwitchFenceRequest([]byte(`{"nodeId":"alias","requestId":"lost"}`)); err != nil {
+		t.Fatal(err)
+	}
+	r := switchReceiptFixture()
+	test := func(name string, result SwitchFenceResult, valid bool) {
+		t.Run(name, func(t *testing.T) {
+			if err := result.Validate(); (err == nil) != valid {
+				t.Fatalf("Validate = %v; want valid %v", err, valid)
+			}
+		})
+	}
+	test("fenced", SwitchFenceResult{NodeID: r.NodeID, RequestID: r.RequestID, Fenced: true}, true)
+	test("accepted", SwitchFenceResult{NodeID: r.NodeID, RequestID: r.RequestID, Receipt: &r}, true)
+	test("neither", SwitchFenceResult{NodeID: r.NodeID, RequestID: r.RequestID}, false)
+	test("both", SwitchFenceResult{NodeID: r.NodeID, RequestID: r.RequestID, Fenced: true, Receipt: &r}, false)
+	test("wrong node", SwitchFenceResult{NodeID: "other", RequestID: r.RequestID, Receipt: &r}, false)
+	test("wrong request", SwitchFenceResult{NodeID: r.NodeID, RequestID: "other", Receipt: &r}, false)
+	test("no node", SwitchFenceResult{RequestID: r.RequestID, Fenced: true}, false)
+	if err := (SwitchError{Code: SwitchConfigurationConflictCode, Kind: SwitchErrorFenced, Message: "Fenced."}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDecodeSwitchFenceResultStrictEnvelope(t *testing.T) {
+	receipt := switchReceiptFixture()
+	receiptJSON, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validReceipt := `{"nodeId":"node-1","requestId":"switch-42","fenced":false,"receipt":` + string(receiptJSON) + `}`
+	for _, tc := range []struct {
+		name, raw string
+		valid     bool
+	}{
+		{"confirmed fence", `{"nodeId":"node-a","requestId":"lost","fenced":true}`, true},
+		{"existing receipt", validReceipt, true},
+		{"whitespace", " \n" + validReceipt + "\t", true},
+		{"case variant discriminant", `{"nodeId":"node-a","requestId":"lost","fenced":false,"Fenced":true}`, false},
+		{"duplicate discriminant", `{"nodeId":"node-a","requestId":"lost","fenced":false,"fenced":true}`, false},
+		{"duplicate node", `{"nodeId":"wrong","nodeId":"node-a","requestId":"lost","fenced":true}`, false},
+		{"duplicate request", `{"nodeId":"node-a","requestId":"wrong","requestId":"lost","fenced":true}`, false},
+		{"case variant node", `{"NodeId":"node-a","requestId":"lost","fenced":true}`, false},
+		{"case variant request", `{"nodeId":"node-a","RequestID":"lost","fenced":true}`, false},
+		{"unknown field", `{"nodeId":"node-a","requestId":"lost","fenced":true,"extra":true}`, false},
+		{"missing boolean", `{"nodeId":"node-1","requestId":"switch-42","receipt":` + string(receiptJSON) + `}`, false},
+		{"null boolean", `{"nodeId":"node-1","requestId":"switch-42","fenced":null,"receipt":` + string(receiptJSON) + `}`, false},
+		{"string boolean", `{"nodeId":"node-a","requestId":"lost","fenced":"true"}`, false},
+		{"null receipt", `{"nodeId":"node-a","requestId":"lost","fenced":true,"receipt":null}`, false},
+		{"neither outcome", `{"nodeId":"node-a","requestId":"lost","fenced":false}`, false},
+		{"both outcomes", strings.Replace(validReceipt, `"fenced":false`, `"fenced":true`, 1), false},
+		{"wrong receipt node", strings.Replace(validReceipt, `"nodeId":"node-1"`, `"nodeId":"other"`, 1), false},
+		{"wrong receipt request", strings.Replace(validReceipt, `"requestId":"switch-42"`, `"requestId":"other"`, 1), false},
+		{"duplicate receipt", strings.TrimSuffix(validReceipt, "}") + `,"receipt":` + string(receiptJSON) + `}`, false},
+		{"null object", `null`, false},
+		{"array", `[]`, false},
+		{"trailing object", validReceipt + `{}`, false},
+		{"trailing garbage", validReceipt + `!`, false},
+		{"byte bound", validReceipt + strings.Repeat(" ", MaxSwitchJournalBytes), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := DecodeSwitchFenceResult([]byte(tc.raw))
+			if (err == nil) != tc.valid {
+				t.Fatalf("decode = %+v %v; want valid %v", result, err, tc.valid)
+			}
+			if err == nil && result.Receipt != nil && !reflect.DeepEqual(*result.Receipt, receipt) {
+				t.Fatal("receipt changed on decode")
+			}
+		})
+	}
+}
+
+func TestDecodeSwitchFenceResultStrictReceipt(t *testing.T) {
+	r := switchReceiptFixture()
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, receipt string }{
+		{"unknown receipt field", strings.TrimSuffix(string(raw), "}") + `,"extra":true}`},
+		{"case variant receipt identity", strings.Replace(string(raw), `"nodeId":`, `"NodeID":`, 1)},
+		{"duplicate receipt identity", strings.TrimSuffix(string(raw), "}") + `,"requestId":"switch-42"}`},
+		{"duplicate nested request identity", strings.Replace(string(raw), `"sourceEngine":`, `"requestId":"switch-42","sourceEngine":`, 1)},
+		{"case variant observation", strings.Replace(string(raw), `"intent":"on"`, `"Intent":"on"`, 1)},
+		{"duplicate observation", strings.Replace(string(raw), `"intent":"on"`, `"intent":"on","intent":"on"`, 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := DecodeSwitchFenceResult([]byte(`{"nodeId":"node-1","requestId":"switch-42","fenced":false,"receipt":` + tc.receipt + `}`))
+			if err == nil {
+				t.Fatalf("malformed receipt accepted: %+v", result)
+			}
+		})
+	}
+}
+
+func TestSwitchTombstoneJournalValidation(t *testing.T) {
+	test := func(name string, tombstones []SwitchTombstone, receipt *SwitchReceipt, generation uint64, valid bool) {
+		t.Run(name, func(t *testing.T) {
+			j := SwitchJournal{Version: SwitchVersion, Generation: generation, Receipts: map[string]SwitchReceipt{}, Tombstones: tombstones}
+			if receipt != nil {
+				j.Receipts[receipt.RequestID], j.ActiveRequestID = *receipt, receipt.RequestID
+			}
+			raw, err := json.Marshal(j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodeSwitchJournal(raw); (err == nil) != valid {
+				t.Fatalf("decode = %v; want valid %v", err, valid)
+			}
+		})
+	}
+	one := SwitchTombstone{Caller: "local", RequestID: "switch-42"}
+	r := switchReceiptFixture()
+	test("one", []SwitchTombstone{one}, nil, 1, true)
+	test("zero generation", []SwitchTombstone{one}, nil, 0, false)
+	test("duplicate pair", []SwitchTombstone{one, one}, nil, 1, false)
+	test("different owners", []SwitchTombstone{one, {Caller: "peer", RequestID: one.RequestID}}, nil, 1, true)
+	test("owned receipt collision", []SwitchTombstone{one}, &r, 1, false)
+	test("foreign receipt coexistence", []SwitchTombstone{{Caller: "peer", RequestID: one.RequestID}}, &r, 1, true)
+	test("empty caller", []SwitchTombstone{{RequestID: "lost"}}, nil, 1, false)
+	test("oversize caller", []SwitchTombstone{{Caller: strings.Repeat("x", 129), RequestID: "lost"}}, nil, 1, false)
+	test("bad caller", []SwitchTombstone{{Caller: "bad caller", RequestID: "lost"}}, nil, 1, false)
+	test("bad ID", []SwitchTombstone{{Caller: "local", RequestID: "bad id"}}, nil, 1, false)
+	many := make([]SwitchTombstone, MaxSwitchTombstones+1)
+	for i := range many {
+		many[i] = SwitchTombstone{Caller: "local", RequestID: fmt.Sprintf("id-%d", i)}
+	}
+	test("count bound", many, nil, 1, false)
+}
+
 func TestSwitchJournalDecode(t *testing.T) {
 	j := SwitchJournal{Version: 1, Receipts: map[string]SwitchReceipt{}}
 	raw, err := json.Marshal(j)

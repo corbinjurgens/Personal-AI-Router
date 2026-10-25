@@ -561,3 +561,205 @@ func TestEngineSwitchStoreCompletedRoundTrip(t *testing.T) {
 		t.Fatal("restart rewrote a terminal receipt")
 	}
 }
+
+func TestEngineSwitchStoreFenceOwnershipAndEviction(t *testing.T) {
+	s := switchStoreOpen(t)
+	fence := func(caller, id string) settings.SwitchFenceResult {
+		t.Helper()
+		result, err := s.Fence("node", caller, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := result.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	if !fence("local", "lost").Fenced || s.Generation() != 1 {
+		t.Fatal("fence was not saved")
+	}
+	if !fence("local", "lost").Fenced || s.Generation() != 1 {
+		t.Fatal("duplicate fence wrote")
+	}
+	_, err := s.Accept(switchStoreReceipt("lost"))
+	switchStoreKind(t, err, settings.SwitchErrorFenced)
+	changed := switchStoreReceipt("lost")
+	changed.Request.TargetEngine = "sglang"
+	changed.PayloadHash = settings.SwitchPayloadHash(changed.Caller, changed.NodeID, changed.Request)
+	_, err = s.Accept(changed)
+	switchStoreKind(t, err, settings.SwitchErrorFenced)
+	if !fence("peer", "lost").Fenced || s.Generation() != 2 {
+		t.Fatal("pair-scoped fence was not independent")
+	}
+	foreign := switchStoreReceipt("lost")
+	foreign.Caller = "other"
+	foreign.PayloadHash = settings.SwitchPayloadHash(foreign.Caller, foreign.NodeID, foreign.Request)
+	accepted := switchStoreAccept(t, s, foreign)
+	result := fence("other", "lost")
+	if result.Fenced || result.Receipt == nil || !reflect.DeepEqual(*result.Receipt, accepted) || s.Generation() != 3 {
+		t.Fatal("fence changed accepted receipt")
+	}
+	result, err = s.Fence("node", "local", "lost")
+	if err != nil || result.Receipt != nil || !result.Fenced || s.Generation() != 3 {
+		t.Fatalf("retained own proof lost behind foreign receipt: %+v %v", result, err)
+	}
+	result, err = s.Fence("node", "no-prior-proof", "lost")
+	switchStoreKind(t, err, settings.SwitchErrorReusedID)
+	if result.Receipt != nil || result.Fenced || s.Generation() != 3 {
+		t.Fatal("foreign receipt disclosed or fenced without prior own proof")
+	}
+	for i := 0; i < settings.MaxSwitchTombstones; i++ {
+		fence("local", fmt.Sprintf("new-%d", i))
+	}
+	if len(s.journal.Tombstones) != settings.MaxSwitchTombstones || s.journal.Tombstones[0].RequestID != "new-0" {
+		t.Fatal("oldest insertion not evicted")
+	}
+	reopened := newEngineSwitchStore(s.path)
+	if err := reopened.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reopened.journal, s.journal) {
+		t.Fatal("restart changed journal")
+	}
+	if _, err := reopened.Fence("node", "local", "new-0"); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Generation() != s.Generation() {
+		t.Fatal("restart duplicate changed generation")
+	}
+	if _, err := reopened.Fence("node", "local", "new-32"); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.IsFenced("local", "new-0") || reopened.journal.Tombstones[0].RequestID != "new-1" {
+		t.Fatal("duplicate retry refreshed insertion order")
+	}
+}
+
+func TestEngineSwitchStoreFenceForeignReceiptDoesNotBypassStorageLatch(t *testing.T) {
+	s := switchStoreOpen(t)
+	if _, err := s.Fence("node", "peer", "lost"); err != nil {
+		t.Fatal(err)
+	}
+	accepted := switchStoreAccept(t, s, switchStoreReceipt("lost"))
+	s.write = func(path string, data []byte, mode os.FileMode) error {
+		if err := durablefile.WriteFile(path, data, mode); err != nil {
+			return err
+		}
+		return durablefile.ErrReplaced
+	}
+	if _, err := s.Fence("node", "peer", "uncertain"); !errors.Is(err, durablefile.ErrReplaced) {
+		t.Fatalf("uncertain write = %v", err)
+	}
+	before := s.copyJournal()
+	result, err := s.Fence("node", "peer", "lost")
+	if !errors.Is(err, durablefile.ErrReplaced) || result.Fenced || result.Receipt != nil {
+		t.Fatalf("latched retry = %+v %v", result, err)
+	}
+	if !reflect.DeepEqual(s.journal, before) {
+		t.Fatal("latched retry changed journal")
+	}
+	result, err = s.Fence("node", "local", "lost")
+	if err != nil || result.Fenced || result.Receipt == nil || !reflect.DeepEqual(*result.Receipt, accepted) {
+		t.Fatalf("owned receipt behind latch = %+v %v", result, err)
+	}
+}
+
+func TestEngineSwitchStoreFenceIdentityBounds(t *testing.T) {
+	for _, pair := range []struct{ name, caller, id string }{
+		{"missing caller", "", "lost"},
+		{"caller contains spaces", "bad caller", "lost"},
+		{"caller exceeds bound", strings.Repeat("x", 129), "lost"},
+		{"missing request ID", "local", ""},
+		{"request ID exceeds bound", "local", strings.Repeat("x", 129)},
+	} {
+		t.Run(pair.name, func(t *testing.T) {
+			s := switchStoreOpen(t)
+			result, err := s.Fence("node", pair.caller, pair.id)
+			switchStoreKind(t, err, settings.SwitchErrorInvalidRequest)
+			if result.Fenced || s.Generation() != 0 {
+				t.Fatal("invalid identity changed journal")
+			}
+		})
+	}
+}
+
+func TestEngineSwitchStoreFenceWriteFaultRetry(t *testing.T) {
+	for _, replaced := range []bool{false, true} {
+		name := "before replacement"
+		if replaced {
+			name = "uncertain replacement"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := switchStoreOpen(t)
+			fault := errors.New("fence write failed")
+			writes := 0
+			s.write = func(path string, data []byte, mode os.FileMode) error {
+				writes++
+				if replaced {
+					if err := durablefile.WriteFile(path, data, mode); err != nil {
+						return err
+					}
+					return errors.Join(durablefile.ErrReplaced, fault)
+				}
+				return fault
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				result, err := s.Fence("node", "local", "lost")
+				if !errors.Is(err, fault) || result.Fenced || result.Receipt != nil {
+					t.Fatalf("false acknowledgement: %+v, %v", result, err)
+				}
+			}
+			if writes != 1 {
+				t.Fatalf("latched failure retried storage: %d", writes)
+			}
+			if replaced {
+				reopened := newEngineSwitchStore(s.path)
+				if err := reopened.Load(); err != nil {
+					t.Fatal(err)
+				}
+				result, err := reopened.Fence("node", "local", "lost")
+				if err != nil || !result.Fenced || reopened.Generation() != 1 {
+					t.Fatalf("trusted restart: %+v %v", result, err)
+				}
+			}
+		})
+	}
+}
+
+func TestEngineSwitchStoreFenceCapacityReservesActiveTerminal(t *testing.T) {
+	s := switchStoreOpen(t)
+	r := switchStoreReceipt("active")
+	r.Caller = strings.Repeat("x", settings.MaxSwitchJournalBytes-32000)
+	r.PayloadHash = settings.SwitchPayloadHash(r.Caller, r.NodeID, r.Request)
+	r = switchStoreAccept(t, s, r)
+	// Fill only the unreserved bytes; retained receipt identity is deliberately
+	// large, as in the existing byte-reservation regression.
+	refused := switchStoreNext(switchStoreReceipt("large-refusal"), settings.SwitchRejected)
+	refused.Caller = strings.Repeat("y", 12000)
+	refused.PayloadHash = settings.SwitchPayloadHash(refused.Caller, refused.NodeID, refused.Request)
+	if _, err := s.Reject(refused); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; ; i++ {
+		before := s.Generation()
+		result, err := s.Fence("node", strings.Repeat("z", 128), fmt.Sprintf("%0128d", i))
+		if err != nil {
+			switchStoreKind(t, err, settings.SwitchErrorFull)
+			if result.Fenced || s.Generation() != before {
+				t.Fatal("full fence acknowledged or changed journal")
+			}
+			break
+		}
+		if i >= settings.MaxSwitchTombstones {
+			t.Fatal("fixture did not fill byte capacity")
+		}
+	}
+	r = switchStoreNext(r, settings.SwitchFailedInterrupted)
+	r.Error.Message = strings.Repeat("\x00", settings.MaxSwitchErrorMessageBytes)
+	if err := s.Advance(r.RequestID, r); err != nil {
+		t.Fatal(err)
+	}
+	if got := switchStoreDisk(t, s).Receipts[r.RequestID]; !reflect.DeepEqual(got, r) {
+		t.Fatal("terminal reservation consumed by fences")
+	}
+}

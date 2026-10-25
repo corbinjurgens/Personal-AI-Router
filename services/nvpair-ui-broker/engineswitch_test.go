@@ -38,6 +38,446 @@ type switchHarness struct {
 	publicationFailure bool
 }
 
+func TestSwitchFenceAbsentRefusesLateOriginalWithoutEffects(t *testing.T) {
+	h := newSwitchHarness(t)
+	p := h.request(t, "lost")
+	beforeCalls := h.engine.snapshot()
+	// The fence must remain reachable while another operation owns this lock,
+	// and the first duplicate/admission point must refuse before trying it.
+	h.b.settingsApplyMu.Lock()
+	result, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: p.RequestID}, "")
+	late, lateErr := h.b.acceptEngineSwitch(context.Background(), p, "")
+	h.b.settingsApplyMu.Unlock()
+	if err != nil || !result.Fenced || result.NodeID != "target" || result.Receipt != nil {
+		t.Fatalf("fence = %+v, %v", result, err)
+	}
+	if late.Receipt.RequestID != "" || switchErrorDetail(lateErr, "").Kind != settings.SwitchErrorFenced {
+		t.Fatalf("late = %+v %v", late, lateErr)
+	}
+	if len(switchSteps(t, h.engine)) != 0 || len(h.b.engineSwitch.store.journal.Receipts) != 0 {
+		t.Fatal("late original had effects")
+	}
+	if !reflect.DeepEqual(h.engine.snapshot(), beforeCalls) {
+		t.Fatal("fence or retained-ID refusal called the engine manager")
+	}
+	for _, mutate := range []func(*settings.SwitchRequest){
+		func(p *settings.SwitchRequest) { p.TargetEngine = "sglang" },
+		func(p *settings.SwitchRequest) { p.ExpectedRevision = h.request(t, "baseline").ExpectedRevision },
+	} {
+		changed := p
+		mutate(&changed)
+		if _, err := h.b.acceptEngineSwitch(context.Background(), changed, ""); switchErrorDetail(err, "").Kind != settings.SwitchErrorFenced {
+			t.Fatalf("changed payload bypassed fence: %v", err)
+		}
+	}
+	duplicate, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: p.RequestID}, "")
+	if err != nil || !reflect.DeepEqual(duplicate, result) || h.b.engineSwitch.store.Generation() != 1 {
+		t.Fatal("duplicate fence changed journal")
+	}
+	newID := p
+	newID.RequestID = "new-id-old-revision"
+	stale, err := h.b.acceptEngineSwitch(context.Background(), newID, "")
+	if err == nil || switchErrorDetail(err, "").Kind != settings.SwitchErrorConfigurationConflict || stale.Receipt.Phase != settings.SwitchRejected || len(switchSteps(t, h.engine)) != 0 {
+		t.Fatalf("stale new ID = %+v %v", stale, err)
+	}
+	fresh := h.request(t, "deliberate-new-id")
+	if _, err := h.b.acceptEngineSwitch(context.Background(), fresh, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.waitIdle(t)
+}
+
+func TestSwitchFenceEvictionRestartKeepsOriginalRevisionStale(t *testing.T) {
+	h := newSwitchHarness(t)
+	p := h.request(t, "lost")
+	for i := 0; i <= settings.MaxSwitchTombstones; i++ {
+		id := fmt.Sprintf("fence-%d", i)
+		if i == 0 {
+			id = p.RequestID
+		}
+		if _, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: id}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := newEngineSwitchStore(h.b.engineSwitch.store.path)
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	h.b.engineSwitch.store = store
+	if store.IsFenced("local", p.RequestID) {
+		t.Fatal("oldest tombstone retained")
+	}
+	result, err := h.b.acceptEngineSwitch(context.Background(), p, "")
+	if switchErrorDetail(err, "").Kind != settings.SwitchErrorConfigurationConflict || result.Receipt.Phase != settings.SwitchRejected || len(switchSteps(t, h.engine)) != 0 {
+		t.Fatalf("evicted original = %+v %v", result, err)
+	}
+}
+
+func TestSwitchFenceAndAcceptanceRace(t *testing.T) {
+	for i := 0; i < 24; i++ {
+		t.Run(fmt.Sprintf("race-%d", i), func(t *testing.T) {
+			h := newSwitchHarness(t)
+			p := h.request(t, "race")
+			start := make(chan struct{})
+			type acceptance struct {
+				result settings.SwitchResult
+				err    error
+			}
+			accepted := make(chan acceptance, 1)
+			go func() {
+				<-start
+				result, err := h.b.acceptEngineSwitch(context.Background(), p, "")
+				accepted <- acceptance{result, err}
+			}()
+			close(start)
+			fence, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: p.RequestID}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := <-accepted
+			if fence.Fenced {
+				if got.err == nil || switchErrorDetail(got.err, "").Kind != settings.SwitchErrorFenced || len(switchSteps(t, h.engine)) != 0 {
+					t.Fatalf("fenced race accepted: %+v %v", got.result, got.err)
+				}
+			} else if fence.Receipt == nil || got.err != nil || fence.Receipt.PayloadHash != got.result.Receipt.PayloadHash {
+				t.Fatalf("accepted race lost receipt: %+v %+v %v", fence, got.result, got.err)
+			}
+			h.waitIdle(t)
+		})
+	}
+}
+
+func TestSwitchFenceReturnsOwnedReceiptUnchanged(t *testing.T) {
+	h := newSwitchHarness(t)
+	p := h.request(t, "accepted")
+	h.active.Store(1) // keep the accepted operation draining until checked
+	accepted, err := h.b.acceptEngineSwitch(context.Background(), p, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.active.Store(0) })
+	h.proxy.waitFor("active switch drain", func(calls []policyCall) bool {
+		for _, call := range calls {
+			if call.method == nodepolicy.MethodAdmissionSnapshot {
+				return true
+			}
+		}
+		return false
+	})
+	h.b.engineConfigMu.Lock()
+	before, _ := h.b.engineSwitch.store.Lookup(p.RequestID)
+	h.b.engineConfigMu.Unlock()
+	fence, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: p.RequestID}, "")
+	if err != nil || fence.Fenced || fence.Receipt == nil || fence.Receipt.PayloadHash != accepted.Receipt.PayloadHash || !reflect.DeepEqual(*fence.Receipt, before) {
+		t.Fatalf("active fence = %+v %v", fence, err)
+	}
+	if len(h.b.engineSwitch.store.journal.Tombstones) != 0 {
+		t.Fatal("accepted operation tombstoned")
+	}
+	h.active.Store(0)
+	h.waitIdle(t)
+	terminal := h.receipt(t, p.RequestID)
+	fence, err = h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: p.RequestID}, "")
+	if err != nil || fence.Fenced || fence.Receipt == nil || !reflect.DeepEqual(*fence.Receipt, terminal) {
+		t.Fatalf("terminal fence = %+v %v", fence, err)
+	}
+}
+
+func TestSwitchFenceSerializesWithSecondAdmissionSnapshot(t *testing.T) {
+	h := newSwitchHarness(t)
+	p := h.request(t, "snapshot-race")
+	base := h.engine.answer
+	reached, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(resume) }) }
+	t.Cleanup(open)
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchPrepareMethod {
+			var prepare settings.SwitchPrepareRequest
+			if err := json.Unmarshal(raw, &prepare); err != nil {
+				return nil, err.Error()
+			}
+			if prepare.OperationID == "" {
+				close(reached)
+				<-resume
+			}
+		}
+		return base(method, raw)
+	})
+	type acceptance struct {
+		result settings.SwitchResult
+		err    error
+	}
+	accepted := make(chan acceptance, 1)
+	go func() {
+		result, err := h.b.acceptEngineSwitch(context.Background(), p, "")
+		accepted <- acceptance{result, err}
+	}()
+	requireGateOpens(t, reached, "second admission snapshot")
+	type fencing struct {
+		result settings.SwitchFenceResult
+		err    error
+	}
+	fenced := make(chan fencing, 1)
+	go func() {
+		result, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: p.RequestID}, "")
+		fenced <- fencing{result, err}
+	}()
+	open()
+	got, fence := <-accepted, <-fenced
+	if got.err != nil || fence.err != nil || fence.result.Fenced || fence.result.Receipt == nil || fence.result.Receipt.PayloadHash != got.result.Receipt.PayloadHash {
+		t.Fatalf("snapshot race: %+v %v; %+v %v", got.result, got.err, fence.result, fence.err)
+	}
+	h.waitIdle(t)
+}
+
+func TestSwitchFenceAuthenticatedNotificationRelay(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	h.b.forwardEngineNotificationFrom(bindRemoteManagementTestSource(h.b), "engine:switch-request", settingsJSON(struct {
+		ID     string                      `json:"id"`
+		Method string                      `json:"method"`
+		Caller string                      `json:"caller"`
+		Params settings.SwitchFenceRequest `json:"params"`
+	}{"fence-relay", settings.SwitchFenceMethod, "peer", settings.SwitchFenceRequest{NodeID: "target", RequestID: "lost"}}))
+	calls := h.engine.waitFor("fence relay reply", func(calls []policyCall) bool {
+		for _, call := range calls {
+			if call.method == "engine:switch-reply" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, call := range calls {
+		if call.method != "engine:switch-reply" {
+			continue
+		}
+		var reply struct {
+			ID        string                     `json:"id"`
+			Result    settings.SwitchFenceResult `json:"result"`
+			ErrorCode int                        `json:"errorCode"`
+		}
+		if err := json.Unmarshal(call.params, &reply); err != nil {
+			t.Fatal(err)
+		}
+		if reply.ID != "fence-relay" || reply.ErrorCode != 0 || !reply.Result.Fenced || reply.Result.NodeID != "target" {
+			t.Fatalf("relay = %+v", reply)
+		}
+	}
+	h.b.engineConfigMu.Lock()
+	defer h.b.engineConfigMu.Unlock()
+	if !h.b.engineSwitch.store.IsFenced("peer", "lost") || h.b.engineSwitch.store.IsFenced("local", "lost") {
+		t.Fatal("relay lost authenticated owner")
+	}
+}
+
+func TestSwitchFenceStorageAndCancellationNeverAcknowledge(t *testing.T) {
+	for _, replaced := range []bool{false, true} {
+		name := "before replacement"
+		if replaced {
+			name = "uncertain replacement"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			h.b.engineSwitch.store.write = func(path string, data []byte, mode os.FileMode) error {
+				if replaced {
+					if err := durablefile.WriteFile(path, data, mode); err != nil {
+						return err
+					}
+					return durablefile.ErrReplaced
+				}
+				return errors.New("fence persistence failed")
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				result, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: "lost"}, "")
+				if err == nil || result.Fenced || result.Receipt != nil {
+					t.Fatalf("false ack: %+v %v", result, err)
+				}
+			}
+		})
+	}
+	t.Run("cancelled before admission", func(t *testing.T) {
+		h := newSwitchHarness(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		result, err := h.b.fenceEngineSwitch(ctx, settings.SwitchFenceRequest{RequestID: "lost"}, "")
+		if !errors.Is(err, context.Canceled) || result.Fenced || h.b.engineSwitch.store.Generation() != 0 {
+			t.Fatalf("cancelled = %+v %v", result, err)
+		}
+	})
+	t.Run("cancelled during persistence", func(t *testing.T) {
+		h := newSwitchHarness(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		h.b.engineSwitch.store.write = func(path string, data []byte, mode os.FileMode) error {
+			cancel()
+			return durablefile.WriteFile(path, data, mode)
+		}
+		result, err := h.b.fenceEngineSwitch(ctx, settings.SwitchFenceRequest{RequestID: "lost"}, "")
+		if !errors.Is(err, context.Canceled) || result.Fenced || result.Receipt != nil {
+			t.Fatalf("cancelled write = %+v %v", result, err)
+		}
+		// The cancelled reply claimed nothing; a fresh retry can establish the
+		// fence from this successfully persisted journal without another write.
+		h.b.engineSwitch.store.write = func(string, []byte, os.FileMode) error { t.Fatal("durable retry wrote"); return nil }
+		result, err = h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: "lost"}, "")
+		if err != nil || !result.Fenced || h.b.engineSwitch.store.Generation() != 1 {
+			t.Fatalf("durable retry = %+v %v", result, err)
+		}
+	})
+}
+
+func TestSwitchFencePeerOwnershipAndFreshGrant(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	p := h.request(t, "shared-id")
+	if _, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, settingsJSON(settings.SwitchFenceRequest{NodeID: "other-hop", RequestID: p.RequestID}), "peer"); err == nil {
+		t.Fatal("forwarded another hop")
+	}
+	if _, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: p.RequestID}, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	// Another caller's original revision is stale, but its fresh request with
+	// this ID is valid; the peer has no claim to the local caller's namespace.
+	fresh := h.request(t, p.RequestID)
+	if _, err := h.b.acceptEngineSwitch(context.Background(), fresh, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.waitIdle(t)
+	result, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: p.RequestID}, "peer")
+	if err != nil || result.Receipt != nil || !result.Fenced {
+		t.Fatalf("retained owned fence = %+v %v", result, err)
+	}
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
+	result, err = h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: "new-id"}, "peer")
+	var denied *remoteManagementDeniedError
+	if !errors.As(err, &denied) || result.Fenced {
+		t.Fatalf("revoked = %+v %v", result, err)
+	}
+}
+
+func TestSwitchFenceLostAcknowledgementSurvivesForeignReceipt(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	params := settingsJSON(settings.SwitchFenceRequest{NodeID: "target", RequestID: "lost"})
+	// The first reply is deliberately discarded, as if its acknowledgement
+	// were lost after the target durably saved the caller's absence proof.
+	if _, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, params, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	fresh := h.request(t, "lost")
+	if _, err := h.b.acceptEngineSwitch(context.Background(), fresh, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.waitIdle(t)
+	status, err := h.b.engineSwitchStatus(context.Background(), settings.SwitchStatusRequest{RequestID: "lost"}, "peer")
+	if err == nil || switchErrorDetail(err, "").Kind != settings.SwitchErrorUnknownReceipt || status.Receipt != nil {
+		t.Fatalf("caller status = %+v %v", status, err)
+	}
+	before := h.b.engineSwitch.store.copyJournal()
+	disk, err := os.ReadFile(h.b.engineSwitch.store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engineCalls, proxyCalls := h.engine.snapshot(), h.proxy.snapshot()
+	h.b.engineSwitch.store.write = func(string, []byte, os.FileMode) error { t.Fatal("fence reconfirmation wrote journal"); return nil }
+	raw, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, params, "peer")
+	if err != nil {
+		t.Fatalf("lost fence acknowledgement could not be recovered: %v", err)
+	}
+	result, ok := raw.(settings.SwitchFenceResult)
+	if !ok || !result.Fenced || result.Receipt != nil || result.NodeID != "target" || result.RequestID != "lost" {
+		t.Fatalf("fence reconfirmation = %+v", raw)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	afterDisk, err := os.ReadFile(h.b.engineSwitch.store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(h.b.engineSwitch.store.journal, before) || !reflect.DeepEqual(disk, afterDisk) {
+		t.Fatal("reconfirmation changed generation, tombstones or foreign receipt")
+	}
+	if !reflect.DeepEqual(h.engine.snapshot(), engineCalls) || !reflect.DeepEqual(h.proxy.snapshot(), proxyCalls) {
+		t.Fatal("reconfirmation had worker effects")
+	}
+}
+
+func TestSwitchFenceForeignReceiptWithoutOwnProof(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	fresh := h.request(t, "foreign-only")
+	if _, err := h.b.acceptEngineSwitch(context.Background(), fresh, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.waitIdle(t)
+	before := h.b.engineSwitch.store.copyJournal()
+	result, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, settingsJSON(settings.SwitchFenceRequest{RequestID: fresh.RequestID}), "peer")
+	if err == nil || switchErrorDetail(err, "").Kind != settings.SwitchErrorReusedID {
+		t.Fatalf("foreign receipt without proof = %+v %v", result, err)
+	}
+	if fence, ok := result.(settings.SwitchFenceResult); ok && (fence.Fenced || fence.Receipt != nil) {
+		t.Fatalf("foreign receipt disclosed or fenced: %+v", fence)
+	}
+	if !reflect.DeepEqual(h.b.engineSwitch.store.journal, before) {
+		t.Fatal("foreign refusal changed journal")
+	}
+}
+
+func TestSwitchFenceForeignReceiptDoesNotBypassStorageLatch(t *testing.T) {
+	for _, name := range []string{"coordinator storage latch", "uncertain fence replacement"} {
+		t.Run(name, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+			grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+			params := settingsJSON(settings.SwitchFenceRequest{RequestID: "lost"})
+			if _, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, params, "peer"); err != nil {
+				t.Fatal(err)
+			}
+			fresh := h.request(t, "lost")
+			if _, err := h.b.acceptEngineSwitch(context.Background(), fresh, ""); err != nil {
+				t.Fatal(err)
+			}
+			h.waitIdle(t)
+			fault := errors.New("coordinator storage failure")
+			if name == "uncertain fence replacement" {
+				h.b.engineSwitch.store.write = func(path string, data []byte, mode os.FileMode) error {
+					if err := durablefile.WriteFile(path, data, mode); err != nil {
+						return err
+					}
+					return durablefile.ErrReplaced
+				}
+				if _, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, settingsJSON(settings.SwitchFenceRequest{RequestID: "uncertain"}), "peer"); !errors.Is(err, durablefile.ErrReplaced) {
+					t.Fatalf("uncertain persistence = %v", err)
+				}
+				fault = durablefile.ErrReplaced
+			} else {
+				h.b.engineSwitch.err = fault
+			}
+			before := h.b.engineSwitch.store.copyJournal()
+			result, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, params, "peer")
+			if !errors.Is(err, fault) {
+				t.Fatalf("storage latch bypassed by foreign receipt: %+v %v", result, err)
+			}
+			if fence, ok := result.(settings.SwitchFenceResult); ok && (fence.Fenced || fence.Receipt != nil) {
+				t.Fatalf("latched false acknowledgement = %+v", fence)
+			}
+			if !reflect.DeepEqual(h.b.engineSwitch.store.journal, before) {
+				t.Fatal("latched retry changed journal")
+			}
+			own, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: "lost"}, "")
+			if err != nil || own.Fenced || own.Receipt == nil || !reflect.DeepEqual(*own.Receipt, before.Receipts["lost"]) {
+				t.Fatalf("own receipt behind latch = %+v %v", own, err)
+			}
+		})
+	}
+}
+
 func newSwitchHarness(t *testing.T) *switchHarness {
 	t.Helper()
 	output := &syncBuffer{}

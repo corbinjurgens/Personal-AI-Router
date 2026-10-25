@@ -58,6 +58,473 @@ func switchMessage(d *nodeDetail, r *enginesettings.SwitchReceipt) detailSwitchM
 		status: enginesettings.SwitchStatus{Receipt: r}}
 }
 
+// Exercise the sent mutation and original-ID absence through the real command
+// boundary. The next command must fence that ID, never replay the mutation.
+func switchAbsentFence(t *testing.T, d *nodeDetail, f *reconnectUIFixture) (string, tea.Cmd) {
+	t.Helper()
+	_, reply := terminalControlsReply(t, f.broker, d.submitSwitch(),
+		&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "reply lost"}})
+	read, _ := d.update(reply)
+	id := d.engineSwitch.requestID
+	req, reply := terminalControlsReply(t, f.broker, read,
+		&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "Unknown switch receipt for this caller."}})
+	var p enginesettings.SwitchStatusRequest
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		t.Fatal(err)
+	}
+	if req.Method != enginesettings.SwitchStatusMethod || p.RequestID != id {
+		t.Fatalf("original read = %s %+v", req.Method, p)
+	}
+	fence, _ := d.update(reply)
+	if fence == nil || d.submitSwitch() != nil || !d.engineSwitch.outcomeUnknown() {
+		t.Fatal("absence must issue one fence while retaining uncertainty")
+	}
+	return id, fence
+}
+
+func TestSwitchFenceAcknowledgementRequiresFreshBaseline(t *testing.T) {
+	for _, remote := range []bool{false, true} {
+		name := "local"
+		if remote {
+			name = "remote"
+		}
+		t.Run(name, func(t *testing.T) {
+			d, f := switchDetail(t, remote)
+			id, fence := switchAbsentFence(t, d, f)
+			req, reply := terminalControlsReply(t, f.broker, fence, switchResponse(t,
+				enginesettings.SwitchFenceResult{NodeID: d.node.key, RequestID: id, Fenced: true}))
+			var p enginesettings.SwitchFenceRequest
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchFenceMethod || p.NodeID != d.nodeArg() || p.RequestID != id {
+				t.Fatalf("fence frame = %s %+v", req.Method, p)
+			}
+			if d.switchStatusCmd(false) != nil {
+				t.Fatal("fence allowed a second waiter")
+			}
+			baseline, _ := d.update(reply)
+			old := switchMessage(d, nil)
+			old.submit = true
+			if d.engineSwitch.outcomeUnknown() || d.engineSwitch.fresh || d.submitSwitch() != nil ||
+				!strings.Contains(d.switchView(), "Not accepted; original request fenced") {
+				t.Fatalf("fence acknowledgement evidence/reason: %s / %s", d.switchView(), d.switchReason())
+			}
+			req, reply = terminalControlsReply(t, f.broker, baseline, switchResponse(t,
+				enginesettings.SwitchStatus{ConfigurationRevision: "after-fence"}))
+			var read enginesettings.SwitchStatusRequest
+			if err := json.Unmarshal(req.Params, &read); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchStatusMethod || read.RequestID != "" {
+				t.Fatalf("fresh baseline = %s %+v", req.Method, read)
+			}
+			if next, _ := d.update(reply); next != nil {
+				t.Fatal("fenced ID was read again")
+			}
+			if reason := d.switchReason(); reason != "" {
+				t.Fatalf("fresh baseline blocked: %s", reason)
+			}
+			if d.engineSwitch.requestID != id {
+				t.Fatal("fence evidence lost before deliberate submit")
+			}
+			cmd := d.submitSwitch()
+			newID := d.engineSwitch.requestID
+			if newID == id || newID == "" {
+				t.Fatal("replacement did not allocate a fresh ID")
+			}
+			late := switchReceipt(d, 99, enginesettings.SwitchCompleted)
+			late.RequestID, late.Request.RequestID = id, id
+			old.status.Receipt = &late
+			d.applySwitch(old)
+			if d.engineSwitch.requestID != newID || d.engineSwitch.receipt != nil || !d.engineSwitch.inFlight {
+				t.Fatal("stale original callback changed replacement")
+			}
+			req, _ = terminalControlsReply(t, f.broker, cmd, &rpc.Message{Error: &rpc.RPCError{Code: -32602, Message: "fixture stops"}})
+			var write enginesettings.SwitchRequest
+			if err := json.Unmarshal(req.Params, &write); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchMethod || write.RequestID != newID || write.ExpectedRevision != "after-fence" {
+				t.Fatalf("replacement frame = %s %+v", req.Method, write)
+			}
+		})
+	}
+}
+
+func TestSwitchFenceFailureRetainsOriginalAndRetriesReadback(t *testing.T) {
+	for _, scenario := range []string{"lost acknowledgement", "denied", "storage", "malformed", "wrong request", "wrong node", "missing fenced", "null fenced", "null receipt", "unknown field", "both alternatives", "neither alternative"} {
+		t.Run(scenario, func(t *testing.T) {
+			d, f := switchDetail(t, false)
+			id, fence := switchAbsentFence(t, d, f)
+			row := map[string]any{"nodeId": d.node.key, "requestId": id, "fenced": true}
+			response := switchResponse(t, row)
+			switch scenario {
+			case "lost acknowledgement":
+				response = &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "reply lost"}}
+			case "denied":
+				response = &rpc.Message{Error: &rpc.RPCError{Code: -32012, Message: "permission denied"}}
+			case "storage":
+				response = &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "storage uncertain"}}
+			case "malformed":
+				row["fenced"] = "yes"
+			case "wrong request":
+				row["requestId"] = "other"
+			case "wrong node":
+				row["nodeId"] = "other"
+			case "missing fenced":
+				delete(row, "fenced")
+			case "null fenced":
+				row["fenced"] = nil
+			case "null receipt":
+				row["receipt"] = nil
+			case "unknown field":
+				row["unexpected"] = true
+			case "both alternatives":
+				row["receipt"] = switchReceipt(d, 1, enginesettings.SwitchDraining)
+			case "neither alternative":
+				row["fenced"] = false
+			}
+			if scenario != "lost acknowledgement" && scenario != "denied" && scenario != "storage" {
+				response = switchResponse(t, row)
+			}
+			req, reply := terminalControlsReply(t, f.broker, fence, response)
+			if req.Method != enginesettings.SwitchFenceMethod {
+				t.Fatalf("method = %s", req.Method)
+			}
+			if next, _ := d.update(reply); next != nil {
+				t.Fatal("failed fence created an automatic retry loop")
+			}
+			if d.engineSwitch.requestID != id || !d.engineSwitch.outcomeUnknown() || d.submitSwitch() != nil || d.engineSwitch.err == nil {
+				t.Fatalf("failed fence resolved original: %s / %s", d.switchView(), d.switchReason())
+			}
+			_, reply = terminalControlsReply(t, f.broker, d.switchStatusCmd(true), switchResponse(t, enginesettings.SwitchStatus{ConfigurationRevision: "idle"}))
+			read, _ := d.update(reply)
+			_, reply = terminalControlsReply(t, f.broker, read, &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "Unknown switch receipt for this caller."}})
+			retry, _ := d.update(reply)
+			req, reply = terminalControlsReply(t, f.broker, retry, switchResponse(t, enginesettings.SwitchFenceResult{NodeID: d.node.key, RequestID: id, Fenced: true}))
+			if req.Method != enginesettings.SwitchFenceMethod {
+				t.Fatalf("retry = %s", req.Method)
+			}
+			d.update(reply)
+		})
+	}
+}
+
+func TestSwitchFenceRawWireAmbiguityRetainsUncertainty(t *testing.T) {
+	for _, row := range []struct{ name, wire string }{
+		{"conflicting case variant flag", `{"nodeId":"node-a","requestId":"lost","fenced":false,"Fenced":true}`},
+		{"conflicting duplicate flag", `{"nodeId":"node-a","requestId":"lost","fenced":false,"fenced":true}`},
+		{"equal duplicate flag", `{"nodeId":"node-a","requestId":"lost","fenced":true,"fenced":true}`},
+		{"escaped duplicate flag", `{"nodeId":"node-a","requestId":"lost","fenced":false,"\u0066enced":true}`},
+		{"missing flag", `{"nodeId":"node-a","requestId":"lost"}`},
+		{"null flag", `{"nodeId":"node-a","requestId":"lost","fenced":null}`},
+		{"null receipt", `{"nodeId":"node-a","requestId":"lost","fenced":true,"receipt":null}`},
+		{"case variant flag", `{"nodeId":"node-a","requestId":"lost","Fenced":true}`},
+		{"case variant node", `{"NodeId":"node-a","requestId":"lost","fenced":true}`},
+		{"case variant request", `{"nodeId":"node-a","RequestId":"lost","fenced":true}`},
+		{"case variant receipt", `{"nodeId":"node-a","requestId":"lost","fenced":true,"Receipt":null}`},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			d, f := switchDetail(t, false)
+			d.node.key = "node-a"
+			s := &d.engineSwitch
+			s.transition(switchTransition{event: switchSubmit, id: "lost"})
+			s.fresh = false
+			p := enginesettings.SwitchRequest{RequestID: "lost", SourceEngine: s.source,
+				TargetEngine: s.target, ExpectedRevision: s.revision}
+			req, reply := terminalControlsReply(t, f.broker,
+				d.switchCommand(enginesettings.SwitchMethod, p, p.RequestID, true),
+				&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "reply lost"}})
+			if req.Method != enginesettings.SwitchMethod {
+				t.Fatalf("submit method = %s", req.Method)
+			}
+			read, _ := d.update(reply)
+			_, reply = terminalControlsReply(t, f.broker, read,
+				&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "Unknown switch receipt for this caller."}})
+			fence, _ := d.update(reply)
+			if fence == nil {
+				t.Fatal("own-ID absence did not request a fence")
+			}
+			done := make(chan tea.Msg, 1)
+			go func() { done <- fence() }()
+			req, err := f.broker.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request enginesettings.SwitchFenceRequest
+			if err := json.Unmarshal(req.Params, &request); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchFenceMethod || request.RequestID != "lost" || req.ID == nil {
+				t.Fatalf("fence frame = %s %+v", req.Method, request)
+			}
+			// Write raw JSON so duplicate/case-variant keys reach the production
+			// decoder unchanged instead of being collapsed by a map fixture.
+			frame := []byte(`{"jsonrpc":"2.0","id":` + string(*req.ID) + `,"result":` + row.wire + "}\n")
+			if n, err := f.peer.Write(frame); err != nil || n != len(frame) {
+				t.Fatalf("write raw fence response: bytes=%d/%d error=%v", n, len(frame), err)
+			}
+			select {
+			case reply = <-done:
+			case <-time.After(time.Second):
+				t.Fatal("raw fence response did not finish")
+			}
+			if next, _ := d.update(reply); next != nil {
+				t.Fatal("ambiguous fence response started automatic progress")
+			}
+			if s.requestID != "lost" || !s.outcomeUnknown() || s.state != switchAbsent || s.err == nil ||
+				s.fresh || d.submitSwitch() != nil || d.switchReason() == "" || strings.Contains(d.switchView(), "original request fenced") {
+				t.Fatalf("ambiguous wire resolved original: %s / %s", d.switchView(), d.switchReason())
+			}
+		})
+	}
+}
+
+// The engine-manager's TestSwitchAuthoritativeAbsentHTTPRoundTripPreservesCodeAndMessage
+// covers operation_error HTTP translation. Enter this consumer at its actual
+// service RPC seam, retaining the exact remote code/message without HTTP-text
+// matching or a second implementation of that translation in the TUI.
+func TestSwitchRemotePreservedStatusErrorFenceRecovery(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		code    int
+		message string
+		fence   bool
+	}{
+		{"authoritative absence", -32000, "Unknown switch receipt for this caller.", true},
+		{"different operation failure", -32000, "Target storage is unavailable.", false},
+		{"different refusal code", -32012, "Unknown switch receipt for this caller.", false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			d, f := switchDetail(t, true)
+			_, reply := terminalControlsReply(t, f.broker, d.submitSwitch(),
+				&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "response lost"}})
+			read, _ := d.update(reply)
+			original := d.engineSwitch.requestID
+			req, reply := terminalControlsReply(t, f.broker, read,
+				&rpc.Message{Error: &rpc.RPCError{Code: row.code, Message: row.message}})
+			var status enginesettings.SwitchStatusRequest
+			if err := json.Unmarshal(req.Params, &status); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchStatusMethod || status.NodeID == "" || status.NodeID != d.nodeArg() || status.RequestID != original {
+				t.Fatalf("remote original-ID status = %s %+v", req.Method, status)
+			}
+			wrapped, ok := reply.(detailReply)
+			if !ok {
+				t.Fatal("missing addressed RPC reply")
+			}
+			msg, ok := wrapped.msg.(detailSwitchMsg)
+			if !ok {
+				t.Fatal("missing switch RPC reply")
+			}
+			var preserved *rpc.RPCError
+			if !errors.As(msg.err, &preserved) || preserved.Code != row.code || preserved.Message != row.message {
+				t.Fatalf("remote status error changed at client boundary: %v", msg.err)
+			}
+			fence, _ := d.update(reply)
+			if !d.engineSwitch.outcomeUnknown() || d.engineSwitch.requestID != original || d.submitSwitch() != nil {
+				t.Fatal("remote status error resolved uncertainty before fence acknowledgement")
+			}
+			if !row.fence {
+				if fence != nil || d.engineSwitch.state != switchUncertain {
+					t.Fatal("non-absence error triggered fencing")
+				}
+				return
+			}
+			if fence == nil || d.engineSwitch.state != switchAbsent {
+				t.Fatal("preserved remote absence did not request a fence")
+			}
+			req, reply = terminalControlsReply(t, f.broker, fence, switchResponse(t,
+				enginesettings.SwitchFenceResult{NodeID: d.node.key, RequestID: original, Fenced: true}))
+			var request enginesettings.SwitchFenceRequest
+			if err := json.Unmarshal(req.Params, &request); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchFenceMethod || request.NodeID != d.nodeArg() || request.RequestID != original {
+				t.Fatalf("remote fence = %s %+v", req.Method, request)
+			}
+			baseline, _ := d.update(reply)
+			if d.engineSwitch.state != switchFenced || d.engineSwitch.fresh || d.submitSwitch() != nil ||
+				!strings.Contains(d.switchView(), "Not accepted; original request fenced") {
+				t.Fatalf("remote fence acknowledgement = %s / %s", d.switchView(), d.switchReason())
+			}
+			req, reply = terminalControlsReply(t, f.broker, baseline,
+				switchResponse(t, enginesettings.SwitchStatus{ConfigurationRevision: "remote-after-fence"}))
+			status = enginesettings.SwitchStatusRequest{}
+			if err := json.Unmarshal(req.Params, &status); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchStatusMethod || status.NodeID != d.nodeArg() || status.RequestID != "" {
+				t.Fatalf("post-fence baseline = %s %+v", req.Method, status)
+			}
+			if next, _ := d.update(reply); next != nil {
+				t.Fatal("fenced remote ID triggered more automatic work")
+			}
+			if reason := d.switchReason(); reason != "" {
+				t.Fatalf("fresh remote baseline still blocked: %s", reason)
+			}
+			req, _ = terminalControlsReply(t, f.broker, d.submitSwitch(),
+				&rpc.Message{Error: &rpc.RPCError{Code: -32602, Message: "fixture stops"}})
+			var replacement enginesettings.SwitchRequest
+			if err := json.Unmarshal(req.Params, &replacement); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchMethod || replacement.NodeID != d.nodeArg() || replacement.RequestID == original ||
+				replacement.RequestID == "" || replacement.ExpectedRevision != "remote-after-fence" {
+				t.Fatalf("remote deliberate replacement = %s %+v", req.Method, replacement)
+			}
+		})
+	}
+}
+
+func TestSwitchFenceStaleScopeCannotResolveOriginal(t *testing.T) {
+	for _, scope := range []string{"visit", "route", "epoch", "transport"} {
+		t.Run(scope, func(t *testing.T) {
+			d, f := switchDetail(t, false)
+			id, fence := switchAbsentFence(t, d, f)
+			_, reply := terminalControlsReply(t, f.broker, fence, switchResponse(t, enginesettings.SwitchFenceResult{NodeID: d.node.key, RequestID: id, Fenced: true}))
+			switch scope {
+			case "visit":
+				d.telemetryGen++
+			case "route":
+				d.telemetryRoute++
+			case "epoch":
+				d.retireSwitch()
+			case "transport":
+				wrapped, ok := reply.(detailReply)
+				if !ok {
+					t.Fatal("missing detail reply")
+				}
+				msg, ok := wrapped.msg.(detailSwitchMsg)
+				if !ok {
+					t.Fatal("missing switch reply")
+				}
+				msg.transport++
+				wrapped.msg = msg
+				reply = wrapped
+			}
+			d.update(reply)
+			if !d.engineSwitch.outcomeUnknown() || d.engineSwitch.requestID != id || d.submitSwitch() != nil {
+				t.Fatal("stale fence resolved uncertainty")
+			}
+		})
+	}
+}
+
+func TestSwitchFenceAcceptanceRaceFollowsOwnedReceipt(t *testing.T) {
+	for _, phase := range []string{enginesettings.SwitchDraining, enginesettings.SwitchCompleted} {
+		t.Run(phase, func(t *testing.T) {
+			d, f := switchDetail(t, true)
+			id, fence := switchAbsentFence(t, d, f)
+			r := switchReceipt(d, 3, phase)
+			r.Version, r.Caller = 1, "local"
+			r.ExpectedRevision = "e3v1:" + strings.Repeat("a", 64)
+			r.Request.ExpectedRevision, r.AcceptedRevision = r.ExpectedRevision, r.ExpectedRevision
+			r.PayloadHash = enginesettings.SwitchPayloadHash(r.Caller, r.NodeID, r.Request)
+			r.AcceptedAt = time.Now().UTC()
+			r.UpdatedAt, r.Deadline = r.AcceptedAt, r.AcceptedAt.Add(time.Minute)
+			if r.Terminal {
+				r.FinishedAt = &r.UpdatedAt
+			}
+			if err := r.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			_, reply := terminalControlsReply(t, f.broker, fence, switchResponse(t,
+				enginesettings.SwitchFenceResult{NodeID: d.node.key, RequestID: id, Receipt: &r}))
+			next, _ := d.update(reply)
+			if d.engineSwitch.state != switchAccepted || d.engineSwitch.receipt == nil || d.engineSwitch.receipt.Phase != phase ||
+				d.engineSwitch.requestID != id || strings.Contains(d.switchView(), "original request fenced") {
+				t.Fatalf("acceptance race lost real receipt: %s", d.switchView())
+			}
+			req, reply := terminalControlsReply(t, f.broker, next, &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "fixture stops"}})
+			var p enginesettings.SwitchStatusRequest
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchStatusMethod || (!r.Terminal && (p.RequestID != id || p.AfterSequence == nil || *p.AfterSequence != 3)) ||
+				(r.Terminal && p.RequestID != "") {
+				t.Fatalf("accepted readback = %s %+v", req.Method, p)
+			}
+			d.update(reply)
+		})
+	}
+}
+
+func TestSwitchFenceBaselineMustBeCurrentAndAvailable(t *testing.T) {
+	for _, scenario := range []string{"failed", "empty revision", "invalidated", "retired"} {
+		t.Run(scenario, func(t *testing.T) {
+			d, f := switchDetail(t, false)
+			id, fence := switchAbsentFence(t, d, f)
+			_, reply := terminalControlsReply(t, f.broker, fence, switchResponse(t,
+				enginesettings.SwitchFenceResult{NodeID: d.node.key, RequestID: id, Fenced: true}))
+			baseline, _ := d.update(reply)
+			response := switchResponse(t, enginesettings.SwitchStatus{ConfigurationRevision: "after-fence"})
+			switch scenario {
+			case "failed":
+				response = &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "unavailable"}}
+			case "empty revision":
+				response = switchResponse(t, enginesettings.SwitchStatus{})
+			case "invalidated":
+				raw, err := json.Marshal(enginesettings.SwitchChanged{NodeID: d.node.key, RequestID: "foreign", Sequence: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d.switchChanged(raw) != nil {
+					t.Fatal("notification added second waiter")
+				}
+			}
+			_, reply = terminalControlsReply(t, f.broker, baseline, response)
+			if scenario == "retired" {
+				d.retireSwitch()
+			}
+			d.update(reply)
+			if d.engineSwitch.fresh || d.submitSwitch() != nil || d.engineSwitch.state != switchFenced ||
+				d.engineSwitch.requestID != id || !strings.Contains(d.switchReason(), "readback") {
+				t.Fatalf("unusable post-fence baseline authorized replacement: %s / %s", d.switchView(), d.switchReason())
+			}
+		})
+	}
+}
+
+func TestSwitchFenceAcknowledgementTransitionOwnership(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		state   switchRequestState
+		receipt bool
+		want    switchRequestState
+	}{
+		{"absent own ID", switchAbsent, false, switchFenced},
+		{"uncertain without absence", switchUncertain, false, switchUncertain},
+		{"uncertain accepted ID", switchUncertain, true, switchUncertain},
+		{"accepted own ID", switchAccepted, true, switchAccepted},
+		{"foreign observed ID", switchObservedOther, false, switchObservedOther},
+		{"foreign inactive ID", switchObservedInactive, false, switchObservedInactive},
+		{"definite refusal", switchRefused, false, switchRefused},
+		{"already fenced", switchFenced, false, switchFenced},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			r := retainedSwitchRequest{state: row.state, requestID: "original"}
+			if row.receipt {
+				r.receipt = &enginesettings.SwitchReceipt{RequestID: "original", Sequence: 1}
+			}
+			previous := r.receipt
+			effect := r.transition(switchTransition{event: switchFenceOK})
+			if r.state != row.want || r.receipt != previous || r.requestID != "original" {
+				t.Fatalf("fence transition = %+v", r)
+			}
+			wantEffect := switchNoRead
+			if row.state == switchAbsent {
+				wantEffect = switchReadBaseline
+			}
+			if effect != wantEffect {
+				t.Fatalf("effect = %v, want %v", effect, wantEffect)
+			}
+		})
+	}
+}
+
 func TestSwitchCanonicalFramesAndDuplicateSubmit(t *testing.T) {
 	for _, remote := range []bool{false, true} {
 		name := "local"
@@ -623,6 +1090,7 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 		a = switchAccepted
 		o = switchObservedOther
 		i = switchObservedInactive
+		x = switchFenced
 	)
 	events := []struct {
 		name  string
@@ -664,6 +1132,7 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 		{"observed terminal", o, enginesettings.SwitchCompleted, false, []switchRequestState{s, o, o, o, o, i, o, o, o, o, o, n, n}},
 		{"observed recovery", o, enginesettings.SwitchFailedInterrupted, true, []switchRequestState{s, o, o, o, o, i, o, o, o, o, o, n, n}},
 		{"observed inactive", i, "", false, []switchRequestState{s, i, i, i, i, i, o, o, i, i, i, n, n}},
+		{"fenced", x, "", false, []switchRequestState{s, x, x, x, x, x, x, o, x, x, x, n, n}},
 	}
 	for _, row := range rows {
 		for i, event := range events {
@@ -693,7 +1162,7 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 					wantID = ""
 				}
 				adopt := event.event == switchBaseline && (row.state == switchNone ||
-					(event.id == "new" && (row.state == switchRefused || row.state == switchObservedOther || row.state == switchObservedInactive ||
+					(event.id == "new" && (row.state == switchRefused || row.state == switchFenced || row.state == switchObservedOther || row.state == switchObservedInactive ||
 						(row.state == switchAccepted && previous.Terminal))))
 				if adopt {
 					wantID = event.id
@@ -708,12 +1177,14 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 					t.Fatalf("identity = %q, want %q", r.requestID, wantID)
 				}
 				wantEffect := switchNoRead
-				if event.event == switchBaseline && wantID != "" && r.state != switchObservedInactive && (r.state != switchRefused || event.id == wantID) {
+				if event.event == switchBaseline && wantID != "" && r.state != switchObservedInactive && r.state != switchFenced && (r.state != switchRefused || event.id == wantID) {
 					wantEffect = switchReadRequest
 				}
-				if event.event == switchSubmitRefused && row.state == switchSubmitting ||
-					event.event == switchReadAbsent && row.state == switchUncertain && previous == nil {
+				if event.event == switchSubmitRefused && row.state == switchSubmitting {
 					wantEffect = switchReadBaseline
+				}
+				if event.event == switchReadAbsent && (row.state == switchUncertain && previous == nil || row.state == switchAbsent) {
+					wantEffect = switchFenceRequest
 				}
 				if event.event == switchSubmitLost && row.state == switchSubmitting {
 					wantEffect = switchReadRequest
@@ -725,7 +1196,7 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 					if previous != nil && r.receipt != previous {
 						t.Fatal("equal sequence replaced receipt")
 					}
-					if event.event == switchReadOK && row.state != switchNone && r.observed != observed {
+					if event.event == switchReadOK && row.state != switchNone && row.state != switchFenced && r.observed != observed {
 						t.Fatal("equal sequence lost current observation")
 					}
 				}
@@ -769,18 +1240,20 @@ func assertSwitchIdleReadbackLiveness(t *testing.T, retained retainedSwitchReque
 				t.Fatalf("recovery frame = %s %+v, want original %q", req.Method, params, original)
 			}
 			next, _ := d.update(result)
-			// First absence asks for one baseline; it is followed on the next
-			// cycle, without creating an unbounded immediate read loop.
+			// A failed fence leaves the same recovery obligation. It must not
+			// recurse into an automatic retry loop or permit replacement.
 			if next != nil {
-				_, result = terminalControlsReply(t, f.broker, next, switchResponse(t,
-					enginesettings.SwitchStatus{ConfigurationRevision: "fresh-idle"}))
-				read, _ = d.update(result)
-				if read != nil {
-					_, result = terminalControlsReply(t, f.broker, read,
-						&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "Unknown switch receipt for this caller."}})
-					if further, _ := d.update(result); further != nil {
-						t.Fatal("idle absence created an unbounded automatic read loop")
-					}
+				req, result = terminalControlsReply(t, f.broker, next,
+					&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "fence acknowledgement lost"}})
+				var fence enginesettings.SwitchFenceRequest
+				if err := json.Unmarshal(req.Params, &fence); err != nil {
+					t.Fatal(err)
+				}
+				if req.Method != enginesettings.SwitchFenceMethod || fence.RequestID != original || !localRecovery || retained.receipt != nil {
+					t.Fatalf("unexpected fence = %s %+v", req.Method, fence)
+				}
+				if further, _ := d.update(result); further != nil {
+					t.Fatal("failed fence created an unbounded automatic retry loop")
 				}
 			}
 		}
@@ -845,16 +1318,22 @@ func TestSwitchAbsentReceiptPreservesUncertaintyAcrossBaselines(t *testing.T) {
 				message = "receipt unavailable"
 			}
 			_, reply = terminalControlsReply(t, f.broker, readback, &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: message}})
-			baseline, _ := d.update(reply)
+			fence, _ := d.update(reply)
 			if scenario == "generic error" {
-				if baseline != nil || d.engineSwitch.state != switchUncertain {
+				if fence != nil || d.engineSwitch.state != switchUncertain {
 					t.Fatal("generic error established absence")
 				}
 				return
 			}
-			if baseline == nil || d.engineSwitch.state != switchAbsent || d.submitSwitch() != nil {
-				t.Fatal("absence did not require a new baseline")
+			if fence == nil || d.engineSwitch.state != switchAbsent || d.submitSwitch() != nil {
+				t.Fatal("absence did not require a fence")
 			}
+			req, reply := terminalControlsReply(t, f.broker, fence, &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "fence unavailable"}})
+			if req.Method != enginesettings.SwitchFenceMethod {
+				t.Fatalf("absence command = %s", req.Method)
+			}
+			d.update(reply)
+			baseline := d.switchStatusCmd(true)
 			status := enginesettings.SwitchStatus{ConfigurationRevision: "fresh"}
 			switch scenario {
 			case "active same":
@@ -875,7 +1354,7 @@ func TestSwitchAbsentReceiptPreservesUncertaintyAcrossBaselines(t *testing.T) {
 				}
 				d.switchChanged(raw)
 			}
-			req, reply := terminalControlsReply(t, f.broker, baseline, response)
+			req, reply = terminalControlsReply(t, f.broker, baseline, response)
 			var params enginesettings.SwitchStatusRequest
 			if err := json.Unmarshal(req.Params, &params); err != nil {
 				t.Fatal(err)
@@ -981,12 +1460,22 @@ func TestSwitchCancelledSubmitAbsenceDoesNotProveNonAcceptance(t *testing.T) {
 			read, _ := d.update(reply)
 			absent := &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "Unknown switch receipt for this caller."}}
 			_, reply = terminalControlsReply(t, f.broker, read, absent)
-			baseline, _ := d.update(reply)
-			_, reply = terminalControlsReply(t, f.broker, baseline, switchResponse(t,
+			fence, _ := d.update(reply)
+			req, reply := terminalControlsReply(t, f.broker, fence, &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "fence acknowledgement lost"}})
+			if req.Method != enginesettings.SwitchFenceMethod {
+				t.Fatalf("absence command = %s", req.Method)
+			}
+			d.update(reply)
+			_, reply = terminalControlsReply(t, f.broker, d.switchStatusCmd(true), switchResponse(t,
 				enginesettings.SwitchStatus{ConfigurationRevision: "fresh"}))
 			read, _ = d.update(reply)
 			if read != nil {
 				_, reply = terminalControlsReply(t, f.broker, read, absent)
+				fence, _ = d.update(reply)
+				req, reply = terminalControlsReply(t, f.broker, fence, &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "fence acknowledgement lost"}})
+				if req.Method != enginesettings.SwitchFenceMethod {
+					t.Fatalf("absence retry = %s", req.Method)
+				}
 				d.update(reply)
 			}
 			if replacement := d.submitSwitch(); replacement != nil {
@@ -1010,7 +1499,7 @@ func TestSwitchCancelledSubmitAbsenceDoesNotProveNonAcceptance(t *testing.T) {
 			_, reply = terminalControlsReply(t, f.broker, d.switchStatusCmd(true), switchResponse(t, status))
 			read, _ = d.update(reply)
 			r := switchReceipt(d, 7, enginesettings.SwitchCompleted)
-			req, reply := terminalControlsReply(t, f.broker, read, switchResponse(t, enginesettings.SwitchStatus{Receipt: &r}))
+			req, reply = terminalControlsReply(t, f.broker, read, switchResponse(t, enginesettings.SwitchStatus{Receipt: &r}))
 			var params enginesettings.SwitchStatusRequest
 			if err := json.Unmarshal(req.Params, &params); err != nil {
 				t.Fatal(err)
@@ -1042,6 +1531,7 @@ func TestSwitchRetainedIdentityBaselineMatrix(t *testing.T) {
 		{"local accepted", switchAccepted, enginesettings.SwitchDraining, false, false, false, true},
 		{"local accepted inaccessible", switchAccepted, enginesettings.SwitchDraining, false, true, false, true},
 		{"local refused", switchRefused, "", false, false, false, false},
+		{"local fenced", switchFenced, "", false, false, false, false},
 		{"local refused retired", switchRefused, "", true, false, false, false},
 		{"local refused inaccessible", switchRefused, "", false, true, false, false},
 		{"local terminal", switchAccepted, enginesettings.SwitchCompleted, false, false, false, false},
@@ -1087,6 +1577,7 @@ func TestSwitchRetainedIdentityBaselineMatrix(t *testing.T) {
 					wantID = baseline.id
 				}
 				wantRead := wantID != "" && (row.state != switchRefused || baseline.id != "") &&
+					!(row.state == switchFenced && baseline.id != "new") &&
 					!(row.state == switchObservedOther && baseline.id == "")
 				if s.requestID != wantID || (next != nil) != wantRead {
 					t.Fatalf("identity=%q read=%t, want identity=%q read=%t", s.requestID, next != nil, wantID, wantRead)

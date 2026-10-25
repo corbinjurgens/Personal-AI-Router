@@ -52,7 +52,7 @@ func switchError(kind, message string) error {
 	switch kind {
 	case settings.SwitchErrorInvalidRequest, settings.SwitchErrorReusedID:
 		code = settings.SwitchInvalidParamsCode
-	case settings.SwitchErrorConfigurationConflict:
+	case settings.SwitchErrorConfigurationConflict, settings.SwitchErrorFenced:
 		code = settings.SwitchConfigurationConflictCode
 	case settings.SwitchErrorRemoteVeto:
 		code = settings.SwitchRemoteVetoCode
@@ -642,6 +642,10 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 		}
 		return settings.SwitchResult{Receipt: old}, nil
 	}
+	if b.engineSwitch.store.IsFenced(identity, p.RequestID) {
+		b.engineConfigMu.Unlock()
+		return settings.SwitchResult{}, switchError(settings.SwitchErrorFenced, "Request ID was fenced by this caller.")
+	}
 	b.engineConfigMu.Unlock()
 	if !b.settingsApplyMu.TryLock() {
 		return settings.SwitchResult{}, switchError(settings.SwitchErrorBusy, "An engine configuration operation is active.")
@@ -670,6 +674,9 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 			return settings.SwitchResult{}, switchError(settings.SwitchErrorReusedID, "Request ID was already used by another caller or payload.")
 		}
 		return settings.SwitchResult{Receipt: old}, nil
+	}
+	if b.engineSwitch.store.IsFenced(identity, p.RequestID) {
+		return settings.SwitchResult{}, switchError(settings.SwitchErrorFenced, "Request ID was fenced by this caller.")
 	}
 	if err := b.pendingSwitchLocked(""); err != nil {
 		return settings.SwitchResult{}, err
@@ -1259,8 +1266,64 @@ func (b *Broker) vetoRemoteEngineSwitch(engine string, cancel bool) error {
 	return nil
 }
 
+// Fence never takes settingsApplyMu or touches an executor. It orders durable
+// absence against acceptance under the same engineConfigMu at both lookups.
+func (b *Broker) fenceEngineSwitch(ctx context.Context, p settings.SwitchFenceRequest, caller string) (settings.SwitchFenceResult, error) {
+	if err := p.Validate(); err != nil {
+		return settings.SwitchFenceResult{}, switchError(settings.SwitchErrorInvalidRequest, err.Error())
+	}
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return settings.SwitchFenceResult{}, err
+	}
+	if err := b.authorizeSettingsCallerLocked(caller); err != nil {
+		return settings.SwitchFenceResult{}, err
+	}
+	if err := b.loadEngineSwitchLocked(); err != nil {
+		return settings.SwitchFenceResult{}, err
+	}
+	runtime := b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if err := b.authorizeRemoteManagementLocked(runtime, caller, "switch-fence", p.RequestID); err != nil {
+		return settings.SwitchFenceResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return settings.SwitchFenceResult{}, err
+	}
+	identity := caller
+	if identity == "" {
+		identity = settings.SwitchOriginLocal
+	}
+	c := b.switchCoordinator()
+	// Existing owned receipts remain readable even behind a storage latch. An
+	// adopted-but-uncertain tombstone must never take that retry read path.
+	if receipt, ok := c.store.Lookup(p.RequestID); c.err != nil && (!ok || receipt.Caller != identity) {
+		return settings.SwitchFenceResult{}, c.err
+	}
+	result, err := c.store.Fence(b.nodeID, identity, p.RequestID)
+	if err != nil {
+		b.latchSwitchStorageLocked(err)
+		return settings.SwitchFenceResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return settings.SwitchFenceResult{}, err
+	}
+	return result, nil
+}
+
 func (b *Broker) dispatchEngineSwitch(ctx context.Context, method string, raw json.RawMessage, caller string) (any, error) {
 	switch method {
+	case settings.SwitchFenceMethod:
+		p, err := settings.DecodeSwitchFenceRequest(raw)
+		if err != nil {
+			return nil, switchError(settings.SwitchErrorInvalidRequest, err.Error())
+		}
+		if caller != "" && p.NodeID != "" && p.NodeID != b.nodeID {
+			return nil, switchError(settings.SwitchErrorInvalidRequest, "A fence cannot forward another hop.")
+		}
+		return b.fenceEngineSwitch(ctx, p, caller)
 	case settings.SwitchMethod:
 		p, err := settings.DecodeSwitchRequest(raw)
 		if err != nil {
@@ -1297,6 +1360,9 @@ func (b *Broker) handleEngineSwitch(msg *Message) {
 		method := settings.RemoteSwitchMethod
 		if msg.Method == settings.SwitchStatusMethod {
 			method = settings.RemoteSwitchStatusMethod
+		}
+		if msg.Method == settings.SwitchFenceMethod {
+			method = settings.RemoteSwitchFenceMethod
 		}
 		raw, rpcErr, err := w.CallNoTimeout(context.Background(), method, msg.Params)
 		if err != nil {

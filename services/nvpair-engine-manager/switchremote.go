@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,11 +18,13 @@ import (
 var switchRemoteMethods = map[string]string{
 	settings.RemoteSwitchMethod:       settings.SwitchApplyPath,
 	settings.RemoteSwitchStatusMethod: settings.SwitchStatusPath,
+	settings.RemoteSwitchFenceMethod:  settings.SwitchFencePath,
 }
 
 var switchRouteMethods = map[string]string{
 	settings.SwitchApplyPath:  settings.SwitchMethod,
 	settings.SwitchStatusPath: settings.SwitchStatusMethod,
+	settings.SwitchFencePath:  settings.SwitchFenceMethod,
 }
 
 // switchBrokerCall cancels only the relay wait. The broker owns accepted work
@@ -34,6 +37,13 @@ func normalizeSwitchParams(path string, data []byte, target string) (json.RawMes
 	var body any
 	var nodeID string
 	switch path {
+	case settings.SwitchFencePath:
+		p, err := settings.DecodeSwitchFenceRequest(data)
+		if err != nil {
+			return nil, "", &codedError{code: settings.SwitchInvalidParamsCode, message: err.Error()}
+		}
+		nodeID, p.NodeID = p.NodeID, target
+		body = p
 	case settings.SwitchApplyPath:
 		p, err := settings.DecodeSwitchRequest(data)
 		if err != nil {
@@ -101,7 +111,7 @@ func (m *Manager) remoteSwitch(ctx context.Context, msg *Message) {
 			}
 			return client, err
 		})
-	if err == nil {
+	if err == nil && msg.Method != settings.RemoteSwitchFenceMethod {
 		m.switchWatchers.observe(ctx, identity, result, m.switchWatchIdentity, m.remoteClient, m.codec.Notify)
 	}
 	m.respondOrErr(msg, result, err)
@@ -130,8 +140,16 @@ func (c *remoteClient) postSwitch(ctx context.Context, path string, params json.
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var body codedBody
-		if response.StatusCode == http.StatusConflict && json.Unmarshal(data, &body) == nil && body.Code == settings.SwitchErrorConfigurationConflict {
-			return nil, &codedError{code: settings.SwitchConfigurationConflictCode, message: body.Error}
+		if response.StatusCode == http.StatusConflict && json.Unmarshal(data, &body) == nil {
+			// Preserve the existing switch conflict alias as well as the ec
+			// owner's codes. A typed target refusal keeps its exact message;
+			// uncoded HTTP/transport failures retain uncertain diagnostics.
+			if body.Code == settings.SwitchErrorConfigurationConflict {
+				return nil, &codedError{code: settings.SwitchConfigurationConflictCode, message: body.Error}
+			}
+			if code, ok := codeOfWire(body.Code); ok {
+				return nil, &codedError{code: code, message: body.Error}
+			}
 		}
 		if response.StatusCode == http.StatusBadRequest {
 			return nil, &codedError{code: settings.SwitchInvalidParamsCode, message: string(data)}
@@ -140,6 +158,19 @@ func (c *remoteClient) postSwitch(ctx context.Context, path string, params json.
 	}
 	if !json.Valid(data) {
 		return nil, fmt.Errorf("remote engine switch: invalid JSON response; operation outcome may be uncertain")
+	}
+	if path == settings.SwitchFencePath {
+		request, err := settings.DecodeSwitchFenceRequest(params)
+		if err != nil {
+			return nil, err
+		}
+		result, err := settings.DecodeSwitchFenceResult(data)
+		if err != nil {
+			return nil, fmt.Errorf("remote engine switch fence: invalid outcome: %w", err)
+		}
+		if result.NodeID != request.NodeID || result.RequestID != request.RequestID {
+			return nil, fmt.Errorf("remote engine switch fence: response identity does not match canonical request")
+		}
 	}
 	return json.RawMessage(data), nil
 }
@@ -194,6 +225,14 @@ func switchHandler(target string, requirePinCaller func(pinnedPeerHandler) http.
 			if code == codeRemoteManagementDenied {
 				// The target refused a management operation; the origin maps
 				// this back to -32012, distinct from the local veto above.
+				writeCodedError(w, code, err.Error())
+				return
+			}
+			var authoritative *codedError
+			if errors.As(err, &authoritative) && code == codeOperationError {
+				// Broker status absence is a coded -32000 refusal. Preserve it
+				// as an authoritative envelope, without classifying plain relay
+				// failures or inferring absence from diagnostic text.
 				writeCodedError(w, code, err.Error())
 				return
 			}
