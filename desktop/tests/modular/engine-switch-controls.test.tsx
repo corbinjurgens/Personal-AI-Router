@@ -23,6 +23,18 @@ import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { emptyEngineStatus } from '@/shared/utils/engines'
 
 const revision = `e3v1:${'a'.repeat(64)}`
+
+it('labels automatic activity while retaining request and phase evidence', async () => {
+    useEngineSwitchStore.setState({
+        entries: {
+            'node-a': { receipt: receipt({ automatic: true }), request, own: false, revision }
+        }
+    })
+    await mount()
+    expect(container.textContent).toContain('Automatic engine switch')
+    expect(container.textContent).toContain('draining')
+    expect(container.textContent).toContain('observed')
+})
 const engines = [
     { value: 'ollama', children: 'Ollama' },
     { value: 'llamacpp', children: 'llama.cpp' }

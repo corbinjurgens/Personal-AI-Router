@@ -5,6 +5,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-engine-manager
 
+Internal automatic replacement reuses the E4 switch transaction. Optional
+`automatic: true` in prepare/checkpoint and receipt contracts describes cause,
+independently of authenticated local/remote origin. The public request has no
+automatic flag. Automatic work retains its initial deadline, capped at 90 seconds.
+It requires a sole running PAIR-controlled, non-adopted source with no reclaim
+uncertainty, rechecked before source effects. The reservation fences other
+activation. Local Off can preempt automatic work of either origin through the
+same durable operation-scoped veto as remote E4. Manual local switching, locks,
+pause and termination proof retain their guards. Readiness proves the server,
+not model inventory. The broker owns bounded automatic receipt retention after
+manager release; unresolved checkpoints remain fenced through recovery.
+
 A config-driven control plane for local inference engines. The bundled
 manifests support Ollama, LM Studio, and llama.cpp. It manages everything about
 an engine **except serving inference**: detect, user-mode install,

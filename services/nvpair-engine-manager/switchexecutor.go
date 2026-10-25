@@ -44,7 +44,7 @@ func (e *Executor) admitMutationLocked(engine string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (cp.SourceEngine == engine || cp.TargetEngine == engine) {
+	if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (cp.Automatic || cp.SourceEngine == engine || cp.TargetEngine == engine) {
 		return nil, &switchBusyError{engine}
 	}
 	return e.trackMutationLocked(engine), nil
@@ -68,7 +68,7 @@ func (e *Executor) admitStop(engine string, origin intentOrigin, operationID str
 	state, err := e.desired.load()
 	if err == nil && operationID != "" {
 		cp := state.PendingSwitch
-		if origin != intentLocal || cp == nil || cp.OperationID != operationID || cp.Phase == settings.SwitchCheckpointReleased || cp.Origin != settings.SwitchOriginRemote || (cp.SourceEngine != engine && cp.TargetEngine != engine) {
+		if origin != intentLocal || cp == nil || cp.OperationID != operationID || cp.Phase == settings.SwitchCheckpointReleased || !cp.YieldsToLocalOff() || (cp.SourceEngine != engine && cp.TargetEngine != engine) {
 			// The broker admitted this Off against a particular reservation.
 			// Once that reservation is gone, neither its veto nor its physical
 			// stop may affect a later switch or an explicit local On.
@@ -77,7 +77,7 @@ func (e *Executor) admitStop(engine string, origin intentOrigin, operationID str
 		}
 	}
 	if err == nil && origin == intentLocal {
-		if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && cp.Origin == settings.SwitchOriginRemote && (cp.SourceEngine == engine || cp.TargetEngine == engine) {
+		if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && cp.YieldsToLocalOff() && (cp.SourceEngine == engine || cp.TargetEngine == engine) {
 			state.setIntent(engine, false, intentLocal)
 			if engine == cp.SourceEngine {
 				cp.SourceLocalOff = true
@@ -215,6 +215,11 @@ func validSwitchEnvelope(p settings.SwitchPrepareRequest) error {
 // SwitchPrepare also supports a read-only configuration snapshot when the
 // operation ID is empty. No reservation is created by that request.
 func (e *Executor) SwitchPrepare(ctx context.Context, p settings.SwitchPrepareRequest) switchExecutorResult {
+	if p.OperationID != "" && p.Automatic {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, p.Deadline)
+		defer cancel()
+	}
 	if p.OperationID != "" {
 		e.switchMu.Lock()
 		defer e.switchMu.Unlock()
@@ -233,7 +238,7 @@ func (e *Executor) SwitchPrepare(ctx context.Context, p settings.SwitchPrepareRe
 		if reserved {
 			// A remote prepare refusal still needs the broker's final veto
 			// reconciliation before releasing its provisional reservation.
-			if p.Origin != settings.SwitchOriginRemote {
+			if !p.YieldsToLocalOff() {
 				result.Checkpoint.Phase = settings.SwitchCheckpointReleased
 			}
 			result.Checkpoint.Error = result.Error
@@ -291,6 +296,9 @@ func (e *Executor) SwitchPrepare(ctx context.Context, p settings.SwitchPrepareRe
 	if p.ConfigurationFence != result.ConfigurationFence {
 		return fail(-32010, settings.SwitchErrorConfigurationConflict, errors.New("manager configuration changed"))
 	}
+	if p.Automatic && p.Deadline.After(time.Now().Add(settings.AutomaticSwitchBudget)) {
+		return fail(-32602, settings.SwitchErrorInvalidRequest, errors.New("automatic deadline exceeds preparation budget"))
+	}
 	source, err := e.state(p.SourceEngine)
 	if err != nil {
 		return fail(-32000, settings.SwitchErrorValidation, err)
@@ -309,6 +317,9 @@ func (e *Executor) SwitchPrepare(ctx context.Context, p settings.SwitchPrepareRe
 	}
 	if err := e.switchTargetVeto(p.Origin, p.TargetEngine); err != nil {
 		return fail(switchCode(err), settings.SwitchErrorRemoteVeto, err)
+	}
+	if err := e.automaticSwitchSource(p); err != nil {
+		return fail(-32000, settings.SwitchErrorValidation, err)
 	}
 	cp := &settings.SwitchCheckpoint{SwitchPrepareRequest: p, Phase: settings.SwitchCheckpointReserved, SourceProvenance: string(state.OffBy[p.SourceEngine]), TargetProvenance: string(state.OffBy[p.TargetEngine])}
 	cp.Source = switchRuntimeObserved(source, switchIntent(state, p.SourceEngine), false)
@@ -370,6 +381,9 @@ func (e *Executor) SwitchPrepare(ctx context.Context, p settings.SwitchPrepareRe
 	cp.PreSource, cp.PreTarget = cp.Source, cp.Target
 	e.switchAdmission.Lock()
 	admissionHeld = true
+	if err := e.automaticSwitchSource(p); err != nil {
+		return fail(-32000, settings.SwitchErrorValidation, err)
+	}
 	if err := e.switchTargetVeto(p.Origin, p.TargetEngine); err != nil {
 		return fail(switchCode(err), settings.SwitchErrorRemoteVeto, err)
 	}
@@ -442,8 +456,12 @@ func (e *Executor) saveSwitch(cp *settings.SwitchCheckpoint, engine string, on b
 			cp.TargetLocalOff, cp.Target = true, previous.Target
 		}
 	}
+	ports := e.switchPorts(cp)
+	if cp.Automatic && state.PendingSwitch != nil && state.PendingSwitch.OperationID == cp.OperationID && state.PendingSwitchPorts != nil {
+		ports.SourcePID, ports.SourceRunID = state.PendingSwitchPorts.SourcePID, state.PendingSwitchPorts.SourceRunID
+	}
 	state.PendingSwitch = cp
-	state.PendingSwitchPorts = e.switchPorts(cp)
+	state.PendingSwitchPorts = ports
 	return e.desired.save(state)
 }
 
@@ -452,6 +470,12 @@ func (e *Executor) switchPorts(cp *settings.SwitchCheckpoint) *switchCheckpointP
 	if st, err := e.state(cp.SourceEngine); err == nil {
 		st.mu.Lock()
 		ports.Source = st.port
+		if cp.Automatic {
+			ports.SourceRunID = st.runID
+			if st.proc != nil && st.proc.cmd != nil && st.proc.cmd.Process != nil {
+				ports.SourcePID = st.proc.cmd.Process.Pid
+			}
+		}
 		st.mu.Unlock()
 	}
 	if st, err := e.state(cp.TargetEngine); err == nil {
@@ -469,6 +493,21 @@ func (e *Executor) SwitchStep(ctx context.Context, p settings.SwitchStepRequest)
 }
 
 func (e *Executor) SwitchReconcile(ctx context.Context, p settings.SwitchReconcileRequest) settings.SwitchReconcileResult {
+	if p.Automatic {
+		// The stdio reader supplies the manager's lifetime context. Carry the
+		// broker's bounded cleanup window separately from immutable identity.
+		deadline := time.Now().Add(settings.SwitchDrainBudget)
+		limit := p.Deadline
+		if p.CleanupDeadline != nil {
+			limit = *p.CleanupDeadline
+		}
+		if limit.Before(deadline) {
+			deadline = limit
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
 	e.switchMu.Lock()
 	defer e.switchMu.Unlock()
 	return e.switchStepLocked(ctx, settings.SwitchStepRequest{SwitchPrepareRequest: p.SwitchPrepareRequest}, true, p.LocalVeto)
@@ -519,7 +558,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 		return fail(settings.SwitchErrorInvalidRequest, &codedError{code: -32602, message: "switch checkpoint identity mismatch"})
 	}
 	if localVeto != nil && cp.Phase != settings.SwitchCheckpointReleased {
-		if cp.Origin != settings.SwitchOriginRemote || (localVeto.Pause && localVeto.Engine != "") || (!localVeto.Pause && localVeto.Engine != cp.SourceEngine && localVeto.Engine != cp.TargetEngine) {
+		if !cp.YieldsToLocalOff() || (localVeto.Pause && localVeto.Engine != "") || (!localVeto.Pause && localVeto.Engine != cp.SourceEngine && localVeto.Engine != cp.TargetEngine) {
 			return fail(settings.SwitchErrorInvalidRequest, &codedError{code: -32602, message: "invalid operation-specific local veto"})
 		}
 		// Reload while holding desired.mu so a concurrent local Off's intent
@@ -574,7 +613,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	}
 	if p.Step == settings.SwitchStepRelease {
 		paused, _ := e.nodeProjection.managementBlocked()
-		if cp.Origin == settings.SwitchOriginRemote {
+		if cp.YieldsToLocalOff() {
 			for _, pair := range []struct {
 				veto        bool
 				observation settings.SwitchEngineState
@@ -584,7 +623,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 				}
 			}
 		}
-		if cp.TargetCommitted && ((cp.Origin == settings.SwitchOriginRemote && cp.Error != nil && cp.Error.Code == codeLocalVeto) || paused) {
+		if cp.TargetCommitted && ((cp.YieldsToLocalOff() && cp.Error != nil && cp.Error.Code == codeLocalVeto) || paused) {
 			return fail(settings.SwitchErrorBusy, errors.New("reconcile vetoed committed target before release; reservation retained"))
 		}
 		if cp.Phase == settings.SwitchCheckpointStopPending || cp.Phase == settings.SwitchCheckpointStartPending {
@@ -598,7 +637,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	}
 	// An explicit veto while the broker still owns a remote reservation also
 	// owns physical termination even if drain failed before source-stop.
-	if reconcile && cp.Origin == settings.SwitchOriginRemote {
+	if reconcile && cp.YieldsToLocalOff() {
 		for _, pair := range []struct {
 			name        string
 			veto        bool
@@ -631,7 +670,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	vetoedCommittedTarget := false
 	if reconcile && cp.TargetCommitted {
 		paused, _ := e.nodeProjection.managementBlocked()
-		if (cp.Origin == settings.SwitchOriginRemote && cp.Error != nil && cp.Error.Code == codeLocalVeto) || paused {
+		if (cp.YieldsToLocalOff() && cp.Error != nil && cp.Error.Code == codeLocalVeto) || paused {
 			vetoedCommittedTarget = true
 			cp.TargetCommitted = false
 			cp.Target.Intent = settings.SwitchIntentOff
@@ -679,6 +718,11 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	if !reconcile && (ctx.Err() != nil || !cp.Deadline.After(time.Now())) {
 		return fail(settings.SwitchErrorInterrupted, errors.New("switch step deadline expired or caller cancelled"))
 	}
+	if !reconcile && cp.Automatic {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, cp.Deadline)
+		defer cancel()
+	}
 	stopSource := p.Step == settings.SwitchStepSourceStop || (reconcile && cp.Phase == settings.SwitchCheckpointStopPending)
 	startTarget := recoverCommitted || p.Step == settings.SwitchStepTargetStart || (reconcile && cp.Phase == settings.SwitchCheckpointStartPending)
 	if !stopSource && !startTarget {
@@ -702,7 +746,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			startCtx, cancel = context.WithDeadline(ctx, cp.Deadline)
 			defer cancel()
 		}
-		if cp.Origin == settings.SwitchOriginRemote {
+		if cp.YieldsToLocalOff() {
 			// Register and read the reservation under the same gate as source
 			// Off, which also cancels work registered for the target engine.
 			e.switchAdmission.Lock()
@@ -725,9 +769,32 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	if stopSource {
+		var ownership *stopOwnership
 		if !reconcile {
 			if err := e.switchTargetVeto(cp.Origin, cp.TargetEngine); err != nil {
 				return fail(settings.SwitchErrorRemoteVeto, err)
+			}
+			// Refresh adoption under the lifecycle lock before saving Off or
+			// invoking the stop owner. Listener refusal alone proves no ownership.
+			if cp.Automatic {
+				installed, detectErr := e.Detect(engine)
+				if detectErr != nil {
+					return fail(kind, detectErr)
+				}
+				st.mu.Lock()
+				port := st.port
+				st.mu.Unlock()
+				e.reconcilePresence(ctx, engine, st, installed, port, false)
+				if err := e.automaticSwitchSource(cp.SwitchPrepareRequest); err != nil {
+					return fail(kind, err)
+				}
+				st.mu.Lock()
+				ownership = &stopOwnership{process: st.proc, runID: st.runID}
+				st.mu.Unlock()
+				ports := state.PendingSwitchPorts
+				if ports == nil || ports.SourceRunID == "" || ports.SourceRunID != ownership.runID || (ownership.process != nil && (ownership.process.cmd == nil || ownership.process.cmd.Process == nil || ports.SourcePID != ownership.process.cmd.Process.Pid)) {
+					return fail(kind, errors.New("automatic source incarnation changed before stop"))
+				}
 			}
 		}
 		cp.Phase = settings.SwitchCheckpointStopPending
@@ -737,7 +804,21 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 		}
 		e.emitIntent()
 		if reconcile {
-			err = e.cleanupSwitchRecovery(ctx, st, engine)
+			paused, _ := e.nodeProjection.managementBlocked()
+			explicitPause := paused || (localVeto != nil && localVeto.Pause)
+			if cp.Automatic && !cp.SourceLocalOff && !explicitPause {
+				err = e.cleanupAutomaticSwitchSource(ctx, st, cp, state.PendingSwitchPorts)
+			} else {
+				err = e.cleanupSwitchRecovery(ctx, st, engine)
+			}
+		} else if cp.Automatic {
+			err = e.doStopOwnedContext(ctx, st, engine, ownership)
+			var changed *stopOwnershipChangedError
+			if errors.As(err, &changed) {
+				// The stop owner positively refused before signalling or invoking
+				// a CLI. Recovery must not turn that refusal into orphan reclaim.
+				cp.Phase = settings.SwitchCheckpointReserved
+			}
 		} else {
 			installed, _ := e.Detect(engine)
 			st.mu.Lock()
@@ -746,8 +827,20 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			e.reconcilePresence(ctx, engine, st, installed, port, true)
 			err = e.doStop(st, engine)
 		}
-		terminated := e.switchTerminated(st)
-		cp.Source = e.switchObserved(st, settings.SwitchIntentOff, terminated)
+		terminated := false
+		if cp.Automatic {
+			terminated = e.switchTerminatedContext(ctx, st)
+			if ports := state.PendingSwitchPorts; ports != nil && ports.SourcePID > 0 {
+				terminated = terminated && orphanPIDExited(ports.SourcePID)
+			}
+			cp.Source = switchRuntimeObserved(st, settings.SwitchIntentOff, terminated)
+			if err != nil && !terminated && cp.Source.Running != nil && !*cp.Source.Running {
+				cp.Source.Running, cp.Source.Healthy = nil, nil
+			}
+		} else {
+			terminated = e.switchTerminated(st)
+			cp.Source = e.switchObserved(st, settings.SwitchIntentOff, terminated)
+		}
 		if !terminated && err == nil {
 			err = errors.New("source termination could not be verified")
 		}
@@ -802,7 +895,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 				} else if !installed {
 					err = errors.New("target engine is no longer prepared")
 				} else {
-					err = e.doStart(startCtx, st, engine, startOpts{RequireOwned: true, ReclaimOwned: true, Bind: "127.0.0.1"})
+					err = e.doStart(startCtx, st, engine, startOpts{RequireOwned: true, ReclaimOwned: true, BoundedCleanup: cp.Automatic, Bind: "127.0.0.1"})
 					launchSucceeded = err == nil
 				}
 				err = vetoCause(startCtx, err)
@@ -839,6 +932,8 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 		if !reclaimFailed && (!recoverCommitted || launchSucceeded || owned) && (!reconcile || recoverCommitted) {
 			if !reconcile && !owned && !launchSucceeded {
 				cleanupErr = e.cleanupSwitchRecovery(startCtx, st, engine)
+			} else if cp.Automatic {
+				cleanupErr = e.doStopContext(startCtx, st, engine)
 			} else {
 				cleanupErr = e.doStop(st, engine)
 			}
@@ -851,7 +946,15 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			cp.TargetCommitted = false
 			cp.Phase = settings.SwitchCheckpointStartPending
 		}
-		cp.Target = e.switchObserved(st, settings.SwitchIntentOff, e.switchTerminated(st))
+		if cp.Automatic {
+			terminated := e.switchTerminatedContext(startCtx, st)
+			cp.Target = switchRuntimeObserved(st, settings.SwitchIntentOff, terminated)
+			if !terminated && cp.Target.Running != nil && !*cp.Target.Running {
+				cp.Target.Running, cp.Target.Healthy = nil, nil
+			}
+		} else {
+			cp.Target = e.switchObserved(st, settings.SwitchIntentOff, e.switchTerminated(st))
+		}
 	}
 	if err != nil {
 		cp.Error = switchFailure(switchCode(err), kind, err)
@@ -938,6 +1041,79 @@ func (e *Executor) switchTargetVeto(origin, engine string) error {
 	return e.activationVeto(engine)
 }
 
+// Automatic replacement requires a sole live source with affirmative PAIR
+// ownership. This deliberately does not invoke or relax orphan reclamation.
+func (e *Executor) automaticSwitchSource(p settings.SwitchPrepareRequest) error {
+	if !p.Automatic {
+		return nil
+	}
+	for _, name := range e.reg.Names() {
+		st, err := e.state(name)
+		if err != nil {
+			// Unsupported host entries cannot be running in this executor.
+			if name == p.SourceEngine {
+				return err
+			}
+			continue
+		}
+		st.mu.Lock()
+		running, adopted, uncertain := st.running, st.adopted, st.reclaimFailed || st.reclaimPID != 0 || (st.running && st.stopping)
+		controlled := (st.proc != nil && st.proc.cmd != nil && st.proc.cmd.Process != nil) || (st.plat.Runtime.modeOrDefault() == "command" && st.runID != "")
+		st.mu.Unlock()
+		if name == p.SourceEngine {
+			if !running || adopted || uncertain || !controlled {
+				return errors.New("automatic source is not a running PAIR-controlled engine with certain ownership")
+			}
+		} else if running || uncertain {
+			return errors.New("automatic replacement requires a sole conflicting source")
+		}
+	}
+	return nil
+}
+
+// A pending automatic source stop may reclaim only the original controlled
+// child. A new listener, or a command server with lost control identity, stays
+// fenced. Explicit local Off keeps its existing independent cleanup authority.
+func (e *Executor) cleanupAutomaticSwitchSource(ctx context.Context, st *engineState, cp *settings.SwitchCheckpoint, ports *switchCheckpointPorts) error {
+	if ports == nil || ports.SourceRunID == "" {
+		return errors.New("automatic source recovery lacks original execution evidence")
+	}
+	st.mu.Lock()
+	proc, runID, adopted, port := st.proc, st.runID, st.adopted, st.port
+	rt, previousPID := st.plat.Runtime, st.reclaimPID
+	st.mu.Unlock()
+	if adopted {
+		return errors.New("automatic source recovery refuses an adopted server")
+	}
+	if proc != nil || rt.modeOrDefault() == "command" {
+		if runID != ports.SourceRunID || (proc != nil && (proc.cmd == nil || proc.cmd.Process == nil || proc.cmd.Process.Pid != ports.SourcePID)) {
+			return errors.New("automatic source recovery control identity changed")
+		}
+		return e.doStopOwnedContext(ctx, st, cp.SourceEngine, &stopOwnership{process: proc, runID: runID})
+	}
+	if ports.SourcePID <= 0 || (previousPID != 0 && previousPID != ports.SourcePID && !orphanPIDExited(previousPID)) {
+		return errors.New("automatic source recovery process ownership is uncertain")
+	}
+	cleanupCtx, finish := e.startContext(ctx, st)
+	defer finish()
+	if _, err := e.Detect(cp.SourceEngine); err != nil {
+		return err
+	}
+	reclaimed, err := e.reclaimOrphanForPID(cleanupCtx, st, cp.SourceEngine, port, ports.SourcePID)
+	if err != nil || reclaimed {
+		return err
+	}
+	// Refused listeners alone cannot prove that the original child exited.
+	if err := e.confirmOrphanStoppedContext(cleanupCtx, cp.SourceEngine, ports.SourcePID, port, rt); err != nil {
+		return err
+	}
+	e.markStopped(st, cp.SourceEngine)
+	if rt.Port == 0 {
+		return e.clearAllocatedPort(st, cp.SourceEngine)
+	}
+	return nil
+}
+
 // Caller holds opMu. All interrupted switch cleanup uses the same precise
 // reclaim owner before readiness can adopt (or overlook) a managed orphan.
 func (e *Executor) cleanupSwitchRecovery(ctx context.Context, st *engineState, engine string) error {
@@ -962,6 +1138,10 @@ func (e *Executor) cleanupSwitchRecovery(ctx context.Context, st *engineState, e
 }
 
 func (e *Executor) switchTerminated(st *engineState) bool {
+	return e.switchTerminatedContext(context.Background(), st)
+}
+
+func (e *Executor) switchTerminatedContext(ctx context.Context, st *engineState) bool {
 	st.mu.Lock()
 	proc, running, port := st.proc, st.running, st.port
 	fenced, reclaimPID := st.reclaimFailed, st.reclaimPID
@@ -972,5 +1152,5 @@ func (e *Executor) switchTerminated(st *engineState) bool {
 	if port == 0 {
 		return true
 	} // no allocated endpoint and no owned process
-	return e.waitUnavailable(st.plat.Runtime.Ready, port, time.Second)
+	return e.waitUnavailableContext(ctx, st.plat.Runtime.Ready, port, time.Second)
 }

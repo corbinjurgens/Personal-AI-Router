@@ -1210,7 +1210,8 @@ Prepare's short mutation-admission gate snapshots configuration and durably
 reserves both IDs before probes. Competing admitted mutations refuse prepare;
 reservations refuse lifecycle, port/configuration, install/uninstall and
 restart-after operations with busy (`-32000`). Validation failure durably
-releases its provisional reservation. Automatic restore skips reserved IDs;
+releases a manual local provisional reservation; remote and automatic reservations
+remain until broker reconciliation/release. Automatic restore skips reserved IDs;
 Wake/Sleep do not rewrite intent. Shutdown remains terminal cleanup and may stop
 reserved owned processes after cancelling their starts.
 
@@ -1271,10 +1272,11 @@ Local and remote prepare/start recheck lock (`-32013`) and either-origin pause
 cancels remote target work and durably records local provenance before waiting
 on the operation lock for cleanup; that vetoing stop returns its actual result.
 This admission does not acquire the switch lock or engine operation lock and
-also applies to recovery reservations. A local Off during a local switch is
+also applies to recovery reservations and automatic operations of either origin.
+A local Off during a manual local switch is
 refused busy without changing intent.
 For parent-only `engine:stop`, optional `switchOperationId` binds a broker-admitted
-Off to its remote reservation. Stop admission checks the operation ID, origin,
+Off to its yielding reservation. Stop admission checks the operation ID, cause/origin,
 engine membership and unreleased phase atomically under the admission lock.
 If that scope has settled or changed, the entire request succeeds as a no-op,
 with no cancellation, physical stop or intent write against later work. Missing
@@ -1303,11 +1305,46 @@ of local and remote reservations. Reconcile durably changes the target to
 target Off with pending cleanup, then stops it without restoring source. In the
 absence of an explicit veto, restart reconciliation preserves committed On.
 The broker-local reconcile envelope may include `localVeto: {engine, pause}`
-for the matching remote operation. `pause: true` requires an empty engine;
+for the matching remote or automatic operation. `pause: true` requires an empty engine;
 otherwise engine must be the reserved source or target. Reconcile durably saves
 the veto (and local Off provenance for an engine veto) before cleanup. Release
 serializes its checkpoint read/write with durable Off admission and refuses a
 vetoed committed target until reconciliation cleans it to verified Off.
+
+Automatic prepare/checkpoint and receipt contracts optionally include
+`automatic: true`. This is execution cause, never caller authority. Forward
+execution shares the initial deadline, capped at 90 seconds, including prepare,
+source stop and failed target startup cleanup. An expired cleanup retains the
+owned handle, endpoint and checkpoint until termination can be verified.
+Manual E4 retains its defaults. Automatic replacement requires
+the selected sole running source to be PAIR-controlled, non-adopted and without
+reclaim uncertainty, rechecked inside reservation and before source effects.
+Automatic reservations fence mutations of other engines to preserve that fact.
+The source stop retains its observed owned process/run identity through the
+durable Off write and into the existing stop owner. Losing that identity refuses
+automatic stop without reclaiming an adopted replacement. Owned-process grace,
+forced-signal exit waiting and command stop use the remaining automatic deadline;
+an expired wait is not termination proof. Manual stop wrappers retain their
+existing background-context behavior. Verified stopped engines remain eligible
+as later targets, including a switch back to the previous source.
+Adjacent `pendingSwitchPorts` also retains the original automatic source's PID
+and control run ID. These are execution fences, never signalling authority.
+Automatic source recovery narrows the unchanged managed-install/image reclaim
+predicate to that original child, refuses adopted replacements, and requires
+original PID exit as well as endpoint refusal. Lost command-server control
+identity remains fenced. An ownership refusal before physical stop is saved
+back as reserved, so cleanup cannot turn that refusal into orphan reclamation.
+Explicit local Off and Pause keep their existing independent cleanup authority.
+Automatic reconcile calls carry optional private `cleanupDeadline` separately
+from the immutable prepare envelope. The broker supplies its cleanup context's
+absolute deadline: live failure cleanup remains inside the original operation
+window; later conservative recovery supplies its fresh cleanup window. The
+manager clamps this to its existing drain/cleanup bound. This field grants no
+forward execution or caller authority and is absent on manual calls.
+No reclaim predicate is weakened, and server readiness does not prove a model
+is available. Automatic checkpoints retain the existing conservative recovery
+and release rules. The broker owns automatic ID generation and settled receipt
+pruning; unresolved or undisclosed cleanup never expires into safety.
 
 Switch relay requests use independent IDs and a bounded pending map. Replies
 preserve numeric error codes; waiter cancellation sends `engine:switch-cancel`

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"time"
 
 	"nvpair-shared/durablefile"
@@ -228,11 +229,20 @@ func (s *engineSwitchStore) insert(r settings.SwitchReceipt, rejected bool) (set
 	if !rejected && s.journal.ActiveRequestID != "" {
 		return settings.SwitchReceipt{}, switchStoreError(settings.SwitchErrorBusy, "another switch is active")
 	}
-	if len(s.journal.Receipts) >= settings.MaxSwitchReceipts {
+	manual := 0
+	for _, receipt := range s.journal.Receipts {
+		if !receipt.Automatic {
+			manual++
+		}
+	}
+	if !r.Automatic && manual >= settings.MaxSwitchReceipts {
 		return settings.SwitchReceipt{}, switchStoreError(settings.SwitchErrorFull, "receipt capacity exhausted")
 	}
 	next := s.copyJournal()
 	next.Receipts[r.RequestID] = cloneSwitchReceipt(r)
+	if r.Automatic && rejected {
+		settleAutomaticSwitch(&next, r.RequestID)
+	}
 	if !rejected {
 		next.ActiveRequestID = r.RequestID
 	}
@@ -307,7 +317,8 @@ func (s *engineSwitchStore) InterruptNonterminal(now time.Time) error {
 // its actual encoded size, reserving 16 KiB for ALL mutable fields (including a
 // 1024-byte error expanded sixfold by JSON escaping, observations/timestamps and
 // uint64 sequence). This exceeds their worst-case encoding. The active entry's
-// reservation is included when Reject adds another receipt, too. No eviction.
+// reservation is included when Reject adds another receipt, too. Only settled
+// automatic rows are eligible for the separate retention pass.
 func switchStoreCapacity(j settings.SwitchJournal) error {
 	data, err := json.Marshal(j)
 	if err != nil {
@@ -340,6 +351,12 @@ func switchStoreCapacity(j settings.SwitchJournal) error {
 
 func (s *engineSwitchStore) copyJournal() settings.SwitchJournal {
 	j := s.journal
+	if s.journal.AutomaticSettled != nil {
+		j.AutomaticSettled = make(map[string]uint64, len(s.journal.AutomaticSettled))
+		for id, settled := range s.journal.AutomaticSettled {
+			j.AutomaticSettled[id] = settled
+		}
+	}
 	j.Tombstones = append([]settings.SwitchTombstone(nil), s.journal.Tombstones...)
 	if s.journal.LocalObligations != nil {
 		j.LocalObligations = make(map[string]settings.SwitchLocalObligation, len(s.journal.LocalObligations))
@@ -352,6 +369,64 @@ func (s *engineSwitchStore) copyJournal() settings.SwitchJournal {
 		j.Receipts[id] = cloneSwitchReceipt(r)
 	}
 	return j
+}
+
+// SettleAutomatic follows verified manager release and obligation discharge.
+// Pruning and settlement share one durable replacement; uncertainty fences work.
+func (s *engineSwitchStore) SettleAutomatic(id string) error {
+	if err := s.trustError(); err != nil {
+		return err
+	}
+	r, ok := s.Lookup(id)
+	if !ok || !r.Automatic || s.journal.AutomaticSettled[id] != 0 {
+		return nil
+	}
+	if !r.Terminal {
+		return switchStoreError(settings.SwitchErrorBusy, "automatic switch is not terminal")
+	}
+	if o, ok := s.journal.LocalObligations[id]; ok && !o.Discharged {
+		return switchStoreError(settings.SwitchErrorBusy, "automatic switch has undischarged obligations")
+	}
+	next := s.copyJournal()
+	if r.RecoveryRequired {
+		if r.Sequence == math.MaxUint64 {
+			return switchStoreError(settings.SwitchErrorStorage, "receipt sequence exhausted")
+		}
+		r.Sequence++
+		r.UpdatedAt = time.Now().UTC()
+		if r.UpdatedAt.Before(s.journal.Receipts[id].UpdatedAt) {
+			r.UpdatedAt = s.journal.Receipts[id].UpdatedAt
+		}
+		r.RecoveryRequired = false
+	}
+	next.Receipts[id] = r
+	settleAutomaticSwitch(&next, id)
+	return s.persist(next)
+}
+
+func settleAutomaticSwitch(j *settings.SwitchJournal, id string) {
+	if j.AutomaticSettled == nil {
+		j.AutomaticSettled = make(map[string]uint64)
+	}
+	j.AutomaticSettled[id] = j.Generation + 1
+	ids := make([]string, 0, len(j.AutomaticSettled))
+	for id := range j.AutomaticSettled {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, k int) bool {
+		a, b := j.AutomaticSettled[ids[i]], j.AutomaticSettled[ids[k]]
+		if a != b {
+			return a < b
+		}
+		return ids[i] < ids[k]
+	})
+	for len(ids) > settings.MaxAutomaticSwitchReceipts {
+		old := ids[0]
+		ids = ids[1:]
+		delete(j.Receipts, old)
+		delete(j.AutomaticSettled, old)
+		delete(j.LocalObligations, old)
+	}
 }
 
 func (s *engineSwitchStore) SaveLocalObligation(id string, obligation settings.SwitchLocalObligation) error {

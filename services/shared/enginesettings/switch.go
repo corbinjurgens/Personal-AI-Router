@@ -36,12 +36,14 @@ const (
 
 	SwitchVersion              = 1
 	MaxSwitchReceipts          = 256
+	MaxAutomaticSwitchReceipts = 32
 	MaxSwitchTombstones        = 32
 	MaxSwitchJournalBytes      = 2 * 1024 * 1024
 	MaxSwitchRequestIDBytes    = 128
 	MaxSwitchErrorMessageBytes = 1024
 	MaxSwitchRequestBytes      = 8 * 1024
 	SwitchOperationBudget      = 15 * time.Minute
+	AutomaticSwitchBudget      = 90 * time.Second
 	SwitchDrainBudget          = 60 * time.Second
 	SwitchStatusWaitBudget     = 25 * time.Second
 )
@@ -172,6 +174,7 @@ type SwitchError struct {
 }
 
 type SwitchReceipt struct {
+	Automatic        bool              `json:"automatic,omitempty"`
 	Version          int               `json:"version"`
 	NodeID           string            `json:"nodeId"`
 	RequestID        string            `json:"requestId"`
@@ -193,8 +196,20 @@ type SwitchReceipt struct {
 	RecoveryRequired bool              `json:"recoveryRequired"`
 }
 
-// SwitchJournal never evicts receipts. A full journal refuses fresh requests;
-// callers must also reserve space for terminal/recovery writes at acceptance.
+func (r *SwitchReceipt) UnmarshalJSON(data []byte) error {
+	if err := validateSwitchFenceReceiptKeys(data); err != nil {
+		return err
+	}
+	type wireReceipt SwitchReceipt
+	decoded, err := decodeSwitchJSON[wireReceipt](data, MaxSwitchJournalBytes)
+	if err == nil {
+		*r = SwitchReceipt(decoded)
+	}
+	return err
+}
+
+// SwitchJournal retains manual receipts permanently. Automatic rows become
+// eligible for bounded retention only after durable cleanup and release.
 type SwitchJournal struct {
 	Version          int                              `json:"version"`
 	Generation       uint64                           `json:"generation"`
@@ -202,6 +217,7 @@ type SwitchJournal struct {
 	Receipts         map[string]SwitchReceipt         `json:"receipts"`
 	LocalObligations map[string]SwitchLocalObligation `json:"localObligations,omitempty"`
 	Tombstones       []SwitchTombstone                `json:"tombstones,omitempty"`
+	AutomaticSettled map[string]uint64                `json:"automaticSettled,omitempty"`
 }
 
 // SwitchLocalObligation is internal broker journal state, never a public receipt.
@@ -225,6 +241,7 @@ type SwitchChanged struct {
 // These envelopes are broker-local executor calls, never ec lifecycle routes.
 // Caller and origin are supplied by an authenticated server boundary.
 type SwitchPrepareRequest struct {
+	Automatic          bool      `json:"automatic,omitempty"`
 	OperationID        string    `json:"operationId"`
 	Caller             string    `json:"caller"`
 	Origin             string    `json:"origin"`
@@ -236,6 +253,11 @@ type SwitchPrepareRequest struct {
 	Deadline           time.Time `json:"deadline"`
 }
 
+// YieldsToLocalOff describes cancellation, never caller authorization.
+func (r SwitchPrepareRequest) YieldsToLocalOff() bool {
+	return r.Automatic || r.Origin == SwitchOriginRemote
+}
+
 type SwitchStepRequest struct {
 	SwitchPrepareRequest
 	Step string `json:"step"`
@@ -243,7 +265,8 @@ type SwitchStepRequest struct {
 
 type SwitchReconcileRequest struct {
 	SwitchPrepareRequest
-	LocalVeto *SwitchLocalVeto `json:"localVeto,omitempty"`
+	LocalVeto       *SwitchLocalVeto `json:"localVeto,omitempty"`
+	CleanupDeadline *time.Time       `json:"cleanupDeadline,omitempty"`
 }
 
 // SwitchLocalVeto delivers a broker-latched local decision for this operation.
@@ -441,7 +464,11 @@ func (r SwitchReceipt) Validate() error {
 	if r.Sequence == 0 || !validSwitchPhase(r.Phase) || r.Terminal != IsTerminal(r.Phase) {
 		return errors.New("invalid switch receipt sequence, phase, or terminal flag")
 	}
-	if r.AcceptedAt.IsZero() || r.UpdatedAt.Before(r.AcceptedAt) || !r.Deadline.After(r.AcceptedAt) || r.Deadline.Sub(r.AcceptedAt) > SwitchOperationBudget {
+	budget := SwitchOperationBudget
+	if r.Automatic {
+		budget = AutomaticSwitchBudget
+	}
+	if r.AcceptedAt.IsZero() || r.UpdatedAt.Before(r.AcceptedAt) || !r.Deadline.After(r.AcceptedAt) || r.Deadline.Sub(r.AcceptedAt) > budget {
 		return errors.New("invalid switch receipt timestamps or operation deadline")
 	}
 	if r.Terminal != (r.FinishedAt != nil) || (r.FinishedAt != nil && (r.FinishedAt.Before(r.AcceptedAt) || r.FinishedAt.After(r.UpdatedAt))) {
@@ -471,7 +498,7 @@ func (j SwitchJournal) Validate() error {
 	if j.Version != SwitchVersion {
 		return errors.New("unsupported switch journal version")
 	}
-	if j.Receipts == nil || len(j.Receipts) > MaxSwitchReceipts {
+	if j.Receipts == nil || len(j.Receipts) > MaxSwitchReceipts+MaxAutomaticSwitchReceipts+1 {
 		return errors.New("switch journal requires a bounded receipts map")
 	}
 	if len(j.Tombstones) > MaxSwitchTombstones {
@@ -492,7 +519,7 @@ func (j SwitchJournal) Validate() error {
 	}
 	for id, obligation := range j.LocalObligations {
 		r, ok := j.Receipts[id]
-		if !ok || r.Caller == SwitchOriginLocal || (!obligation.SourceOff && !obligation.TargetOff && !obligation.Pause) {
+		if !ok || (r.Caller == SwitchOriginLocal && !r.Automatic) || (!obligation.SourceOff && !obligation.TargetOff && !obligation.Pause) {
 			return errors.New("invalid operation-specific local obligation")
 		}
 		if obligation.PauseApplied && !obligation.Pause {
@@ -500,7 +527,21 @@ func (j SwitchJournal) Validate() error {
 		}
 	}
 	active := 0
+	manual := 0
+	for id, settled := range j.AutomaticSettled {
+		r, ok := j.Receipts[id]
+		o := j.LocalObligations[id]
+		if settled == 0 || settled > j.Generation || !ok || !r.Automatic || !r.Terminal || r.RecoveryRequired || ((o.SourceOff || o.TargetOff || o.Pause) && !o.Discharged) {
+			return errors.New("invalid settled automatic receipt")
+		}
+	}
+	if len(j.AutomaticSettled) > MaxAutomaticSwitchReceipts {
+		return errors.New("automatic receipt retention exceeded")
+	}
 	for id, receipt := range j.Receipts {
+		if !receipt.Automatic {
+			manual++
+		}
 		if id != receipt.RequestID {
 			return errors.New("switch journal key does not match requestId")
 		}
@@ -513,6 +554,9 @@ func (j SwitchJournal) Validate() error {
 				return errors.New("nonterminal receipt must be active")
 			}
 		}
+	}
+	if manual > MaxSwitchReceipts {
+		return errors.New("manual receipt capacity exceeded")
 	}
 	if active > 1 {
 		return errors.New("switch journal has multiple active requests")
@@ -620,9 +664,12 @@ func DecodeSwitchFenceResult(data []byte) (SwitchFenceResult, error) {
 func validateSwitchFenceReceiptKeys(data []byte) error {
 	fields, err := decodeSwitchFenceObject(data, "version", "nodeId", "requestId", "caller", "payloadHash", "request",
 		"expectedRevision", "acceptedRevision", "sequence", "phase", "terminal", "acceptedAt", "updatedAt", "deadline",
-		"finishedAt", "source", "target", "error", "recoveryRequired")
+		"finishedAt", "source", "target", "error", "recoveryRequired", "automatic")
 	if err != nil {
 		return err
+	}
+	if automatic, ok := fields["automatic"]; ok && !bytes.Equal(bytes.TrimSpace(automatic), []byte("true")) && !bytes.Equal(bytes.TrimSpace(automatic), []byte("false")) {
+		return errors.New("automatic must be boolean")
 	}
 	if request, ok := fields["request"]; ok {
 		if _, err := decodeSwitchFenceObject(request, "nodeId", "requestId", "sourceEngine", "targetEngine", "expectedRevision"); err != nil {
