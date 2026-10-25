@@ -241,8 +241,8 @@ func TestBrokerBridgesManualNodeIntoProxy(t *testing.T) {
 			if !ok {
 				t.Fatal("broker stream closed before the manual node bridged into the proxy")
 			}
-			if msg.Method == "" && msg.ID != nil && proxyNodesHas(t, msg.Result, nodeName) {
-				assertProxyManualTarget(t, msg.Result, nodeName, ollamaPort)
+			if msg.Method == "" && msg.ID != nil && proxyNodesHas(t, msg.Result, "manual:name:"+nodeName) {
+				assertProxyManualTarget(t, msg.Result, "manual:name:"+nodeName, ollamaPort)
 				t.Logf("manual node %q bridged into proxy nodes/list", nodeName)
 				return
 			}
@@ -300,7 +300,7 @@ func TestBrokerBridgesManualNodeUnderLearnedUUID(t *testing.T) {
 					t.Logf("manual node bridged into proxy under learned hostUuid")
 					return
 				}
-				if proxyNodesHas(t, msg.Result, nodeName) {
+				if proxyNodesHas(t, msg.Result, "manual:name:"+nodeName) {
 					t.Fatalf("proxy candidate keyed by manual name %q, not the learned hostUuid (scheduler would not match)", nodeName)
 				}
 			}

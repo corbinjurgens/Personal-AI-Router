@@ -710,7 +710,7 @@ func TestBrokerManualNodeMergedIntoDiscovery(t *testing.T) {
 			}
 			if msg.Method == "" && msg.ID != nil {
 				var res availableNodesResult
-				if json.Unmarshal(msg.Result, &res) == nil && containsNode(res.Nodes, nodeName) {
+				if json.Unmarshal(msg.Result, &res) == nil && containsNode(res.Nodes, "manual:name:"+nodeName) {
 					t.Logf("manual node %q present in discovery snapshot", nodeName)
 					return
 				}
