@@ -242,10 +242,12 @@ func testE2ERestoreReclaimsOwnedOrphan(t *testing.T, portZero bool) {
 		}
 	})
 	first.stopped = true
+	// Keep stdin open until Wait reaps the manager and closes it. On Unix,
+	// Kill only sends SIGKILL: closing stdin before exit can let the manager's
+	// orderly shutdown race the hard kill and send SIGTERM to its owned child.
 	if err := first.cmd.Process.Kill(); err != nil {
 		t.Fatalf("hard-kill first manager: %v", err)
 	}
-	_ = first.stdin.Close()
 	select {
 	case <-first.readerDone:
 	case <-time.After(5 * time.Second):
