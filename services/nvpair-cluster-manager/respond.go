@@ -257,7 +257,7 @@ func (m *Manager) runCompletionExchangeLocked(sess *pairingSession, pin string) 
 		return fmt.Errorf("feed pin: %w", err)
 	}
 
-	client := &http.Client{Timeout: pairingHTTPTimeout}
+	client := pairingHTTPClient()
 	// Kickoff: empty msg so the inviter's Server.Start() emits the first blob.
 	respBlob, err := postPairingBlob(client, sess.addr, sess.inviteID, "completion", nil)
 	if err != nil {
@@ -344,7 +344,8 @@ func (m *Manager) notifyInviterAuthenticated(inviterAddr string, inviterDER []by
 	}
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: pairingHTTPTimeout}
+	client := pairingHTTPClient()
+	client.Transport = transport
 	for attempt := 1; attempt <= inviterNotifyAttempts; attempt++ {
 		err = postPairingSignalScheme(client, "https", inviterAddr, inviteID, phase, "")
 		if err == nil {
@@ -365,7 +366,7 @@ func (m *Manager) notifyInviterTerminal(inviterAddr, inviteID, phase, reason str
 	if inviterAddr == "" {
 		return
 	}
-	client := &http.Client{Timeout: pairingHTTPTimeout}
+	client := pairingHTTPClient()
 	var err error
 	for attempt := 1; attempt <= inviterNotifyAttempts; attempt++ {
 		err = postPairingSignal(client, inviterAddr, inviteID, phase, reason)

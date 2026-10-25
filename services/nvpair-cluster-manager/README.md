@@ -520,6 +520,17 @@ trust fabric other inter-node services (`nvpair-workload-manager`,
 
 ## Inter-node networking
 
+Every pairing HTTP client refuses redirects, including ordinary Invite,
+ask-to-join, cancellation, both completion modes, terminal signals and receipt
+replay/confirmation. Any `3xx` response fails that request without contacting
+the redirect target. Initial and inviter-driven completion use the existing
+`redirect-refused` failure reason; legacy completion retains its generic
+transport-failure outcome, and cancellation remains locally authoritative.
+Legitimate PAIR peers, including older peers using joiner-driven completion,
+never redirect pairing endpoints: the server handlers answer directly with a
+pairing result or an error. Rejecting redirects therefore preserves their
+mixed-version wire behavior; redirecting intermediaries are unsupported.
+
 - One HTTP listener on TCP **`14321`** serves the source-limited plain-HTTP
   admission prelude (`POST /v1/cluster/join-requests`), the **pairing
   channel** (`POST /v1/cluster/pairing`, used only during a pairing, before

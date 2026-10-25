@@ -495,6 +495,20 @@ this same local channel and generic broker relay.
   - **Trusted endpoints** (e.g. `POST /v1/cluster/members/remove`) — **HTTPS over mTLS**: the server presents this node's leaf cert (§7.4) and is configured `RequireAnyClientCert`. The request handler's `verifyClientPin` reads the **claimed UUID from the presented client cert's subject `CN` (and URI SAN, §7.4)**, looks up that UUID in the trusted-node store, and requires a **byte-for-byte DER match** against the pinned cert (TLS min 1.2). An unpinned or mismatched cert receives `403 Forbidden`; the TLS handshake requires a client certificate. Pairing-only confirmation uses its exact transcript gate instead of this membership-pin gate.
 
 **Pairing channel — `POST /v1/cluster/pairing`** (JSON, `/v1` prefix). EAP exchange bodies wrap one EAP-NOOB message; readiness and confirmation use the control envelopes specified below:
+
+All pairing HTTP clients share a redirect-refusing transport policy, including
+ordinary Invite, ask-to-join, cancellation, legacy and inviter-driven completion,
+terminal signals, receipt replay and authenticated confirmation. Their
+`CheckRedirect` returns an error; every `3xx` response (also without `Location`)
+is a request failure and never authorizes a request to another URL. Initial and
+inviter-driven completion retain `failed` / `redirect-refused`; legacy completion
+uses its existing generic transport-failure outcome, and cancellation's local
+teardown remains authoritative when notification fails. Legitimate PAIR server
+handlers return pairing outcomes or errors directly and never redirect these
+endpoints. This holds for older peers using joiner-driven completion too, so
+mixed-version pairing needs no wire or capability change. A redirecting
+intermediary is unsupported and fails closed.
+
 ```json
 { "inviteId": "inv-9f3a1c", "phase": "initial|outbound-ready|outbound-completion|completion|confirm", "msg": "<base64 EAP-NOOB blob>" }
 ```

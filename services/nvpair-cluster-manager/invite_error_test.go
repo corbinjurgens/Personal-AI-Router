@@ -15,8 +15,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
+
+	"eapnoob"
 )
 
 func TestInviteFailureResultRetainsConnectionReason(t *testing.T) {
@@ -98,4 +102,206 @@ func TestInviteFailureReason(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPairingRedirectResponsesFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		location bool
+	}{
+		{"multiple choices", http.StatusMultipleChoices, true},
+		{"moved permanently", http.StatusMovedPermanently, true},
+		{"found", http.StatusFound, true},
+		{"see other", http.StatusSeeOther, true},
+		{"not modified", http.StatusNotModified, true},
+		{"temporary redirect", http.StatusTemporaryRedirect, true},
+		{"permanent redirect", http.StatusPermanentRedirect, true},
+		{"redirect without location", http.StatusTemporaryRedirect, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var contacted atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				contacted.Add(1)
+				respondPairing(w, nil)
+			}))
+			t.Cleanup(target.Close)
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.location {
+					w.Header().Set("Location", target.URL+pairingPath)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			t.Cleanup(origin.Close)
+			addr := strings.TrimPrefix(origin.URL, "http://")
+			client := pairingHTTPClient()
+			t.Cleanup(client.CloseIdleConnections)
+			test := func(name string, post func() error) {
+				t.Run(name, func(t *testing.T) {
+					if err := post(); !errors.Is(err, errPairingRedirect) {
+						t.Fatalf("pairing error = %v, want redirect refusal", err)
+					}
+					if got := contacted.Load(); got != 0 {
+						t.Fatalf("redirect target contacts = %d, want 0", got)
+					}
+				})
+			}
+			test("initial", func() error {
+				_, err := postPairingBlob(client, addr, "ordinary-invite", "initial", nil)
+				return err
+			})
+			test("cancel", func() error {
+				_, err := postPairingBlob(client, addr, "ordinary-invite", "cancel", nil)
+				return err
+			})
+			test("legacy completion", func() error {
+				_, err := postCompletionBlob(client, addr, "ordinary-invite", nil)
+				return err
+			})
+			test("inviter completion", func() error {
+				_, err := exchangePairingEnvelope(client, "http", addr, pairingEnvelope{InviteID: "ordinary-invite", Phase: "outbound-completion"})
+				return err
+			})
+			test("terminal signal", func() error {
+				return postPairingSignal(client, addr, "ordinary-invite", "fail", "")
+			})
+		})
+	}
+}
+
+func TestOrdinaryInviteInitialNeverFollowsRedirect(t *testing.T) {
+	test := func(name string, redirectOnFirst bool) {
+		t.Run(name, func(t *testing.T) {
+			m := joinTestManager(t)
+			activateTestCluster(t, m, "redirect-test-cluster")
+			joiner := joinTestManager(t)
+			var contacted atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				contacted.Add(1)
+				respondPairing(w, nil)
+			}))
+			t.Cleanup(target.Close)
+			var initialPosts atomic.Int32
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// A successful Initial Exchange has Discovery, Negotiation,
+				// KeyExchange and a final EAP-Failure delivery.
+				if !redirectOnFirst && initialPosts.Add(1) < 4 {
+					joiner.handlePairing(w, r)
+					return
+				}
+				http.Redirect(w, r, target.URL+pairingPath, http.StatusTemporaryRedirect)
+			}))
+			t.Cleanup(origin.Close)
+			const id = "ordinary-initial-redirect"
+			m.putInvite(&Invite{InviteID: id, ClusterID: "redirect-test-cluster", State: inviteStatePending, CreatedAt: time.Now().UnixMilli()})
+			result := m.completeInitialInvite(id, []string{strings.TrimPrefix(origin.URL, "http://")}, "redirect-test-cluster", m.sessGen.Load(), false)
+			if result["state"] != inviteStateFailed || result["reason"] != "redirect-refused" || result["pin"] != nil {
+				t.Fatalf("Initial result = %+v, want failed/redirect-refused without a PIN", result)
+			}
+			inv, ok := m.getInvite(id)
+			if !ok || inv.State != inviteStateFailed || inv.Reason != "redirect-refused" {
+				t.Fatalf("stored Initial result = %+v, found=%v", inv, ok)
+			}
+			if _, ok := m.getSession(id); ok {
+				t.Fatal("redirecting Initial retained a session")
+			}
+			if contacted.Load() != 0 || len(m.trust.List()) != 0 {
+				t.Fatalf("redirect contacts = %d, trusted peers = %d, want 0", contacted.Load(), len(m.trust.List()))
+			}
+		})
+	}
+	test("first Initial message", true)
+	test("final Initial message", false)
+}
+
+func TestOrdinaryInviteCancellationNeverFollowsRedirect(t *testing.T) {
+	m := joinTestManager(t)
+	const id = "ordinary-cancel-redirect"
+	m.putInvite(&Invite{InviteID: id, State: inviteStateCanceled})
+	var contacted, cancellations atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contacted.Add(1)
+		respondPairing(w, nil)
+	}))
+	t.Cleanup(target.Close)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var env pairingEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
+			t.Error(err)
+			return
+		}
+		if env.InviteID != id || env.Phase != "cancel" {
+			t.Errorf("cancel envelope = %+v", env)
+		}
+		cancellations.Add(1)
+		http.Redirect(w, r, target.URL+pairingPath, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(origin.Close)
+	m.notifyJoinerCanceled(strings.TrimPrefix(origin.URL, "http://"), id)
+	inv, ok := m.getInvite(id)
+	if !ok || inv.State != inviteStateCanceled {
+		t.Fatalf("best-effort cancellation changed local outcome: %+v, found=%v", inv, ok)
+	}
+	if cancellations.Load() != 1 || contacted.Load() != 0 {
+		t.Fatalf("cancel attempts = %d, redirect contacts = %d, want 1/0", cancellations.Load(), contacted.Load())
+	}
+}
+
+func TestOrdinaryInviteCompletionNeverFollowsRedirect(t *testing.T) {
+	t.Run("legacy joiner completion", func(t *testing.T) {
+		f := newOutboundPairingFixture(t)
+		var contacted atomic.Int32
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			contacted.Add(1)
+			respondPairing(w, nil)
+		}))
+		t.Cleanup(target.Close)
+		origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+pairingPath, http.StatusTemporaryRedirect)
+		}))
+		t.Cleanup(origin.Close)
+		f.joinSession.addr = strings.TrimPrefix(origin.URL, "http://")
+		f.joinSession.mu.Lock()
+		err := f.joiner.runCompletionExchangeLocked(f.joinSession, f.pin)
+		f.joinSession.mu.Unlock()
+		var authErr *completionAuthError
+		if !errors.Is(err, errPairingRedirect) || errors.As(err, &authErr) {
+			t.Fatalf("Completion error = %v, want redirect refusal rather than incorrect PIN", err)
+		}
+		if f.joinSession.peer.State() == eapnoob.StateRegistered || len(f.joiner.trust.List()) != 0 || contacted.Load() != 0 {
+			t.Fatalf("Completion state = %s, trusted peers = %d, redirect contacts = %d", f.joinSession.peer.State(), len(f.joiner.trust.List()), contacted.Load())
+		}
+	})
+	t.Run("inviter completion", func(t *testing.T) {
+		f := newOutboundPairingFixture(t)
+		f.ready(t)
+		var contacted atomic.Int32
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			contacted.Add(1)
+			respondPairing(w, nil)
+		}))
+		t.Cleanup(target.Close)
+		origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var env pairingEnvelope
+			if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
+				t.Error(err)
+				return
+			}
+			if env.Phase == "outbound-ready" {
+				f.joiner.handlePairingReady(w, &env)
+				return
+			}
+			http.Redirect(w, r, target.URL+pairingPath, http.StatusTemporaryRedirect)
+		}))
+		t.Cleanup(origin.Close)
+		f.session.joinerAddr = strings.TrimPrefix(origin.URL, "http://")
+		f.inviter.driveOutboundCompletion(f.session)
+		inv, ok := f.inviter.getInvite(f.session.inviteID)
+		if !ok || inv.State != inviteStateFailed || inv.Reason != "redirect-refused" {
+			t.Fatalf("Completion outcome = %+v, found=%v", inv, ok)
+		}
+		if contacted.Load() != 0 || len(f.inviter.trust.List()) != 0 || len(f.joiner.trust.List()) != 0 {
+			t.Fatalf("redirect contacts = %d, inviter/joiner pins = %d/%d", contacted.Load(), len(f.inviter.trust.List()), len(f.joiner.trust.List()))
+		}
+	})
 }
