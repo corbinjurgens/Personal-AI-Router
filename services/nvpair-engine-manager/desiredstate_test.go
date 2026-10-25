@@ -363,6 +363,15 @@ func TestDesiredOnSurvivesShutdownAndExplicitOffDoesNot(t *testing.T) {
 }
 
 func TestRestoreEnabledPreservesForeignListenerOnManagedPort(t *testing.T) {
+	testRestoreEnabledPreservesForeignListener(t, false)
+}
+
+func TestRestoreEnabledPreservesForeignListenerOnRecordedPort(t *testing.T) {
+	testRestoreEnabledPreservesForeignListener(t, true)
+}
+
+func testRestoreEnabledPreservesForeignListener(t *testing.T, portZero bool) {
+	t.Helper()
 	baseDir := t.TempDir()
 	managedDir := filepath.Join(baseDir, "fake")
 	if err := os.MkdirAll(managedDir, 0o700); err != nil {
@@ -380,11 +389,19 @@ func TestRestoreEnabledPreservesForeignListenerOnManagedPort(t *testing.T) {
 	manifest := testEngineManifest(managedBin)
 	platform := manifest.Platforms[hostKey()]
 	platform.Runtime.Port = port
+	if portZero {
+		platform.Runtime.Port = 0
+	}
 	platform.Runtime.Health = nil
 	manifest.Platforms[hostKey()] = platform
 	ex := desiredTestExecutor(t, manifest, baseDir)
 	if err := ex.desired.set("fake", true, intentLocal); err != nil {
 		t.Fatalf("save ON intent: %v", err)
+	}
+	if portZero {
+		if err := ex.desired.setAllocatedPort("fake", port); err != nil {
+			t.Fatalf("save allocated port: %v", err)
+		}
 	}
 	if err := ex.RestoreEnabled(context.Background()); err != nil {
 		t.Fatalf("restore with foreign listener: %v", err)
@@ -398,6 +415,107 @@ func TestRestoreEnabledPreservesForeignListenerOnManagedPort(t *testing.T) {
 	state.mu.Unlock()
 	if !running || !adopted || proc != nil || !pidAlive(foreign.Process.Pid) {
 		t.Fatalf("foreign listener changed: running=%v adopted=%v owned=%v foreignAlive=%v", running, adopted, proc != nil, pidAlive(foreign.Process.Pid))
+	}
+	if portZero {
+		if err := ex.Stop("fake"); err == nil {
+			t.Fatal("stop must refuse the foreign image")
+		}
+		if saved, err := ex.desired.allocatedPort("fake"); err != nil || saved != port {
+			t.Fatalf("refused stop lost endpoint evidence: port=%d err=%v", saved, err)
+		}
+		if !pidAlive(foreign.Process.Pid) || !portServing(port) {
+			t.Fatal("foreign listener was touched by restore or stop")
+		}
+	}
+}
+
+func TestAllocatedPortLegacyStateAndFixedPort(t *testing.T) {
+	base := t.TempDir()
+	store := newDesiredStateStore(base)
+	if err := os.WriteFile(store.path, []byte(`{"engines":{"fake":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if port, err := store.allocatedPort("fake"); err != nil || port != 0 {
+		t.Fatalf("legacy allocated port = %d, %v; want zero", port, err)
+	}
+	if err := store.setAllocatedPort("fake", 12345); err != nil {
+		t.Fatal(err)
+	}
+	m := testEngineManifest(fakeEngineBin)
+	p := m.Platforms[hostKey()]
+	p.Runtime.Port = privateTestPorts(t, 1)[0]
+	m.Platforms[hostKey()] = p
+	ex := desiredTestExecutor(t, m, base)
+	if err := ex.RestoreEnabled(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := ex.Status("fake"); err != nil || st.Port != p.Runtime.Port || !st.Running {
+		t.Fatalf("fixed port overridden by allocation record: %+v, %v", st, err)
+	}
+}
+
+func TestAllocatedPortWriteFailurePreventsSpawn(t *testing.T) {
+	ex := desiredTestExecutor(t, testEngineManifest(fakeEngineBin), t.TempDir())
+	pidFile := filepath.Join(t.TempDir(), "fake.pid")
+	st, err := ex.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.plat.Runtime.Env["FAKE_PID_FILE"] = pidFile
+	failure := errors.New("allocated endpoint write failed")
+	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
+		return nil, failure
+	}})
+	if err := ex.Start(context.Background(), "fake"); !errors.Is(err, failure) {
+		t.Fatalf("start error = %v, want allocation persistence failure", err)
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("child spawned before durable endpoint: PID file stat error = %v", err)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.proc != nil || st.running {
+		t.Fatalf("failed durable endpoint left proc=%p running=%v", st.proc, st.running)
+	}
+}
+
+func TestAllocatedPortSleepRetriesFailedCleanup(t *testing.T) {
+	base := t.TempDir()
+	ex := desiredTestExecutor(t, testEngineManifest(fakeEngineBin), base)
+	if err := ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	started, err := ex.Status("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("allocated endpoint cleanup failed")
+	failed := false
+	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(dir, base string, _ os.FileMode) (durablefile.File, error) {
+		if !failed {
+			failed = true
+			return nil, failure
+		}
+		return os.CreateTemp(dir, base+".*.tmp")
+	}})
+	if err := ex.Sleep("fake"); !errors.Is(err, failure) {
+		t.Fatalf("first sleep = %v, want endpoint cleanup failure", err)
+	}
+	if portServing(started.Port) {
+		t.Fatal("sleep did not stop the owned process before the persistence failure")
+	}
+	if port, err := newDesiredStateStore(base).allocatedPort("fake"); err != nil || port != started.Port {
+		t.Fatalf("failed cleanup endpoint = %d, %v; want %d", port, err, started.Port)
+	}
+	if err := ex.Sleep("fake"); err != nil {
+		t.Fatalf("retry sleep: %v", err)
+	}
+	saved, err := newDesiredStateStore(base).load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := saved.AllocatedPorts["fake"]; present || !saved.Engines["fake"] {
+		t.Fatalf("retry retained endpoint or lost saved On: %+v", saved)
 	}
 }
 
