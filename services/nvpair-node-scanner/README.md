@@ -131,12 +131,24 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 |---|---|---|
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
 | `--mdns` | `true` | Browse and advertise nodes over mDNS; `--mdns=false` constructs neither the browser nor the responder |
+| `--test-scan-interval <duration>` | `5s` | Fixture-only mDNS scan cadence |
+| `--test-scan-timeout <duration>` | `3s` | Fixture-only timeout for each mDNS browse |
+| `--test-peer-refresh-interval <duration>` | `15s` | Fixture-only cadence for the mDNS-independent inventory and membership sweep |
 | `--cluster-dir <path>` | _(none)_ | Cluster config dir (`node.crt`/`node.key` + `trusted/`). Controls peer trust annotation, local membership advertisement, pinned direct/reverse peer transport for node information and model inventory, and the parent directory used to resolve this node's identity |
 | `--ca-bundle <path>` | _(none)_ | PEM CA bundle to trust for verifying node-info server certs (additive to the system trust store). Setting any TLS flag moves node-info enrichment onto HTTPS |
 | `--client-cert <path>` | _(none)_ | PEM client certificate to present when fetching `/v1/node-info` from TLS-enabled nodes (mTLS; requires `--client-key`) |
 | `--client-key <path>` | _(none)_ | PEM client private key matching `--client-cert` |
 | `--log-level <level>` | `info` | `error` / `warn` / `info` / `debug` |
 | `--version` | | Print version and exit |
+
+The `--test-*` durations are startup overrides for isolated process fixtures.
+They accept Go duration strings, must be positive, and the scan timeout must not
+exceed the scan interval. Invalid timings fail before trust-store access, IPC
+connection or discovery construction, including when `--mdns=false`. With no
+overrides, production scans, browse timeouts and peer refreshes remain 5s, 3s and
+15s. Each scanner owns its timings; the shared browser's miss threshold,
+empty-scan grace, liveness probes and eviction rules remain unchanged. Shorter
+fixture cadences compress the time between scans without changing those rules.
 
 Use `--mdns=false` for isolated tests or air-gapped deployments that do not use
 multicast discovery. The scanner still publishes its local directory entry,

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"nvpair-shared/clustertrust"
@@ -158,26 +159,53 @@ func TestMDNSDisabledPeerServicesRefreshAndMaintenance(t *testing.T) {
 }
 
 func TestMDNSDisabledRefreshesInventory(t *testing.T) {
-	d := newMDNSDisabledDaemon(t)
-	requireMDNSDisabled(t, d)
-	hostUUID := d.reg.record().HostUUID
-	d.reg.setIdentity(hostUUID, "", []string{"192.0.2.10"})
-	d.reg.register(noderec.RegisterParams{Service: noderec.ServiceEngineManager, Port: 18080})
-	body := `{"models":["initial-model"]}`
-	d.modelsHTTP = &http.Client{Transport: peerServicesTestTransport(func(r *http.Request) (*http.Response, error) {
-		if r.Method != http.MethodGet || r.URL.Scheme != "http" || r.URL.Host != "127.0.0.1:18080" || r.URL.Path != "/v1/models" {
-			return nil, fmt.Errorf("unexpected self inventory request: %s %s", r.Method, r.URL)
+	synctest.Test(t, func(t *testing.T) {
+		timings := defaultScannerTimings()
+		timings.peerRefreshInterval = 25 * time.Millisecond
+		dir := filepath.Join(t.TempDir(), "cluster")
+		d := newScannerWithTimings(nil, clustertrust.Open(dir), dir, nil, false, timings).daemon
+		requireMDNSDisabled(t, d)
+		const hostUUID = "peer-inventory"
+		seedEMNode(d, hostUUID, "127.0.0.1", 18080)
+		body := `{"models":["initial-model"]}`
+		d.modelsHTTP = &http.Client{Transport: peerServicesTestTransport(func(r *http.Request) (*http.Response, error) {
+			if r.Method != http.MethodGet || r.URL.Scheme != "http" || r.URL.Host != "127.0.0.1:18080" || r.URL.Path != "/v1/models" {
+				return nil, fmt.Errorf("unexpected peer inventory request: %s %s", r.Method, r.URL)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}
+		// A peer-only engine registration prevents self address re-ranking from
+		// refreshing this inventory through publishSelf instead of the sweep.
+		d.refreshModelsOnce()
+		if node, ok := d.dir.get(hostUUID); !ok || len(node.Models) != 1 || node.Models[0] != "initial-model" {
+			t.Fatalf("initial peer inventory = %+v, present = %v", node, ok)
 		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
-	})}
-	d.publishSelf()
-	if node, ok := d.dir.get(hostUUID); !ok || len(node.Models) != 1 || node.Models[0] != "initial-model" {
-		t.Fatalf("initial self inventory = %+v, present = %v", node, ok)
-	}
-	body = `{"models":["refreshed-model"]}`
-	// Drive the unchanged periodic sweep body without waiting its 15s interval.
-	d.refreshModelsOnce()
-	if node, ok := d.dir.get(hostUUID); !ok || len(node.Models) != 1 || node.Models[0] != "refreshed-model" {
-		t.Fatalf("refreshed self inventory = %+v, present = %v", node, ok)
-	}
+		body = `{"models":["refreshed-model"]}`
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() {
+			d.refreshPeersLoop(ctx)
+			close(done)
+		}()
+		synctest.Wait()
+		time.Sleep(timings.peerRefreshInterval - time.Nanosecond)
+		synctest.Wait()
+		if node, ok := d.dir.get(hostUUID); !ok || len(node.Models) != 1 || node.Models[0] != "initial-model" {
+			t.Fatalf("inventory refreshed before the configured tick: %+v, present = %v", node, ok)
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if node, ok := d.dir.get(hostUUID); !ok || len(node.Models) != 1 || node.Models[0] != "refreshed-model" {
+			t.Fatalf("inventory did not refresh on the configured tick: %+v, present = %v", node, ok)
+		}
+		cancel()
+		<-done
+		body = `{"models":["after-cancellation"]}`
+		time.Sleep(timings.peerRefreshInterval)
+		synctest.Wait()
+		if node, ok := d.dir.get(hostUUID); !ok || len(node.Models) != 1 || node.Models[0] != "refreshed-model" {
+			t.Fatalf("inventory refreshed after cancellation: %+v, present = %v", node, ok)
+		}
+	})
 }

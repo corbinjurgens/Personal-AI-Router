@@ -76,9 +76,14 @@ type Scanner struct {
 // tlsHTTP is nil unless the operator opted node-info enrichment onto HTTPS via
 // the --client-cert/--client-key/--ca-bundle flags.
 func NewScanner(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool) *Scanner {
+	return newScannerWithTimings(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled, defaultScannerTimings())
+}
+
+// newScannerWithTimings receives timings validated by main before startup.
+func newScannerWithTimings(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, timings scannerTimings) *Scanner {
 	return &Scanner{
 		codec:  codec,
-		daemon: newDaemon(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled),
+		daemon: newDaemon(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled, timings),
 	}
 }
 

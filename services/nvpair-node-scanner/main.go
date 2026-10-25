@@ -13,10 +13,49 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
 )
+
+// scannerTimings are copied into each daemon before discovery is constructed.
+// Only process fixtures override them; ordinary constructors use the defaults.
+type scannerTimings struct {
+	scanInterval        time.Duration
+	scanTimeout         time.Duration
+	peerRefreshInterval time.Duration
+}
+
+func defaultScannerTimings() scannerTimings {
+	return scannerTimings{
+		scanInterval:        defaultScanInterval,
+		scanTimeout:         defaultScanTimeout,
+		peerRefreshInterval: defaultPeerRefreshInterval,
+	}
+}
+
+func (t *scannerTimings) registerFlags(fs *flag.FlagSet) {
+	fs.DurationVar(&t.scanInterval, "test-scan-interval", t.scanInterval, "fixture-only mDNS scan cadence")
+	fs.DurationVar(&t.scanTimeout, "test-scan-timeout", t.scanTimeout, "fixture-only mDNS browse timeout (must not exceed scan interval)")
+	fs.DurationVar(&t.peerRefreshInterval, "test-peer-refresh-interval", t.peerRefreshInterval, "fixture-only peer inventory and membership refresh cadence")
+}
+
+func (t scannerTimings) validate() error {
+	if t.scanInterval <= 0 {
+		return fmt.Errorf("--test-scan-interval must be positive")
+	}
+	if t.scanTimeout <= 0 {
+		return fmt.Errorf("--test-scan-timeout must be positive")
+	}
+	if t.peerRefreshInterval <= 0 {
+		return fmt.Errorf("--test-peer-refresh-interval must be positive")
+	}
+	if t.scanTimeout > t.scanInterval {
+		return fmt.Errorf("--test-scan-timeout must not exceed --test-scan-interval")
+	}
+	return nil
+}
 
 func main() {
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
@@ -26,12 +65,18 @@ func main() {
 	caBundle := flag.String("ca-bundle", "", "path to PEM CA bundle to trust for verifying node-info server certificates (additive to the system trust store); enabling any of these TLS flags moves node-info enrichment onto HTTPS")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	mdnsEnabled := flag.Bool("mdns", true, "browse and advertise nodes over mDNS")
+	timings := defaultScannerTimings()
+	timings.registerFlags(flag.CommandLine)
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(Version)
 		os.Exit(0)
+	}
+
+	if err := timings.validate(); err != nil {
+		log.Fatalf("invalid scanner timings: %v", err)
 	}
 
 	applog.Init("nvpair-node-scanner", resolveLevel())
@@ -85,7 +130,7 @@ func main() {
 	}()
 
 	codec := NewCodec(transport)
-	scanner := NewScanner(codec, mesh, *clusterDir, tlsHTTP, *mdnsEnabled)
+	scanner := newScannerWithTimings(codec, mesh, *clusterDir, tlsHTTP, *mdnsEnabled, timings)
 
 	if err := scanner.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("scanner error: %v", err)
