@@ -35,6 +35,9 @@ func departedWorkloadIdentity(rec workloadstore.Record) departedWorkload {
 // replay fails before any facade is enabled, and a failed facade bring-up stops
 // the process only when no facade was enabled and routingListenerEnabled is false.
 func (b *Broker) captureDepartedRunWorkloads(cause string) {
+	// History uses its already-captured incarnation frontier, independently of
+	// this workload identity set and of the output lock below.
+	b.wakeRoutingHistory()
 	if b.workloads == nil {
 		return
 	}

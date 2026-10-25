@@ -4,6 +4,7 @@
 package nodepolicy
 
 import (
+	"bytes"
 	"math/bits"
 	"reflect"
 	"strings"
@@ -95,23 +96,37 @@ func compareHistoryKeys(a, b RoutingRequestKey) int {
 }
 
 func (w RoutingHistoryWindow) Validate() error {
-	if w.Schema != 1 || ValidateRoutingHistoryGeneration(w.Generation) != nil || w.Keys == nil || len(w.Keys) > RoutingHistoryRecords {
+	i := 0
+	return validateHistoryWindow(w.Schema, w.Generation, w.Keys != nil, len(w.Keys), w.Cutoff, func() (RoutingHistoryWindowKey, error) {
+		key := w.Keys[i]
+		i++
+		return key, nil
+	})
+}
+
+func validateHistoryWindow(schema int64, generation string, present bool, count int, cutoff *RoutingHistoryCutoff, next func() (RoutingHistoryWindowKey, error)) error {
+	if schema != 1 || ValidateRoutingHistoryGeneration(generation) != nil || !present || count > RoutingHistoryRecords {
 		return historyError("invalid-value")
 	}
-	least := -1
-	for i, key := range w.Keys {
-		if key.Request.Validate() != nil || !historyNumber(key.CreatedAt) || !historyNumber(key.Seq) || key.Seq == 0 || (i > 0 && compareHistoryKeys(w.Keys[i-1].Request, key.Request) >= 0) {
+	var previous, least RoutingHistoryWindowKey
+	for i := 0; i < count; i++ {
+		key, err := next()
+		if err != nil {
+			return err
+		}
+		if key.Request.Validate() != nil || !historyNumber(key.CreatedAt) || !historyNumber(key.Seq) || key.Seq == 0 || (i > 0 && compareHistoryKeys(previous.Request, key.Request) >= 0) {
 			return historyError("invalid-value")
 		}
-		if least < 0 || key.CreatedAt < w.Keys[least].CreatedAt || (key.CreatedAt == w.Keys[least].CreatedAt && compareHistoryKeys(key.Request, w.Keys[least].Request) < 0) {
-			least = i
+		if i == 0 || key.CreatedAt < least.CreatedAt || (key.CreatedAt == least.CreatedAt && compareHistoryKeys(key.Request, least.Request) < 0) {
+			least = key
 		}
+		previous = key
 	}
-	if len(w.Keys) < RoutingHistoryRecords {
-		if w.Cutoff != nil {
+	if count < RoutingHistoryRecords {
+		if cutoff != nil {
 			return historyError("invalid-value")
 		}
-	} else if w.Cutoff == nil || w.Cutoff.Request != w.Keys[least].Request || w.Cutoff.CreatedAt != w.Keys[least].CreatedAt {
+	} else if cutoff == nil || cutoff.Request != least.Request || cutoff.CreatedAt != least.CreatedAt {
 		return historyError("invalid-value")
 	}
 	return nil
@@ -199,11 +214,8 @@ func RoutingHistoryTransportSchema(method string, initial bool) (jsonrpc.History
 	case NotifyRoutingHistoryWindow:
 		s := historyProjection(reflect.TypeOf(RoutingHistoryWindow{}), false)
 		s.Check = func(raw []byte) error {
-			var w RoutingHistoryWindow
-			if err := jsonrpc.MaterializeHistory(raw, &w, historyTransportInteger); err != nil {
-				return err
-			}
-			return w.Validate()
+			_, err := ReadProjectedRoutingHistoryWindow(raw)
+			return err
 		}
 		return s, true
 	case NotifyRoutingHistoryWindowEnd, NotifyRoutingHistoryAccepted:
@@ -221,11 +233,290 @@ func RoutingHistoryTransportSchema(method string, initial bool) (jsonrpc.History
 }
 
 func validateHistoryTransportRecord(raw []byte) error {
-	var record RoutingHistoryRecord
-	if err := jsonrpc.MaterializeHistory(raw, &record, historyTransportInteger); err != nil {
-		return err
-	}
-	return record.Validate()
+	_, err := ReadProjectedRoutingHistoryRecord(raw)
+	return err
 }
 
-func historyTransportInteger(raw []byte) (int64, bool) { return historyInteger(string(raw)) }
+func historyTransportInteger(raw []byte) (int64, bool) { return historyScalarInteger(raw) }
+
+type historySpan struct{ start, end int }
+
+// RoutingHistoryRecordView borrows only already-projected bytes. It has a
+// bounded header and attempt offsets, never an Attempts DTO slice. Callers must
+// finish use before releasing the ProjectHistory output lease.
+type RoutingHistoryRecordView struct {
+	Header   RoutingHistoryRecordHeader
+	raw      []byte
+	attempts [RoutingHistoryAttempts]historySpan
+	count    int
+}
+
+func (v *RoutingHistoryRecordView) AttemptCount() int { return v.count }
+
+// ReadAttempt replaces the caller's slot, dropping every prior referent before
+// decoding. Nested semantic lookups use a separate related slot in the core.
+func (v *RoutingHistoryRecordView) ReadAttempt(i int, dst *RoutingHistoryAttempt) error {
+	*dst = RoutingHistoryAttempt{}
+	if i < 0 || i >= v.count {
+		return historyError("invalid-shape")
+	}
+	s := v.attempts[i]
+	return jsonrpc.MaterializeHistory(v.raw[s.start:s.end], dst, historyTransportInteger)
+}
+
+// ReadProjectedRoutingHistoryRecord is a semantic adapter, not a raw JSON
+// entry point: ProjectHistory must first enforce the original-byte grammar,
+// shape, duplicate, unknown, null, depth, member and array limits. Only fixed
+// spans are traversed here; the shared materializer decodes bounded fields.
+func ReadProjectedRoutingHistoryRecord(raw []byte) (RoutingHistoryRecordView, error) {
+	v := RoutingHistoryRecordView{raw: raw}
+	header := reflect.ValueOf(&v.Header).Elem()
+	typ := reflect.TypeOf(RoutingHistoryRecord{})
+	present := false
+	err := historyProjectedFields(raw, typ, func(i int, span historySpan) error {
+		token := raw[span.start:span.end]
+		if i < header.NumField() {
+			return jsonrpc.MaterializeHistory(token, header.Field(i).Addr().Interface(), historyTransportInteger)
+		}
+		present = !bytes.Equal(bytes.TrimSpace(token), []byte("null"))
+		if !present {
+			return nil
+		}
+		cursor := historyProjectedCursor{raw: token, pos: 1}
+		for {
+			s, more, err := cursor.nextElement()
+			if err != nil || !more {
+				return err
+			}
+			if v.count == len(v.attempts) {
+				return historyError("limit-exceeded")
+			}
+			v.attempts[v.count] = historySpan{span.start + s.start, span.start + s.end}
+			v.count++
+		}
+	})
+	if err != nil {
+		return RoutingHistoryRecordView{}, err
+	}
+	if err := validateHistoryRecord(v.Header, present, v.count, v.ReadAttempt); err != nil {
+		return RoutingHistoryRecordView{}, err
+	}
+	return v, nil
+}
+
+// RoutingHistoryWindowView retains a key-array byte span, not a Keys DTO
+// slice. Validation holds only current/previous/least/cutoff key facts.
+type RoutingHistoryWindowView struct {
+	Generation string
+	Cutoff     *RoutingHistoryCutoff
+	keys       []byte
+	count      int
+}
+
+func (v *RoutingHistoryWindowView) KeyCount() int { return v.count }
+
+func (v *RoutingHistoryWindowView) ForEachKey(visit func(int, RoutingHistoryWindowKey) error) error {
+	cursor := historyProjectedCursor{raw: v.keys, pos: 1}
+	var key RoutingHistoryWindowKey
+	for i := 0; i < v.count; i++ {
+		span, more, err := cursor.nextElement()
+		if err != nil || !more {
+			return historyError("invalid-shape")
+		}
+		key = RoutingHistoryWindowKey{}
+		if err := jsonrpc.MaterializeHistory(v.keys[span.start:span.end], &key, historyTransportInteger); err != nil {
+			return err
+		}
+		if err := visit(i, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// As with the record view, raw must be ProjectHistory's checked output. The
+// cursor locates spans only; it does not replace the original JSON guard.
+func ReadProjectedRoutingHistoryWindow(raw []byte) (RoutingHistoryWindowView, error) {
+	var v RoutingHistoryWindowView
+	var schema int64
+	err := historyProjectedFields(raw, reflect.TypeOf(RoutingHistoryWindow{}), func(i int, span historySpan) error {
+		token := raw[span.start:span.end]
+		switch i {
+		case 0:
+			return jsonrpc.MaterializeHistory(token, &schema, historyTransportInteger)
+		case 1:
+			return jsonrpc.MaterializeHistory(token, &v.Generation, historyTransportInteger)
+		case 2:
+			return jsonrpc.MaterializeHistory(token, &v.Cutoff, historyTransportInteger)
+		case 3:
+			v.keys = token
+			cursor := historyProjectedCursor{raw: token, pos: 1}
+			for {
+				_, more, err := cursor.nextElement()
+				if err != nil || !more {
+					return err
+				}
+				v.count++
+				if v.count > RoutingHistoryRecords {
+					return historyError("invalid-value")
+				}
+			}
+		}
+		return historyError("invalid-shape")
+	})
+	if err != nil {
+		return RoutingHistoryWindowView{}, err
+	}
+	cursor := historyProjectedCursor{raw: v.keys, pos: 1}
+	err = validateHistoryWindow(schema, v.Generation, len(v.keys) > 0 && v.keys[0] == '[', v.count, v.Cutoff, func() (RoutingHistoryWindowKey, error) {
+		span, more, err := cursor.nextElement()
+		if err != nil || !more {
+			return RoutingHistoryWindowKey{}, historyError("invalid-shape")
+		}
+		var key RoutingHistoryWindowKey
+		err = jsonrpc.MaterializeHistory(v.keys[span.start:span.end], &key, historyTransportInteger)
+		return key, err
+	})
+	if err != nil {
+		return RoutingHistoryWindowView{}, err
+	}
+	return v, nil
+}
+
+// The following cursor only finds spans in already-checked projected JSON.
+// Strings and numeric tokens stay in the leased bytes; no token-sized copy,
+// unknown-field decoder, generic value tree or second offset bank is made.
+type historyProjectedCursor struct {
+	raw []byte
+	pos int
+}
+
+func (c *historyProjectedCursor) space() {
+	for c.pos < len(c.raw) && (c.raw[c.pos] == ' ' || c.raw[c.pos] == '\r' || c.raw[c.pos] == '\n' || c.raw[c.pos] == '\t') {
+		c.pos++
+	}
+}
+
+func (c *historyProjectedCursor) value() (historySpan, error) {
+	c.space()
+	start, depth, quoted := c.pos, 0, false
+	for c.pos < len(c.raw) {
+		b := c.raw[c.pos]
+		if quoted {
+			c.pos++
+			if b == '\\' {
+				c.pos++
+			} else if b == '"' {
+				quoted = false
+				if depth == 0 {
+					return historySpan{start, c.pos}, nil
+				}
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			quoted = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth == 0 {
+				if c.pos == start {
+					return historySpan{}, historyError("invalid-shape")
+				}
+				return historySpan{start, c.pos}, nil
+			}
+			depth--
+			if depth == 0 {
+				c.pos++
+				return historySpan{start, c.pos}, nil
+			}
+		case ',', ':', ' ', '\r', '\n', '\t':
+			if depth == 0 {
+				if c.pos == start {
+					return historySpan{}, historyError("invalid-shape")
+				}
+				return historySpan{start, c.pos}, nil
+			}
+		}
+		c.pos++
+	}
+	if c.pos > start && c.pos == len(c.raw) && depth == 0 && !quoted {
+		return historySpan{start, c.pos}, nil
+	}
+	return historySpan{}, historyError("invalid-shape")
+}
+
+func (c *historyProjectedCursor) nextElement() (historySpan, bool, error) {
+	if len(c.raw) < 2 || c.raw[0] != '[' {
+		return historySpan{}, false, historyError("invalid-shape")
+	}
+	c.space()
+	if c.pos < len(c.raw) && c.raw[c.pos] == ',' {
+		c.pos++
+		c.space()
+	}
+	if c.pos < len(c.raw) && c.raw[c.pos] == ']' {
+		return historySpan{}, false, nil
+	}
+	span, err := c.value()
+	return span, err == nil, err
+}
+
+func historyProjectedFields(raw []byte, typ reflect.Type, visit func(int, historySpan) error) error {
+	c := historyProjectedCursor{raw: raw}
+	c.space()
+	if c.pos == len(raw) || raw[c.pos] != '{' {
+		return historyError("invalid-shape")
+	}
+	c.pos++
+	for {
+		c.space()
+		if c.pos < len(raw) && raw[c.pos] == '}' {
+			return nil
+		}
+		key, err := c.value()
+		if err != nil {
+			return err
+		}
+		// Known names have a bounded escaped spelling. Check that bound
+		// before asking the shared scalar materializer to decode a name.
+		maxName := 0
+		for i := 0; i < typ.NumField(); i++ {
+			maxName = max(maxName, len(typ.Field(i).Tag.Get("json")))
+		}
+		if key.end-key.start > 6*maxName+2 {
+			return historyError("invalid-shape")
+		}
+		var name string
+		if err := jsonrpc.MaterializeHistory(raw[key.start:key.end], &name, historyTransportInteger); err != nil {
+			return err
+		}
+		c.space()
+		if c.pos == len(raw) || raw[c.pos] != ':' {
+			return historyError("invalid-shape")
+		}
+		c.pos++
+		span, err := c.value()
+		if err != nil {
+			return err
+		}
+		field := -1
+		for i := 0; i < typ.NumField(); i++ {
+			if typ.Field(i).Tag.Get("json") == name {
+				field = i
+				break
+			}
+		}
+		if field < 0 {
+			return historyError("invalid-shape")
+		}
+		if err := visit(field, span); err != nil {
+			return err
+		}
+		c.space()
+		if c.pos < len(raw) && raw[c.pos] == ',' {
+			c.pos++
+		}
+	}
+}

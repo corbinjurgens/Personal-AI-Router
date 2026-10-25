@@ -165,6 +165,8 @@ func (b *Broker) finishOllamaProxyTerminal() {
 // waiting on LM Studio's gate must not be held by Ollama's state.
 func (b *Broker) configureProxySupervisorCallbacks(sup *supervisor) {
 	sup.onCrash, sup.onRecovered = b.supervisedWorkerCallbacks(engines.ProxyComponent, func() {
+		// clearProxyHandles fences the captured process at the same workersMu
+		// boundary as history acceptance, before monitor replacement.
 		b.clearProxyHandles()
 		// Capture before this monitor can respawn. Emission belongs to the
 		// coalesced supervision owner, outside Stop's proxySupMu/join boundary.

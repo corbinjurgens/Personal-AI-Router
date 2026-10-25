@@ -159,6 +159,7 @@ func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialR
 
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
+		_ = stdout.Close()
 		return nil, fmt.Errorf("start %s: %w", binaryPath, err)
 	}
 
@@ -176,9 +177,10 @@ func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialR
 	}
 	pp.attachPeer(readWriter{stdout, stdin})
 
-	go pp.peer.Serve(nil, pp.handleNotify)
+	go pp.servePeer()
 	go func() {
 		_ = cmd.Wait()
+		pp.retireRoutingHistoryRead()
 		pp.peer.Close()
 		// Every facade's subscription goes, not just one: the process is gone,
 		// so a surviving registration would push snapshots at a closed peer.
@@ -197,6 +199,10 @@ func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialR
 }
 
 func (b *Broker) forwardProxyNotificationFrom(source *proxyProcess, ollamaGeneration, lmstudioGeneration uint64, method string, params json.RawMessage) {
+	if routingHistoryMethod(method) {
+		b.routeRoutingHistoryFrom(source, method, params)
+		return
+	}
 	if source == nil || b.proxyProcessHandle() != source {
 		return
 	}
@@ -365,8 +371,23 @@ func (b *Broker) proxyProcessHandle() *proxyProcess {
 
 func (b *Broker) setProxyProcessHandle(pp *proxyProcess) {
 	b.workersMu.Lock()
+	old := b.proxyProc
+	if b.proxyProc != pp {
+		b.fenceRoutingHistoryLocked(b.proxyProc)
+		b.historyOrigin, b.historyRun = "", ""
+		if pp != nil {
+			// Exhaustion disables history for this process; never wrap identity.
+			if b.historyIncarnation != ^uint64(0) {
+				b.historyIncarnation++
+			}
+		}
+	}
 	b.proxyProc = pp
 	b.workersMu.Unlock()
+	if old != pp {
+		old.retireRoutingHistoryRead()
+	}
+	b.wakeRoutingHistory()
 }
 
 // clearProxyHandles withdraws the process handle and every engine's handle.
@@ -472,6 +493,9 @@ func (b *Broker) startProxySupervisorLocked() {
 // stopProxySupervisorLocked stops the proxy and withdraws its handles. Caller
 // holds proxySupMu.
 func (b *Broker) stopProxySupervisorLocked() {
+	// Fence before waiting for the monitor/pipe. Done cannot join a callback
+	// already admitted at the initial source check.
+	b.fenceRoutingHistory()
 	b.withdrawEgressLease()
 	// The process is stopped on purpose, so a push its closing pipe fails is
 	// not a failed activation: retire it first and such an answer is discarded.

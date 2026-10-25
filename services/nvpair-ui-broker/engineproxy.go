@@ -543,6 +543,11 @@ func (b *Broker) forwardDefaultEngineProxyNotification(profile engineProxyProfil
 // process: dispatching them through each engine's handler in turn would file
 // every workload twice.
 func (b *Broker) routeProcessScopedProxyNotification(method string, params json.RawMessage) bool {
+	// Only forwardProxyNotificationFrom carries the actual source required
+	// for history acceptance. Alternate/unbound routes must consume it here.
+	if routingHistoryMethod(method) {
+		return true
+	}
 	switch {
 	case method == methodPerformanceSample:
 		if err := b.ingestPerformanceSample(params); err != nil {

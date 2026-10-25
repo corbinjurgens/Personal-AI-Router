@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,8 +18,229 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
 	"nvpair-ui-broker/workloadstore"
 )
+
+func TestDepartedRunHistoryApplyFence(t *testing.T) {
+	b, old, _ := historyFixture(t)
+	prior := historyRecord("9", 10, 1)
+	historySend(t, b, old, "1", prior)
+	update := prior
+	update.Seq = 2
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	b.routingHistory.beforeApply = func() { close(entered); <-release }
+	b.forwardProxyNotificationFrom(old, 0, 0, nodepolicy.NotifyRoutingHistoryWindow, historyMarshal(t, historyManifest(t, "2", update)))
+	b.forwardProxyNotificationFrom(old, 0, 0, nodepolicy.NotifyRoutingRequest, historyMarshal(t, update))
+	end := historyMarshal(t, nodepolicy.RoutingHistoryWindowEnd{Schema: 1, Generation: "2"})
+	go func() {
+		b.forwardProxyNotificationFrom(old, 0, 0, nodepolicy.NotifyRoutingHistoryWindowEnd, end)
+		close(done)
+	}()
+	<-entered
+	// The admitted callback owns history.mu, but withdrawal needs only
+	// workersMu. It must complete before releasing the copy/apply barrier.
+	close(old.done)
+	b.clearProxyHandles()
+	b.setProxyProcessHandle(&proxyProcess{done: make(chan struct{})})
+	close(release)
+	<-done
+	b.routingHistory.beforeApply = nil
+	historyRequireRows(t, b, prior)
+	h := b.routingHistory
+	h.mu.Lock()
+	h.retireLocked()
+	h.mu.Unlock()
+	rows := historyRows(t, b)
+	if len(rows) != 1 || rows[0].Seq != 2 || rows[0].Reason != "proxy-exited" || rows[0].State != "failed" || rows[0].Recoverable || rows[0].EndedAt == nil || *rows[0].EndedAt < prior.CreatedAt {
+		t.Fatalf("retirement after apply fence = %+v", rows)
+	}
+	if !reflect.DeepEqual(rows[0].Spend, prior.Spend) {
+		t.Fatal("retirement changed observed money")
+	}
+}
+
+func TestDepartedRunHistoryFrontier(t *testing.T) {
+	b, old, _ := historyFixture(t)
+	open := historyRecord("9", 10, 4)
+	held, charged := nodepolicy.NanoUSD("250000000"), nodepolicy.NanoUSD("123456789")
+	open.Spend.HeldNanoUSD, open.Spend.ChargedNanoUSD, open.Spend.Accounting = &held, &charged, "retained"
+	terminal := historyTerminal(historyRecord("10", 11, 2))
+	historySend(t, b, old, "1", open, terminal)
+	b.clearProxyHandles()
+	replacement := historyActivate(t, b, "run-b")
+	newer := historyRecord("1", 12, 1)
+	newer.Request.ProxyRunID = "run-b"
+	historySend(t, b, replacement, "1", newer)
+	h := b.routingHistory
+	h.mu.Lock()
+	h.retireLocked()
+	h.mu.Unlock()
+	rows := historyRows(t, b)
+	if len(rows) != 3 || rows[0].Request.ProxyRunID != "run-b" || rows[0].State != "routing" || rows[1].Seq != 2 || rows[1].Reason != "no-owner" || rows[2].Seq != 5 || rows[2].Reason != "proxy-exited" {
+		t.Fatalf("frontier scope = %+v", rows)
+	}
+	retired := rows[2]
+	if retired.Spend.HeldNanoUSD == nil || *retired.Spend.HeldNanoUSD != "250000000" || retired.Spend.ChargedNanoUSD == nil || *retired.Spend.ChargedNanoUSD != "123456789" || retired.Spend.Accounting != "retained" || retired.Served != nil {
+		t.Fatal("presentation retirement invented delivery or changed accounting")
+	}
+	historySend(t, b, old, "2", historyRecord("9", 10, 99))
+	h.mu.Lock()
+	h.retireLocked()
+	h.mu.Unlock()
+	after := historyRows(t, b)
+	if after[2].Seq != retired.Seq || after[0].State != "routing" {
+		t.Fatal("late old run or duplicate retirement changed records")
+	}
+}
+
+func TestDepartedRunHistoryRepeatedCrashesKeepBanks(t *testing.T) {
+	b, p, _ := historyFixture(t)
+	row := historyRecord("9", 10, 1)
+	historySend(t, b, p, "1", row)
+	h := b.routingHistory
+	banks := map[*routingHistoryBank]bool{h.accepted: true, h.stage: true, h.merge: true, h.initial: true}
+	// No history owner turn between crashes: the actual withdrawal frontier
+	// must coalesce without pinning a bank or retaining a run list per crash.
+	for i := 0; i < 300; i++ {
+		b.clearProxyHandles()
+		b.setProxyProcessHandle(&proxyProcess{done: make(chan struct{})})
+	}
+	b.clearProxyHandles()
+	h.mu.Lock()
+	h.retireLocked()
+	h.mu.Unlock()
+	for _, bank := range []*routingHistoryBank{h.accepted, h.stage, h.merge, h.initial} {
+		if !banks[bank] {
+			t.Fatal("departure allocated another window")
+		}
+	}
+	rows := historyRows(t, b)
+	if len(rows) != 1 || rows[0].Seq != 2 || rows[0].State != "failed" || h.retiredThrough != b.historyRetiredThrough {
+		t.Fatalf("coalesced frontier = %+v", rows)
+	}
+}
+
+func TestDepartedRunHistoryReadReuseDuringOrdinaryCallbacks(t *testing.T) {
+	b, _, _ := historyFixture(t)
+	r := &b.routingHistory.readers
+	callbacksRelease := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(callbacksRelease) }) }
+	t.Cleanup(release)
+	type oldRead struct {
+		codec *Codec
+		done  chan struct{}
+	}
+	var old [4]oldRead
+	var inputAddress *byte
+	offsetAddress := &r.slots[historyProxyPrivate].offsets[0]
+	for i := range old {
+		p := historyActivate(t, b, "run-"+strconv.Itoa(i))
+		frame := `{"jsonrpc":"2.0","method":"ordinary","params":{"generation":` + strconv.Itoa(i) + "}}\n"
+		if err := p.attachRoutingHistoryPeer(b, readWriter{strings.NewReader(frame + frame), io.Discard}, func() {
+			t.Error("blocked ordinary callback still owned an active read")
+		}); err != nil {
+			t.Fatal(err)
+		}
+		address := &r.slots[historyProxyPrivate].raw[:cap(r.slots[historyProxyPrivate].raw)][0]
+		if i == 0 {
+			inputAddress = address
+		}
+		if address != inputAddress || &r.slots[historyProxyPrivate].offsets[0] != offsetAddress {
+			t.Fatal("restart allocated another role bank")
+		}
+		entered, pumpDone := make(chan struct{}), make(chan struct{})
+		want, callbacks := i, 0
+		p.onNotify = func(method string, params json.RawMessage) {
+			callbacks++
+			if callbacks == 1 {
+				close(entered)
+			}
+			<-callbacksRelease
+			var got struct {
+				Generation int `json:"generation"`
+			}
+			if err := json.Unmarshal(params, &got); err != nil {
+				t.Errorf("ordinary owned params: %v", err)
+			} else if got.Generation != want || method != "ordinary" {
+				t.Errorf("late ordinary callback changed: generation %d, method %s", got.Generation, method)
+			}
+		}
+		go func() {
+			p.servePeer()
+			if callbacks != 1 {
+				t.Errorf("buffered frame escaped retirement: %d callbacks", callbacks)
+			}
+			close(pumpDone)
+		}()
+		historyAwaitReadSignal(t, entered)
+		withdrawn := make(chan struct{})
+		go func() { b.clearProxyHandles(); close(withdrawn) }()
+		historyAwaitReadSignal(t, withdrawn)
+		historyAwaitReadSignal(t, p.peer.Codec().RetireRead())
+		historyRequireReadDetached(t, p.peer.Codec())
+		select {
+		case <-pumpDone:
+			t.Fatal("old ordinary callback was not held across replacement")
+		default:
+		}
+		old[i] = oldRead{p.peer.Codec(), pumpDone}
+		// Retained old references cannot read or release a newly bound bank.
+		for _, previous := range old[:i+1] {
+			r.retire(historyProxyPrivate, previous.codec)
+			historyRequireReadDetached(t, previous.codec)
+		}
+	}
+	release()
+	for _, previous := range old {
+		historyAwaitReadSignal(t, previous.done)
+		if _, _, err := previous.codec.ReadWithRelease(); err != jsonrpc.ErrPeerClosed {
+			t.Fatalf("old read shell revived: %v", err)
+		}
+	}
+}
+
+func TestDepartedRunHistoryReadWaitsForHistoryCallback(t *testing.T) {
+	b, p, _ := historyFixture(t)
+	row := historyRecord("9", 10, 1)
+	begin := historyMarshal(t, Message{JSONRPC: "2.0", Method: nodepolicy.NotifyRoutingHistoryWindow, Params: historyMarshal(t, historyManifest(t, "1", row))})
+	record := historyMarshal(t, Message{JSONRPC: "2.0", Method: nodepolicy.NotifyRoutingRequest, Params: historyMarshal(t, row)})
+	end := historyMarshal(t, Message{JSONRPC: "2.0", Method: nodepolicy.NotifyRoutingHistoryWindowEnd, Params: historyMarshal(t, nodepolicy.RoutingHistoryWindowEnd{Schema: 1, Generation: "1"})})
+	input := string(begin) + "\n" + string(record) + "\n" + string(end) + "\n"
+	if err := p.attachRoutingHistoryPeer(b, readWriter{strings.NewReader(input), io.Discard}, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	p.onNotify = func(method string, params json.RawMessage) { b.forwardProxyNotificationFrom(p, 0, 0, method, params) }
+	entered, release, pumpDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(finish)
+	b.routingHistory.beforeApply = func() { close(entered); <-release }
+	go func() { p.servePeer(); close(pumpDone) }()
+	historyAwaitReadSignal(t, entered)
+	withdrawn := make(chan struct{})
+	go func() { b.clearProxyHandles(); close(withdrawn) }()
+	historyAwaitReadSignal(t, withdrawn)
+	codec := p.peer.Codec()
+	done := codec.RetireRead()
+	historyRequireReadPending(t, done)
+	r := &b.routingHistory.readers
+	if _, err := r.acquire(historyProxyPrivate, readWriter{strings.NewReader(""), io.Discard}, func() {}, nil); err != jsonrpc.ErrHistoryBusy {
+		t.Fatalf("admitted history callback bank rebound: %v", err)
+	}
+	finish()
+	historyAwaitReadSignal(t, done)
+	historyAwaitReadSignal(t, pumpDone)
+	historyRequireReadDetached(t, codec)
+	if _, err := r.acquire(historyProxyPrivate, readWriter{strings.NewReader(""), io.Discard}, func() {}, nil); err != nil {
+		t.Fatalf("actual history consumption did not release role: %v", err)
+	}
+	if b.routingHistory.accepted.count != 0 {
+		t.Fatal("old callback committed after withdrawal")
+	}
+}
 
 func departedRunInput(t *testing.T, id, origin, runID, state, destination string) workloadstore.Incoming {
 	t.Helper()

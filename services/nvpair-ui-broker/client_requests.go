@@ -132,6 +132,25 @@ func (b *Broker) forwardLogLevel(level string) {
 }
 
 func (b *Broker) handleMessage(msg *Message) {
+	profile, componentAddressed := engineProxyProfileForMethod(msg.Method)
+	method := msg.Method
+	if componentAddressed {
+		method = strings.TrimPrefix(method, profile.ComponentName()+":")
+	}
+	// Resolve the component before local facade handling, relays or logging.
+	// Public history controls are local-only too: a component address cannot
+	// grant access to the proxy's history protocol or the broker's subscription.
+	if routingHistoryPrivateMethod(method) || (componentAddressed && routingHistoryMethod(method)) {
+		if msg.IsRequest() {
+			// Canonical private history requests arrive as validated raw-guard
+			// refusals before this dispatcher. Owned requests here, including
+			// addressed aliases, keep ordinary ID handling and serialization.
+			if err := b.codec.RespondError(msg.ID, -32601, "method not found"); err != nil {
+				slog.Debug("routing history control reply failed", "category", "history-write-failed", "count", 1)
+			}
+		}
+		return
+	}
 	if msg.Method == applog.SetLevelMethod {
 		resolved, err := applog.HandleSetLevelParams(msg.Params)
 		if msg.IsRequest() {
@@ -171,8 +190,7 @@ func (b *Broker) handleMessage(msg *Message) {
 		return
 	}
 
-	if profile, ok := engineProxyProfileForMethod(msg.Method); ok {
-		method := strings.TrimPrefix(msg.Method, profile.ComponentName()+":")
+	if componentAddressed {
 		if b.handleEngineProxyBrokerRequest(profile, method, msg) {
 			return
 		}
@@ -283,6 +301,8 @@ func (b *Broker) handleMessage(msg *Message) {
 
 	case "routing:cancel", "routing:active":
 		b.handleRoutingControl(msg)
+	case nodepolicy.MethodRoutingSubscribe, nodepolicy.MethodRoutingUnsubscribe, nodepolicy.MethodRoutingGetInitial:
+		b.handleRoutingHistoryRequest(msg)
 
 	case "node/add", "node/remove", "nodes/list":
 		b.relayToManualNodes(msg)
@@ -328,7 +348,7 @@ func (b *Broker) handleMessage(msg *Message) {
 		//
 		// The prefixes are the engines' ComponentName values, so this loop
 		// gains a new engine for free rather than needing another branch.
-		if profile, ok := engineProxyProfileForMethod(msg.Method); ok {
+		if componentAddressed {
 			b.relayToEngineProxy(profile, msg)
 			return
 		}

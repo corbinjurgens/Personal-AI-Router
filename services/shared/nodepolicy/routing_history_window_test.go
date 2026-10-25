@@ -223,3 +223,135 @@ func TestHistoryRawGuardInitialRecordLimits(t *testing.T) {
 		t.Fatal("record borrowed initial depth allowance")
 	}
 }
+
+func TestHistoryProjectedRecordUsesSharedSemantics(t *testing.T) {
+	for _, fixture := range loadRoutingHistoryFixtures(t) {
+		t.Run(fixture.Name, func(t *testing.T) {
+			want, _, err := DecodeRoutingHistoryRecord(fixture.Record)
+			if err != nil {
+				t.Fatalf("decode fixture: %v", err)
+			}
+			schema, _ := RoutingHistoryTransportSchema(NotifyRoutingRequest, false)
+			projected, _, err := jsonrpc.ProjectHistory(fixture.Record, make([]byte, 0, RoutingHistoryRecordBytes), make([]uint32, RoutingHistoryRecordBytes/4), schema)
+			if err != nil {
+				t.Fatalf("project fixture: %v", err)
+			}
+			view, err := ReadProjectedRoutingHistoryRecord(projected)
+			if err != nil {
+				t.Fatalf("read view: %v", err)
+			}
+			if view.AttemptCount() != len(want.Attempts) {
+				t.Fatalf("attempt count = %d, want %d", view.AttemptCount(), len(want.Attempts))
+			}
+			var current, related RoutingHistoryAttempt
+			for i := range want.Attempts {
+				if err := view.ReadAttempt(i, &current); err != nil {
+					t.Fatalf("read current: %v", err)
+				}
+				if err := view.ReadAttempt(len(want.Attempts)-1, &related); err != nil {
+					t.Fatalf("read related: %v", err)
+				}
+				if !reflect.DeepEqual(current, want.Attempts[i]) || !reflect.DeepEqual(related, want.Attempts[len(want.Attempts)-1]) {
+					t.Fatal("related lookup clobbered current or changed facts")
+				}
+			}
+			// The header is independent of both scratch slots and has no
+			// full attempt slice to retain after a nested lookup.
+			header := reflect.TypeOf(view.Header)
+			record := reflect.TypeOf(want)
+			if header.NumField()+1 != record.NumField() {
+				t.Fatal("header field count differs from record prefix")
+			}
+			for i := 0; i < header.NumField(); i++ {
+				if header.Field(i).Name != record.Field(i).Name || header.Field(i).Type != record.Field(i).Type || !reflect.DeepEqual(reflect.ValueOf(view.Header).Field(i).Interface(), reflect.ValueOf(want).Field(i).Interface()) {
+					t.Fatalf("header differs at field %s", header.Field(i).Name)
+				}
+			}
+		})
+	}
+}
+
+func TestHistoryProjectedRecordSemanticRefusals(t *testing.T) {
+	fixture := loadRoutingHistoryFixtures(t)[0].Record
+	test := func(name, path string, value any) {
+		t.Run(name, func(t *testing.T) {
+			object := routingHistoryObject(t, fixture)
+			parent, field := routingHistoryParent(t, object, path)
+			parent[field] = value
+			raw := routingHistoryJSON(t, object)
+			schema, _ := RoutingHistoryTransportSchema(NotifyRoutingRequest, false)
+			// Obtain shape-checked spans without running the semantic callback,
+			// then compare that callback's refusal with the public decoder.
+			schema.Check = nil
+			projected, _, err := jsonrpc.ProjectHistory(raw, make([]byte, 0, RoutingHistoryRecordBytes), make([]uint32, RoutingHistoryRecordBytes/4), schema)
+			if err != nil {
+				t.Fatalf("shape fixture: %v", err)
+			}
+			_, _, want := DecodeRoutingHistoryRecord(raw)
+			_, got := ReadProjectedRoutingHistoryRecord(projected)
+			if want == nil || got == nil || got.Error() != want.Error() {
+				t.Fatalf("view/public errors = %v / %v", got, want)
+			}
+		})
+	}
+	test("nonpositive sequence", "seq", 0)
+	test("terminal recovery", "recoverable", true)
+	test("record before creation", "endedAt", 0)
+	test("attempt ordinal", "attempts.0.index", routingHistorySafeInteger)
+	test("noncanonical money", "spend.heldNanoUsd", "01")
+	test("destination exclusivity", "attempts.0.destination.accountId", "account")
+}
+
+func TestHistoryProjectedLongIntegerAfterOriginalGrammar(t *testing.T) {
+	fixture := loadRoutingHistoryFixtures(t)[0].Record
+	object := routingHistoryObject(t, fixture)
+	object["seq"] = json.Number("0." + strings.Repeat("0", 66000) + "1E66001")
+	raw := routingHistoryJSON(t, object)
+	schema, _ := RoutingHistoryTransportSchema(NotifyRoutingRequest, false)
+	out := make([]byte, 0, RoutingHistoryRecordBytes)
+	offsets := make([]uint32, RoutingHistoryRecordBytes/4)
+	projected, _, err := jsonrpc.ProjectHistory(raw, out, offsets, schema)
+	if err != nil {
+		t.Fatalf("legal long integer: %v", err)
+	}
+	view, err := ReadProjectedRoutingHistoryRecord(projected)
+	if err != nil || view.Header.Seq != 1 {
+		t.Fatalf("long integer sequence = %d / %v", view.Header.Seq, err)
+	}
+	malformed := strings.Replace(string(raw), "1E66001", "1E+", 1)
+	if _, _, err := jsonrpc.ProjectHistory([]byte(malformed), out, offsets, schema); err == nil {
+		t.Fatal("invalid original JSON reached semantic acceptance")
+	}
+}
+
+func TestHistoryProjectedWindowBoundedIteration(t *testing.T) {
+	window := RoutingHistoryWindow{Schema: 1, Generation: "1", Keys: make([]RoutingHistoryWindowKey, RoutingHistoryRecords)}
+	for i := range window.Keys {
+		window.Keys[i] = RoutingHistoryWindowKey{Request: RoutingRequestKey{OriginNodeID: strings.Repeat("o", 128), ProxyRunID: strings.Repeat("r", 128), RequestID: fmt.Sprintf("9223372036854775%03d", i)}, CreatedAt: int64(i), Seq: 1}
+	}
+	window.Cutoff = &RoutingHistoryCutoff{Request: window.Keys[0].Request, CreatedAt: 0}
+	raw, err := json.Marshal(window)
+	if err != nil {
+		t.Fatalf("encode window: %v", err)
+	}
+	schema, _ := RoutingHistoryTransportSchema(NotifyRoutingHistoryWindow, false)
+	projected, _, err := jsonrpc.ProjectHistory(raw, make([]byte, 0, RoutingHistoryRecordBytes), make([]uint32, RoutingHistoryRecordBytes/4), schema)
+	if err != nil {
+		t.Fatalf("project maximum manifest: %v", err)
+	}
+	view, err := ReadProjectedRoutingHistoryWindow(projected)
+	if err != nil {
+		t.Fatalf("read window view: %v", err)
+	}
+	if view.KeyCount() != len(window.Keys) || view.Generation != window.Generation || !reflect.DeepEqual(view.Cutoff, window.Cutoff) {
+		t.Fatal("manifest header changed")
+	}
+	if err := view.ForEachKey(func(i int, key RoutingHistoryWindowKey) error {
+		if !reflect.DeepEqual(key, window.Keys[i]) {
+			t.Fatalf("manifest key %d changed", i)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("iterate maximum manifest: %v", err)
+	}
+}

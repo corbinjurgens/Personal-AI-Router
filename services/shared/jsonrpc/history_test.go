@@ -88,7 +88,7 @@ func TestHistoryGeneratedQuarantineWithoutLateAAllowsB(t *testing.T) {
 			}
 			c := historyTestReader(t, "", &correlation)
 			read := func(frame string) (*Message, error) {
-				c.history.r.Reset(strings.NewReader(frame + "\n"))
+				c.history.Load().r.Reset(strings.NewReader(frame + "\n"))
 				return c.Read()
 			}
 			_, err := read(`{"jsonrpc":"2.0",` + candidates + `,"result":{"requests":[]}}`)
@@ -130,7 +130,7 @@ func TestHistoryGeneratedRepeatedQuarantineStaleAndReservedResponses(t *testing.
 	}
 	c := historyTestReader(t, "", &correlation)
 	read := func(frame string) (*Message, error) {
-		c.history.r.Reset(strings.NewReader(frame + "\n"))
+		c.history.Load().r.Reset(strings.NewReader(frame + "\n"))
 		return c.Read()
 	}
 	for _, candidates := range []string{`"id":"jh:1","id":7`, `"ID":7,"\u0069d":"\u006ah:2"`} {
@@ -185,10 +185,10 @@ func TestHistoryGeneratedStaleMaximumInitialUsesOnlyRawLease(t *testing.T) {
 		t.Fatal("fixture does not consume H")
 	}
 	c := historyTestReader(t, frame, &correlation)
-	c.history.output = []byte("pinned output")[:0]
+	c.history.Load().output = []byte("pinned output")[:0]
 	msg, err := c.Read()
 	var failure *HistoryFailure
-	if msg != nil || !errors.As(err, &failure) || failure.Category != "history-stale" || string(c.history.output[:cap(c.history.output)]) != "pinned output" {
+	if msg != nil || !errors.As(err, &failure) || failure.Category != "history-stale" || string(c.history.Load().output[:cap(c.history.Load().output)]) != "pinned output" {
 		t.Fatalf("stale result borrowed output or required an initial output grant: %v", err)
 	}
 }
@@ -279,6 +279,462 @@ func TestHistoryRawGuardGrammar(t *testing.T) {
 	}
 }
 
+// depth includes the leaf object. No marshaler may erase escaped key/ID
+// spellings, duplicates or malformed grammar in these wire specimens.
+func historyTraversalValue(kind string, depth int, leaf string) string {
+	var open, close strings.Builder
+	for i := 1; i < depth; i++ {
+		if kind == "objects" || (kind == "mixed" && i%2 == 0) {
+			open.WriteString(`{"unknown":`)
+			close.WriteByte('}')
+		} else {
+			open.WriteByte('[')
+			close.WriteByte(']')
+		}
+	}
+	ends := []byte(close.String())
+	for i, j := 0, len(ends)-1; i < j; i, j = i+1, j-1 {
+		ends[i], ends[j] = ends[j], ends[i]
+	}
+	return open.String() + leaf + string(ends)
+}
+
+func historyOffsetInitial(keys int, requests string) string {
+	var raw strings.Builder
+	raw.WriteString(`{"requests":` + requests)
+	for i := 0; i < keys-1; i++ {
+		raw.WriteString(`,"k` + strconv.Itoa(i) + `":0`)
+	}
+	raw.WriteByte('}')
+	return raw.String()
+}
+
+func TestHistoryTraversalIndependentGrants(t *testing.T) {
+	const words = HistoryRecordBytes / 4
+	for _, tc := range []struct {
+		name, requests string
+		keys, offsets  int
+		valid          bool
+	}{
+		{"M value with exactly R root keys", `[]`, words, words, true},
+		{"one root key over R", `[]`, words + 1, words, false},
+		{"root plus record exactly R live keys", `[{"schema":1}]`, words - 1, words, true},
+		{"record resets reuse the last available key slot", `[{"schema":1},{"schema":2}]`, words - 1, words, true},
+		{"record cannot reclaim its parent key range", `[{"schema":1}]`, words, words, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value := historyOffsetInitial(tc.keys, tc.requests)
+			if len(value) <= HistoryRecordBytes || len(value) >= HistoryInitialBytes {
+				t.Fatal("specimen does not exercise independent M/R grants")
+			}
+			for _, inPlace := range []bool{false, true} {
+				raw := []byte(value)
+				want := `{"requests":` + tc.requests + `}`
+				out := make([]byte, 0, len(want))
+				if inPlace {
+					out = raw[:0]
+				}
+				schema, _ := historyTestSchema("", true)
+				schema.RecordType = reflect.TypeOf(historyTestValue{})
+				schema.RecordBytes, schema.RecordDepth, schema.RecordMembers = HistoryRecordBytes, 16, 2
+				checked := 0
+				schema.CheckRecord = func(raw []byte) error {
+					if string(raw) != `{"schema":1}` && string(raw) != `{"schema":2}` {
+						t.Fatal("record check lost its bounded record slice")
+					}
+					checked++
+					return nil
+				}
+				clean, stripped, err := ProjectHistory(raw, out, make([]uint32, tc.offsets), schema)
+				if !tc.valid {
+					if !errors.Is(err, ErrHistoryInvalid) || clean != nil || checked != 0 {
+						t.Fatal("independent grants lost an original key-capacity error")
+					}
+					continue
+				}
+				wantChecks := strings.Count(tc.requests, "schema")
+				if err != nil || string(clean) != want || stripped != tc.keys-1 || checked != wantChecks {
+					t.Fatalf("independent grant projection: bytes=%d stripped=%d checks=%d err=%v", len(clean), stripped, checked, err)
+				}
+			}
+		})
+	}
+	test := func(name, value string, typ reflect.Type) {
+		t.Run(name, func(t *testing.T) {
+			schema := HistoryProjection{Type: typ, Bytes: HistoryRecordBytes, Depth: historyRawDepth, Members: HistoryRecordBytes, ArrayLimit: HistoryRecordBytes}
+			clean, _, err := ProjectHistory([]byte(value), make([]byte, 0, len(value)), nil, schema)
+			if err != nil || string(clean) != value {
+				t.Fatalf("key-free array acquired an offset requirement: %v", err)
+			}
+		})
+	}
+	test("typed array needs no key offsets", `[1]`, reflect.TypeOf([]int{}))
+	test("maximum key-free array path needs no offsets", historyTraversalValue("arrays", historyRawDepth, `{}`), nil)
+}
+
+func TestHistoryTraversalIndependentGrantsReaderPhases(t *testing.T) {
+	value := historyOffsetInitial(HistoryRecordBytes/4, `[]`)
+	for _, method := range []string{"routing:subscribe", "routing/request"} {
+		t.Run(method+" outer keys precede attribution", func(t *testing.T) {
+			frame := `{"jsonrpc":"2.0","id":"no-copy","method":"` + method + `","params":` + value + `}` + "\n" +
+				`{"jsonrpc":"2.0","id":7,"method":"ordinary","params":{}}` + "\n"
+			var correlation HistoryCorrelation
+			c, err := NewHistoryCodec(rw{strings.NewReader(frame), io.Discard}, 1<<20, make([]byte, 0, HistoryFrameBytes), make([]byte, 0, HistoryFrameBytes), make([]uint32, HistoryRecordBytes/4), &correlation, historyTestSchema, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			msg, err := c.Read()
+			var failure *HistoryFailure
+			if msg != nil || !errors.As(err, &failure) || failure.Disposition != "discard" || failure.Refusal != nil || failure.FailPending || c.history.Load().idToken != [HistoryIDBytes]byte{} {
+				t.Fatal("whole-envelope key capacity was bypassed before attribution")
+			}
+			ordinary, err := c.Read()
+			if err != nil || ordinary == nil || ordinary.Method != "ordinary" || ordinary.borrowedRead {
+				t.Fatal("ordinary progress changed after whole-envelope capacity failure")
+			}
+		})
+	}
+	t.Run("pending initial requires M offsets before physical read", func(t *testing.T) {
+		var correlation HistoryCorrelation
+		if err := correlation.Begin([]byte("1")); err != nil {
+			t.Fatal(err)
+		}
+		input := strings.NewReader(`{"jsonrpc":"2.0","id":1,"result":` + value + `}` + "\n")
+		remaining := input.Len()
+		c, err := NewHistoryCodec(rw{input, io.Discard}, 1<<20, make([]byte, 0, HistoryFrameBytes), make([]byte, 0, HistoryFrameBytes), make([]uint32, HistoryRecordBytes/4), &correlation, historyTestSchema, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg, err := c.Read(); msg != nil || !errors.Is(err, ErrHistoryBusy) || input.Len() != remaining || len(c.history.Load().raw) != 0 {
+			t.Fatal("R-only initial reader consumed input or changed admission")
+		}
+	})
+	t.Run("R record and E envelope with R offsets", func(t *testing.T) {
+		value := `{"schema":1,"unknown":"` + strings.Repeat("x", HistoryRecordBytes-len(`{"schema":1,"unknown":""}`)) + `"}`
+		prefix := `{"jsonrpc":"2.0","method":"routing/request","params":`
+		frame := prefix + value + strings.Repeat(" ", HistoryEnvelopeBytes-len(prefix)-2) + "}\n"
+		if len(frame) != HistoryRecordFrameBytes {
+			t.Fatal("specimen does not consume R plus E")
+		}
+		var correlation HistoryCorrelation
+		c, err := NewHistoryCodec(rw{strings.NewReader(frame), io.Discard}, 1<<20, make([]byte, 0, 1<<20), nil, make([]uint32, HistoryRecordBytes/4), &correlation, historyTestSchema, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg, err := c.Read()
+		if err != nil || msg == nil || !msg.borrowedRead || string(msg.Params) != `{"schema":1}` {
+			t.Fatalf("R-only record reader changed a legal R/E boundary: %v", err)
+		}
+	})
+}
+
+func TestHistoryTraversalMaximumDepthProjection(t *testing.T) {
+	for _, kind := range []string{"arrays", "objects", "mixed"} {
+		t.Run(kind, func(t *testing.T) {
+			schema, _ := historyTestSchema("", false)
+			schema.Depth, schema.Members = historyRawDepth, HistoryRecordBytes
+			for _, leaf := range []struct {
+				name, raw string
+				valid     bool
+			}{
+				{"distinct escaped keys", `{"a":0,"\u0062":1}`, true},
+				{"case-sensitive unknown keys", `{"a":0,"A":1}`, true},
+				{"late escaped duplicate", `{"a":0,"\u0061":1}`, false},
+				{"late literal duplicate", `{"\u0061":0,"a":1}`, false},
+				{"late malformed member", `{"a":0,}`, false},
+			} {
+				t.Run(leaf.name, func(t *testing.T) {
+					raw := []byte(`{"schema":1e+0,"unknown":` + historyTraversalValue(kind, historyRawDepth-1, leaf.raw) + `}`)
+					for _, inPlace := range []bool{false, true} {
+						input := append([]byte(nil), raw...)
+						out := make([]byte, 0, len(input))
+						if inPlace {
+							out = input[:0]
+						}
+						clean, stripped, err := ProjectHistory(input, out, make([]uint32, HistoryRecordBytes/4), schema)
+						if !leaf.valid {
+							if !errors.Is(err, ErrHistoryInvalid) || clean != nil {
+								t.Fatalf("deep invalid projection: %v", err)
+							}
+						} else if err != nil || string(clean) != `{"schema":1e+0}` || stripped != 1 {
+							t.Fatalf("deep projection changed known bytes/count: %q, %d, %v", clean, stripped, err)
+						}
+					}
+				})
+			}
+			tooDeep := []byte(`{"schema":1,"unknown":` + historyTraversalValue(kind, historyRawDepth, `{}`) + `}`)
+			if _, _, err := ProjectHistory(tooDeep, make([]byte, 0, len(tooDeep)), make([]uint32, HistoryRecordBytes/4), schema); !errors.Is(err, ErrHistoryInvalid) {
+				t.Fatal("raw depth contract widened")
+			}
+		})
+	}
+}
+
+func TestHistoryTraversalIncomingMaximumDepth(t *testing.T) {
+	for _, kind := range []string{"arrays", "objects", "mixed"} {
+		for _, method := range []string{"routing:subscribe", "routing/request"} {
+			t.Run(kind+"/"+method, func(t *testing.T) {
+				for _, specimen := range []struct {
+					name, leaf, candidates, disposition string
+					code                                int
+				}{
+					{"unambiguous", `{"a":0,"\u0062":1}`, `"id":"\u0061<>&"`, "refuse-request", -32601},
+					{"512 byte ID", `{}`, `"id":"` + strings.Repeat("<", 510) + `"`, "refuse-request", -32601},
+					{"over-cap ID", `{}`, `"id":"` + strings.Repeat("<", 511) + `"`, "refuse-request", HistoryInvalidCode},
+					{"late escaped duplicate", `{"a":0,"\u0061":1}`, `"id":"\u0061<>&"`, "discard", 0},
+					{"late literal duplicate", `{"\u0061":0,"a":1}`, `"id":"\u0061<>&"`, "discard", 0},
+					{"late malformed", `{"a":0,}`, `"id":"\u0061<>&"`, "quarantine", 0},
+					{"ambiguous ID first", `{}`, `"id":1,"ID":2`, "quarantine", 0},
+					{"ambiguous ID last", `{}`, `"ID":2,"id":1`, "quarantine", 0},
+				} {
+					t.Run(specimen.name, func(t *testing.T) {
+						params := historyTraversalValue(kind, historyRawDepth-1, specimen.leaf)
+						frame := `{"jsonrpc":"2.0",` + specimen.candidates + `,"method":"` + method + `","params":` + params + `}` + "\n" +
+							`{"jsonrpc":"2.0","id":7,"method":"ordinary","params":{}}` + "\n"
+						var correlation HistoryCorrelation
+						// Use exactly the broker's admitted R and ordinary raw backing.
+						c, err := NewHistoryCodec(rw{strings.NewReader(frame), io.Discard}, 1<<20, make([]byte, 0, 1<<20), nil, make([]uint32, HistoryRecordBytes/4), &correlation, func(m string, initial bool) (HistoryProjection, bool) {
+							s, ok := historyTestSchema(m, initial)
+							if m == "routing:subscribe" && !initial {
+								s.Type = reflect.TypeOf(struct{}{})
+							}
+							return s, ok
+						}, nil)
+						if err != nil {
+							t.Fatal(err)
+						}
+						var control ReadControl
+						if err := c.EnableReadRetirement(&control, func() {}); err != nil {
+							t.Fatal(err)
+						}
+						msg, release, err := c.ReadWithRelease()
+						var failure *HistoryFailure
+						if msg != nil || !errors.As(err, &failure) || failure.Disposition != specimen.disposition || failure.FailPending || failure.Error() != "history-invalid" || release == nil {
+							t.Fatalf("deep request disposition: %+v, %v", failure, err)
+						}
+						if specimen.code != 0 {
+							wantID := strings.TrimPrefix(specimen.candidates, `"id":`)
+							code := specimen.code
+							if method == "routing:subscribe" || specimen.code == HistoryInvalidCode {
+								code = HistoryInvalidCode
+							}
+							if specimen.name == "over-cap ID" {
+								wantID = "null"
+							}
+							if release == nil || failure.Refusal == nil || failure.Refusal.Code != code || string(failure.Refusal.ReplyID) != wantID || &failure.Refusal.ReplyID[0] != &c.history.Load().idToken[0] {
+								t.Fatal("deep refusal changed exact/null ID or borrowed ownership")
+							}
+						} else if failure.Refusal != nil || c.history.Load().idToken != [HistoryIDBytes]byte{} {
+							t.Fatal("deep duplicate/ambiguity/grammar failure copied a reply ID")
+						}
+						if _, _, err := c.ReadWithRelease(); !errors.Is(err, ErrHistoryBusy) {
+							t.Fatal("deep history/failure borrow released before consumption")
+						}
+						if release != nil {
+							release()
+							release()
+						}
+						ordinary, release, err := c.ReadWithRelease()
+						if err != nil || ordinary == nil || ordinary.Method != "ordinary" || ordinary.borrowedRead || release != nil || correlation.pendingN != 0 {
+							t.Fatalf("ordinary progress after deep input: %v", err)
+						}
+						<-c.RetireRead()
+					})
+				}
+			})
+		}
+	}
+}
+
+func TestHistoryTraversalProjectionContinuations(t *testing.T) {
+	// Nil-type arrays still exercise every kept continuation at the raw limit;
+	// unknown objects exercise the other traversal mode without Go recursion.
+	schema := HistoryProjection{Bytes: HistoryRecordBytes, Depth: historyRawDepth, Members: HistoryRecordBytes, ArrayLimit: HistoryRecordBytes}
+	raw := []byte(historyTraversalValue("arrays", historyRawDepth, `{}`))
+	clean, _, err := ProjectHistory(raw, make([]byte, 0, len(raw)), make([]uint32, HistoryRecordBytes/4), schema)
+	if err != nil || !bytes.Equal(raw, clean) {
+		t.Fatalf("maximum kept continuation path: %v", err)
+	}
+	schema, _ = historyTestSchema("", true)
+	schema.RecordType = reflect.TypeOf(historyTestValue{})
+	schema.RecordBytes, schema.RecordDepth, schema.RecordMembers = HistoryRecordBytes, 16, 2
+	checked := 0
+	schema.CheckRecord = func(raw []byte) error {
+		if string(raw) != `{"schema":1}` && string(raw) != `{"schema":2}` {
+			t.Fatal("record check saw unknown fields or another record's bytes")
+		}
+		checked++
+		return nil
+	}
+	raw = []byte(`{"before":{},"requests":[{"unknown":[],"schema":1},{"schema":2,"unknown":{}}],"after":[]}`)
+	clean, stripped, err := ProjectHistory(raw, raw[:0], make([]uint32, HistoryRecordBytes/4), schema)
+	if err != nil || checked != 2 || stripped != 4 || string(clean) != `{"requests":[{"schema":1},{"schema":2}]}` {
+		t.Fatalf("record continuation/reset/in-place projection: %q, %d, %d, %v", clean, checked, stripped, err)
+	}
+}
+
+func TestHistoryTraversalRetainsAncestorKeyCapacity(t *testing.T) {
+	// Ancestor keys cannot be reclaimed early to turn a former capacity error
+	// into an attributed private reply. The raw frame fits ordinary backing.
+	var leaf strings.Builder
+	leaf.WriteByte('{')
+	for i := 0; i < HistoryRecordBytes/4-historyRawDepth+4; i++ {
+		if i != 0 {
+			leaf.WriteByte(',')
+		}
+		leaf.WriteString(`"k` + strconv.Itoa(i) + `":0`)
+	}
+	leaf.WriteByte('}')
+	frame := `{"jsonrpc":"2.0","id":"no-copy","method":"routing/request","params":` + historyTraversalValue("objects", historyRawDepth-1, leaf.String()) + `}` + "\n"
+	var correlation HistoryCorrelation
+	c, err := NewHistoryCodec(rw{strings.NewReader(frame), io.Discard}, 1<<20, make([]byte, 0, 1<<20), nil, make([]uint32, HistoryRecordBytes/4), &correlation, historyTestSchema, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := c.Read()
+	var failure *HistoryFailure
+	if msg != nil || !errors.As(err, &failure) || failure.Disposition != "discard" || failure.Refusal != nil || failure.Error() != "history-invalid" || c.history.Load().idToken != [HistoryIDBytes]byte{} {
+		t.Fatalf("ancestor key capacity changed refusal attribution: %+v, %v", failure, err)
+	}
+}
+
+func TestHistoryTraversalDeepDirectionAndCorrelation(t *testing.T) {
+	for _, mode := range []string{"default arbitrary IDs", "generated IDs"} {
+		t.Run(mode, func(t *testing.T) {
+			var correlation HistoryCorrelation
+			id := `"same"`
+			if mode == "generated IDs" {
+				if err := correlation.EnableGeneratedIDs(); err != nil {
+					t.Fatal(err)
+				}
+				token, err := correlation.BeginGeneratedMethod("routing:subscribe")
+				if err != nil {
+					t.Fatal(err)
+				}
+				id = string(token)
+			} else if err := correlation.Begin([]byte(id)); err != nil {
+				t.Fatal(err)
+			}
+			deep := historyTraversalValue("mixed", historyRawDepth-1, `{}`)
+			frames := `{"jsonrpc":"2.0","id":` + id + `,"method":"routing/request","params":` + deep + `}` + "\n" +
+				`{"jsonrpc":"2.0","method":"routing/request","params":` + deep + `}` + "\n" +
+				`{"jsonrpc":"2.0","id":` + id + `,"result":{"requests":[],"unknown":` + historyTraversalValue("mixed", historyRawDepth-2, `{}`) + `}}` + "\n" +
+				`{"jsonrpc":"2.0","id":7,"result":{"alive":true}}` + "\n"
+			c := historyIncomingTestReader(t, frames, &correlation)
+			for _, disposition := range []string{"refuse-request", "discard", "fail-call"} {
+				msg, err := c.Read()
+				var failure *HistoryFailure
+				if msg != nil || !errors.As(err, &failure) || failure.Disposition != disposition || failure.FailPending != (disposition == "fail-call") {
+					t.Fatalf("deep direction/correlation: %+v, %v", failure, err)
+				}
+				if disposition == "refuse-request" {
+					if failure.Refusal == nil || failure.Refusal.Code != -32601 || string(failure.Refusal.ReplyID) != id {
+						t.Fatal("incoming private request lost its own exact identity")
+					}
+				} else if failure.Refusal != nil {
+					t.Fatal("notification/response acquired incoming refusal identity")
+				}
+				if disposition != "fail-call" && (!correlation.MatchesPending([]byte(id)) || correlation.Quarantined()) {
+					t.Fatal("incoming traffic settled the outbound initial")
+				}
+			}
+			ordinary, err := c.Read()
+			if err != nil || ordinary == nil || ordinary.borrowedRead || string(ordinary.Result) != `{"alive":true}` {
+				t.Fatalf("ordinary response after deep history failure: %v", err)
+			}
+			if mode == "generated IDs" {
+				if next, err := correlation.BeginGeneratedMethod("routing:subscribe"); err != nil || string(next) != `"jh:2"` {
+					t.Fatal("deep failure changed issued frontier/refetch admission")
+				}
+			} else if err := correlation.Begin([]byte(`"next"`)); !errors.Is(err, ErrHistoryBusy) {
+				t.Fatal("default retired classification slot changed")
+			}
+		})
+	}
+	ordinary := NewCodec(rw{strings.NewReader(`{"jsonrpc":"2.0","id":{},"method":"routing:subscribe","params":null}` + "\n"), io.Discard})
+	msg, err := ordinary.Read()
+	if err != nil || msg == nil || msg.borrowedRead || msg.ID == nil || string(*msg.ID) != `{}` || string(msg.Params) != "null" || ordinary.history.Load() != nil {
+		t.Fatal("ordinary codec was enrolled in history validation")
+	}
+}
+
+func TestHistoryTraversalScratchFunding(t *testing.T) {
+	// Source-layout assertions only. No execution/layout or compiler claim.
+	// Offset capacity is independent of the byte/output grants. Exactly one
+	// word per live key remains available, including a completely full R.
+	// Every nonempty object's metadata replaces its checked last key offset;
+	// arrays and empty objects consume no continuation word at any depth.
+	if HistoryFrameBytes >= 1<<26 || HistoryFrameBytes/4 >= 1<<25 || historyObjectBoundary < 1<<26 {
+		t.Fatal("object frame tag/base cannot represent the admitted raw grant")
+	}
+	offsets := make([]uint32, HistoryRecordBytes/4)
+	rootKeys := len(offsets) - historyRawDepth + 1
+	for i := 0; i < rootKeys; i++ {
+		offsets[i] = uint32(i)
+	}
+	offsets[rootKeys-1] = historyObjectBoundary | 62
+	for i := 1; i < historyRawDepth; i++ {
+		base := rootKeys + i - 1
+		offsets[base] = historyObjectBoundary | uint32(base)<<6 | uint32(i%63)
+	}
+	p := historyParser{offsets: offsets}
+	for i := historyRawDepth - 1; i > 0; i-- {
+		if p.offsets[len(p.offsets)-1]&63 != uint32(i%63) {
+			t.Fatal("object selector overwrote its parent base")
+		}
+		p.popObject()
+		if len(p.offsets) != rootKeys+i-1 {
+			t.Fatal("object pop reclaimed an ancestor or retained a child slot")
+		}
+	}
+	p.popObject()
+	if len(p.offsets) != 0 || cap(p.offsets) != HistoryRecordBytes/4 {
+		t.Fatal("full R object frames changed backing capacity")
+	}
+	// The raw grammar's existing byte stack is unchanged. Traversal adds no
+	// depth-sized C array: parser/schema/cursors/sort/reflection work fit the
+	// existing 2048 control allowance, including the saved record schema.
+	const cursor = 2048
+	if unsafe.Sizeof(historyParser{})+unsafe.Sizeof(HistoryProjection{})+512 > cursor {
+		t.Fatal("fixed traversal headers/cursors escaped their control allowance")
+	}
+	const grammar = historyRawDepth + 1
+	const semantic, writer, retirement, fixed = 25600, 12288, 47104, 20480
+	if grammar+cursor > writer || grammar+cursor > semantic || fixed+max(3*semantic+2*writer, 2*semantic+retirement+writer) != 131072 {
+		t.Fatal("canonical traversal changed the fixed C phase arithmetic")
+	}
+}
+
+func TestHistoryTraversalWideKeySort(t *testing.T) {
+	var members strings.Builder
+	for i := 2045; i >= 0; i-- {
+		if i != 2045 {
+			members.WriteByte(',')
+		}
+		members.WriteString(`"k` + strconv.Itoa(i) + `":0`)
+	}
+	schema, _ := historyTestSchema("", false)
+	test := func(name, keys string, valid bool) {
+		t.Run(name, func(t *testing.T) {
+			raw := []byte(`{"schema":1,"unknown":{` + keys + `}}`)
+			clean, stripped, err := ProjectHistory(raw, make([]byte, 0, 64), make([]uint32, HistoryRecordBytes/4), schema)
+			if valid {
+				if err != nil || string(clean) != `{"schema":1}` || stripped != 1 {
+					t.Fatalf("wide key sort changed projection: %q, %v", clean, err)
+				}
+			} else if !errors.Is(err, ErrHistoryInvalid) || clean != nil {
+				t.Fatal("wide key sort lost an escaped duplicate")
+			}
+		})
+	}
+	test("reverse key order", members.String(), true)
+	// Keep the same member bound in duplicate cases, so failure cannot be
+	// supplied by an unrelated member overflow instead of key comparison.
+	keys := strings.TrimSuffix(members.String(), `,"k0":0`)
+	test("escaped duplicate first", `"\u006b1":0,`+keys, false)
+	test("escaped duplicate last", keys+`,"\u006b1":0`, false)
+}
+
 func TestHistoryRawGuardDuplicateKeys(t *testing.T) {
 	test := func(name, raw string) {
 		t.Run(name, func(t *testing.T) {
@@ -355,16 +811,106 @@ func TestHistoryFrameInPlaceProjection(t *testing.T) {
 	if string(msg.Result) != `{"requests":[{"schema":1e15}]}` || msg.ID == nil || string(*msg.ID) != `"id"` {
 		t.Fatalf("in-place envelope=%+v", msg)
 	}
-	if cap(c.history.raw) != HistoryFrameBytes || cap(c.history.output) != HistoryFrameBytes || cap(c.history.offsets)*4 != HistoryInitialBytes {
+	if cap(c.history.Load().raw) != HistoryFrameBytes || cap(c.history.Load().output) != HistoryFrameBytes || cap(c.history.Load().offsets)*4 != HistoryInitialBytes {
 		t.Fatal("reader grants changed")
 	}
-	if &c.history.raw[:cap(c.history.raw)][0] != &c.history.output[:cap(c.history.output)][0] {
+	if &c.history.Load().raw[:cap(c.history.Load().raw)][0] != &c.history.Load().output[:cap(c.history.Load().output)][0] {
 		t.Fatal("in-place projection acquired a second frame")
 	}
 	correlation.Complete()
 	if err := correlation.Begin([]byte(`"next"`)); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestHistoryPrivateFragmentBoundaries(t *testing.T) {
+	for _, size := range []int{255, 256, 257} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			base := `{"jsonrpc":"2.0","method":"ordinary","params":{}}` + "\n"
+			frame := strings.Repeat(" ", size-len(base)) + base
+			c := historyTestReader(t, frame+base, &HistoryCorrelation{})
+			if c.history.Load().r.Size() != 256 {
+				t.Fatal("private fragment backing is not the owned 256-byte buffer")
+			}
+			for i := 0; i < 2; i++ {
+				msg, err := c.Read()
+				if err != nil || msg == nil || msg.Method != "ordinary" {
+					t.Fatalf("frame %d = %+v, error = %v", i, msg, err)
+				}
+			}
+			if _, err := c.Read(); err != io.EOF {
+				t.Fatalf("empty EOF = %v", err)
+			}
+		})
+	}
+	test := func(name, frame, marker, token string) {
+		t.Run(name, func(t *testing.T) {
+			at := strings.Index(frame, marker)
+			if at < 0 || at > 255 {
+				t.Fatal("split marker fixture is not representable")
+			}
+			frame = strings.Repeat(" ", 255-at) + frame
+			ordinary := `{"jsonrpc":"2.0","method":"ordinary","params":{}}` + "\n"
+			c := historyIncomingTestReader(t, frame+"\n"+ordinary, &HistoryCorrelation{})
+			_, err := c.Read()
+			var failure *HistoryFailure
+			if !errors.As(err, &failure) || failure.Refusal == nil || string(failure.Refusal.ReplyID) != token || failure.Refusal.Code != -32601 {
+				t.Fatalf("split refusal = %+v, error = %v", failure, err)
+			}
+			msg, err := c.Read()
+			if err != nil || msg == nil || msg.Method != "ordinary" {
+				t.Fatalf("ordinary progress after split token = %+v, error = %v", msg, err)
+			}
+		})
+	}
+	test("UTF8 crosses fragment", `{"jsonrpc":"2.0","id":"€<","method":"routing/request","params":{}}`, "€", `"€<"`)
+	test("escaped ID crosses fragment", `{"jsonrpc":"2.0","id":"a\u003cb","method":"routing/request","params":{}}`, `\u003c`, `"a\u003cb"`)
+	t.Run("partial fragment EOF", func(t *testing.T) {
+		c := historyTestReader(t, strings.Repeat(" ", 257), &HistoryCorrelation{})
+		if _, err := c.Read(); !errors.Is(err, ErrHistoryFraming) {
+			t.Fatalf("partial EOF = %v", err)
+		}
+	})
+}
+
+type historyFragmentRead struct {
+	prefix    []byte
+	entered   chan struct{}
+	rest      io.Reader
+	announced bool
+}
+
+func (r *historyFragmentRead) Read(p []byte) (int, error) {
+	if len(r.prefix) != 0 {
+		n := copy(p, r.prefix)
+		r.prefix = r.prefix[n:]
+		return n, nil
+	}
+	if !r.announced {
+		r.announced = true
+		close(r.entered)
+	}
+	return r.rest.Read(p)
+}
+
+func TestHistoryPrivateFragmentReadRetirement(t *testing.T) {
+	input, feed := io.Pipe()
+	t.Cleanup(func() { _ = input.Close(); _ = feed.Close() })
+	r := &historyFragmentRead{prefix: []byte(strings.Repeat(" ", 257)), entered: make(chan struct{}), rest: input}
+	c := newReadRetirementCodec(t, rw{r, io.Discard}, newReadRetirementBacking(), &HistoryCorrelation{}, func() { _ = input.Close() })
+	reader := c.history.Load()
+	if reader.r.Size() != 256 {
+		t.Fatal("fragment retirement did not use private buffer")
+	}
+	readDone := make(chan error, 1)
+	go func() { _, _, err := c.ReadWithRelease(); readDone <- err }()
+	awaitPeerSignal(t, r.entered, "fragment consumed before blocked read")
+	done := c.RetireRead()
+	if err := <-readDone; !errors.Is(err, ErrPeerClosed) {
+		t.Fatalf("retired fragment read = %v", err)
+	}
+	awaitPeerSignal(t, done, "fragment read retirement")
+	assertReadRetirementDetached(t, c, reader)
 }
 
 func TestHistoryFrameMaximumBudgets(t *testing.T) {
@@ -457,7 +1003,7 @@ func TestHistoryFramePrivateReaderLeases(t *testing.T) {
 	if err != nil || msg == nil || msg.Method != "ordinary" {
 		t.Fatalf("ordinary traffic lost after history quarantine: %v", err)
 	}
-	if cap(c.history.raw) != 1<<20 || cap(c.history.output) != 135168 || cap(c.history.offsets)*4 != 131072 {
+	if cap(c.history.Load().raw) != 1<<20 || cap(c.history.Load().output) != 135168 || cap(c.history.Load().offsets)*4 != 131072 {
 		t.Fatal("private reader acquired initial backing")
 	}
 }
@@ -568,8 +1114,8 @@ func TestHistoryRawGuardOuterDecoderAliases(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			c.history.correlation = &correlation
-			c.history.r.Reset(strings.NewReader(input + "\n"))
+			c.history.Load().correlation = &correlation
+			c.history.Load().r.Reset(strings.NewReader(input + "\n"))
 			msg, err := c.Read()
 			if err != nil || msg == nil {
 				t.Fatalf("alias read: %v", err)
@@ -622,8 +1168,8 @@ func TestHistoryRawGuardOuterAliasConflicts(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			c.history.correlation = &correlation
-			c.history.r.Reset(strings.NewReader(input + "\n"))
+			c.history.Load().correlation = &correlation
+			c.history.Load().r.Reset(strings.NewReader(input + "\n"))
 			msg, err := c.Read()
 			var failure *HistoryFailure
 			if msg != nil || !errors.As(err, &failure) || failure.Disposition != disposition || failure.Category != "history-invalid" || failure.Count != 1 || failure.FailPending != pending {
@@ -737,8 +1283,8 @@ func TestHistoryRawGuardRejectsUnapprovedBusyResult(t *testing.T) {
 		if err := correlation.Begin([]byte(`1`)); err != nil {
 			t.Fatal(err)
 		}
-		c.history.correlation = &correlation
-		c.history.r.Reset(strings.NewReader(input + "\n"))
+		c.history.Load().correlation = &correlation
+		c.history.Load().r.Reset(strings.NewReader(input + "\n"))
 		msg, err := c.Read()
 		var failure *HistoryFailure
 		if msg != nil || !errors.As(err, &failure) || failure.Disposition != "fail-call" || !failure.FailPending || failure.Error() != "history-invalid" {
@@ -913,7 +1459,7 @@ func TestHistoryRawGuardKnownDecode(t *testing.T) {
 func historyIncomingTestReader(t *testing.T, input string, correlation *HistoryCorrelation) *Codec {
 	t.Helper()
 	c := historyTestReader(t, input, correlation)
-	c.history.schema = func(method string, initial bool) (HistoryProjection, bool) {
+	c.history.Load().schema = func(method string, initial bool) (HistoryProjection, bool) {
 		schema, ok := historyTestSchema(method, initial)
 		if !initial && (method == "routing:get-initial" || method == "routing:subscribe" || method == "routing:unsubscribe") {
 			schema.Type = reflect.TypeOf(struct{}{})
@@ -927,7 +1473,7 @@ func TestHistoryIncomingRequestIDAdmission(t *testing.T) {
 	c := historyIncomingTestReader(t, "", &HistoryCorrelation{})
 	test := func(name, id, wantID string, wantCode int) {
 		t.Run(name, func(t *testing.T) {
-			c.history.r.Reset(strings.NewReader(`{"jsonrpc":"2.0","id":` + id + `,"method":"routing:get-initial","params":{}}` + "\n"))
+			c.history.Load().r.Reset(strings.NewReader(`{"jsonrpc":"2.0","id":` + id + `,"method":"routing:get-initial","params":{}}` + "\n"))
 			msg, err := c.Read()
 			if wantCode == 0 {
 				if err != nil || msg == nil || !msg.IsRequest() || string(*msg.ID) != wantID || string(msg.Params) != `{}` {
@@ -942,7 +1488,7 @@ func TestHistoryIncomingRequestIDAdmission(t *testing.T) {
 			if failure.Refusal.Code != wantCode || failure.Refusal.Message != "history-invalid" || string(failure.Refusal.ReplyID) != wantID || failure.Error() != "history-invalid" {
 				t.Fatalf("fixed refusal=%+v", failure.Refusal)
 			}
-			if &failure.Refusal.ReplyID[0] != &c.history.idToken[0] || len(failure.Refusal.ReplyID) > 512 {
+			if &failure.Refusal.ReplyID[0] != &c.history.Load().idToken[0] || len(failure.Refusal.ReplyID) > 512 {
 				t.Fatal("refusal ID does not borrow the bounded control slot")
 			}
 		})
@@ -963,7 +1509,7 @@ func TestHistoryIncomingRequestFixedRefusals(t *testing.T) {
 	test := func(name, method, id, params, wantID string, wantCode int, wantMessage string) {
 		t.Run(name, func(t *testing.T) {
 			frame := `{"jsonrpc":"2.0","id":` + id + `,"method":"` + method + `"` + params + `}` + "\n"
-			c.history.r.Reset(strings.NewReader(frame))
+			c.history.Load().r.Reset(strings.NewReader(frame))
 			var writes bytes.Buffer
 			c.writer = &writes
 			msg, err := c.Read()
@@ -1027,8 +1573,8 @@ func TestHistoryIncomingRequestNoUnsafeReplyAttribution(t *testing.T) {
 	test := func(name, frame, disposition string) {
 		t.Run(name, func(t *testing.T) {
 			correlation := HistoryCorrelation{}
-			c.history.correlation = &correlation
-			c.history.r.Reset(strings.NewReader(frame + "\n"))
+			c.history.Load().correlation = &correlation
+			c.history.Load().r.Reset(strings.NewReader(frame + "\n"))
 			msg, err := c.Read()
 			var failure *HistoryFailure
 			if msg != nil || !errors.As(err, &failure) || failure.Disposition != disposition || failure.Refusal != nil || failure.FailPending || failure.Error() != "history-invalid" {
@@ -1065,8 +1611,8 @@ func TestHistoryIncomingRequestCollisionDoesNotSettleOutbound(t *testing.T) {
 			if err := correlation.Begin([]byte(`"same"`)); err != nil {
 				t.Fatal(err)
 			}
-			c.history.correlation = &correlation
-			c.history.r.Reset(strings.NewReader(frame + "\n" + `{"jsonrpc":"2.0","id":"same","result":{"requests":[]}}` + "\n"))
+			c.history.Load().correlation = &correlation
+			c.history.Load().r.Reset(strings.NewReader(frame + "\n" + `{"jsonrpc":"2.0","id":"same","result":{"requests":[]}}` + "\n"))
 			msg, err := c.Read()
 			if wantDisposition == "" {
 				if err != nil || msg == nil || !msg.IsRequest() || msg.Method != wantMethod {
