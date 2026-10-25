@@ -294,6 +294,16 @@ through literally, with no maintained catalog of engine options or variables.
 Local model state comes from canonical `engine:models`. Remote model state comes
 from node-scanner enrichment and is attributed per engine.
 
+The desktop copy control API accepts independent source and destination UUIDs,
+an exact model, manager engine ID and operation ID. It exposes typed capability,
+start, cancel and active-snapshot calls; Copy-to-this-PC delegates to the same
+coordinator. Backend progress/result fields preserve export identity, byte
+counts, serving-setup requirements and uncertain receipt durability. Progress
+is keyed by the full tuple at the destination, active state hydrates from Go,
+and lost results remain unknown. Destination status and scanner-owned remote
+inventory refresh without controller artifact I/O or synthetic model rows.
+The independent source/destination picker is not part of this bridge contract.
+
 Personal AI Router uses:
 
 - `engine:models`, selecting the requested engine's `modelsByEngine` inventory;

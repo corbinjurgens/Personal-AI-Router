@@ -694,6 +694,10 @@ Requests (caller → service):
 | `engine:remote-unload-model` | `{ node, engine, model }` | the remote action result |
 | `engine:remote-delete-model` | `{ node, engine, model }` | the remote action result |
 | `engine:remote-copy-model` | `{ node, engine, model }` | `{ opId, result: { engine, model, files, filesSkipped, bytesTotal, bytesCopied } }` after copying the model from `node` into this node's engine store (§7.3) |
+| `engine:copy-model` | `{ opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId? }` | `{ opId, result: copyModelResult }` after verified destination publication (§7.3) |
+| `engine:cancel-model-copy` | `{ opId }` | `{ cancelled: boolean }`; local channel only |
+| `engine:active-model-copies` | `{}` | `{ operations: [{ opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId?, progress? }] }` |
+| `engine:model-copy-capabilities` | `{ nodeId, engine }` | `{ version:1, engine, available, installed, modelStore, exportLayouts, importLayouts, writable, reason, identityBoundRetry, receiptDurability }` |
 | `engine:remote-start` | `{ node, engine, port? }` | `EngineStatus` from the remote node (manifest `runtime.bind`; no per-call bind on the remote path) |
 | `engine:remote-stop` | `{ node, engine }` | `EngineStatus` from the remote node |
 | `engine:wake` | `{ engine }` | `EngineStatus` — starts the engine only if its saved intent is On; intent-neutral; holds the engine's lifecycle lock like `engine:restart`; refused once shutdown has begun |
@@ -877,7 +881,57 @@ pause are checked before source stop for local and remote switches.
 The `engine:remote-*` methods are the client half: engine-manager resolves the target `node` in an `ec` peer directory (fed by its own `discovery:subscribe{services:[ec]}` to the broker relay), dials the peer's `ec` surface with the same pinned identity, relays each streamed progress frame up as `engine:remote-progress` (keyed by a minted `opId`), and settles the request on the terminal frame. Remote install/pull run for the operation's full duration (no broker-imposed timeout); remote stop and model unload/delete are fast request/response, remote Ollama model load uses the readiness-sized response budget, and remote start waits for the engine's bounded readiness result. They error if this node isn't clustered or the target isn't a pinned peer.
 
 ### 7.3 Model copy between nodes
-`engine:remote-copy-model {node, engine, model}` copies a model the pinned peer `node` holds into this node's store for the same engine. Requirements:
+`engine:copy-model {opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId?}` dispatches to the destination's existing `CopyModelFrom`.
+The controller owns no artifact I/O for a copy between other devices.
+`engine:remote-copy-model {node, engine, model}` mints an opId and delegates to
+the same coordinator with this node as destination.
+The wrapper retains its original parsing and missing-field error precedence,
+including shared raw model validation, and forwards only the canonical tuple.
+
+Requirements:
+
+- **Identity and admission.** Device selectors are host UUID keys, independently
+  associated with certificate principals by the live directory. Resolve this
+  node as the unique directory entry whose cluster UUID matches the live mesh
+  principal; unknown or ambiguous associations fail closed. Never guess from a
+  hostname or treat the certificate UUID as a host selector. New canonical RPC
+  and inbound HTTP control objects are at most 16 KiB, with exact unique keys, valid Unicode/model
+  identifiers and no trailing body. Op IDs are 32 lowercase hex characters;
+  expected export IDs are lowercase SHA256 hex. Identical endpoints, malformed
+  requests, duplicate active IDs and capacity overflow fail before lookup/dial
+  or progress. Manager's copy-only state is bounded to eight active entries,
+  including incoming destination requests, with tuple/context/latest progress.
+  Every exit releases its reservation. Exact cancellation and shutdown cancel
+  contexts, including lock waits; completed entries are removed, not journaled.
+- **Destination authority.** Pinned `POST /v1/models/copy` is a registered
+  mutation. Its only fields are `opId`, `sourceNodeId`, `engine`, `model` and
+  optional `expectedExportId`; the recipient always writes locally. A narrow
+  Manager callback rechecks the real caller's fresh grant and pause/recovery
+  gates under its reservation before effects. Previously accepted work is not
+  undone by later grant revocation. The source independently pin-gates the
+  destination as the actual reader. Preserve `-32012/remote_management_denied`,
+  `-32011/local_veto`, and `-32010/policy_conflict` end to end. There is no
+  install/start, activation gate or controller staging fallback.
+- **Capabilities and retry.** Pinned read `GET /v1/models/copy-capabilities`
+  accepts only `?engine=...` and returns the local/remote RPC capability shape
+  above. `modelStore` and native layout names are adapter IDs (`ollama`,
+  `llamacpp`, `lmstudio`), plus `llama-artifacts-v1` for custom llama.cpp.
+  Fields describe actual installation/support and caller write readiness,
+  without paths, grants or other-peer permission state. Unsupported versions
+  or missing routes are never allows. Require an installed destination and a
+  shared layout, then verify the actual export against both endpoints' lists.
+  The outbound capabilities GET has the ordinary 30-second remote-control budget
+  as a context deadline covering headers and the whole bounded response body;
+  an earlier caller deadline or cancellation still wins.
+  After destination authorization/admission, an identity-bound retry first
+  verifies a matching committed receipt and fully hashes every confined file
+  before source lookup/dial/capability checks. Verified completion may therefore
+  survive an offline source; reading an old receipt retains uncertain durability.
+  Otherwise source authority must be live and its export ID must equal
+  `expectedExportId` before writes; alias rebinding is a typed conflict.
+  Alias-only retry is fresh resolution, not proof of identical content. Active
+  snapshots carry no terminal history: disappearance while disconnected means
+  unknown outcome and permits explicit idempotent retry, never inferred success.
 
 - **Transport owner.** The shared pinned peer/service adapter resolves the
   admitted source and current advertised `ec` endpoint, prefers direct mTLS,
@@ -955,7 +1009,22 @@ The `engine:remote-*` methods are the client half: engine-manager resolves the t
   does not provide dedicated bridge/UI qualification display; custom artifact
   completion is separate from destination serving configuration and readiness.
 - **Visibility.** The file that makes the model visible is written last: Ollama's manifest (after checking that every blob it names is present), llama.cpp's first GGUF split and then `refs/main` when the repo was not cached before, followed by `GET /models?reload=1` on a running router; LM Studio's model GGUF, followed by a restart of a running server (the `restart_after` path, since LM Studio indexes at startup).
-- **Progress.** `engine:remote-progress` with `op:"copy"` and `node` = the source: `listing`, `hashing` (relayed, with `file`), `checking`, `downloading` (`file`, `bytesDone`, `bytesTotal`, `percent` over the whole model), `finalizing`, then `done` (`percent:100`) or `error` (`percent:-1`).
+- **Progress.** `engine:remote-progress` retains `node=source`, `opId`, `engine`,
+  `op:"copy"`, `stage`, `percent?`, `message` and adds `sourceNodeId`,
+  `destinationNodeId`, `model`, `exportId?`, `file?`, `bytesDone?`, `bytesTotal?`.
+  Per-operation callbacks stream coalesced listing/hashing/checking/downloading/
+  finalizing progress, followed by exactly one done/error/cancelled/unknown outcome.
+  Done follows verified publication and carries total byte counts. The remote
+  NDJSON endpoint emits one terminal result/error frame, checks actual writes
+  and flushes, and cancels on failure or request loss. Progress frames are
+  bounded individually; inactivity and write deadlines bound a stalled stream.
+  Missing or invalid mutation acknowledgements carry a copy-specific typed
+  uncertainty error and emit terminal `stage:"unknown"` with `percent:-1`,
+  including when destination publication completed before acknowledgement loss.
+  Definite refusal/error and explicit cancellation retain their distinct stages.
+  The copy stream's terminal error frame preserves `stage:"unknown"` as
+  structured state; diagnostic message text never selects the outcome. Controller
+  transport loss never replays the POST or fabricates a definite failed copy.
 
 Stores: Ollama uses `OLLAMA_MODELS` from the engine's launch environment or this process, else `{models_dir}/models`; llama.cpp uses `LLAMA_CACHE` (the manifest sets `{models_dir}`) in the Hugging Face hub cache layout, selecting `owner/repo:TAG` files as llama.cpp does; LM Studio uses `{models_dir}` and the paths `lms ls --json` reports. The layout is selected by the manifest's `family`, so a fork with its own id and `models_dir` uses its family's layout rooted at its own store; an engine whose family has no layout is refused. One copy of a given model runs at a time per node.
 

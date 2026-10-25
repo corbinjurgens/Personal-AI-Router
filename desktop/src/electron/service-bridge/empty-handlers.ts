@@ -13,6 +13,7 @@ import type {
 import type { EngineType } from '@/shared/types/engines'
 import type { ServiceError } from '@/shared/types/errors'
 import { parseEngineSwitchResult, parseEngineSwitchStatus } from './engine-switch'
+import { parseModelCopyCancel, parseModelCopyCapabilities } from './model-copy'
 import {
     MODULAR_CLUSTER_MANAGER_PORT,
     MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
@@ -871,6 +872,29 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'cluster:abandon-if-solo': () => handleClusterAbandonIfSolo(),
 
     'engines:get-initial': () => getModularBridgeState().getEngineInitialState(),
+    'engine:copy-model': payload => {
+        if (!payload) throw new Error('Missing model copy request')
+        return getModularSupervisor().copyModel(payload)
+    },
+    'engine:active-model-copies': () => getModularSupervisor().activeModelCopies(),
+    'engine:cancel-model-copy': async payload => {
+        if (!payload) throw new Error('Missing model copy operation ID')
+        return parseModelCopyCancel(
+            await getModularSupervisor().callProcess('broker', 'engine:cancel-model-copy', {
+                opId: payload.opId
+            })
+        )
+    },
+    'engine:model-copy-capabilities': async payload => {
+        if (!payload) throw new Error('Missing model copy capability target')
+        return parseModelCopyCapabilities(
+            await getModularSupervisor().callProcess('broker', 'engine:model-copy-capabilities', {
+                nodeId: payload.nodeId,
+                engine: payload.engine
+            }),
+            payload.engine
+        )
+    },
     'engines:get-intent': () => getModularBridgeState().getEngineIntent(),
     'engines:switch': async payload =>
         parseEngineSwitchResult(

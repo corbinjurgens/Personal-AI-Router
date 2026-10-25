@@ -39,6 +39,12 @@ import type {
 } from '@/shared/types/engine-api'
 import type { EngineDescriptor, EngineProgress, EngineType } from '@/shared/types/engines'
 import type {
+    ActiveModelCopy,
+    ModelCopyCapabilities,
+    ModelCopyRequest,
+    ModelCopyResponse
+} from '@/shared/types/model-copy'
+import type {
     EngineSettingsTarget,
     EngineSettingsRequest,
     EngineSettingsSnapshot,
@@ -163,6 +169,13 @@ export interface WsInvokeChannelMap {
     'engines:preview-settings': { request: EngineSettingsRequest; response: EngineSettingsPreview }
     'engines:apply-settings': { request: EngineSettingsRequest; response: EngineSettingsReceipt }
     'engine:command': { request: EngineCommandPayload; response: null }
+    'engine:copy-model': { request: ModelCopyRequest; response: ModelCopyResponse }
+    'engine:cancel-model-copy': { request: { opId: string }; response: { cancelled: boolean } }
+    'engine:active-model-copies': { request: void; response: { operations: ActiveModelCopy[] } }
+    'engine:model-copy-capabilities': {
+        request: { nodeId: string; engine: string }
+        response: ModelCopyCapabilities
+    }
     'engine:search-hub': {
         request: { engineType: EngineType; query?: string }
         response: EngineHubSearchResponse

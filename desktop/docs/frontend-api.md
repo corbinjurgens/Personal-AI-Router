@@ -135,6 +135,46 @@ contract lives in [cluster-manager spec §7.0.1](../../services/nvpair-cluster-m
 
 ### `pairApi.engines`
 
+The copy control API uses manager engine IDs (`llamacpp`, for example), stable
+node UUIDs and exact model IDs. `copyModel(request)` invokes `engine:copy-model`
+with `{opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId?}`
+and waits without a fixed pull-duration cutoff for `{opId, result}`. The result
+retains `files`, `filesSkipped`, `bytesTotal`, `bytesCopied`, optional `layout`,
+`exportId`, `durability` (`confirmed` or `uncertain`) and
+`requiresConfiguration`. A copy receipt does not assert serving readiness.
+`bytesCopied` measures network traffic including retries and may exceed
+`bytesTotal`. Successful progress completes at the artifact total `bytesTotal`;
+the result retains the actual network byte count.
+
+`modelCopyCapabilities({nodeId, engine})`, `cancelModelCopy(opId)` and
+`activeModelCopies()` use `engine:model-copy-capabilities`,
+`engine:cancel-model-copy` and `engine:active-model-copies`. Capabilities require
+version 1 and preserve availability, installation, layouts, writability/reason,
+identity-bound retry and receipt-durability support. Unsupported methods,
+unknown versions and failed reads never imply permission or readiness; service
+error codes survive the bridge. Go performs the authoritative admission checks.
+Cancellation addresses only the exact operation ID and returns `{cancelled}`.
+
+Copy progress retains the complete source/destination/engine/model tuple and
+`opId`, with the visible `nodeId` set to the destination. The bridge coalesces
+active progress and retains bounded last outcomes in the engine snapshot.
+The terminal stages are `done`, `error`, `cancelled` and `unknown`. Go reports
+`unknown` for transport or acknowledgement loss. The bridge preserves this
+uncertainty through RPC settlement and on observers; an error response alone
+cannot turn an explicit unknown outcome into a definite failure.
+Custom completion messages and typed results survive independently of native
+model inventory; no routable model row is fabricated. Reconnect hydrates Go's
+active set. An operation missing from that set has an unknown outcome unless
+this client received its verified terminal result. Retain a learned `exportId`
+for an explicit identity-bound retry using `expectedExportId` and a fresh
+`opId`; an alias-only retry resolves content anew. Detaching does not cancel.
+
+`copyModelToThisPc(engineType, sourceNodeId, model)` keeps its public void
+signature and existing `engine:command` transport. Electron supplies the local
+destination UUID and a fresh operation ID, then delegates to the same canonical
+coordinator. Peer-to-peer transfers carry only control/status metadata through
+the desktop; the destination's Go service fetches the source artifacts.
+
 - `getIntent()` reads the local bridge's `EngineIntentSnapshot | null` through
   `engines:get-intent`; `onIntentChanged(callback)` subscribes through
   `engines:intent-changed`. Both maps are required: `enabledByEngine` contains
@@ -318,6 +358,10 @@ Commands return no state. Renderer stores update from
 | `engines:switch`            | `SwitchRequest`              | `{ receipt: SwitchReceipt }` |
 | `engines:switch-status`     | `SwitchStatusRequest`        | `SwitchStatus`            |
 | `engine:command`            | `EngineCommandPayload`       | `null`                    |
+| `engine:copy-model`         | `ModelCopyRequest`           | `ModelCopyResponse`       |
+| `engine:model-copy-capabilities` | `{ nodeId, engine }` | `ModelCopyCapabilities` |
+| `engine:cancel-model-copy` | `{ opId }` | `{ cancelled }` |
+| `engine:active-model-copies` | `void` | `{ operations: ActiveModelCopy[] }` |
 | `engine:search-hub`         | `{ engineType, query? }`     | `EngineHubSearchResponse` |
 | `errors:get-initial`        | `void`                       | `ServiceError[]`          |
 | `errors:clear`              | error ID                     | `null`                    |

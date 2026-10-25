@@ -42,9 +42,13 @@ import (
 // across the whole model.
 type copyProgress struct {
 	remoteProgress
-	File       string `json:"file,omitempty"`
-	BytesDone  int64  `json:"bytesDone,omitempty"`
-	BytesTotal int64  `json:"bytesTotal,omitempty"`
+	SourceNodeID      string `json:"sourceNodeId"`
+	DestinationNodeID string `json:"destinationNodeId"`
+	Model             string `json:"model"`
+	ExportID          string `json:"exportId,omitempty"`
+	File              string `json:"file,omitempty"`
+	BytesDone         int64  `json:"bytesDone,omitempty"`
+	BytesTotal        int64  `json:"bytesTotal,omitempty"`
 }
 
 // copyModelResult is the engine:remote-copy-model result (under "result").
@@ -112,22 +116,20 @@ type keyedLocks struct {
 }
 
 type keyedLock struct {
-	mu   sync.Mutex
+	gate chan struct{}
 	refs int
 }
 
-func (k *keyedLocks) lock(key string) func() {
+func (k *keyedLocks) lock(ctx context.Context, key string) (func(), error) {
 	k.mu.Lock()
 	l := k.m[key]
 	if l == nil {
-		l = &keyedLock{}
+		l = &keyedLock{gate: make(chan struct{}, 1)}
 		k.m[key] = l
 	}
 	l.refs++
 	k.mu.Unlock()
-	l.mu.Lock()
-	return func() {
-		l.mu.Unlock()
+	drop := func() {
 		k.mu.Lock()
 		l.refs--
 		if l.refs == 0 {
@@ -135,24 +137,36 @@ func (k *keyedLocks) lock(key string) func() {
 		}
 		k.mu.Unlock()
 	}
+	select {
+	case l.gate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-l.gate
+			drop()
+			return nil, err
+		}
+		return func() { <-l.gate; drop() }, nil
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	}
 }
 
 // runRemoteCopy answers engine:remote-copy-model. Like the other engine:remote-*
 // methods it runs on its own goroutine and settles when the copy finishes, with
 // live engine:remote-progress frames meanwhile (op "copy", node = the source).
 func (m *Manager) runRemoteCopy(ctx context.Context, msg *Message) {
-	var p remoteParam
-	if !m.parse(msg, &p) {
+	var legacy remoteParam
+	if !m.parse(msg, &legacy) {
 		return
 	}
 	switch {
-	case p.Node == "":
+	case legacy.Node == "":
 		m.codec.RespondError(msg.ID, -32602, "node is required")
 		return
-	case p.Engine == "":
+	case legacy.Engine == "":
 		m.codec.RespondError(msg.ID, -32602, "engine is required")
 		return
-	case p.Model == "":
+	case legacy.Model == "":
 		m.codec.RespondError(msg.ID, -32602, "model is required")
 		return
 	}
@@ -160,33 +174,28 @@ func (m *Manager) runRemoteCopy(ctx context.Context, msg *Message) {
 		m.codec.RespondError(msg.ID, -32602, err.Error())
 		return
 	}
-	peer, ok := m.peers.lookup(p.Node)
-	if !ok {
-		m.codec.RespondError(msg.ID, -32000, "node "+p.Node+" is not a discovered ec peer")
-		return
-	}
-	client, err := m.remoteClient(ctx, peer)
+	self, err := m.copySelfID()
 	if err != nil {
-		m.codec.RespondError(msg.ID, -32000, err.Error())
+		m.respondOrErr(msg, nil, err)
 		return
 	}
-	opID := newOpID()
-	emit := func(cp copyProgress) {
-		cp.OpID, cp.Node, cp.Engine, cp.Op = opID, peer.nodeID, p.Engine, "copy"
-		_ = m.codec.Notify("engine:remote-progress", cp)
-	}
-	res, err := m.exec.CopyModelFrom(ctx, client, p.Engine, p.Model, emit)
+	p := copyRequest{OpID: newOpID(), SourceNodeID: legacy.Node, DestinationNodeID: self, Engine: legacy.Engine, Model: legacy.Model}
+	data, err := json.Marshal(p)
 	if err != nil {
-		// Terminal frame for a UI whose synchronous call already gave up.
-		emit(copyProgress{remoteProgress: remoteProgress{Stage: "error", Percent: -1, Message: err.Error()}})
-		m.codec.RespondError(msg.ID, -32000, err.Error())
+		m.respondOrErr(msg, nil, err)
 		return
 	}
-	m.codec.Respond(msg.ID, map[string]any{"opId": opID, "result": res})
+	canonical := *msg
+	canonical.Params = data
+	m.runCopy(ctx, &canonical)
 }
 
 // CopyModelFrom copies model for engine from src into this node's engine store.
 func (e *Executor) CopyModelFrom(ctx context.Context, src modelFileSource, engine, model string, emit func(copyProgress)) (copyModelResult, error) {
+	return e.copyModelFrom(ctx, src, engine, model, "", nil, nil, emit)
+}
+
+func (e *Executor) copyModelFrom(ctx context.Context, src modelFileSource, engine, model, expectedExportID string, exportLayouts, importLayouts []string, emit func(copyProgress)) (copyModelResult, error) {
 	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
 		return copyModelResult{}, err
 	}
@@ -207,9 +216,9 @@ func (e *Executor) CopyModelFrom(ctx context.Context, src modelFileSource, engin
 	if !status.Installed {
 		return copyModelResult{}, fmt.Errorf("%s is not installed on this node; install it before copying a model to it", status.DisplayName)
 	}
-	key := engine + "\x00" + model
+	key := store.root + "\x00" + engine + "\x00" + model
 	if _, busy := activeModelCopies.LoadOrStore(key, struct{}{}); busy {
-		return copyModelResult{}, fmt.Errorf("a copy of %q is already running on this node", model)
+		return copyModelResult{}, copyConflict(fmt.Sprintf("a copy of %q is already running on this node", model))
 	}
 	defer activeModelCopies.Delete(key)
 
@@ -227,9 +236,34 @@ func (e *Executor) CopyModelFrom(ctx context.Context, src modelFileSource, engin
 	if err != nil {
 		return copyModelResult{}, fmt.Errorf("list %q on the source: %w", model, err)
 	}
+	if expectedExportID != "" && list.ExportID != expectedExportID {
+		return copyModelResult{}, copyConflict("source export changed; retry identity does not match")
+	}
+	layout := list.Layout
+	if layout == "" {
+		layout = store.adapter
+	}
+	for _, supported := range [][]string{exportLayouts, importLayouts} {
+		if supported == nil {
+			continue
+		}
+		found := false
+		for _, name := range supported {
+			if name == layout {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return copyModelResult{}, fmt.Errorf("source export layout is not supported by both endpoints")
+		}
+	}
 	plan, err := e.planModelCopy(st, store, model, list)
 	if err != nil {
 		return copyModelResult{}, err
+	}
+	if list.ExportID != "" {
+		emit(copyProgress{remoteProgress: remoteProgress{Stage: "checking"}, ExportID: list.ExportID})
 	}
 	// Listing the source and planning the copy are read-only. Installing the
 	// downloaded files is not: the writes run under the engine's
@@ -237,7 +271,10 @@ func (e *Executor) CopyModelFrom(ctx context.Context, src modelFileSource, engin
 	// engine's model identity before the first file is written.
 	var res copyModelResult
 	if err := e.withModelMutation(ctx, engine, func() error {
-		unlock := copyDestLocks.lock(plan.root + "\x00" + model)
+		unlock, err := copyDestLocks.lock(ctx, plan.root+"\x00"+model)
+		if err != nil {
+			return err
+		}
 		defer unlock()
 		if plan.preflight != nil {
 			if err := plan.preflight(ctx); err != nil {
@@ -361,17 +398,17 @@ func destMatches(ctx context.Context, f plannedFile) (bool, error) {
 		return false, err
 	}
 	if info.IsDir() {
-		return false, fmt.Errorf("%s is a directory on this node", f.dest)
+		return false, copyConflict(fmt.Sprintf("copy conflict: %s is a directory on this node", f.Path))
 	}
 	if !info.Mode().IsRegular() || info.Size() != f.Size {
-		return false, fmt.Errorf("copy conflict: existing destination content differs for %s", f.Path)
+		return false, copyConflict(fmt.Sprintf("copy conflict: existing destination content differs for %s", f.Path))
 	}
 	sum, err := fileHashes.sum(ctx, f.dest, nil)
 	if err != nil {
 		return false, err
 	}
 	if sum != f.SHA256 {
-		return false, fmt.Errorf("copy conflict: existing destination content differs for %s", f.Path)
+		return false, copyConflict(fmt.Sprintf("copy conflict: existing destination content differs for %s", f.Path))
 	}
 	return true, nil
 }
@@ -381,11 +418,11 @@ func checkFreeSpace(root string, needed int64) error {
 	dir := nearestExistingDir(root)
 	free, err := diskFreeBytes(dir)
 	if err != nil {
-		return fmt.Errorf("could not check free disk space at %s: %w", dir, err)
+		return fmt.Errorf("could not check free disk space on the destination: %w", err)
 	}
 	if want := uint64(needed) + uint64(copyFreeSpaceHeadroom); free < want {
-		return fmt.Errorf("not enough free disk space on this node: the copy needs %s more and %s is free at %s (with %s kept in reserve)",
-			formatBytes(needed), formatBytes(int64(free)), dir, formatBytes(copyFreeSpaceHeadroom))
+		return fmt.Errorf("not enough free disk space on this node: the copy needs %s more and %s is free (with %s kept in reserve)",
+			formatBytes(needed), formatBytes(int64(free)), formatBytes(copyFreeSpaceHeadroom))
 	}
 	return nil
 }
@@ -421,7 +458,10 @@ func formatBytes(n int64) string {
 // rename. It returns the bytes fetched over the network, and skipped when
 // another writer placed a matching file while this one waited for its lock.
 func downloadPlannedFile(ctx context.Context, src modelFileSource, engine, model string, f plannedFile, onBytes func(int64)) (copied int64, skipped bool, err error) {
-	unlock := copyDestLocks.lock(f.dest)
+	unlock, err := copyDestLocks.lock(ctx, f.dest)
+	if err != nil {
+		return 0, false, err
+	}
 	defer unlock()
 	if ok, err := destMatches(ctx, f); err != nil || ok {
 		return 0, ok, err

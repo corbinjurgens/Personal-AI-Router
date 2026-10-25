@@ -11,6 +11,7 @@ import {
     ModelExpiries,
     ModelItemStatuses
 } from '@/shared/constants/engines'
+import type { ModelCopyResult } from '@/shared/types/model-copy'
 import type { ModelDownloadEntry, ModelDownloadSnapshot } from '@/shared/types/model-download'
 
 /**
@@ -132,6 +133,16 @@ export interface EngineProgress {
     completed?: number
     total?: number
     error?: string
+    /** Copies are keyed by the complete tuple and displayed at the destination. */
+    opId?: string
+    sourceNodeId?: string
+    destinationNodeId?: string
+    expectedExportId?: string
+    exportId?: string
+    file?: string
+    message?: string
+    /** Retains setup/durability qualifications without inventing a model row. */
+    copyResult?: ModelCopyResult
     downloadState?: ModelDownloadEntry
     downloadStateCurrent?: boolean
     downloadSourceId?: string

@@ -50,7 +50,7 @@ const pendingInvite = {
     respondedAt: null
 } satisfies Invite
 
-function timeoutFor(method: string): number | undefined {
+function timeoutFor(method: string): number | null | undefined {
     const call = mocks.supervisor.callProcess.mock.calls.find(([, name]) => name === method)
     expect(call).toBeDefined()
     return call?.[3]

@@ -583,7 +583,7 @@ func TestRunRemoteCopyValidatesParams(t *testing.T) {
 		`{"engine":"ollama","model":"x"}`:                "node is required",
 		`{"node":"n","model":"x"}`:                       "engine is required",
 		`{"node":"n","engine":"ollama"}`:                 "model is required",
-		`{"node":"ghost","engine":"ollama","model":"x"}`: "not a discovered ec peer",
+		`{"node":"ghost","engine":"ollama","model":"x"}`: "this node is not clustered",
 	} {
 		out := &lockedBuffer{}
 		m := NewManager(NewCodec(out), &Executor{progress: newProgressHub()}, nil, "")

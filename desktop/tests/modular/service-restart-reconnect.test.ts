@@ -92,8 +92,8 @@ function refreshCount(): number {
 }
 
 async function flush(): Promise<void> {
-    // Drain the finite hydration chain without advancing periodic poll timers.
-    for (let turn = 0; turn < 100; turn++) await Promise.resolve()
+    // Drain hydration promises without advancing periodic poll timers.
+    await vi.advanceTimersByTimeAsync(0)
 }
 
 describe('broker session hydration', () => {
@@ -112,6 +112,7 @@ describe('broker session hydration', () => {
             if (method === 'workloads:get-initial') return baseline('fresh')
             if (method === 'cluster:get-node-id') return { nodeUuid: 'self' }
             if (method === 'engine:models') return modelBaseline([])
+            if (method === 'engine:active-model-copies') return { operations: [] }
             if (method === 'nodes:get-initial') return { nodes: [] }
             if (method === 'engine:get-installed' || method === 'engine:descriptors')
                 return { engines: [] }
