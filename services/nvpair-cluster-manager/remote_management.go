@@ -402,7 +402,7 @@ func (m *Manager) finalizeRemoteManagementMigrationLocked() error {
 				if err != nil || !remoteManagementAuthorityMatches(captured, pin.NodeUUID, fingerprint, pin.ClusterID, pin.AdmissionEpoch) {
 					continue
 				}
-				incarnation, ok := m.mesh.PeerServiceIncarnation(pin.NodeUUID)
+				incarnation, ok := m.peerServiceIncarnation(pin.NodeUUID)
 				if ok {
 					doc.Grants = append(doc.Grants, clustertrust.RemoteManagementGrant{PeerUUID: pin.NodeUUID, Incarnation: incarnation, Allowed: true, DecisionRevision: doc.Revision})
 				}
@@ -450,16 +450,19 @@ func (m *Manager) remoteManagementSnapshotLocked() remoteManagementSnapshot {
 	if err == nil && marker.State == "complete" {
 		view.Revision = doc.Revision
 	}
-	m.memMu.Lock()
-	defer m.memMu.Unlock()
-	for uuid, member := range m.members {
+	for _, member := range m.snapshotNodes() {
+		uuid := member.NodeUUID
 		if member.State != stateMember || uuid == m.identity.NodeUUID {
 			continue
 		}
 		if _, ok := m.trust.Get(uuid); !ok {
 			continue
 		}
+		// RemoteManagement also reads the Mesh incarnation. snapshotNodes has
+		// released memMu before storage ownership, matching the writer order.
+		m.membersStoreMu.Lock()
 		permission := m.mesh.RemoteManagement(uuid)
+		m.membersStoreMu.Unlock()
 		view.Grants = append(view.Grants, remoteManagementViewGrant{PeerUUID: uuid, Allowed: permission.Allowed, State: permission.State})
 	}
 	sort.Slice(view.Grants, func(i, j int) bool { return view.Grants[i].PeerUUID < view.Grants[j].PeerUUID })
@@ -485,7 +488,7 @@ func (m *Manager) setRemoteManagementWithGuardLocked(peerUUID string, allowed bo
 	if err != nil || revision == math.MaxUint64 {
 		return fmt.Errorf("remote management revision exhausted")
 	}
-	incarnation, ok := m.mesh.PeerServiceIncarnation(peerUUID)
+	incarnation, ok := m.peerServiceIncarnation(peerUUID)
 	if !ok || peerUUID == m.identity.NodeUUID || m.teardownPending.Load() {
 		return fmt.Errorf("peer has no current admission")
 	}
@@ -495,7 +498,7 @@ func (m *Manager) setRemoteManagementWithGuardLocked(peerUUID string, allowed bo
 		if grant.PeerUUID == peerUUID && grant.Incarnation == incarnation {
 			oldState = strconv.FormatBool(grant.Allowed)
 		}
-		current, ok := m.mesh.PeerServiceIncarnation(grant.PeerUUID)
+		current, ok := m.peerServiceIncarnation(grant.PeerUUID)
 		if ok && current == grant.Incarnation && grant.PeerUUID != peerUUID {
 			grants = append(grants, grant)
 		}

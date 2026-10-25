@@ -955,12 +955,17 @@ encoding and replacement. `persistMembersStoreLocked` is the single snapshot
 and replacement implementation. Ordinary member mutations release `memMu`
 before persistence; the store does not serialize all live display/address
 updates. The hint transaction is different: `commitPeerServiceHints` first
-owns `rosterMu` and verifies the original Mesh incarnation and `reversePeer`
-identity, including both admissions and certificates. Only then does it take
-`membersStoreMu`, briefly recheck exact member UUID/state/cluster/epoch under
-`memMu`, and copy/update the slice. No Mesh, trust, reverse, routing or outer
-composition callback runs inside the store boundary, and filesystem I/O holds
-no `memMu`.
+owns `rosterMu`, refreshes the Mesh and verifies the `reversePeer` identity.
+Neither operation reads `members.json`. It then takes `membersStoreMu` to
+verify the original Mesh incarnation, briefly recheck exact member
+UUID/state/cluster/epoch under `memMu`, and copy/update the slice. Every manager
+incarnation lookup, including pairing receipts and remote-management migration
+and grant updates, excludes member replacements with this storage boundary.
+The remote-management view releases its member snapshot's `memMu` before
+taking storage ownership for the Mesh permission read, which also checks the
+incarnation. Only the Mesh's internal leaf locks run inside that boundary;
+no manager trust, reverse, routing or outer composition callback does, and
+filesystem I/O holds no `memMu`.
 
 The hint transaction calls the locked writer without recursively acquiring it.
 Pre-replacement failure restores only the old hint slice before releasing

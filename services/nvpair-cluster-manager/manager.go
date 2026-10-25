@@ -89,9 +89,9 @@ type Manager struct {
 	// speculative hint rollback. Order: existing roster/invite/session owner,
 	// then membersStoreMu, then briefly memMu. Storage never acquires outer
 	// identity, trust, reverse, routing or callback owners; I/O releases memMu.
-	// The Mesh's own internal read locks are the one exception: the peer
-	// incarnation check reads members.json under membersStoreMu so it cannot
-	// overlap a replacement.
+	// The Mesh's own internal read locks are the one exception: incarnation
+	// and remote-management checks read members.json under membersStoreMu so
+	// they cannot overlap a replacement. Neither calls back into the Manager.
 	membersStoreMu sync.Mutex
 	memMu          sync.Mutex
 	members        map[string]*ClusterNode // keyed by nodeUuid
