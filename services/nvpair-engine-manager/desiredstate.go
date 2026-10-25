@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -93,6 +94,17 @@ func (state *desiredStateFile) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	for name, raw := range fields {
+		if name == "pendingSwitch" && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			var checkpoint map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &checkpoint); err != nil {
+				return err
+			}
+			for key, cause := range checkpoint {
+				if strings.EqualFold(key, "automatic") && (key != "automatic" || (!bytes.Equal(bytes.TrimSpace(cause), []byte("true")) && !bytes.Equal(bytes.TrimSpace(cause), []byte("false")))) {
+					return errors.New("pending switch automatic must be boolean")
+				}
+			}
+		}
 		if !strings.EqualFold(name, "locked") {
 			continue
 		}
@@ -116,6 +128,9 @@ func (state *desiredStateFile) UnmarshalJSON(data []byte) error {
 type switchCheckpointPorts struct {
 	Source int `json:"source"`
 	Target int `json:"target"`
+	// Automatic source execution evidence, never permission to signal a PID.
+	SourcePID   int    `json:"sourcePid,omitempty"`
+	SourceRunID string `json:"sourceRunId,omitempty"`
 }
 
 // intentOrigin says who saved an engine's intent: this node's own clients
@@ -338,7 +353,7 @@ func (s *desiredStateStore) load() (desiredStateFile, error) {
 		}
 	}
 	if cp := state.PendingSwitch; cp != nil {
-		if ports := state.PendingSwitchPorts; ports != nil && (ports.Source < 0 || ports.Source > 65535 || ports.Target < 0 || ports.Target > 65535) {
+		if ports := state.PendingSwitchPorts; ports != nil && (ports.Source < 0 || ports.Source > 65535 || ports.Target < 0 || ports.Target > 65535 || ports.SourcePID < 0 || len(ports.SourceRunID) > settings.MaxSwitchRequestIDBytes) {
 			return desiredStateFile{}, errors.New("invalid pending switch endpoint")
 		}
 		if err := validSwitchEnvelope(cp.SwitchPrepareRequest); err != nil {
@@ -440,6 +455,12 @@ func (e *Executor) restoreEnabled(ctx context.Context, engine string) error {
 // readiness/adoption, since an interrupted managed child may be unhealthy.
 // Callers hold opMu and register startCancel before entering this owner.
 func (e *Executor) reclaimOrphan(ctx context.Context, st *engineState, engine string, port int) (bool, error) {
+	return e.reclaimOrphanForPID(ctx, st, engine, port, 0)
+}
+
+// requiredPID narrows automatic source cleanup to its original child. The
+// managed-install/image, previous-reclaim and exit predicates remain mandatory.
+func (e *Executor) reclaimOrphanForPID(ctx context.Context, st *engineState, engine string, port, requiredPID int) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -471,6 +492,9 @@ func (e *Executor) reclaimOrphan(ctx context.Context, st *engineState, engine st
 	}
 	if !found || !isOurEngineImage(image, binPath) {
 		return false, nil
+	}
+	if requiredPID > 0 && pid != requiredPID {
+		return false, fmt.Errorf("cannot automatically reclaim %s: source process changed", engine)
 	}
 	if err := ctx.Err(); err != nil {
 		return false, err
