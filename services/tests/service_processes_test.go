@@ -22,6 +22,8 @@ type serviceProcessIdentity struct {
 	Created int64
 }
 
+var errServiceProcessDeparted = errors.New("recorded fixture process departed")
+
 type serviceProcessInventory struct {
 	mu    sync.Mutex
 	paths []string
@@ -32,6 +34,8 @@ type serviceProcessInventory struct {
 	enumerationError error
 	// recoveryProbe replaces the independent stopped-state probe in tests.
 	recoveryProbe func(context.Context, int32) (bool, error)
+	// recoveryIdentity replaces the live canonical identity read in tests.
+	recoveryIdentity func(context.Context, int32) (serviceProcessIdentity, error)
 }
 
 func canonicalServicePath(path string) (string, error) {
@@ -113,8 +117,8 @@ func serviceStoppedPresence(stopped func(context.Context, int32) (bool, error)) 
 	}
 }
 
-// A recorded identity can be omitted only after independent absence or a zombie
-// status is established. Windows has no zombie state and no supported Status.
+// Windows has no zombie state and no supported Status. Recovery also checks
+// identity because a present PID may belong to a replacement process.
 func serviceProcessStopped(ctx context.Context, pid int32) (bool, error) {
 	var status func(context.Context, int32) ([]string, error)
 	if runtime.GOOS != "windows" {
@@ -237,7 +241,8 @@ func (in *serviceProcessInventory) scanContext(ctx context.Context) ([]servicePr
 }
 
 // recoveryContext includes recorded descendants missed by an incomplete scan.
-// A live or ambiguous PID still has to pass killContext's full revalidation.
+// Only the same live lifetime is recovered; killContext still independently
+// revalidates every identity immediately before signalling.
 func (in *serviceProcessInventory) recoveryContext(ctx context.Context, owned []serviceProcessIdentity) ([]serviceProcessIdentity, error) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
@@ -248,6 +253,10 @@ func (in *serviceProcessInventory) recoveryContext(ctx context.Context, owned []
 	probe := in.recoveryProbe
 	if probe == nil {
 		probe = serviceProcessStopped
+	}
+	inspect := in.recoveryIdentity
+	if inspect == nil {
+		inspect = serviceProcessIdentityAt
 	}
 	var failures []error
 	for pid, identity := range in.known {
@@ -272,9 +281,42 @@ func (in *serviceProcessInventory) recoveryContext(ctx context.Context, owned []
 		if err == nil && stopped {
 			continue
 		}
+		current, identityErr := inspect(ctx, pid)
+		if identityErr != nil {
+			if unresolved := serviceInspectionErrorWithProbe(ctx, pid, "recover identity", identityErr, serviceStoppedPresence(probe)); unresolved != nil {
+				failures = append(failures, unresolved)
+			}
+			continue
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		if current != identity {
+			continue // The recorded process departed and its PID was reused.
+		}
 		owned = append(owned, identity)
 	}
 	return owned, errors.Join(errors.Join(failures...), ctx.Err())
+}
+
+func serviceProcessIdentityAt(ctx context.Context, pid int32) (serviceProcessIdentity, error) {
+	p, err := process.NewProcessWithContext(ctx, pid)
+	if err != nil {
+		return serviceProcessIdentity{}, err
+	}
+	path, err := p.ExeWithContext(ctx)
+	if err != nil {
+		return serviceProcessIdentity{}, err
+	}
+	path, err = serviceExecutablePath(path)
+	if err != nil {
+		return serviceProcessIdentity{}, err
+	}
+	created, err := p.CreateTimeWithContext(ctx)
+	if err != nil {
+		return serviceProcessIdentity{}, err
+	}
+	return serviceProcessIdentity{PID: pid, Path: path, Created: created}, ctx.Err()
 }
 
 // kill rechecks all identity fields immediately before targeting this PID.
@@ -321,7 +363,11 @@ func (in *serviceProcessInventory) killContextWithProbes(ctx context.Context, wa
 		return inspectionFailed("creation time", err)
 	}
 	if path != want.Path || created != want.Created || !in.owns(path) {
-		return fmt.Errorf("refusing changed pid %d identity: path=%q created=%d, recorded=%+v", want.PID, path, created, want)
+		err := fmt.Errorf("refusing changed pid %d identity: path=%q created=%d, recorded=%+v", want.PID, path, created, want)
+		if path != want.Path || created != want.Created {
+			return errors.Join(err, errServiceProcessDeparted)
+		}
+		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err

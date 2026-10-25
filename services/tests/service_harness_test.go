@@ -520,7 +520,7 @@ func (f *serviceFixture) cleanupChecked() error {
 					break
 				}
 				if identity.Path == path {
-					if err := f.inventory.killContext(cleanupCtx, identity); err != nil {
+					if err := f.inventory.killContext(cleanupCtx, identity); err != nil && !errors.Is(err, errServiceProcessDeparted) {
 						failures = append(failures, fmt.Errorf("kill owned fixture %+v: %w", identity, err))
 					}
 				}
