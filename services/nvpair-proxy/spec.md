@@ -1490,6 +1490,13 @@ observation, hold cleanup, terminal expiry and retry deadlines retain their
 existing meaning. A stale proxy `engine-off` refusal remains `pending` without
 a reason while the current manager source reports the engine running.
 
+Prepare and dispatch refusals have a separate shared reason validator that
+excludes `load-failed`. Their producers evaluate current admission and reservation
+state, not the previous load outcome: an unresolved failed load can cause
+`no-fit` on a new preparation or `reservation-revoked` on redispatch. Its broker
+model-configuration status remains `unknown`/`load-failed`; older peers still
+need a coordinated upgrade to consume that status.
+
 An interrupted load without a terminal manager reply retains its resident hold
 and reports `unknown`/`operation-timeout` until a policy edit invalidates the
 declaration or the proxy restarts. Elapsed observation time and manager

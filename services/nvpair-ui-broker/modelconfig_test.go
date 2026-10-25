@@ -1732,6 +1732,38 @@ func TestModelConfigDefiniteLoadFailureReason(t *testing.T) {
 	test("recovered finish", true)
 }
 
+func TestModelConfigLoadFailureReasonIsStatusOnly(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startResidentAttempt(t, nodepolicy.ResidentFailed)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	assertModelConfigLoadFailed(t, f)
+	status := f.b.localPolicy().ModelConfiguration
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var readback nodepolicy.ModelConfiguration
+	if err := json.Unmarshal(raw, &readback); err != nil {
+		t.Fatalf("produced failed-load status rejected: %v", err)
+	}
+	if len(readback.Models) != 1 {
+		t.Fatalf("produced status has no unique resident: %+v", readback)
+	}
+	entry := readback.Models[0]
+	if entry.Reason != nodepolicy.ModelReasonLoadFailed {
+		t.Fatalf("produced failure lost its status reason: %+v", entry)
+	}
+	refusal := nodepolicy.ResidentRefusal{Engine: entry.Engine, Model: entry.Model, Reason: entry.Reason}
+	if err := refusal.Validate(); err == nil {
+		t.Error("completed load failure accepted as a prepare refusal")
+	}
+	if err := (nodepolicy.DispatchResidentResult{Reason: nodepolicy.DispatchResidentReason(entry.Reason)}).Validate(); err == nil {
+		t.Error("completed load failure accepted as a dispatch refusal")
+	}
+}
+
 // The manager's ordinary definite failure carries its readable post-load
 // inventory, which omits the model; the proxy settles it without recovery.
 func TestModelConfigObservedLoadFailureReason(t *testing.T) {

@@ -626,6 +626,42 @@ func TestResidentCapacityDispatchedUnknownRetained(t *testing.T) {
 	}
 }
 
+func TestResidentFailedLoadRefusals(t *testing.T) {
+	h, in := residentHarness(t, "m:latest")
+	prepared := prepareResidentOK(t, h.a, in)
+	dispatchResidentOK(t, h.a, in, prepared)
+	// A definite load failure without fresh inventory still holds capacity.
+	finish := finishResidentOK(t, h.a, residentFinish(in, prepared, nodepolicy.ResidentFailed))
+	if finish.RecoveryID == "" || h.a.currentActive() != 1 {
+		t.Fatalf("failed load lost its unresolved hold: %+v active=%d", finish, h.a.currentActive())
+	}
+	in.OperationID = "resident:2"
+	refused, err := h.a.prepareResident("proxy", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused.ReservationID != "" || len(refused.Refusals) != 1 || refused.Refusals[0].Reason != nodepolicy.ModelReasonNoFit {
+		t.Fatalf("failed load must refuse new preparation by capacity: %+v", refused)
+	}
+	if err := refused.Validate(); err != nil {
+		t.Fatalf("produced prepare refusal rejected: %v", err)
+	}
+	in.OperationID = "resident:1"
+	dispatched, err := h.a.dispatchResident("proxy", residentDispatch(in, prepared))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatched.Dispatched || dispatched.Reason != nodepolicy.DispatchReasonReservationRevoked {
+		t.Fatalf("completed failed load must refuse redispatch by reservation: %+v", dispatched)
+	}
+	if err := dispatched.Validate(); err != nil {
+		t.Fatalf("produced dispatch refusal rejected: %v", err)
+	}
+	if h.a.currentActive() != 1 || h.a.isLoaded(in.Engine, in.Model) {
+		t.Fatal("refusal changed unresolved failed-load capacity or invented loaded evidence")
+	}
+}
+
 func TestResidentCapacityUndispatchedFinishReleasesOnce(t *testing.T) {
 	h, in := residentHarness(t, "m:latest")
 	prepared := prepareResidentOK(t, h.a, in)

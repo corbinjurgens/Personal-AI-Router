@@ -87,6 +87,15 @@ source still reports the engine running; it uses the same retry deadline.
 These status reasons do not change hold cleanup, expiry or retry scheduling,
 and never include raw engine errors.
 
+`load-failed` is a model-configuration status reason only. Shared prepare and
+dispatch refusal validation excludes it; the proxy reports current permission,
+capacity or reservation refusal independently of a prior load outcome. The
+status reason still requires a coordinated fleet upgrade: brokers predating
+`load-failed` drop policy-set announcements containing it, and desktop parsers
+predating the reason reject the entry.
+Separating refusal validation does not make those configuration facts readable
+by older peers.
+
 A pause of either origin reports model-configuration reason `paused`, including
 the accepted interval before persistence. An ordinary saved Off reports
 `engine-off`; it does not imply an engine lock. Lock enforcement and the
