@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"sync"
 
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
@@ -69,6 +70,9 @@ type setPortParam struct {
 // start, stop, restart, action) run in their own goroutine so the read
 // loop never blocks; the codec serializes the concurrent responses.
 type Manager struct {
+	copyMu           sync.Mutex
+	copies           map[string]*activeCopy
+	copiesClosed     bool
 	switchWatchers   switchWatchers
 	switchRelay      switchRelay
 	settingsRelay    settingsRelay
@@ -137,6 +141,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	defer cancel()
+	defer m.stopCopies()
 
 	if err := m.codec.Notify("engine:ready", ReadyParams{Version: Version}); err != nil {
 		return fmt.Errorf("failed to send ready notification: %w", err)
@@ -160,6 +165,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	// Cancel first so any in-flight start aborts at its readiness wait,
 	// then stop engines so the parent's exit doesn't orphan them.
 	cancel()
+	m.stopCopies()
 	m.exec.StopAll()
 	m.controlHTTP.CloseIdle()
 	m.controlReadyHTTP.CloseIdle()
@@ -375,6 +381,14 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 
 	case "engine:remote-copy-model":
 		go m.runRemoteCopy(ctx, msg)
+	case "engine:copy-model":
+		go m.runCopy(ctx, msg)
+	case "engine:cancel-model-copy":
+		m.copyState(msg, true)
+	case "engine:active-model-copies":
+		m.copyState(msg, false)
+	case "engine:model-copy-capabilities":
+		go m.runCopyCapabilities(ctx, msg)
 
 	case remoteManagementGetMethod:
 		go m.remoteManagementGet(ctx, msg)

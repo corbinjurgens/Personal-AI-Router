@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"nvpair-shared/durablefile"
@@ -551,6 +552,93 @@ func readCopyReceipt(store engineModelStore, model string) (copyReceipt, error) 
 	return receipt, nil
 }
 
+// A retry may prove completion without a reachable source. Reading the receipt
+// alone is insufficient: every committed artifact is confined and fully hashed
+// under the same destination writer lock as ordinary copy. No files are created.
+func (e *Executor) completedCopy(ctx context.Context, engine, model, expected string, emit func(copyProgress)) (copyModelResult, bool, error) {
+	_, store, err := e.modelStoreFor(engine)
+	if err != nil {
+		return copyModelResult{}, false, err
+	}
+	if store.adapter != "llamacpp" {
+		return copyModelResult{}, false, nil
+	}
+	unlock, err := copyDestLocks.lock(ctx, store.root+"\x00"+model)
+	if err != nil {
+		return copyModelResult{}, false, err
+	}
+	defer unlock()
+	receipt, err := readCopyReceipt(store, model)
+	if errors.Is(err, os.ErrNotExist) {
+		return copyModelResult{}, false, nil
+	}
+	if err != nil {
+		return copyModelResult{}, false, err
+	}
+	if receipt.List.ExportID != expected {
+		return copyModelResult{}, false, copyConflict("committed copy differs from expected export identity")
+	}
+	root, err := os.OpenRoot(store.root)
+	if err != nil {
+		return copyModelResult{}, false, fmt.Errorf("cannot open destination model store")
+	}
+	defer root.Close()
+	res := copyModelResult{Engine: engine, Model: model, Layout: llamaArtifactsLayout, ExportID: expected, Durability: copyDurabilityUncertain, RequiresConfiguration: true, Files: len(receipt.List.Files), FilesSkipped: len(receipt.List.Files)}
+	for _, f := range receipt.List.Files {
+		res.BytesTotal += f.Size
+	}
+	var done int64
+	var lastEmit time.Time
+	report := func(file string, bytes int64, force bool) {
+		if emit == nil || !force && time.Since(lastEmit) < copyProgressInterval {
+			return
+		}
+		lastEmit = time.Now()
+		emit(copyProgress{remoteProgress: remoteProgress{Stage: "checking", Percent: copyPercent(done+bytes, res.BytesTotal)}, ExportID: expected, File: file, BytesDone: done + bytes, BytesTotal: res.BytesTotal})
+	}
+	report("", 0, true)
+	for _, f := range receipt.List.Files {
+		dest := filepath.Join(copyAliasDir(store.root, model), expected, filepath.FromSlash(f.Path))
+		if err := safeCopyDestination(store.root, dest); err != nil {
+			return res, false, err
+		}
+		rel, err := filepath.Rel(store.root, dest)
+		if err != nil {
+			return res, false, err
+		}
+		file, err := root.Open(rel)
+		if errors.Is(err, os.ErrNotExist) {
+			return copyModelResult{}, false, nil
+		}
+		if err != nil {
+			return res, false, fmt.Errorf("cannot verify committed copy artifact")
+		}
+		before, statErr := file.Stat()
+		if statErr != nil || !before.Mode().IsRegular() || before.Size() != f.Size {
+			_ = file.Close()
+			return res, false, copyConflict("committed copy artifact does not match its receipt")
+		}
+		hash := sha256.New()
+		_, hashErr := copyWithContext(ctx, hash, file, func(n int64) { report(f.Path, n, false) })
+		closeErr := file.Close()
+		after, afterErr := root.Lstat(rel)
+		if afterErr != nil || !sameCopyFile(before, after) {
+			return res, false, copyConflict("committed copy artifact changed")
+		}
+		if hashErr != nil {
+			return res, false, hashErr
+		}
+		if closeErr != nil {
+			return res, false, fmt.Errorf("cannot verify committed copy artifact")
+		}
+		if before.Size() != f.Size || hex.EncodeToString(hash.Sum(nil)) != f.SHA256 {
+			return res, false, copyConflict("committed copy artifact does not match its receipt")
+		}
+		done += f.Size
+	}
+	return res, true, ctx.Err()
+}
+
 // Existing components below the trusted store root must be ordinary directories
 // and files. Reject symlinks (including .part and receipt paths) and Windows
 // case aliases before any creation, and repeat under each writer lock.
@@ -623,7 +711,7 @@ func customArtifactPlan(store engineModelStore, model string, list modelFileList
 			return err
 		}
 		if receipt.List.ExportID != id {
-			return fmt.Errorf("copy conflict: this alias already has a different committed export")
+			return copyConflict("copy conflict: this alias already has a different committed export")
 		}
 		return ctx.Err()
 	}

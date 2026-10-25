@@ -1319,6 +1319,20 @@ Opt into / out of the `engine:<event>` stream (off by default). Acks `{ subscrib
 
 #### `engine:<method>` (generic relay)
 
+Model COPY uses this same relay for `engine:copy-model`,
+`engine:model-copy-capabilities`, `engine:cancel-model-copy` and
+`engine:active-model-copies`, including exact operation/source/destination/model
+fields and the optional expected export identity. Engine-manager owns admission,
+authority, bounded active state and execution. The destination fetches bytes
+directly from the source; the broker carries no artifacts and adds no copy owner
+or operation timeout. The generic response relay preserves typed refusal codes,
+terminal byte counts and custom receipt `layout`, `exportId`, `durability` and
+`requiresConfiguration` fields. `engine:subscribe` forwards full
+`engine:remote-progress` payloads, including operation tuple, learned export
+identity, file and byte counters. An absent operation in a reconnect snapshot
+does not establish success; consumers need terminal evidence and the result's
+durability qualification.
+
 Any other `engine:*` request is forwarded to `nvpair-engine-manager` verbatim and its response relayed straight back. This covers the whole engine control plane: `engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`, `engine:uninstall`, `engine:start`, `engine:stop`, `engine:restart`, `engine:action`, `engine:logs`, `engine:errors`, `engine:models`, and the node
 policy's `engine:wake`, `engine:sleep`, `engine:intent` and
 `engine:unload-model`. `engine:wake` is refused by the broker while this node is

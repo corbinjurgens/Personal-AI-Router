@@ -62,8 +62,9 @@ func (e *Executor) completeSwitchRecovery(incarnation string) error {
 
 // controlServer holds the dependencies the ec handlers share.
 type controlServer struct {
-	exec *Executor
-	mesh *clustertrust.Mesh
+	exec         *Executor
+	mesh         *clustertrust.Mesh
+	copyFromPeer func(context.Context, copyRequest, func() error, func(copyProgress)) (copyModelResult, error)
 }
 
 // controlClass is a registered ec route's authorization class. Any pinned peer
@@ -241,6 +242,8 @@ func (s *controlServer) routes() []controlRoute {
 		{controlStartPath, http.MethodPost, controlMutation, "engine-start", ignoreCaller(s.handleStart)},
 		{controlStopPath, http.MethodPost, controlMutation, "engine-stop", ignoreCaller(s.handleStop)},
 		{controlRemoteManagementPath, http.MethodGet, controlRead, remoteManagementReadFamily, s.handleRemoteManagement},
+		{controlCopyPath, http.MethodPost, controlMutation, "model-copy", s.handleCopy},
+		{controlCopyCapabilitiesPath, http.MethodGet, controlRead, "model-copy-capabilities", s.handleCopyCapabilities},
 	}
 	routes = append(routes, s.settingsRoutes()...)
 	routes = append(routes, s.switchRoutes()...)
@@ -263,7 +266,7 @@ func (s *controlServer) handleEngines(w http.ResponseWriter, r *http.Request) {
 // serveControl runs the ec mTLS control surface on 0.0.0.0:port until ctx is
 // cancelled. A bind failure is non-fatal: stdio engine management (and local
 // peers' remote calls being unavailable) must not take the process down.
-func serveControl(ctx context.Context, port int, exec *Executor, mesh *clustertrust.Mesh) {
+func serveControl(ctx context.Context, port int, exec *Executor, mesh *clustertrust.Mesh, copyFromPeer func(context.Context, copyRequest, func() error, func(copyProgress)) (copyModelResult, error)) {
 	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -272,7 +275,7 @@ func serveControl(ctx context.Context, port int, exec *Executor, mesh *clustertr
 	}
 	ln = tls.NewListener(ln, mesh.ServerTLSConfig())
 	srv := &http.Server{
-		Handler:           (&controlServer{exec: exec, mesh: mesh}).mux(),
+		Handler:           (&controlServer{exec: exec, mesh: mesh, copyFromPeer: copyFromPeer}).mux(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       clustertrust.PeerListenerIdleTimeout,
 	}

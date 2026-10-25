@@ -33,15 +33,23 @@ const maxControlBody = 1 << 20 // 1 MiB
 // streamFrame is one NDJSON frame on the ec streaming endpoints. Type is
 // "progress", "result", or "error". Percent is omitted when indeterminate (0).
 type streamFrame struct {
-	Type    string          `json:"type"`
-	OpID    string          `json:"opId,omitempty"`
-	Engine  string          `json:"engine,omitempty"`
-	Op      string          `json:"op,omitempty"`
-	Stage   string          `json:"stage,omitempty"`
-	Percent int             `json:"percent,omitempty"`
-	Message string          `json:"message,omitempty"`
-	Status  *EngineStatus   `json:"status,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
+	Type              string          `json:"type"`
+	OpID              string          `json:"opId,omitempty"`
+	Engine            string          `json:"engine,omitempty"`
+	Op                string          `json:"op,omitempty"`
+	Stage             string          `json:"stage,omitempty"`
+	Percent           int             `json:"percent,omitempty"`
+	Message           string          `json:"message,omitempty"`
+	Status            *EngineStatus   `json:"status,omitempty"`
+	Result            json.RawMessage `json:"result,omitempty"`
+	Node              string          `json:"node,omitempty"`
+	SourceNodeID      string          `json:"sourceNodeId,omitempty"`
+	DestinationNodeID string          `json:"destinationNodeId,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	ExportID          string          `json:"exportId,omitempty"`
+	File              string          `json:"file,omitempty"`
+	BytesDone         int64           `json:"bytesDone,omitempty"`
+	BytesTotal        int64           `json:"bytesTotal,omitempty"`
 	// Code is the wire name of a typed error code on an error frame, such as
 	// "local_veto"; empty for an untyped failure.
 	Code string `json:"code,omitempty"`

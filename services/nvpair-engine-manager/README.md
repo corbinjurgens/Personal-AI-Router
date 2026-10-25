@@ -163,6 +163,10 @@ Requests (caller → service):
 | `engine:remote-install` | `{ node, engine, start? }` | `{ opId, status: EngineStatus }` after the remote install (live progress via `engine:remote-progress`) |
 | `engine:remote-pull-model` | `{ node, engine, model?, params? }` | `{ opId, result }` after the remote pull (live progress via `engine:remote-progress`) |
 | `engine:remote-copy-model` | `{ node, engine, model }` | `{ opId, result: { engine, model, files, filesSkipped, bytesTotal, bytesCopied } }` after copying the model from `node`'s engine store into this node's (live progress via `engine:remote-progress` with `op:"copy"`). See "Model copy between nodes" below |
+| `engine:copy-model` | `{ opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId? }` | `{ opId, result: copyModelResult }` after destination-owned verified publication |
+| `engine:cancel-model-copy` | `{ opId }` | `{ cancelled: boolean }`; local channel only, exact active operation |
+| `engine:active-model-copies` | `{}` | `{ operations: [{ opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId?, progress? }] }`; memory-only active snapshot |
+| `engine:model-copy-capabilities` | `{ nodeId, engine }` | Caller-specific versioned copy capabilities described below |
 | `engine:remote-start` | `{ node, engine, port? }` | `EngineStatus` from the remote node (always the manifest's `runtime.bind`; no per-call bind override on the remote path) |
 | `engine:remote-stop` | `{ node, engine }` | `EngineStatus` from the remote node |
 | `engine:wake` | `{ engine }` | `EngineStatus` — starts the engine only if its saved intent is On (an engine with no saved intent counts as Off and is refused). Never changes the saved intent. Refused once shutdown has begun |
@@ -589,9 +593,48 @@ its own.
 
 ## Model copy between nodes
 
-`engine:remote-copy-model {node, engine, model}` copies a model that a pinned
-peer (`node`) already holds into this node's store for the same engine, over
-the peer's `ec` surface, instead of downloading it from the internet again.
+`engine:copy-model {opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId?}` asks the selected destination to fetch directly from the
+selected source. Device selectors are stable host UUIDs; `engine` is the exact
+manager ID, including custom IDs. The controller carries only control and
+progress. Its model store is never opened for a copy between other devices.
+`engine:remote-copy-model {node, engine, model}` mints an operation ID and
+invokes this same coordinator with `node` as source and this device as destination.
+
+Copy requests accept exact, unique field names and valid model identifiers,
+with a complete 16 KiB control-body limit. Operation IDs are 32 lowercase hex
+characters. Identical endpoints, unknown fields (including caller, URL and
+path overrides), duplicate active IDs and excess active work are refused before
+peer lookup or transfer. Each Manager owns at most eight active reservations,
+including inbound copies; there is no queue or terminal history. Cancellation
+and shutdown close the exact request context and retain resumable partials.
+Closing a GUI subscriber alone does not cancel a copy. A reconnect snapshot
+that no longer contains an operation establishes an unknown outcome, not success.
+
+The destination route is pinned `POST /v1/models/copy`, classified as a
+mutation. Its body contains only `opId`, `sourceNodeId`, `engine`, `model` and
+optional `expectedExportId`. The destination rechecks the authenticated
+controller's grant and its pause/recovery gates while holding a reservation.
+The destination independently needs a live source pin; controller trust cannot
+substitute for that relationship. Copy does not install or activate an engine,
+and does not require Running or override saved Off/locks. A dispatched copy
+POST is never replayed through an alternate route.
+
+`engine:model-copy-capabilities {nodeId, engine}` reads the actual node's
+`{version:1, engine, available, installed, modelStore, exportLayouts, importLayouts, writable, reason, identityBoundRetry, receiptDurability}`.
+The peer route is pinned `GET /v1/models/copy-capabilities?engine=...`;
+`writable` reflects readiness and the actual caller's target-local permission.
+Adapter names are `ollama`, `llamacpp`, and `lmstudio`; llama.cpp also supports
+`llama-artifacts-v1`. No filesystem paths or grant lists are returned. Missing
+routes/versions are unsupported. Source and destination layouts must intersect,
+the selected export must be supported by both, and the destination must be installed.
+
+An explicit retry can bind `expectedExportId` to a learned custom export.
+After destination authorization/admission, a matching committed receipt is
+fully rehashed before any source lookup or capability request. A verified
+receipt can finish with the source offline, reporting `durability:"uncertain"`.
+Otherwise the source must be live and its export identity must still match
+before writes. Without an export ID, retry resolves the alias afresh and cannot
+guarantee the same content after a lost response. Timeouts are never success.
 
 The shared pinned peer/service adapter owns both listing and file transport.
 It resolves the current admitted source and advertised `ec` endpoint, prefers
@@ -669,12 +712,17 @@ On the destination, the copy:
    the attempt had resumed an older partial).
 6. Writes the file that makes the model visible to the engine last.
 
-Progress is `engine:remote-progress` with `op:"copy"` and `node` naming the
-source. Stages are `listing`, `hashing` (relayed from the source, `file` set),
+Progress is `engine:remote-progress` with `opId`, `op:"copy"`, `node` naming the
+source, `sourceNodeId`, `destinationNodeId`, `engine`, `model`, and `exportId`
+as soon as a custom listing resolves. Stages are `listing`, `hashing` (relayed from the source, `file` set),
 `checking`, `downloading` (`file`, and `bytesDone`/`bytesTotal`/`percent` over
 the whole model, about every 500 ms), `finalizing`, then a terminal `done`
-(`percent:100`) or `error` (`percent:-1`, `message`). The desktop app does not
-render copy progress yet and ignores these frames.
+(`percent:100`), `error` or `cancelled` (`percent:-1`, `message`). Each accepted
+operation emits exactly one terminal outcome; done follows verified publication.
+Copy NDJSON uses the per-operation callback, bounded coalescing and checked
+write/flush errors that cancel the transfer. It does not subscribe to another
+operation's engine-wide progress. Terminal result byte counts and the custom
+receipt qualification are retained separately from inventory.
 
 | Engine | Store | What is copied | How the engine sees it |
 |---|---|---|---|
