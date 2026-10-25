@@ -622,6 +622,57 @@ func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
 	}, modeldownload.PhaseUnknown, true)
 }
 
+func TestActionPullModelMissingActionEmitsTerminalError(t *testing.T) {
+	m := testEngineManifest(fakeEngineBin)
+	delete(m.Actions, pullModelAction)
+	reg := NewRegistry()
+	reg.engines[m.Engine] = m
+	var reports bytes.Buffer
+	var progress []ProgressEvent
+	ex := NewExecutor(reg, NewReporter(NewCodec(&reports)), func(method string, params any) {
+		if method != "engine:pull-progress" {
+			return
+		}
+		data, err := json.Marshal(params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var event ProgressEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			t.Fatal(err)
+		}
+		progress = append(progress, event)
+	}, t.TempDir())
+	var out bytes.Buffer
+	mgr := NewManager(NewCodec(&out), ex, nil, "")
+	id := json.RawMessage("9")
+	mgr.runAction(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:action",
+		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"name":"demo:1b"}}`)})
+	var response struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	want := `Fake Engine experienced an error while downloading a model: engine "fake" has no action "pull_model"`
+	if response.Error.Code != -32000 || response.Error.Message != want {
+		t.Fatalf("pull refusal = %+v", response.Error)
+	}
+	if len(progress) != 1 {
+		t.Fatalf("progress = %+v, want one terminal", progress)
+	}
+	event := progress[0]
+	if event.Engine != "fake" || event.Op != "pull" || event.Stage != "error" || event.Percent != -1 || event.Message != want || event.ID != "" || event.DownloadState != nil {
+		t.Fatalf("unreserved pull terminal = %+v", event)
+	}
+	if state := ex.downloads.snapshot(); len(state.Entries) != 0 {
+		t.Fatalf("unreserved pull created lifecycle state: %+v", state)
+	}
+}
+
 // TestActionPullModelFailureEmitsTerminalError proves a failed LOCAL pull emits
 // a terminal engine:pull-progress error frame (in addition to the JSON-RPC
 // error), so a UI that already stopped waiting on the synchronous call still
