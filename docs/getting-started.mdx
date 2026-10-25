@@ -321,6 +321,10 @@ proxy takes the port the engine would normally use, so existing clients keep
 working without reconfiguration, and PAIR moves the engine itself to the next
 free port.
 
+For OpenCode, also check the selected primary model's declared limits against
+its actual serving bounds before submitting coding work. See
+[OpenCode context budget](troubleshooting.mdx#opencode-context-budget).
+
 | What an application connects to     | Default port |
 | ----------------------------------- | ------------ |
 | Ollama-compatible proxy             | `11434`      |
