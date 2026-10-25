@@ -110,6 +110,7 @@ type Service struct {
 	exitCh     chan struct{}
 	exitOnce   sync.Once
 	brokerDone chan struct{}
+	history    *serviceHistory
 }
 
 // pendingRequest is a request in flight at the broker under a service id.
@@ -175,6 +176,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.startedAt = time.Now()
+	s.startHistory()
 	slog.Info("service listening", "endpoint", s.cfg.endpoint, "pid", os.Getpid())
 
 	go s.superviseBroker()
@@ -203,6 +205,9 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-c.written:
 		case <-time.After(clientFlushTimeout):
 		}
+	}
+	if s.history != nil {
+		s.history.wg.Wait()
 	}
 	slog.Info("service stopped")
 	return nil
@@ -261,6 +266,9 @@ func (s *Service) attach(conn io.ReadWriteCloser) {
 	c := newClient(s.nextCID, conn)
 	s.clients[c] = struct{}{}
 	if s.readyFrame != nil {
+		if s.history != nil {
+			c.history.awaitReady.Store(true)
+		}
 		c.send(s.readyFrame)
 	}
 	n := len(s.clients)
@@ -275,6 +283,9 @@ func (s *Service) detach(c *client, graceful bool) {
 	s.mu.Lock()
 	_, ok := s.clients[c]
 	delete(s.clients, c)
+	if s.history != nil {
+		s.cancelHistoryRefetchIfUnused()
+	}
 	n := len(s.clients)
 	s.mu.Unlock()
 	if graceful {
@@ -282,12 +293,19 @@ func (s *Service) detach(c *client, graceful bool) {
 	} else {
 		c.closeNow()
 	}
+	if s.history != nil {
+		s.history.signal()
+	}
 	if ok {
 		slog.Info("client detached", "client", c.id, "clients", n)
 	}
 }
 
 func (s *Service) readClient(c *client) {
+	if s.history != nil {
+		s.readHistoryClient(c)
+		return
+	}
 	sc := bufio.NewScanner(c.conn)
 	sc.Buffer(make([]byte, 0, 64*1024), jsonrpc.WorkerFrameBytes)
 	for sc.Scan() {
@@ -304,6 +322,9 @@ func (s *Service) readClient(c *client) {
 // handleClientFrame dispatches one frame from a client. It returns false once
 // the client has been detached.
 func (s *Service) handleClientFrame(c *client, frame []byte) bool {
+	if s.history != nil {
+		return s.handleHistoryClientFrame(c, frame)
+	}
 	var msg jsonrpc.Message
 	if err := json.Unmarshal(frame, &msg); err != nil || msg.JSONRPC != "2.0" {
 		slog.Debug("ignoring malformed client frame", "client", c.id)
@@ -330,6 +351,10 @@ func (s *Service) handleClientFrame(c *client, frame []byte) bool {
 }
 
 func (s *Service) handleClientRequest(c *client, msg *jsonrpc.Message) bool {
+	if s.history != nil && historyPublic(msg.Method) {
+		s.handleHistoryRequest(c, msg)
+		return true
+	}
 	switch {
 	case msg.Method == methodStatus:
 		c.respond(msg.ID, s.status())

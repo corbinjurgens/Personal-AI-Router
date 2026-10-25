@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +19,25 @@ import (
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/servicectl"
 )
+
+func TestClientWritesWholeFramesAcrossShortWrites(t *testing.T) {
+	server, peer := net.Pipe()
+	defer peer.Close()
+	c := newClient(1, &historyTestShortConn{Conn: server, chunk: 3})
+	defer c.closeNow()
+	frame := []byte("{\"jsonrpc\":\"2.0\",\"method\":\"ordinary:event\",\"params\":{}}\n")
+	c.send(frame)
+	actual := make([]byte, len(frame))
+	if err := peer.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(peer, actual); err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != string(frame) {
+		t.Fatalf("short writes changed ordinary frame: %q", actual)
+	}
+}
 
 func TestTwoClientsShareOneBrokerWithRemappedIDs(t *testing.T) {
 	h := newHarness(t)
