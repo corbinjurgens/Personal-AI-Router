@@ -2266,8 +2266,20 @@ func TestServedResidentProcessRecovery(t *testing.T) {
 			state := f.control(t, "")
 			return state.Models[neModel].Loads == 1 && state.InventoryUnavailable && !state.DropNextLoadResponse
 		})
+		var lastView srPolicyView
+		t.Cleanup(func() {
+			if t.Failed() {
+				data, err := json.Marshal(lastView)
+				if err != nil {
+					t.Logf("encode last observed policy view: %v", err)
+					return
+				}
+				t.Logf("last observed policy view: %s", data)
+			}
+		})
 		neEventually(t, "unknown completion without readback", neCallBudget, func() bool {
 			view := f.policy(t)
+			lastView = view
 			if view.ModelConfiguration == nil || view.ModelConfiguration.PolicyRevision != view.Policy.Revision {
 				return false
 			}

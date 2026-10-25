@@ -511,9 +511,19 @@ func (m *Manager) runAction(ctx context.Context, msg *Message) {
 			m.codec.RespondError(msg.ID, -32602, validationErr.Error())
 			return
 		}
-		res, err = m.exec.PullModelStream(ctx, p.Engine, model, p.Params)
+		var pull *modelPullReservation
+		pull, err = m.exec.reserveModelPull(ctx, p.Engine, model, p.Params)
+		if err == nil {
+			res, err = pull.run(ctx)
+		}
 		if err != nil {
 			userMsg := m.exec.reportPullFailed(p.Engine, model, err)
+			if pull == nil {
+				// Refusal before reservation has no lifecycle token to publish its
+				// terminal. Preserve the local pull contract without inventing a
+				// download attempt or duplicating a reserved attempt's terminal.
+				m.exec.emitPullProgress(ProgressEvent{Engine: p.Engine, Op: "pull", Stage: "error", Percent: -1, Message: userMsg})
+			}
 			m.codec.RespondError(msg.ID, -32000, userMsg)
 			return
 		}

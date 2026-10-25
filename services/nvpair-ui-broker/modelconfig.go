@@ -49,9 +49,9 @@ func residentAttemptReason(terminal bool, outcome nodepolicy.ResidentOutcome) no
 	return nodepolicy.ModelReasonOperationTimeout
 }
 
-func residentFailureReadback(entry nodepolicy.ModelConfigurationEntry, hold residentUnsettled) nodepolicy.ModelConfigurationEntry {
-	if reason := residentAttemptReason(hold.terminal, hold.finish.Outcome); reason == nodepolicy.ModelReasonLoadFailed && (entry.State == nodepolicy.ModelStatePending || entry.Reason == nodepolicy.ModelReasonObservationUnknown) {
-		entry.State, entry.Reason = nodepolicy.ModelStateUnknown, reason
+func residentAttemptReadback(entry nodepolicy.ModelConfigurationEntry, hold residentUnsettled) nodepolicy.ModelConfigurationEntry {
+	if entry.State == nodepolicy.ModelStatePending || entry.Reason == nodepolicy.ModelReasonObservationUnknown {
+		entry.State, entry.Reason = nodepolicy.ModelStateUnknown, residentAttemptReason(hold.terminal, hold.finish.Outcome)
 	}
 	return entry
 }
@@ -351,9 +351,9 @@ func (b *Broker) modelConfiguration(e modelConfigEvidence) nodepolicy.ModelConfi
 		entry, _, _, _ := b.modelConfigEntry(e, ref)
 		entry = residentProofLocked(r, e, ref, entry)
 		if hold, held := r.models.unsettled[ref]; held && b.residentDeclarationCurrent(hold.op.evidence, e, ref) && r.now().Before(hold.expires) {
-			// A retained terminal failure remains known when inventory changes;
+			// A retained attempt remains known when inventory changes;
 			// missing capacity evidence and current vetoes retain their meaning.
-			entry = residentFailureReadback(entry, hold)
+			entry = residentAttemptReadback(entry, hold)
 		}
 		out.Models = append(out.Models, entry)
 	}
@@ -426,7 +426,7 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		entry, _, _, _ := b.modelConfigEntry(e, ref)
 		entry = residentProofLocked(r, e, ref, entry)
 		if hold, held := r.models.unsettled[ref]; held {
-			entry = residentFailureReadback(entry, hold)
+			entry = residentAttemptReadback(entry, hold)
 			if entry.State == nodepolicy.ModelStatePending {
 				entry.State, entry.Reason = nodepolicy.ModelStateUnknown, residentAttemptReason(hold.terminal, hold.finish.Outcome)
 			}
@@ -504,7 +504,7 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			}
 		}
 		if unsettled {
-			entry = residentFailureReadback(entry, hold)
+			entry = residentAttemptReadback(entry, hold)
 		}
 		r.mu.Lock()
 		_, awaitingObservation := r.models.pending[ref]
