@@ -106,7 +106,7 @@ func TestWorkloadDepartedRunRetired(t *testing.T) {
 		// and a cross-pinned joined cluster, outside the network sandbox.
 		cluster := newInterNodeCluster(t)
 		received := cluster.startStubClusterPeer(t, "departed-run-peer", "departed-run-peer-uuid")
-		f := startDepartedRunFixture(t, cluster.nodeDir)
+		f := startDepartedRunFixture(t, cluster.nodeDir, "--scanner-mdns=true")
 		pid := mustPid(t, waitForStderr(t, f.proxyLines, proxyPidRe, 10*time.Second))
 		request := f.startRequest(t)
 		running := waitDepartedRunFrame(t, f.events, "workloads:upsert", 15*time.Second, func(p departedRunParams) bool {
@@ -262,7 +262,7 @@ type departedRunFixture struct {
 	requests   sync.WaitGroup
 }
 
-func startDepartedRunFixture(t *testing.T, clusterDir string) *departedRunFixture {
+func startDepartedRunFixture(t *testing.T, clusterDir string, extraArgs ...string) *departedRunFixture {
 	t.Helper()
 	configDir := t.TempDir()
 	release := make(chan struct{})
@@ -297,10 +297,11 @@ func startDepartedRunFixture(t *testing.T, clusterDir string) *departedRunFixtur
 		client: &http.Client{Transport: &http.Transport{}, Timeout: 120 * time.Second}}
 	var cancel context.CancelFunc
 	f.ctx, cancel = context.WithCancel(context.Background())
-	stdin, messages, stderr, cleanup := startBrokerWithDirs(t, configDir, clusterDir,
+	args := append([]string{
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--workload-manager-path", workloadMgrBin,
-	)
+	}, extraArgs...)
+	stdin, messages, stderr, cleanup := startBrokerWithDirs(t, configDir, clusterDir, args...)
 	f.stdin = stdin
 	control, events := make(chan jsonrpc.Message, 64), make(chan jsonrpc.Message, 64)
 	proxyLines := make(chan string, 8)

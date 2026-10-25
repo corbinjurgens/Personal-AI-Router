@@ -271,8 +271,9 @@ type trackedNode struct {
 }
 
 type Manager struct {
-	codec  *Codec
-	cancel context.CancelFunc
+	codec      *Codec
+	cancel     context.CancelFunc
+	probePorts probePorts
 
 	// client is the plain-HTTP probe client (Ollama on :11434 and
 	// nvpair-node-info's HTTP listener). tlsClient is used only when
@@ -311,8 +312,9 @@ func NewManager(codec *Codec, tlsOpts tlsClientOptions, mesh *clustertrust.Mesh)
 		tlsClient = &http.Client{Timeout: probeTimeout, Transport: noKeepAliveTransport()}
 	}
 	return &Manager{
-		codec: codec,
-		mesh:  mesh,
+		probePorts: defaultProbePorts(),
+		codec:      codec,
+		mesh:       mesh,
 		client: &http.Client{
 			Timeout:   probeTimeout,
 			Transport: noKeepAliveTransport(),
@@ -385,17 +387,22 @@ func (m *Manager) probeNode(tn *trackedNode) {
 	addr := entry.Address
 	id := nodeID(entry)
 
-	ollamaUp, ollamaModels := m.probeOllama(addr, 11434)
-	lmStudioUp, lmStudioModels := m.probeLMStudio(addr, lmStudioPort)
+	var ollamaUp, lmStudioUp bool
+	var ollamaModels, lmStudioModels []string
+	if m.probePorts.ollama > 0 {
+		ollamaUp, ollamaModels = m.probeOllama(addr, m.probePorts.ollama)
+	}
+	if m.probePorts.lmstudio > 0 {
+		lmStudioUp, lmStudioModels = m.probeLMStudio(addr, m.probePorts.lmstudio)
+	}
 
 	// Pick scheme + port + client based on the entry's TLS hint.
 	// The operator decides which scheme this manual node uses; we
 	// don't probe both. TLSPort > 0 means HTTPS on that port via
 	// the TLS client (which carries the operator's client cert,
-	// if configured). Otherwise it's plain HTTP on the historical
-	// 14318.
+	// if configured). Otherwise use the configured plain node-info target.
 	scheme := "http"
-	nodeInfoPort := 14318
+	nodeInfoPort := m.probePorts.nodeInfo
 	probeClient := m.client
 	if entry.TLSPort > 0 {
 		scheme = "https"
@@ -412,7 +419,11 @@ func (m *Manager) probeNode(tn *trackedNode) {
 			probeClient = &http.Client{Timeout: probeTimeout, Transport: &http.Transport{TLSClientConfig: cfg, DisableKeepAlives: true}}
 		}
 	}
-	nodeInfoUp, info := m.probeNodeInfo(probeClient, scheme, addr, nodeInfoPort)
+	var nodeInfoUp bool
+	var info NodeInfoResponse
+	if nodeInfoPort > 0 {
+		nodeInfoUp, info = m.probeNodeInfo(probeClient, scheme, addr, nodeInfoPort)
+	}
 
 	newStatus := ManualNodeStatus{
 		ServiceBuildID: info.ServiceBuildID,
@@ -420,10 +431,10 @@ func (m *Manager) probeNode(tn *trackedNode) {
 		Name:           entry.Name,
 		Address:        addr,
 		OllamaUp:       ollamaUp,
-		OllamaPort:     11434,
+		OllamaPort:     m.probePorts.ollama,
 		OllamaModels:   ollamaModels,
 		LMStudioUp:     lmStudioUp,
-		LMStudioPort:   lmStudioPort,
+		LMStudioPort:   m.probePorts.lmstudio,
 		LMStudioModels: lmStudioModels,
 		NodeInfoUp:     nodeInfoUp,
 		NodeInfoPort:   nodeInfoPort,
@@ -724,7 +735,7 @@ func (m *Manager) addNode(entry ManualEntry) ManualNodeStatus {
 	}
 	id := nodeID(entry)
 
-	nodeInfoPort := 14318
+	nodeInfoPort := m.probePorts.nodeInfo
 	if entry.TLSPort > 0 {
 		nodeInfoPort = entry.TLSPort
 	}
@@ -732,7 +743,8 @@ func (m *Manager) addNode(entry ManualEntry) ManualNodeStatus {
 		ID:           id,
 		Name:         entry.Name,
 		Address:      entry.Address,
-		OllamaPort:   11434,
+		OllamaPort:   m.probePorts.ollama,
+		LMStudioPort: m.probePorts.lmstudio,
 		NodeInfoPort: nodeInfoPort,
 		TLSEnabled:   entry.TLSPort > 0,
 		MTLSRequired: entry.TLSPort > 0 && entry.MTLS,

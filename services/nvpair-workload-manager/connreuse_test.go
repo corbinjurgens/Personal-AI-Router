@@ -62,7 +62,7 @@ func TestBroadcast_ReusesPeerConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	peers := newPeerSet(14320)
+	peers := newPeerSet()
 	peers.Replace([]PeerNode{{
 		ID:        "peer-1",
 		Host:      host,

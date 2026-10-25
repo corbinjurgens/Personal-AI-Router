@@ -63,20 +63,18 @@ type target struct {
 }
 
 // peerSet is the in-memory broadcast target set, replaced wholesale on each
-// discovery refresh. The port comes from the peer's advertised SRV record,
-// falling back to defaultPort; the uuid comes from its cluster-uuid= TXT.
+// discovery refresh. The port must come from the peer's advertisement, never
+// from this node's listener; the uuid comes from its cluster-uuid= TXT.
 type peerSet struct {
-	mu          sync.RWMutex
-	defaultPort int
-	peers       map[string]peerEntry // node id -> destination
-	generation  uint64
-	onChange    func() // retire idle service connections after a route-set change
+	mu         sync.RWMutex
+	peers      map[string]peerEntry // node id -> destination
+	generation uint64
+	onChange   func() // retire idle service connections after a route-set change
 }
 
-func newPeerSet(defaultPort int) *peerSet {
+func newPeerSet() *peerSet {
 	return &peerSet{
-		defaultPort: defaultPort,
-		peers:       make(map[string]peerEntry),
+		peers: make(map[string]peerEntry),
 	}
 }
 
@@ -91,8 +89,8 @@ func (p *peerSet) Replace(nodes []PeerNode) (added, removed []string) {
 			continue
 		}
 		port := n.Port
-		if port == 0 {
-			port = p.defaultPort
+		if port < 1 || port > 65535 {
+			continue
 		}
 		id := n.ID
 		if id == "" {

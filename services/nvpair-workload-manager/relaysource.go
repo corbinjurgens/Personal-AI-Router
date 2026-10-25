@@ -89,7 +89,7 @@ func (r *relayPeerSource) set(nodes []noderec.DirectoryNode) {
 func directoryToPeerNode(n noderec.DirectoryNode) (PeerNode, bool) {
 	svc, ok := n.Services[noderec.ServiceWorkload]
 	addresses := n.CandidateIPs()
-	if !ok || len(addresses) == 0 {
+	if !ok || svc.Port < 1 || svc.Port > 65535 || len(addresses) == 0 {
 		return PeerNode{}, false
 	}
 	txt := n.AddressTXT()
