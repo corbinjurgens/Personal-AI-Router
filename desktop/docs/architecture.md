@@ -266,6 +266,19 @@ closed `EngineType` union and narrows external strings with `isEngineType()`.
 `engineManagerName()` / `engineTypeFromManagerName()` are the one place that
 translation to and from the engine manager's own spelling lives.
 
+### Model copy control
+
+The desktop relays a complete source/destination/engine/model tuple and operation
+ID through `engine:copy-model`. Go owns endpoint authority, capability checks,
+artifact I/O and cancellation. A controller receives control/status only;
+copying from one peer to another does not stage files or read local inventory
+on the controller. Progress belongs to the destination and retains the source.
+The bridge hydrates Go's bounded active set on reconnect; lost terminal results
+remain unknown. Custom artifact receipts retain serving-setup and publication
+durability qualifications independently of native inventory. The existing
+Copy-to-this-PC API delegates to this same path. See the
+[frontend copy contract](frontend-api.md#pairapiengines).
+
 ### Engine settings
 
 Server port, proxy port, and the engine arguments are one authoritative

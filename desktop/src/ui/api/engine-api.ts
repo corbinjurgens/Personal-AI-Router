@@ -4,10 +4,11 @@
 /**
  * Engine command API -- fire-and-forget commands + push event subscriptions.
  *
- * Commands are void (fire-and-forget). Errors arrive via errors:update push events.
- * All state flows via push events, not command responses.
+ * Ordinary commands are fire-and-forget. Copies also return the backend's verified
+ * terminal result, including setup and publication durability qualifications.
  */
 import type { ServiceTransport } from '@/shared/types/service-bridge'
+import type { WsInvokeRequest, WsInvokeResponse } from '@/shared/types/ws-channels'
 import type {
     SwitchRequest,
     SwitchStatusRequest,
@@ -83,6 +84,15 @@ export interface IEngineApi {
     deleteModel(engineType: EngineType, nodeId: string, model: string): void
     /** Copy a model from a paired node (`nodeId`) to this PC. Progress arrives as `copy` progress. */
     copyModelToThisPc(engineType: EngineType, nodeId: string, model: string): void
+    /** The backend owns admission and readiness; this waits for its real terminal response. */
+    copyModel(
+        request: WsInvokeRequest<'engine:copy-model'>
+    ): Promise<WsInvokeResponse<'engine:copy-model'>>
+    modelCopyCapabilities(
+        target: WsInvokeRequest<'engine:model-copy-capabilities'>
+    ): Promise<WsInvokeResponse<'engine:model-copy-capabilities'>>
+    cancelModelCopy(opId: string): Promise<WsInvokeResponse<'engine:cancel-model-copy'>>
+    activeModelCopies(): Promise<WsInvokeResponse<'engine:active-model-copies'>>
     /** Set the model keep-alive expiry duration on a node. */
     setModelExpiry(engineType: EngineType, nodeId: string, model: string, expiry: string): void
     /** Load an engine catalog or explicitly search its upstream registry. */
@@ -132,6 +142,10 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
         onSettingsChanged: cb => transport.subscribePush('engines:settings-changed', cb),
         onSettingsDisconnected: cb => transport.subscribePush('engines:settings-disconnected', cb),
         getInitialState: () => transport.invoke('engines:get-initial'),
+        copyModel: request => transport.invoke('engine:copy-model', request),
+        modelCopyCapabilities: target => transport.invoke('engine:model-copy-capabilities', target),
+        cancelModelCopy: opId => transport.invoke('engine:cancel-model-copy', { opId }),
+        activeModelCopies: () => transport.invoke('engine:active-model-copies'),
 
         toggle: (engineType, nodeId) =>
             fireCommand(transport, { command: 'toggle', engineType, nodeId }),

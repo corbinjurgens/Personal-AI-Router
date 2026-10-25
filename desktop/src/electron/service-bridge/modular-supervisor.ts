@@ -3,6 +3,7 @@
 
 import fs from 'fs'
 import path from 'path'
+import { randomBytes } from 'crypto'
 import { app } from 'electron'
 import type { Duplex } from 'stream'
 import {
@@ -17,7 +18,10 @@ import { createStructuredLogger } from '@/shared/utils/log'
 import getErrorString from '@/shared/utils/get-error-string'
 import {
     ENGINE_LOCKED_CODE,
+    INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
+    POLICY_CONFLICT_CODE,
+    REMOTE_MANAGEMENT_DENIED_CODE,
     engineLockedMessage,
     localVetoMessage
 } from '@/shared/constants/service-errors'
@@ -43,9 +47,15 @@ import { parseEngineSettings } from './engine-settings'
 import { parseEngineIntent } from './engine-intent'
 import { parseEngineSwitchChanged } from './engine-switch'
 import { parseEngineDescriptors } from './engine-descriptors'
+import { parseActiveModelCopies, parseModelCopyResult } from './model-copy'
+import type {
+    ModelCopyRequest,
+    ModelCopyResponse,
+    ActiveModelCopy
+} from '@/shared/types/model-copy'
 import { resolvePullCatchError } from './pull-error-handling'
 import { isServiceLogLevelEnabled, serviceLogLevel } from './service-log-level'
-import { engineManagerName } from '@/shared/utils/engines'
+import { engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
 import { isFirstRun } from '@/electron/config/ui-config'
 import { createOverviewWindow } from '@/electron/window'
 import {
@@ -577,6 +587,7 @@ class ModularSupervisor {
         if (this.isReady) return
 
         this.brokerSessionGeneration++
+        getModularBridgeState().reconcileModelCopies([])
         getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateEngineLocks()
         this.shuttingDown = false
@@ -667,6 +678,7 @@ class ModularSupervisor {
         // treated as deliberate, not a crash.
         this.shuttingDown = true
         this.brokerSessionGeneration++
+        getModularBridgeState().reconcileModelCopies([])
         getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateEngineLocks()
         await this.performance.stop()
@@ -769,7 +781,7 @@ class ModularSupervisor {
         name: ModularProcessName,
         method: string,
         params?: Parameters<JsonRpcSocketClient['call']>[1],
-        timeoutMs?: number
+        timeoutMs?: number | null
     ): Promise<Awaited<ReturnType<JsonRpcSocketClient['call']>>> {
         const child = this.processes.get(name)
         // Reject rather than throw synchronously: callers on the notification
@@ -922,6 +934,7 @@ class ModularSupervisor {
     /** Forget what a broker that is gone told us, until the next `app:ready`. */
     private resetBrokerSession(): void {
         this.brokerSessionGeneration++
+        getModularBridgeState().reconcileModelCopies([])
         getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateEngineLocks()
         this.performance.reset()
@@ -973,6 +986,7 @@ class ModularSupervisor {
             this.processes.delete(child.name as ModularProcessName)
             if (child.name === 'broker') {
                 this.brokerSessionGeneration++
+                getModularBridgeState().reconcileModelCopies([])
                 getModularBridgeState().applyEngineIntent(null)
                 getModularBridgeState().invalidateEngineLocks()
                 this.performance.reset()
@@ -1112,6 +1126,13 @@ class ModularSupervisor {
         await this.hydrateAvailability()
         if (generation !== this.brokerSessionGeneration) return
         await this.hydrateEngineManager()
+        if (generation !== this.brokerSessionGeneration) return
+        try {
+            await this.activeModelCopies()
+        } catch {
+            // Reconnect already invalidated old active copies. A failed baseline
+            // must not erase a newer submission that raced this read.
+        }
         if (generation !== this.brokerSessionGeneration) return
         this.startInstalledEnginesOnFirstOpen()
         await this.seedClusterPeerIds()
@@ -1973,10 +1994,12 @@ class ModularSupervisor {
             return
         }
         if (notification.method === 'engine:ready') {
+            getModularBridgeState().reconcileModelCopies([])
             getModularBridgeState().applyEngineIntent(null)
             getModularBridgeState().invalidateEngineLocks()
             void this.hydrateEngineIntent()
             void this.hydrateEngineManager()
+            void this.activeModelCopies().catch(() => {})
             return
         }
         if (notification.method === 'engine:intent-changed') {
@@ -2229,13 +2252,7 @@ class ModularSupervisor {
         }
     }
 
-    /**
-     * Copy a model from a paired peer to this PC via `engine:remote-copy-model`.
-     * Progress streams as `engine:remote-progress` with `op: "copy"` (applied by
-     * the bridge state); the awaited RPC settling ends the copy, and a failure,
-     * whether the RPC rejects or a terminal `error` frame arrived, is reported
-     * through the local error path. One copy per source peer and engine at a time.
-     */
+    /** Compatibility convenience wrapper; the full tuple coordinator is the sole copy path. */
     async copyModelToThisPc(
         nodeId: string,
         engine: string,
@@ -2243,29 +2260,124 @@ class ModularSupervisor {
         model: string
     ): Promise<void> {
         const state = getModularBridgeState()
-        if (!state.beginModelCopy(nodeId, engineType, model)) return
-        let failure: string | undefined
         try {
-            await this.callProcess(
-                'broker',
-                'engine:remote-copy-model',
-                { node: nodeId, engine, model },
-                PULL_TIMEOUT_MS
-            )
+            const destinationNodeId = state.getSelfId()
+            if (!destinationNodeId) throw new Error('This device identity is not available')
+            await this.copyModel({
+                opId: randomBytes(16).toString('hex'),
+                sourceNodeId: nodeId,
+                destinationNodeId,
+                engine,
+                model
+            })
         } catch (err) {
-            failure = getErrorString(err)
+            this.reportError(
+                `Failed to copy ${model} to this PC: ${getErrorString(err)}`,
+                'error',
+                `engine-copy-model:${nodeId}:${engineType}:${model}`
+            )
         }
-        failure = state.finishModelCopy(nodeId, engineType) ?? failure
-        if (failure === undefined) {
-            // The copied model is now on this PC; refresh its list.
-            await this.refreshEngineModels(engine, engineType)
+    }
+
+    /** Copies relay metadata only; no artifact, engine activation or inventory synthesis here. */
+    async copyModel(request: ModelCopyRequest): Promise<ModelCopyResponse> {
+        const state = getModularBridgeState()
+        state.beginModelCopy(request)
+        const session = this.brokerSessionGeneration
+        let response: ModelCopyResponse
+        try {
+            response = parseModelCopyResult(
+                await this.callProcess(
+                    'broker',
+                    'engine:copy-model',
+                    {
+                        opId: request.opId,
+                        sourceNodeId: request.sourceNodeId,
+                        destinationNodeId: request.destinationNodeId,
+                        engine: request.engine,
+                        model: request.model,
+                        ...(request.expectedExportId === undefined
+                            ? {}
+                            : { expectedExportId: request.expectedExportId })
+                    },
+                    null
+                ),
+                request
+            )
+            if (session !== this.brokerSessionGeneration)
+                throw new Error('Copy connection changed before terminal response')
+            state.finishModelCopy(request, 'done', response.result)
+        } catch (err) {
+            const definiteRejection =
+                err instanceof JsonRpcResponseError &&
+                [
+                    INVALID_PARAMS_CODE,
+                    POLICY_CONFLICT_CODE,
+                    LOCAL_VETO_CODE,
+                    REMOTE_MANAGEMENT_DENIED_CODE,
+                    ENGINE_LOCKED_CODE,
+                    -32601
+                ].includes(err.code)
+            state.finishModelCopy(
+                request,
+                definiteRejection ? 'error' : 'unknown',
+                undefined,
+                definiteRejection && err instanceof JsonRpcResponseError
+                    ? err.message
+                    : `Copy outcome unknown: ${getErrorString(err)}. Reconnect and retry with the export identity when available.`
+            )
+            throw err
+        }
+        // Read only the destination. Native inventory may legitimately omit a
+        // custom receipt; the qualified result above is retained independently.
+        await this.refreshModelCopyDestination(request)
+        return response
+    }
+
+    async activeModelCopies(): Promise<{ operations: ActiveModelCopy[] }> {
+        const state = getModularBridgeState()
+        const baseline = state.beginModelCopyRead()
+        const session = this.brokerSessionGeneration
+        const operations = parseActiveModelCopies(
+            await this.callProcess('broker', 'engine:active-model-copies', {})
+        )
+        if (session !== this.brokerSessionGeneration)
+            throw new Error('Copy snapshot connection changed')
+        state.reconcileModelCopies(operations, baseline)
+        return { operations }
+    }
+
+    private async refreshModelCopyDestination(request: ModelCopyRequest): Promise<void> {
+        const state = getModularBridgeState()
+        const engineType = engineTypeFromManagerName(request.engine)
+        if (!engineType) return
+        if (request.destinationNodeId === state.getSelfId()) {
+            await this.refreshEngineModels(request.engine, engineType)
+            try {
+                const status = await this.callProcess('broker', 'engine:status', {
+                    engine: request.engine
+                })
+                state.applyEngineManagerStatus(status)
+            } catch {
+                /* A failed read does not invalidate a verified copy. */
+            }
             return
         }
-        this.reportError(
-            `Failed to copy ${model} to this PC: ${failure}`,
-            'error',
-            `engine-copy-model:${nodeId}:${engineType}:${model}`
-        )
+        try {
+            const status = await this.callProcess('broker', 'engine:remote-get-installed', {
+                node: request.destinationNodeId
+            })
+            state.applyRemoteEngineFacts(request.destinationNodeId, status)
+        } catch {
+            /* Scanner pushes retain their existing convergence behavior. */
+        }
+        try {
+            const snapshot = await this.callProcess('broker', 'discovery:get-nodes')
+            // This is the scanner's current inventory, not a local model read.
+            state.applyModelCopyDestinationInventory(request.destinationNodeId, snapshot)
+        } catch {
+            /* A stale/missing inventory never erases the copy receipt. */
+        }
     }
 
     /**

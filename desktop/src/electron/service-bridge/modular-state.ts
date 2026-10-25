@@ -18,6 +18,7 @@ import type { ServiceError, ServiceErrorAction, ServiceErrorSeverity } from '@/s
 import type { Workload } from '@/shared/types/workloads'
 import type { ClusterNode, Invite } from '@/shared/types/cluster'
 import type { WsInvokeResponse } from '@/shared/types/ws-channels'
+import type { ActiveModelCopy, ModelCopyRequest, ModelCopyResult } from '@/shared/types/model-copy'
 import { MODULAR_SUPERSEDE_MIN_AGE_MS } from '@/shared/constants/modular-runtime'
 import {
     emptyEngineStatus,
@@ -28,7 +29,12 @@ import {
 import { engineProgressKey } from '@/shared/utils/engine-progress'
 import { workloadKey } from '@/shared/utils/workloads'
 import { emitBridgePush } from './broadcaster'
-import { isModelCopyTerminal, modelCopyProgress, parseModelCopyFrame } from './model-copy'
+import {
+    isModelCopyTerminal,
+    modelCopyProgress,
+    parseModelCopyFrame,
+    sameModelCopy
+} from './model-copy'
 import { mergePullProgressPercent } from './pull-error-handling'
 import type { JsonRpcNotification, JsonValue } from './json-rpc-client'
 import { serviceLogLevel } from './service-log-level'
@@ -275,7 +281,8 @@ class ModularBridgeState {
     private pendingRemoteEngineOps = new Map<string, EngineProcessStatus>()
     private pendingRemoteOpTimers = new Map<string, ReturnType<typeof setTimeout>>()
     /**
-     * In-flight model pulls keyed by {@link engineProgressKey}. The pull is
+     * Model operation progress keyed by {@link engineProgressKey}, including
+     * bounded copy outcomes. A pull is
      * dispatched fire-and-forget, so we synthesize a `pulling` progress entry on
      * dispatch (so {@link IncomingSyncPullRow} renders immediately) and clear it
      * when the supervisor's awaited completion resolves. While the pull runs the
@@ -317,13 +324,18 @@ class ModularBridgeState {
      * {@link finishModelPull}.
      */
     private localPullModels = new Map<EngineType, string>()
-    /**
-     * In-flight copies to this PC keyed by {@link remoteOpKey} of the source peer
-     * and engine. `engine:remote-progress` copy frames carry no `model` either, so
-     * the model dispatched is stamped here; `failure` holds the message of a
-     * terminal `error` frame for {@link finishModelCopy} to hand back.
-     */
-    private modelCopies = new Map<string, { model: string; failure?: string }>()
+    /** Eight active copies plus at most eight last visible outcomes; no terminal history. */
+    private modelCopies = new Map<
+        string,
+        {
+            request: ModelCopyRequest
+            sequence: number
+            active: boolean
+            awaitingResponse: boolean
+            terminal?: 'error' | 'cancelled'
+        }
+    >()
+    private modelCopySequence = 0
     /**
      * The authoritative set of live inbound invites awaiting the local user's PIN
      * entry, keyed by `inviteId`. The cluster-manager pushes `cluster:invite-received`
@@ -1014,57 +1026,202 @@ class ModularBridgeState {
         emitBridgePush('engines:progress-changed', progress)
     }
 
-    /** Start a copy of a model from a peer to this PC; false when one is already in flight. */
-    beginModelCopy(nodeId: string, engineType: EngineType, model: string): boolean {
-        const key = this.remoteOpKey(nodeId, engineType)
-        if (this.modelCopies.has(key)) return false
-        this.modelCopies.set(key, { model })
-        emitBridgePush(
-            'engines:progress-changed',
-            modelCopyProgress(
-                { nodeId, engineType, stage: 'starting' },
-                model,
-                this.nodes.get(nodeId)?.name ?? nodeId
-            )
+    beginModelCopy(request: ModelCopyRequest, awaitingResponse = true): void {
+        const previous = this.modelCopies.get(request.opId)
+        if (previous) throw new Error('Use a fresh operation ID for each copy attempt')
+        if (Array.from(this.modelCopies.values()).filter(copy => copy.active).length >= 8)
+            throw new Error('Too many active model copies')
+        const progress = modelCopyProgress(
+            {
+                ...request,
+                node: request.sourceNodeId,
+                op: 'copy',
+                stage: 'starting'
+            },
+            this.nodes.get(request.destinationNodeId)?.name ?? request.destinationNodeId
         )
-        return true
-    }
-
-    /** End a copy, clearing its progress. Returns the failure message a terminal frame carried. */
-    finishModelCopy(nodeId: string, engineType: EngineType): string | undefined {
-        const key = this.remoteOpKey(nodeId, engineType)
-        const copy = this.modelCopies.get(key)
-        if (!copy) return undefined
-        this.modelCopies.delete(key)
-        emitBridgePush('engines:progress-cleared', {
-            key: engineProgressKey({
-                nodeId,
-                engineType,
-                operation: 'copy',
-                model: copy.model
-            })
+        this.modelCopies.set(request.opId, {
+            request: { ...request },
+            active: true,
+            awaitingResponse,
+            sequence: ++this.modelCopySequence
         })
-        return copy.failure
+        this.publishModelCopy({ ...progress, expectedExportId: request.expectedExportId })
     }
 
-    /**
-     * Apply an `engine:remote-progress` frame with `op: "copy"`. A terminal frame
-     * is left for {@link finishModelCopy}, which the awaiting RPC runs; an
-     * `error` frame only records its message first.
-     */
+    private publishModelCopy(progress: EngineProgress): void {
+        this.activePulls.set(engineProgressKey(progress), progress)
+        emitBridgePush('engines:progress-changed', progress)
+    }
+
+    finishModelCopy(
+        request: ModelCopyRequest,
+        status: 'done' | 'error' | 'cancelled' | 'unknown',
+        result?: ModelCopyResult,
+        message?: string
+    ): void {
+        const copy = this.modelCopies.get(request.opId)
+        if (!copy || !sameModelCopy(copy.request, request)) return
+        if (status !== 'done' && copy.terminal) status = copy.terminal
+        const progress = modelCopyProgress(
+            { ...request, node: request.sourceNodeId, op: 'copy', stage: status },
+            this.nodes.get(request.destinationNodeId)?.name ?? request.destinationNodeId
+        )
+        const previous = this.activePulls.get(engineProgressKey(progress))
+        if (
+            result &&
+            (copy.terminal || (previous?.exportId && previous.exportId !== result.exportId))
+        )
+            throw new Error(
+                'Copy terminal response disagrees with its progress identity or outcome'
+            )
+        let completion = copy.terminal ? (previous?.message ?? message) : message
+        if (result) {
+            completion = `Copied to ${progress.nodeName}.`
+            if (result.requiresConfiguration)
+                completion += ` Set up this model's serving configuration on ${progress.nodeName} before loading it.`
+            if (result.durability === 'uncertain')
+                completion += ' Files copied; publication durability could not be confirmed.'
+        }
+        copy.active = false
+        copy.sequence = ++this.modelCopySequence
+        // Reinsert so eviction removes the oldest settled outcome, not an active copy.
+        this.modelCopies.delete(request.opId)
+        this.modelCopies.set(request.opId, copy)
+        this.publishModelCopy({
+            ...previous,
+            ...progress,
+            expectedExportId: request.expectedExportId,
+            exportId: result?.exportId ?? previous?.exportId,
+            completed: result?.bytesCopied ?? previous?.completed,
+            total: result?.bytesTotal ?? previous?.total,
+            copyResult: result,
+            message: completion,
+            error: status === 'error' ? completion : undefined
+        })
+        const settled = Array.from(this.modelCopies.entries()).filter(([, entry]) => !entry.active)
+        for (const [opId, entry] of settled.slice(0, Math.max(0, settled.length - 8))) {
+            this.modelCopies.delete(opId)
+            const key = engineProgressKey(
+                modelCopyProgress(
+                    {
+                        ...entry.request,
+                        node: entry.request.sourceNodeId,
+                        op: 'copy',
+                        stage: 'idle'
+                    },
+                    ''
+                )
+            )
+            this.activePulls.delete(key)
+            emitBridgePush('engines:progress-cleared', { key })
+        }
+    }
+
+    beginModelCopyRead(): number {
+        return this.modelCopySequence
+    }
+
+    /** Adopt only the selected peer's scanner inventory; never refresh controller models. */
+    applyModelCopyDestinationInventory(nodeId: string, snapshot: JsonValue | undefined): void {
+        if (nodeId === this.selfId) return
+        const node = brokerNodesValue(snapshot).find(node => node.id === nodeId)
+        if (!node) return
+        this.brokerNodeIds.add(nodeId)
+        this.upsertNode(node, 'broker')
+    }
+
+    /** Reconcile Go's active set, preserving newer notifications/results that raced the read. */
+    reconcileModelCopies(operations: ActiveModelCopy[], baseline = this.modelCopySequence): void {
+        const seen = new Set(operations.map(operation => operation.opId))
+        for (const copy of Array.from(this.modelCopies.values())) {
+            if (copy.active && copy.sequence <= baseline && !seen.has(copy.request.opId)) {
+                this.finishModelCopy(
+                    copy.request,
+                    'unknown',
+                    undefined,
+                    'Copy outcome unknown after reconnect. Retry with the export identity when available.'
+                )
+            }
+        }
+        for (const operation of operations) {
+            const previous = this.modelCopies.get(operation.opId)
+            if (
+                previous &&
+                (previous.sequence > baseline || !sameModelCopy(previous.request, operation))
+            )
+                continue
+            // A newer local admission can race this older full snapshot.
+            if (
+                !previous?.active &&
+                Array.from(this.modelCopies.values()).filter(copy => copy.active).length >= 8
+            )
+                continue
+            if (previous && !previous.active) {
+                const progress = modelCopyProgress(
+                    { ...operation, node: operation.sourceNodeId, op: 'copy', stage: 'starting' },
+                    ''
+                )
+                if (this.activePulls.get(engineProgressKey(progress))?.status !== 'unknown')
+                    continue
+                previous.active = true
+                previous.awaitingResponse = false
+                previous.sequence = ++this.modelCopySequence
+                previous.terminal = undefined
+                const cached = this.activePulls.get(engineProgressKey(progress))
+                this.publishModelCopy({
+                    ...progress,
+                    nodeName: cached?.nodeName ?? operation.destinationNodeId,
+                    expectedExportId: operation.expectedExportId,
+                    exportId: cached?.exportId,
+                    completed: cached?.completed,
+                    total: cached?.total
+                })
+            } else if (!previous) {
+                this.beginModelCopy(operation, false)
+            }
+            if (operation.progress) this.applyModelCopyFrame({ ...operation.progress })
+        }
+    }
+
+    /** A terminal progress frame alone never establishes verified success. */
     private applyModelCopyFrame(params: JsonValue | undefined): void {
         const frame = parseModelCopyFrame(params)
         if (!frame) return
-        const copy = this.modelCopies.get(this.remoteOpKey(frame.nodeId, frame.engineType))
-        if (!copy) return
-        if (isModelCopyTerminal(frame.stage)) {
-            if (frame.stage === 'error') copy.failure = frame.message ?? 'The copy failed'
-            return
-        }
-        emitBridgePush(
-            'engines:progress-changed',
-            modelCopyProgress(frame, copy.model, this.nodes.get(frame.nodeId)?.name ?? frame.nodeId)
+        const copy = this.modelCopies.get(frame.opId)
+        if (!copy?.active || !sameModelCopy(copy.request, frame)) return
+        const progress = modelCopyProgress(
+            frame,
+            this.nodes.get(frame.destinationNodeId)?.name ?? frame.destinationNodeId
         )
+        const previous = this.activePulls.get(engineProgressKey(progress))
+        const expectedExportId = copy.request.expectedExportId ?? previous?.exportId
+        if (frame.exportId && expectedExportId && frame.exportId !== expectedExportId) return
+        copy.sequence = ++this.modelCopySequence
+        if (frame.stage === 'error' || frame.stage === 'cancelled') copy.terminal = frame.stage
+        if (isModelCopyTerminal(frame.stage)) {
+            if (!copy.awaitingResponse) {
+                this.publishModelCopy({
+                    ...progress,
+                    exportId: progress.exportId ?? previous?.exportId
+                })
+                this.finishModelCopy(
+                    copy.request,
+                    frame.stage === 'done' ? 'unknown' : (copy.terminal ?? 'unknown'),
+                    undefined,
+                    frame.stage === 'done'
+                        ? 'Copy finished while detached; its verified result is unavailable. Retry with the export identity to confirm the outcome.'
+                        : frame.message
+                )
+                return
+            }
+            progress.status = 'awaiting-result'
+        }
+        this.publishModelCopy({
+            ...progress,
+            expectedExportId: copy.request.expectedExportId,
+            exportId: progress.exportId ?? previous?.exportId
+        })
     }
 
     /** Whether an optimistic remote pull entry for this model is still in flight. */

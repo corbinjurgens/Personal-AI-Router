@@ -260,6 +260,21 @@ resolve to one node and lets workload/error attribution land on the right node.
 Local model state comes from `nvpair-engine-manager`; remote model state comes
 from scanner enrichment of each peer's engine-manager `/v1/models` endpoint.
 
+Model copy control uses `engine:copy-model`, `engine:cancel-model-copy`,
+`engine:active-model-copies` and `engine:model-copy-capabilities` through the
+existing broker relay. Copy start uses the existing JSON-RPC unlimited-wait
+option and preserves the real terminal result. `engine:remote-progress` copy
+frames carry the full tuple and operation ID; source-only attribution is
+refused. Reconnect reads Go's active snapshot instead of reconstructing success.
+After a verified copy, the bridge refreshes the actual destination status and
+inventory: local destinations use engine-manager reads; remote destinations
+adopt only their entry from the scanner's current discovery snapshot and keep
+converging through scanner pushes. This snapshot read does not force immediate
+peer enrichment. The controller's model store is never opened. Custom receipts
+remain separate from native inventories, including setup and uncertain
+durability qualifications. The typed API is documented in
+[frontend-api.md](frontend-api.md#pairapiengines).
+
 ### When the backend drops a node
 
 A node leaves the directory only after it has been absent from every mDNS scan

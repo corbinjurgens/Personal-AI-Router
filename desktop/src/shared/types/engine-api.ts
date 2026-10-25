@@ -4,8 +4,8 @@
 /**
  * Engine command and initial state types for the frontend API.
  *
- * Commands are fire-and-forget (void). Errors arrive via errors:update push events.
- * All state flows via push events, not command responses.
+ * Ordinary commands are fire-and-forget. Copy requests additionally return their
+ * verified terminal result; operation state still flows through progress pushes.
  */
 import type { EngineStatusData, EngineType } from '@/shared/types/engines'
 import type {
@@ -99,6 +99,7 @@ export interface EngineStateSnapshot {
     descriptors: EngineDescriptor[]
     statuses: EngineStatusData[]
     models: EngineModels[]
+    /** Active operations and bounded last copy outcomes, including unknown after reconnect. */
     activeProgress: EngineProgress[]
     updateAvailable: EngineUpdateAvailable[]
 }

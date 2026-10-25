@@ -15,7 +15,13 @@ export function engineProgressKey(p: {
     engineType: EngineType
     operation: string
     model?: string
+    opId?: string
+    sourceNodeId?: string
+    destinationNodeId?: string
 }): string {
+    if (p.operation === 'copy' && p.opId) {
+        return `${p.nodeId}:copy:${JSON.stringify([p.opId, p.sourceNodeId, p.destinationNodeId, p.engineType, p.model])}`
+    }
     return p.model
         ? `${p.nodeId}:${p.engineType}:${p.operation}:${p.model}`
         : `${p.nodeId}:${p.engineType}:${p.operation}`
@@ -53,7 +59,10 @@ export function emptyEngineProgress(at: {
 export function isEngineCopyInProgress(
     p: Pick<EngineProgress, 'operation' | 'status'> | undefined
 ): boolean {
-    return p?.operation === 'copy' && p.status !== 'idle'
+    return (
+        p?.operation === 'copy' &&
+        !['idle', 'done', 'error', 'cancelled', 'unknown'].includes(p.status)
+    )
 }
 
 /** Whether UI should treat this progress as an active pull (show cancel, spinner, etc.). */
