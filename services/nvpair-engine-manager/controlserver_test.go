@@ -17,6 +17,24 @@ func TestControlHostDefault(t *testing.T) {
 	if defaultControlHost != "0.0.0.0" {
 		t.Fatalf("default control host = %q, want 0.0.0.0", defaultControlHost)
 	}
+	listener, err := listenControl(defaultControlHost, 0)
+	if err != nil {
+		t.Fatalf("bind default control listener: %v", err)
+	}
+	defer func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("close default control listener: %v", err)
+		}
+	}()
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || !address.IP.IsUnspecified() || address.Port <= 0 {
+		t.Fatalf("actual default control listener = %v, want a wildcard address on an allocated port", listener.Addr())
+	}
+	family := "IPv6"
+	if address.IP.To4() != nil {
+		family = "IPv4"
+	}
+	t.Logf("default literal %q bound %s wildcard %s", defaultControlHost, family, address)
 }
 
 func TestControlHostLiteralValidation(t *testing.T) {
