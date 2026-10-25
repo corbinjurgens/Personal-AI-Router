@@ -60,13 +60,10 @@ func Dial(ctx context.Context) (io.ReadWriteCloser, error) {
 	return DialEndpoint(ctx, endpoint)
 }
 
-// DialEndpoint connects to a service listening at endpoint.
+// DialEndpoint connects to a service listening at endpoint. Only endpoint
+// absence wraps ErrNotRunning; other errors retain their original cause.
 func DialEndpoint(ctx context.Context, endpoint string) (io.ReadWriteCloser, error) {
-	conn, err := dialEndpoint(ctx, endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrNotRunning, err)
-	}
-	return conn, nil
+	return dialEndpoint(ctx, endpoint)
 }
 
 // StartDetached starts the nvpair-service binary at binaryPath in the
@@ -109,30 +106,40 @@ func StartDetachedArgs(binaryPath string, args []string) error {
 
 // ConnectOrStart dials the service and, when it is not running, starts
 // binaryPath detached and keeps dialing for up to ten seconds (or until ctx
-// ends).
+// ends). Only endpoint absence permits a start or a startup retry; other dial
+// errors, including cancellation and permission failures, are returned.
 func ConnectOrStart(ctx context.Context, binaryPath string, brokerArgs []string) (io.ReadWriteCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	endpoint, err := Endpoint()
 	if err != nil {
 		return nil, err
 	}
 	if conn, err := DialEndpoint(ctx, endpoint); err == nil {
 		return conn, nil
+	} else if !errors.Is(err, ErrNotRunning) {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if err := StartDetached(binaryPath, brokerArgs); err != nil {
 		return nil, err
 	}
 	deadline, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
-	var lastErr error
 	for {
 		conn, err := DialEndpoint(deadline, endpoint)
 		if err == nil {
 			return conn, nil
 		}
-		lastErr = err
+		if !errors.Is(err, ErrNotRunning) {
+			return nil, fmt.Errorf("started %s but it did not answer on %s: %w", binaryPath, endpoint, err)
+		}
 		select {
 		case <-deadline.Done():
-			return nil, fmt.Errorf("started %s but it did not answer on %s: %w", binaryPath, endpoint, lastErr)
+			return nil, fmt.Errorf("started %s but it did not answer on %s: %w", binaryPath, endpoint, deadline.Err())
 		case <-time.After(dialRetryInterval):
 		}
 	}

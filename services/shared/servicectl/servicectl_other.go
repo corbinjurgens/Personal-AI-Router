@@ -7,6 +7,7 @@ package servicectl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -58,7 +59,11 @@ func shortEndpoint() (string, error) {
 
 func dialEndpoint(ctx context.Context, endpoint string) (io.ReadWriteCloser, error) {
 	var d net.Dialer
-	return d.DialContext(ctx, "unix", endpoint)
+	conn, err := d.DialContext(ctx, "unix", endpoint)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
+		return nil, fmt.Errorf("%w: %w", ErrNotRunning, err)
+	}
+	return conn, err
 }
 
 // configureDetached puts the service in a new session, so it has no
