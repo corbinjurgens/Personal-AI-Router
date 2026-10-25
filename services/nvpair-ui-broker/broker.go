@@ -504,6 +504,11 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 	if paths.engineMgrControlHost != nil {
 		controlHost = *paths.engineMgrControlHost
 	}
+	validNamespace := true
+	if paths.scannerNamespace != nil {
+		_, err := paths.scannerNamespace.Normalize()
+		validNamespace = err == nil
+	}
 	// Resolve the local node id once, as the stable per-host UUID (the same
 	// value the node-scanner advertises as hostUuid and the cluster-manager
 	// uses as nodeUuid). It's stamped onto every local-origin workload
@@ -512,7 +517,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 	// only. The same value is passed to nvpair-errors via --node-id so
 	// its localNodeID stays in lockstep with what the broker stamps.
 	nodeID := ""
-	if validateEngineManagerControlHost(controlHost) == nil {
+	if validNamespace && validateEngineManagerControlHost(controlHost) == nil {
 		nodeID = resolveLocalNodeID(paths.clusterDir)
 	}
 	return &Broker{

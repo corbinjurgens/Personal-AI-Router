@@ -4,6 +4,8 @@
 package main
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -74,13 +76,41 @@ func TestScannerNamespaceSurvivesSupervisedRestart(t *testing.T) {
 	assertArgs()
 }
 
-func TestScannerNamespaceInvalidBeforeSpawn(t *testing.T) {
-	b := NewBroker(nil, workerPaths{scanner: "must-not-start", scannerNamespace: &noderec.MDNSNamespace{Service: noderec.ServiceType}})
-	if args, err := b.scannerArgs(); err == nil || args != nil {
-		t.Fatalf("invalid namespace argv = %q, %v", args, err)
-	}
-	if handle, err := b.spawnScanner(); err == nil || handle != nil {
-		t.Fatalf("invalid namespace spawn = %v, %v", handle, err)
+func TestScannerNamespaceInvalidBeforeIdentityAndSpawn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		disabled bool
+	}{
+		{"multicast enabled", false},
+		{"multicast disabled", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "must-not-exist")
+			assertNoIdentity := func() {
+				t.Helper()
+				if _, err := os.Stat(root); !os.IsNotExist(err) {
+					t.Fatalf("invalid namespace created identity directory or stat failed: %v", err)
+				}
+			}
+			b := NewBroker(nil, workerPaths{
+				scanner: "must-not-start", clusterDir: filepath.Join(root, "cluster"), disableMDNS: tc.disabled,
+				scannerNamespace: &noderec.MDNSNamespace{Service: noderec.ServiceType},
+			})
+			assertNoIdentity()
+			if b.nodeID != "" {
+				t.Fatalf("invalid namespace resolved identity %q", b.nodeID)
+			}
+			if args, err := b.scannerArgs(); err == nil || args != nil {
+				t.Fatalf("invalid namespace argv = %q, %v", args, err)
+			}
+			if err := b.Serve(context.Background()); err == nil {
+				t.Fatal("Serve accepted invalid namespace")
+			}
+			if handle, err := b.spawnScanner(); err == nil || handle != nil {
+				t.Fatalf("invalid namespace spawn = %v, %v", handle, err)
+			}
+			assertNoIdentity()
+		})
 	}
 }
 
