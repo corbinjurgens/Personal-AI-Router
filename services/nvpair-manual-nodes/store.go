@@ -35,18 +35,28 @@ func loadEntries(path string) ([]ManualEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	var st persistedState
+	var st struct {
+		Version int               `json:"version"`
+		Nodes   []json.RawMessage `json:"nodes"`
+	}
 	if err := json.Unmarshal(data, &st); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if st.Version != stateVersion {
 		return nil, fmt.Errorf("%s has unsupported version %d", path, st.Version)
 	}
-	out := st.Nodes[:0]
-	for _, e := range st.Nodes {
-		if e.Address != "" {
-			out = append(out, e)
+	var out []ManualEntry
+	dropped := 0
+	for _, raw := range st.Nodes {
+		var entry ManualEntry
+		if json.Unmarshal(raw, &entry) != nil {
+			dropped++
+			continue
 		}
+		out = append(out, entry)
+	}
+	if dropped > 0 {
+		slog.Warn("skipping invalid saved manual nodes", "count", dropped)
 	}
 	return out, nil
 }

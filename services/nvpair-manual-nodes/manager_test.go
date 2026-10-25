@@ -11,6 +11,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -92,8 +94,8 @@ func TestModelControlsManualObservationPresenceTransitions(t *testing.T) {
 			assertPayload(t, discovered.Params, nil)
 			for _, phase := range []struct {
 				name, ollama, lmstudio string
-				want                  []string
-				changed               bool
+				want                   []string
+				changed                bool
 			}{
 				{"unknown repeat", `{"models":`, `{"data":`, nil, false},
 				{"successful empty", `{"models":[]}`, `{"data":[]}`, []string{}, true},
@@ -490,11 +492,100 @@ func sampleInfo() NodeInfoResponse {
 }
 
 func TestNodeID(t *testing.T) {
-	if got := nodeID(ManualEntry{Name: "workstation", Address: "10.0.0.5"}); got != "workstation" {
+	if got := nodeID(ManualEntry{Name: "workstation", Address: "10.0.0.5"}); got != "manual:name:workstation" {
 		t.Fatalf("named nodeID = %q", got)
 	}
 	if got := nodeID(ManualEntry{Address: "10.0.0.5"}); got != "manual:10.0.0.5" {
 		t.Fatalf("unnamed nodeID = %q", got)
+	}
+}
+
+func TestManualEntryValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry ManualEntry
+	}{
+		{"IPv4", ManualEntry{Address: "192.0.2.1"}},
+		{"IPv6", ManualEntry{Address: "2001:db8::1"}},
+		{"hostname", ManualEntry{Address: "lab.tailnet.ts.net."}},
+		{"Unicode display name", ManualEntry{Address: "node.local", Name: "作業 PC"}},
+		{"named reference at byte bound", ManualEntry{Address: "node.local", Name: strings.Repeat("n", manualNodeReferenceMaxBytes-len("manual:name:"))}},
+		{"maximum TLS port", ManualEntry{Address: "node.local", TLSPort: 65535, MTLS: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.entry.validate(); err != nil {
+				t.Fatalf("valid entry rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestManualEntryRejectedBeforeEffects(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+	}{
+		{"URL", `{"address":"http://node.local"}`},
+		{"scoped IPv6", `{"address":"fe80::1%en0"}`},
+		{"host and port", `{"address":"node.local:11434"}`},
+		{"path", `{"address":"node.local/path"}`},
+		{"credentials", `{"address":"user@node.local"}`},
+		{"query", `{"address":"node.local?x"}`},
+		{"whitespace", `{"address":" node.local"}`},
+		{"empty DNS label", `{"address":"node..local"}`},
+		{"leading hyphen", `{"address":"-node.local"}`},
+		{"invalid UTF8", "{\"address\":\"node.local\",\"name\":\"bad\xff\"}"},
+		{"unpaired surrogate", `{"address":"node.local","name":"\ud800"}`},
+		{"format character", `{"address":"node.local","name":"bad\u200b"}`},
+		{"control character", `{"address":"node.local","name":"bad\n"}`},
+		{"negative port", `{"address":"node.local","tls_port":-1}`},
+		{"over-bound port", `{"address":"node.local","tls_port":65536}`},
+		{"mTLS without TLS", `{"address":"node.local","mtls":true}`},
+		{"named reference over byte bound", `{"address":"node.local","name":"` + strings.Repeat("n", manualNodeReferenceMaxBytes-len("manual:name:")+1) + `"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rw, _ := newTestManager()
+			m.statePath = filepath.Join(t.TempDir(), stateFileName)
+			m.handleMessage(requestMessageRaw(1, "node/add", json.RawMessage(tc.raw)))
+			response := readCaptureFrame(t, rw)
+			if response.Error == nil || response.Error.Code != -32602 || len(m.listNodes()) != 0 {
+				t.Fatalf("invalid entry reached state/probes: response=%+v", response)
+			}
+			if _, err := os.Stat(m.statePath); !os.IsNotExist(err) {
+				t.Fatalf("invalid entry reached persistence: %v", err)
+			}
+		})
+	}
+}
+
+func TestManualNamesCannotClaimOtherKeyNamespaces(t *testing.T) {
+	for _, name := range []string{"self", "peer-uuid", "manual:192.0.2.1", "192.0.2.1"} {
+		t.Run(name, func(t *testing.T) {
+			id := nodeID(ManualEntry{Address: "node.local", Name: name})
+			if id == name || id == nodeID(ManualEntry{Address: "192.0.2.1"}) || !strings.HasPrefix(id, "manual:name:") {
+				t.Fatalf("name escaped its namespace: %q", id)
+			}
+		})
+	}
+}
+
+func TestManualNameUnicodeEscapes(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw, want string
+	}{
+		{"paired surrogate", `"\ud83d\ude00"`, "😀"},
+		{"literal replacement rune", `"�"`, "�"},
+		{"escaped replacement rune", `"\ufffd"`, "�"},
+		{"escaped backslash", `"\\ud800"`, `\ud800`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var entry ManualEntry
+			if err := json.Unmarshal([]byte(`{"address":"node.local","name":`+tc.raw+`}`), &entry); err != nil {
+				t.Fatal(err)
+			}
+			if entry.Name != tc.want {
+				t.Fatalf("name=%q, want %q", entry.Name, tc.want)
+			}
+		})
 	}
 }
 
@@ -506,7 +597,7 @@ func TestNodeAddRespondsWithInitialStatusThenDiscoversProbeResult(t *testing.T) 
 
 	resp := readCaptureUntil(t, rw, responseWithID(1))
 	initial := decodeResult[ManualNodeStatus](t, resp)
-	if initial.ID != "lab" || initial.Address != "node.local" {
+	if initial.ID != "manual:name:lab" || initial.Address != "node.local" {
 		t.Fatalf("initial status = %+v", initial)
 	}
 	if initial.OllamaPort != 11434 || initial.NodeInfoPort != 14318 {
@@ -583,18 +674,18 @@ func TestNodesListReturnsCurrentStatuses(t *testing.T) {
 
 func TestNodeRemoveReturnsRemovedAndNotifies(t *testing.T) {
 	m, rw, _ := newTestManager()
-	m.nodes["lab"] = &trackedNode{
+	m.nodes["manual:name:lab"] = &trackedNode{
 		entry:  ManualEntry{Name: "lab", Address: "node.local"},
-		status: ManualNodeStatus{ID: "lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318},
+		status: ManualNodeStatus{ID: "manual:name:lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318},
 	}
 
-	m.handleMessage(requestMessage(1, "node/remove", map[string]string{"id": "lab"}))
+	m.handleMessage(requestMessage(1, "node/remove", map[string]string{"id": "manual:name:lab"}))
 	removed := readCaptureFrame(t, rw)
 	if removed.Method != "node/removed" {
 		t.Fatalf("first remove frame = %+v", removed)
 	}
 	status := decodeParams[ManualNodeStatus](t, removed)
-	if status.ID != "lab" {
+	if status.ID != "manual:name:lab" {
 		t.Fatalf("removed params = %+v", status)
 	}
 	resp := readCaptureUntil(t, rw, responseWithID(1))
@@ -606,7 +697,7 @@ func TestNodeRemoveReturnsRemovedAndNotifies(t *testing.T) {
 		t.Fatalf("node still listed after removal: %#v", got)
 	}
 
-	m.handleMessage(requestMessage(2, "node/remove", map[string]string{"id": "lab"}))
+	m.handleMessage(requestMessage(2, "node/remove", map[string]string{"id": "manual:name:lab"}))
 	resp = readCaptureUntil(t, rw, responseWithID(2))
 	result = decodeResult[map[string]bool](t, resp)
 	if result["removed"] {
@@ -632,7 +723,7 @@ func TestAddThenRemoveBeforeInitialProbeDoesNotRediscover(t *testing.T) {
 	})
 
 	status := m.addNode(ManualEntry{Address: "node.local", Name: "lab"})
-	if status.ID != "lab" {
+	if status.ID != "manual:name:lab" {
 		t.Fatalf("add status = %+v", status)
 	}
 
@@ -642,7 +733,7 @@ func TestAddThenRemoveBeforeInitialProbeDoesNotRediscover(t *testing.T) {
 		t.Fatal("initial probe did not start")
 	}
 
-	if !m.removeNode("lab") {
+	if !m.removeNode("manual:name:lab") {
 		t.Fatal("removeNode returned false")
 	}
 	_ = readCaptureUntil(t, rw, methodIs("node/removed"))
@@ -669,8 +760,8 @@ func TestReplacedManualNodeDropsOldProbeResultAndDiscovery(t *testing.T) {
 		<-releaseOldProbe
 		return httpJSON(http.StatusOK, `{}`)
 	})
-	oldNode := &trackedNode{entry: oldEntry, status: ManualNodeStatus{ID: "lab", Address: oldEntry.Address, OllamaPort: 11434, NodeInfoPort: 14318}}
-	m.nodes["lab"] = oldNode
+	oldNode := &trackedNode{entry: oldEntry, status: ManualNodeStatus{ID: "manual:name:lab", Address: oldEntry.Address, OllamaPort: 11434, NodeInfoPort: 14318}}
+	m.nodes["manual:name:lab"] = oldNode
 	go func() {
 		m.probeAndDiscover(oldNode)
 		close(oldProbeDone)
@@ -703,7 +794,7 @@ func TestReplacedManualNodeDropsOldProbeResultAndDiscovery(t *testing.T) {
 	}
 
 	m.mu.RLock()
-	got := m.nodes["lab"].status
+	got := m.nodes["manual:name:lab"].status
 	m.mu.RUnlock()
 	if got.Address != newEntry.Address || got.HostUUID != "new-host" || got.ServiceBuildID != manualCleanBuild {
 		t.Fatalf("replacement status overwritten by old probe: %+v", got)
@@ -721,17 +812,17 @@ func TestReplacedManualNodeDropsOldProbeResultAndDiscovery(t *testing.T) {
 
 func TestProbeNodeEmitsUpdatedOnStateChange(t *testing.T) {
 	m, rw, rt := newTestManager()
-	m.nodes["lab"] = &trackedNode{entry: ManualEntry{Name: "lab", Address: "node.local"}, status: ManualNodeStatus{ID: "lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318}}
+	m.nodes["manual:name:lab"] = &trackedNode{entry: ManualEntry{Name: "lab", Address: "node.local"}, status: ManualNodeStatus{ID: "manual:name:lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318}}
 
 	configureHealthyNode(rt, "node.local", []string{"llama3"}, sampleInfo())
-	m.probeNode(m.nodes["lab"])
+	m.probeNode(m.nodes["manual:name:lab"])
 	first := decodeParams[ManualNodeStatus](t, readCaptureUntil(t, rw, methodIs("node/updated")))
 	if len(first.OllamaModels) != 1 || first.OllamaModels[0] != "llama3" {
 		t.Fatalf("first update models = %#v", first.OllamaModels)
 	}
 
 	configureHealthyNode(rt, "node.local", []string{"mistral"}, sampleInfo())
-	m.probeNode(m.nodes["lab"])
+	m.probeNode(m.nodes["manual:name:lab"])
 	second := decodeParams[ManualNodeStatus](t, readCaptureUntil(t, rw, methodIs("node/updated")))
 	if len(second.OllamaModels) != 1 || second.OllamaModels[0] != "mistral" {
 		t.Fatalf("second update models = %#v", second.OllamaModels)
@@ -741,7 +832,7 @@ func TestProbeNodeEmitsUpdatedOnStateChange(t *testing.T) {
 func TestProbeNodeNoUpdateWhenStable(t *testing.T) {
 	m, rw, rt := newTestManager()
 	entry := ManualEntry{Name: "lab", Address: "node.local"}
-	m.nodes["lab"] = &trackedNode{entry: entry, status: ManualNodeStatus{ID: "lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318}}
+	m.nodes["manual:name:lab"] = &trackedNode{entry: entry, status: ManualNodeStatus{ID: "manual:name:lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318}}
 	configureHealthyNode(rt, "node.local", []string{"llama3"}, sampleInfo())
 
 	m.probeNode(m.nodes[nodeID(entry)])
@@ -754,10 +845,10 @@ func TestProbeNodeNoUpdateWhenStable(t *testing.T) {
 func TestProbeFailuresClearAvailability(t *testing.T) {
 	m, rw, rt := newTestManager()
 	entry := ManualEntry{Name: "lab", Address: "node.local"}
-	m.nodes["lab"] = &trackedNode{
+	m.nodes["manual:name:lab"] = &trackedNode{
 		entry: entry,
 		status: ManualNodeStatus{
-			ID:           "lab",
+			ID:           "manual:name:lab",
 			Address:      "node.local",
 			OllamaUp:     true,
 			OllamaPort:   11434,
@@ -792,7 +883,7 @@ func TestProbeFailuresClearAvailability(t *testing.T) {
 func TestProbeFailurePreservesHostUUID(t *testing.T) {
 	m, rw, rt := newTestManager()
 	entry := ManualEntry{Name: "lab", Address: "node.local"}
-	m.nodes["lab"] = &trackedNode{entry: entry, status: ManualNodeStatus{ID: "lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318}}
+	m.nodes["manual:name:lab"] = &trackedNode{entry: entry, status: ManualNodeStatus{ID: "manual:name:lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318}}
 
 	info := sampleInfo()
 	info.HostUUID = "node-uuid"

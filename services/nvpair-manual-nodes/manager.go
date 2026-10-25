@@ -12,9 +12,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"nvpair-shared/applog"
 	"nvpair-shared/buildinfo"
@@ -96,6 +100,121 @@ type ManualEntry struct {
 	Name    string `json:"name"`
 	TLSPort int    `json:"tls_port,omitempty"`
 	MTLS    bool   `json:"mtls,omitempty"`
+}
+
+// Match the broker's existing 256-byte workload node-reference projection.
+// Prefixes count toward the limit; validating before effects prevents saved
+// entries from creating identities downstream consumers cannot represent.
+const manualNodeReferenceMaxBytes = 256
+
+func (e ManualEntry) validate() error {
+	if e.Address == "" {
+		return fmt.Errorf("address is required")
+	}
+	if e.TLSPort < 0 || e.TLSPort > 65535 {
+		return fmt.Errorf("tls_port must be between 0 and 65535")
+	}
+	if e.MTLS && e.TLSPort == 0 {
+		return fmt.Errorf("mtls requires tls_port")
+	}
+	for _, value := range []string{e.Address, e.Name, nodeID(e)} {
+		if len(value) > manualNodeReferenceMaxBytes || !utf8.ValidString(value) {
+			return fmt.Errorf("manual node reference must be valid UTF-8 and at most 256 bytes including its prefix")
+		}
+		for _, r := range value {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				return fmt.Errorf("manual node reference contains a control or format character")
+			}
+		}
+	}
+	if ip, err := netip.ParseAddr(e.Address); err == nil && ip.Zone() == "" {
+		return nil
+	}
+	// Accept a bare DNS hostname (including a trailing root dot), never a
+	// URL, host:port, path, query, or credentials that URL construction could
+	// interpret as a different probe target.
+	host := strings.TrimSuffix(e.Address, ".")
+	if len(host) > 253 {
+		return fmt.Errorf("DNS hostname must be at most 253 bytes")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("address must be a bare IP address or DNS hostname")
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return fmt.Errorf("address must be a bare IP address or DNS hostname")
+			}
+		}
+	}
+	return nil
+}
+
+func (e *ManualEntry) UnmarshalJSON(data []byte) error {
+	// The regular decoder repairs malformed UTF-8 and surrogate escapes. Check
+	// original address/name tokens first, including folded field spellings.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for key, raw := range fields {
+		if strings.EqualFold(key, "address") || strings.EqualFold(key, "name") {
+			if !manualStringUnicode(raw) || string(raw) != `""` && nodepolicy.ValidateModelIdentifierJSON(raw) != nil {
+				return fmt.Errorf("invalid manual node identity")
+			}
+		}
+	}
+	type wire ManualEntry
+	var next wire
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	if err := ManualEntry(next).validate(); err != nil {
+		return err
+	}
+	*e = ManualEntry(next)
+	return nil
+}
+
+// Match the engine-manager control decoder's Unicode guard: encoding/json
+// repairs lone UTF-16 surrogates, which must not alias two manual identities.
+// A literal replacement rune and valid surrogate pairs remain valid.
+func manualStringUnicode(raw []byte) bool {
+	if len(raw) < 2 || raw[0] != '"' || !utf8.Valid(raw) {
+		return false
+	}
+	for i := 1; i < len(raw)-1; i++ {
+		if raw[i] != '\\' {
+			continue
+		}
+		i++
+		if raw[i] != 'u' {
+			continue
+		}
+		if i+4 >= len(raw) {
+			return false
+		}
+		value, err := strconv.ParseUint(string(raw[i+1:i+5]), 16, 16)
+		if err != nil {
+			return false
+		}
+		i += 4
+		if value >= 0xdc00 && value <= 0xdfff {
+			return false
+		}
+		if value < 0xd800 || value > 0xdbff {
+			continue
+		}
+		if i+6 >= len(raw) || raw[i+1] != '\\' || raw[i+2] != 'u' {
+			return false
+		}
+		low, err := strconv.ParseUint(string(raw[i+3:i+7]), 16, 16)
+		if err != nil || low < 0xdc00 || low > 0xdfff {
+			return false
+		}
+		i += 6
+	}
+	return true
 }
 
 // ManualNodeStatus mirrors a manual entry plus the latest probe
@@ -600,6 +719,9 @@ func (m *Manager) probeNodeInfo(client *http.Client, scheme, addr string, port i
 }
 
 func (m *Manager) addNode(entry ManualEntry) ManualNodeStatus {
+	if entry.validate() != nil {
+		return ManualNodeStatus{}
+	}
 	id := nodeID(entry)
 
 	nodeInfoPort := 14318
@@ -724,8 +846,8 @@ func (m *Manager) handleMessage(msg *Message) {
 			m.codec.RespondError(msg.ID, -32602, "invalid params: expected {\"address\": \"...\"}")
 			return
 		}
-		if entry.Address == "" {
-			m.codec.RespondError(msg.ID, -32602, "address is required")
+		if err := entry.validate(); err != nil {
+			m.codec.RespondError(msg.ID, -32602, err.Error())
 			return
 		}
 		status := m.addNode(entry)
@@ -776,7 +898,7 @@ func (m *Manager) handleMessage(msg *Message) {
 
 func nodeID(entry ManualEntry) string {
 	if entry.Name != "" {
-		return entry.Name
+		return "manual:name:" + entry.Name
 	}
 	return "manual:" + entry.Address
 }

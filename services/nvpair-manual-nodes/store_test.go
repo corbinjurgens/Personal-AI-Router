@@ -24,6 +24,25 @@ func readState(t *testing.T, path string) []ManualEntry {
 	return entries
 }
 
+func TestLoadEntriesSkipsInvalidLegacyEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), stateFileName)
+	data := []byte(`{"version":1,"nodes":[{"address":"node.local","name":"legacy name"},{"address":"http://bad.local"},{"address":"other.local","name":"bad\u200b"}]}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries := readState(t, path)
+	if len(entries) != 1 || entries[0].Name != "legacy name" || nodeID(entries[0]) != "manual:name:legacy name" {
+		t.Fatalf("legacy sanitation = %+v", entries)
+	}
+	unchanged, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(unchanged) != string(data) {
+		t.Fatal("load rewrote the legacy file")
+	}
+}
+
 func TestNodeAddPersistsAndRemoveDeletes(t *testing.T) {
 	m, rw, _ := newTestManager()
 	m.statePath = filepath.Join(t.TempDir(), "sub", stateFileName)
@@ -38,9 +57,9 @@ func TestNodeAddPersistsAndRemoveDeletes(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("persisted %d entries, want 2: %+v", len(got), got)
 	}
-	// Sorted by node id: "lab" < "manual:10.0.0.7".
-	if got[0] != (ManualEntry{Address: "lab.tailnet.ts.net", Name: "lab", TLSPort: 14319, MTLS: true}) ||
-		got[1] != (ManualEntry{Address: "10.0.0.7"}) {
+	// Sorted by node id: "manual:10.0.0.7" < "manual:name:lab".
+	if got[1] != (ManualEntry{Address: "lab.tailnet.ts.net", Name: "lab", TLSPort: 14319, MTLS: true}) ||
+		got[0] != (ManualEntry{Address: "10.0.0.7"}) {
 		t.Fatalf("persisted entries = %+v", got)
 	}
 	if runtime.GOOS != "windows" {
@@ -53,7 +72,7 @@ func TestNodeAddPersistsAndRemoveDeletes(t *testing.T) {
 		}
 	}
 
-	m.handleMessage(requestMessage(3, "node/remove", map[string]string{"id": "lab"}))
+	m.handleMessage(requestMessage(3, "node/remove", map[string]string{"id": "manual:name:lab"}))
 	readCaptureUntil(t, rw, responseWithID(3))
 	got = readState(t, m.statePath)
 	if len(got) != 1 || got[0].Address != "10.0.0.7" {
@@ -101,7 +120,7 @@ func TestReplayRestoresSavedEntries(t *testing.T) {
 	for _, n := range nodes {
 		byID[n.ID] = n
 	}
-	if byID["lab"].Address != "node.local" || byID["manual:box.tailnet.ts.net"].Address != "box.tailnet.ts.net" {
+	if byID["manual:name:lab"].Address != "node.local" || byID["manual:box.tailnet.ts.net"].Address != "box.tailnet.ts.net" {
 		t.Fatalf("restored nodes = %+v", nodes)
 	}
 	// Each restored entry is probed and announced like a fresh node/add.
@@ -165,7 +184,7 @@ func TestRunReplaysAfterReady(t *testing.T) {
 			break
 		}
 	}
-	if discovered.ID != "loopback" || discovered.Address != address ||
+	if discovered.ID != "manual:name:loopback" || discovered.Address != address ||
 		!discovered.OllamaUp || !discovered.LMStudioUp || !discovered.NodeInfoUp ||
 		len(discovered.OllamaModels) != 1 || discovered.OllamaModels[0] != "replayed-ollama" ||
 		len(discovered.LMStudioModels) != 1 || discovered.LMStudioModels[0] != "replayed-lmstudio" ||
@@ -180,7 +199,7 @@ func TestRunReplaysAfterReady(t *testing.T) {
 			continue
 		}
 		list := decodeResult[map[string][]ManualNodeStatus](t, msg)
-		if len(list["nodes"]) != 1 || list["nodes"][0].ID != "loopback" ||
+		if len(list["nodes"]) != 1 || list["nodes"][0].ID != "manual:name:loopback" ||
 			list["nodes"][0].Address != address || !list["nodes"][0].NodeInfoUp ||
 			!sliceEqual(list["nodes"][0].OllamaModels, discovered.OllamaModels) ||
 			!sliceEqual(list["nodes"][0].LMStudioModels, discovered.LMStudioModels) {
