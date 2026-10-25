@@ -241,13 +241,22 @@ reads do not grant permission or establish success. After a lost response,
 read the original ID rather than resubmitting; readback performs no recovery,
 rollback or source restart.
 
-Correlation is visit-scoped. An absent sent request can remain unresolved
-indefinitely: the broker does not fence/tombstone an ID it has not accepted.
-Closing the panel retains the ID; leaving node detail clears it. Reopening an
-idle node can permit a fresh submission, but forgetting the old ID does not
-resolve its outcome or prevent late acceptance. Reconnect/restart alone does
-not establish abandonment. See [Switch Engine](../../docs/terminal-interface.mdx#switch-engine)
-for the operator workflow and recovery limitations.
+Absence is only a point-in-time observation. For this visit's own sent but
+unacknowledged ID, the exact unknown-receipt response triggers one
+`engine:switch-fence {nodeId?, requestId}` call through the broker. Only a valid,
+matching durable acknowledgement reports **Not accepted; original request
+fenced**. A fresh configuration baseline must then complete before a deliberate
+switch allocates a new ID. If acceptance won the race, the fence returns the
+owned receipt and the TUI follows it. It never cancels accepted work or fences
+another client's observed activity. Lost, denied or malformed fence replies
+retain uncertainty and the original ID; `r` retries readback and, if still absent,
+the same fence. No switch is automatically replayed.
+
+Correlation remains visit-scoped. Closing the panel retains the ID; leaving
+node detail clears it. Leaving without a fence acknowledgement does not resolve
+the outcome or prevent late acceptance. Reconnect/restart alone does not
+establish abandonment. Readback and fencing do not perform recovery, rollback
+or source restart, and report no engine start or model residency.
 
 The detail screen polls GPU, CPU and memory only for the open node, with the
 existing two-second interval between reads. Paired remote detail uses

@@ -1,17 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
     parseEngineSwitchResult,
     parseEngineSwitchStatus,
-    parseEngineSwitchChanged
+    parseEngineSwitchChanged,
+    parseEngineSwitchFenceResult
 } from '@/electron/service-bridge/engine-switch'
 import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
-import type { SwitchReceipt, SwitchPhase } from '@/shared/types/engine-switch'
+import type { SwitchReceipt, SwitchPhase, SwitchFenceResult } from '@/shared/types/engine-switch'
 import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
 import { ServiceCallError, serviceErrorCode, serviceTransport } from '@/ui/api/service-transport'
 import { createEngineApi } from '@/ui/api/engine-api'
+import { handleServiceBridgeInvoke } from '@/electron/service-bridge/empty-handlers'
+import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
+import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
+import { JsonRpcResponseError } from '@/electron/service-bridge/json-rpc-client'
+import { MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS } from '@/shared/constants/modular-runtime'
+import type { createOverviewWindow } from '@/electron/window'
+
+vi.mock('electron', () => ({ app: { isPackaged: false, getAppPath: () => process.cwd() } }))
+vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn<typeof createOverviewWindow>() }))
+vi.mock('@/electron/config/ui-config', () => ({ isFirstRun: () => false }))
+vi.mock('@/electron/service-bridge/node-info-poller', () => ({
+    startNodeInfoPoller: vi.fn<() => void>(),
+    stopNodeInfoPoller: vi.fn<() => void>()
+}))
+
+afterEach(() => vi.restoreAllMocks())
 
 const revision = `e3v1:${'a'.repeat(64)}`
 const observed = {
@@ -21,6 +38,110 @@ const observed = {
     observedAt: '2026-10-19T01:00:00Z',
     terminationVerified: true
 }
+
+describe('engine switch fence', () => {
+    const request = { nodeId: 'node-a', requestId: 'switch-1' }
+    const fenced = { ...request, fenced: true } satisfies SwitchFenceResult
+    it('parses confirmed fencing and a receipt that won acceptance', () => {
+        expect(parseEngineSwitchFenceResult(fenced, request)).toEqual(fenced)
+        const accepted = { ...request, fenced: false, receipt: fixture() }
+        expect(parseEngineSwitchFenceResult(accepted, request)).toEqual(accepted)
+    })
+    it('accepts a canonical node returned for a discovery alias', () => {
+        const alias = { nodeId: 'discovery-alias', requestId: request.requestId }
+        expect(parseEngineSwitchFenceResult(fenced, alias)).toEqual(fenced)
+        const accepted = { ...request, fenced: false, receipt: fixture() }
+        expect(parseEngineSwitchFenceResult(accepted, alias)).toEqual(accepted)
+    })
+    const invalid: [string, JsonValue][] = [
+        ['missing flag', { ...request }],
+        ['neither alternative', { ...request, fenced: false }],
+        ['both alternatives', { ...fenced, receipt: fixture() }],
+        ['null receipt', { ...request, fenced: false, receipt: null }],
+        ['wrong request', { ...fenced, requestId: 'other' }],
+        ['empty canonical node', { ...fenced, nodeId: '' }],
+        [
+            'receipt identity mismatch',
+            { ...request, fenced: false, receipt: { ...fixture(), nodeId: 'other' } }
+        ],
+        ['unknown field', { ...fenced, success: true }],
+        ['malformed receipt', { ...request, fenced: false, receipt: {} }]
+    ]
+    it.each(invalid)('rejects %s without claiming resolution', (_name, value) => {
+        expect(() => parseEngineSwitchFenceResult(value, request)).toThrow(
+            'Invalid engine switch response.'
+        )
+    })
+    it.each([undefined, 'node-a', 'discovery-alias'])(
+        'calls the broker fence with exact payload for node %s',
+        async nodeId => {
+            vi.spyOn(getModularBridgeState(), 'getSelfId').mockReturnValue('node-a')
+            const payload = { ...(nodeId === undefined ? {} : { nodeId }), requestId: 'switch-1' }
+            const call = vi.spyOn(getModularSupervisor(), 'callProcess').mockResolvedValue(fenced)
+            await expect(
+                handleServiceBridgeInvoke('engines:switch-fence', payload)
+            ).resolves.toEqual(fenced)
+            expect(call).toHaveBeenCalledExactlyOnceWith(
+                'broker',
+                'engine:switch-fence',
+                payload,
+                MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
+            )
+        }
+    )
+    it('preserves an owned receipt from the broker fence', async () => {
+        const accepted = { ...request, fenced: false, receipt: fixture() }
+        vi.spyOn(getModularSupervisor(), 'callProcess').mockResolvedValue(accepted)
+        await expect(handleServiceBridgeInvoke('engines:switch-fence', request)).resolves.toEqual(
+            accepted
+        )
+    })
+    it.each([-32010, -32012, -32000])('propagates broker refusal %s', async code => {
+        const refusal = new JsonRpcResponseError(code, 'fence refused')
+        vi.spyOn(getModularSupervisor(), 'callProcess').mockRejectedValue(refusal)
+        await expect(handleServiceBridgeInvoke('engines:switch-fence', request)).rejects.toBe(
+            refusal
+        )
+    })
+    it('rejects a mismatched broker result', async () => {
+        vi.spyOn(getModularSupervisor(), 'callProcess').mockResolvedValue({
+            ...fenced,
+            requestId: 'other'
+        })
+        await expect(handleServiceBridgeInvoke('engines:switch-fence', request)).rejects.toThrow(
+            'Invalid engine switch response.'
+        )
+    })
+    it('forwards the typed renderer fence and result without changing engine status', async () => {
+        const statuses = getModularBridgeState().getEngineInitialState().statuses
+        const invoke = vi
+            .fn<
+                PreloadServiceTransport['invoke']
+            >(async () => ({ success: false, error: 'unexpected invoke' }))
+            .mockResolvedValue({ success: true, data: fenced })
+        const preload: PreloadServiceTransport = {
+            connected: true,
+            invoke,
+            invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
+                throw new Error('Unexpected history invoke')
+            }),
+            subscribePush: () => () => {},
+            onConnect: () => () => {},
+            onDisconnect: () => () => {},
+            onAuthFailure: () => () => {},
+            destroy: () => {}
+        }
+        const api = createEngineApi(serviceTransport(preload))
+        await expect(api.fenceSwitch(request)).resolves.toEqual(fenced)
+        expect(invoke).toHaveBeenCalledExactlyOnceWith('engines:switch-fence', request)
+        expect(getModularBridgeState().getEngineInitialState().statuses).toEqual(statuses)
+        invoke.mockResolvedValue({ success: false, error: 'denied', code: -32012 })
+        await expect(api.fenceSwitch(request)).rejects.toSatisfy(
+            (error: Error) =>
+                error instanceof ServiceCallError && serviceErrorCode(error) === -32012
+        )
+    })
+})
 function fixture(): JsonObject {
     return {
         version: 1,
@@ -152,6 +273,7 @@ describe('engine switch receipt parser', () => {
         [-32602, 'invalid_request'],
         [-32602, 'reused_id'],
         [-32010, 'configuration_conflict'],
+        [-32010, 'fenced'],
         [-32011, 'remote_veto'],
         [-32013, 'engine_locked'],
         [-32012, 'validation'],
@@ -184,6 +306,7 @@ describe('engine switch status and notification parsers', () => {
         [-32012, 'busy'],
         [-32010, 'validation'],
         [-32000, 'configuration_conflict'],
+        [-32000, 'fenced'],
         [-32602, 'validation']
     ])('rejects invalid code %s and kind %s in result and status', (code, kind) => {
         const value = { ...fixture(), error: { code, kind, message: 'invalid pair' } }

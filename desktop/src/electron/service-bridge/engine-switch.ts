@@ -3,6 +3,8 @@
 
 import type {
     SwitchRequest,
+    SwitchFenceRequest,
+    SwitchFenceResult,
     SwitchReceipt,
     SwitchStatus,
     SwitchChanged,
@@ -86,6 +88,7 @@ function errorKind(value: JsonValue | undefined): SwitchErrorKind {
         case 'invalid_request':
         case 'reused_id':
         case 'configuration_conflict':
+        case 'fenced':
         case 'remote_veto':
         case 'engine_locked':
         case 'unknown_receipt':
@@ -113,7 +116,7 @@ function switchError(value: JsonValue | undefined): SwitchError | null {
     const defaultCode =
         kind === 'invalid_request' || kind === 'reused_id'
             ? -32602
-            : kind === 'configuration_conflict'
+            : kind === 'configuration_conflict' || kind === 'fenced'
               ? -32010
               : kind === 'remote_veto'
                 ? -32011
@@ -221,6 +224,24 @@ function receipt(value: JsonValue | undefined): SwitchReceipt {
 export function parseEngineSwitchResult(value: JsonValue | undefined): { receipt: SwitchReceipt } {
     const row = object(value, ['receipt'])
     return { receipt: receipt(row.receipt) }
+}
+export function parseEngineSwitchFenceResult(
+    value: JsonValue | undefined,
+    request: SwitchFenceRequest
+): SwitchFenceResult {
+    const row = object(value, ['nodeId', 'requestId', 'fenced', 'receipt'])
+    const nodeId = text(row.nodeId)
+    const requestId = matching(row.requestId, identity)
+    if (requestId !== request.requestId) return invalid()
+    // The broker normalizes transport/discovery aliases to its canonical node.
+    // A raw request nodeId is not evidence of that canonical identity.
+    if (flag(row.fenced)) {
+        if (row.receipt !== undefined) return invalid()
+        return { nodeId, requestId, fenced: true }
+    }
+    const owned = receipt(row.receipt)
+    if (owned.nodeId !== nodeId || owned.requestId !== requestId) return invalid()
+    return { nodeId, requestId, fenced: false, receipt: owned }
 }
 export function parseEngineSwitchStatus(value: JsonValue | undefined): SwitchStatus {
     const row = object(value, ['configurationRevision', 'activeRequestId', 'receipt', 'observed'])

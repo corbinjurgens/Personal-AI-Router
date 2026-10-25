@@ -54,12 +54,17 @@ permission must be current; local pause/Off remains available during switching.
 
 Lost responses require original-ID readback, never automatic resubmission.
 Unknown outcomes and `recoveryRequired` stay explicit; refresh does not perform
-recovery, rollback, cancellation or source restart. The broker has no fence for
-a sent but absent request ID. An idle/absent read cannot rule out late acceptance.
+recovery, rollback, cancellation or source restart. An idle/absent read cannot
+rule out late acceptance. The TUI follows exact absence of its own unacknowledged
+ID with an atomic caller-owned fence. Only confirmed durable fencing and a
+subsequent fresh revision permit deliberate replacement with a new ID. If
+acceptance won the race, it follows the returned owned receipt. Failed or lost
+fence acknowledgements retain uncertainty. Desktop exposes the same typed
+`fenceSwitch` API; its existing controls continue to read status.
 TUI correlation lasts for the node-detail visit: closing the panel retains it,
-leaving detail forgets it. Reopening can unblock submission without resolving
-the original outcome. See the [operator guide](../../docs/terminal-interface.mdx#switch-engine)
-and [frontend API](frontend-api.md) for controls and readback behavior.
+leaving detail forgets it. Leaving without an acknowledgement does not resolve
+the original outcome or prevent late acceptance. See the
+[frontend API](frontend-api.md) for controls and readback behavior.
 Process and native client acceptance require their own execution evidence;
 static checks and mocked client tests do not establish Windows or live-engine
 acceptance.

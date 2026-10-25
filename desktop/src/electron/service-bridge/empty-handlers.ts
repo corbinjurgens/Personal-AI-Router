@@ -12,7 +12,11 @@ import type {
 } from '@/shared/types/cluster'
 import type { EngineType } from '@/shared/types/engines'
 import type { ServiceError } from '@/shared/types/errors'
-import { parseEngineSwitchResult, parseEngineSwitchStatus } from './engine-switch'
+import {
+    parseEngineSwitchResult,
+    parseEngineSwitchStatus,
+    parseEngineSwitchFenceResult
+} from './engine-switch'
 import { parseModelCopyCancel, parseModelCopyCapabilities } from './model-copy'
 import {
     MODULAR_CLUSTER_MANAGER_PORT,
@@ -914,6 +918,18 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
                 MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
             )
         ),
+    'engines:switch-fence': async payload => {
+        if (!payload) throw new Error('Missing engine switch fence request')
+        return parseEngineSwitchFenceResult(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'engine:switch-fence',
+                { ...payload },
+                MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
+            ),
+            payload
+        )
+    },
     'engines:get-settings': async payload =>
         parseEngineSettings(
             await getModularSupervisor().callProcess(

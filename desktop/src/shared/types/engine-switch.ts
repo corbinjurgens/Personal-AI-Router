@@ -13,6 +13,14 @@ export interface SwitchStatusRequest {
     requestId?: string
     afterSequence?: number
 }
+export interface SwitchFenceRequest {
+    nodeId?: string
+    requestId: string
+}
+export type SwitchFenceResult = { nodeId: string; requestId: string } & (
+    | { fenced: true; receipt?: never }
+    | { fenced: false; receipt: SwitchReceipt }
+)
 export interface SwitchEngineState {
     intent: 'on' | 'off' | 'unknown'
     running: boolean | null
@@ -40,6 +48,7 @@ export type SwitchErrorKind =
     | 'invalid_request'
     | 'reused_id'
     | 'configuration_conflict'
+    | 'fenced'
     | 'remote_veto'
     | 'engine_locked'
     | 'unknown_receipt'

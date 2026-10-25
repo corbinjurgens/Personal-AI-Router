@@ -11,6 +11,8 @@ import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type { WsInvokeRequest, WsInvokeResponse } from '@/shared/types/ws-channels'
 import type {
     SwitchRequest,
+    SwitchFenceRequest,
+    SwitchFenceResult,
     SwitchStatusRequest,
     SwitchStatus,
     SwitchReceipt,
@@ -41,6 +43,7 @@ export interface IEngineApi {
     onIntentChanged(callback: (snapshot: EngineIntentSnapshot | null) => void): () => void
     switchEngine(request: SwitchRequest): Promise<{ receipt: SwitchReceipt }>
     switchStatus(request: SwitchStatusRequest): Promise<SwitchStatus>
+    fenceSwitch(request: SwitchFenceRequest): Promise<SwitchFenceResult>
     onSwitchChanged(callback: (change: SwitchChanged) => void): () => void
     /** Read the owning node's authoritative settings snapshot for one engine. */
     getSettings(target: EngineSettingsTarget): Promise<EngineSettingsSnapshot>
@@ -131,6 +134,7 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
                 return result
             }),
         switchStatus: request => transport.invoke('engines:switch-status', request),
+        fenceSwitch: request => transport.invoke('engines:switch-fence', request),
         onSwitchChanged: cb => transport.subscribePush('engines:switch-changed', cb),
         getSettings: target => transport.invoke('engines:get-settings', target),
         previewSettings: request => transport.invoke('engines:preview-settings', request),

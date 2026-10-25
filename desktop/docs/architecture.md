@@ -343,6 +343,15 @@ ordinary environment assignments can be edited locally or by a pinned peer.
 authoritative settings operation rather than forwarding to the engine manager,
 so both entry points validate, restart, and persist identically.
 
+Engine-switch absence is resolved only by the broker's atomic caller-owned
+`engine:switch-fence`, exposed as `engines:switch-fence` / `IEngineApi.fenceSwitch`.
+The broker returns a durable non-acceptance acknowledgement or the already
+accepted owned receipt. The TUI requests it only for its own unacknowledged ID
+after exact unknown-receipt readback, preserving visit, route, command epoch and
+transport fences and one outstanding command. Acknowledged fencing requires a
+fresh baseline before deliberate replacement. Failed acknowledgements retain
+uncertainty; accepted work, recovery and engine status stay backend-owned.
+
 All engine proxies are cluster-aware. For model-bearing inference,
 each proxy first keeps only nodes whose per-engine discovery inventory advertises
 the requested model. Empty and non-matching inventories are excluded; an empty
