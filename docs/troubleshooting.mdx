@@ -139,6 +139,85 @@ PAIR's port, expand **Engine settings > Ports** on the node's card in
 PAIR's port is usually easier and leaves the other application alone. Refer to
 [Changing a Port](getting-started.mdx#changing-a-port).
 
+### OpenCode context budget
+
+If OpenCode can list a model or generate a title but coding work fails during
+compaction, check the primary request's budget. A short user message can still
+carry substantial agent instructions and tool definitions.
+
+This guidance describes stock **OpenCode v2.1.4**, pinned to commit
+[`68bc26b7da1990ce10ffecfbc1e09eb13aa5d824`](https://github.com/anomalyco/opencode/tree/68bc26b7da1990ce10ffecfbc1e09eb13aa5d824).
+The current official [models](https://dev.opencode.ai/v2/docs/models/),
+[providers](https://dev.opencode.ai/v2/docs/providers/), and
+[compaction](https://dev.opencode.ai/v2/docs/compaction/) documentation may
+describe later behavior; check your client version before applying it.
+
+Treat these as separate checks:
+
+| Check | What it establishes |
+| --- | --- |
+| Model is selectable in OpenCode | The catalog and provider make it available for selection. |
+| Current primary coding request fits the client budget | The assembled agent instructions, tools, and history fit OpenCode's approximate compaction policy. Its estimate is pre-hook, not a tokenizer result or a bound on the final provider request. Unknown limits mean unknown suitability. |
+| Request passes PAIR's qualified path | The request shape is supported and independently bounded input plus output pass that path's qualification and admission. Strict qualification does not apply to every ordinary direct model alias. |
+| Primary request completes at the serving engine | That particular coding request actually ran successfully. Selection, title generation, and client estimates alone do not establish this. |
+
+To review a setup without enlarging its serving envelope:
+
+1. Identify the current session's primary agent, explicitly selected provider
+   and model, and variant. Choose the intended primary model explicitly and
+   verify its visible identity. In the pinned
+   [selection code](https://github.com/anomalyco/opencode/blob/68bc26b7da1990ce10ffecfbc1e09eb13aa5d824/packages/app/src/providers/models/selection.tsx),
+   an explicit session choice takes precedence over agent and global fallbacks;
+   refreshing the catalog must not replace it. Editing a global default does
+   not prove an existing session switched. Title, small-model, and compaction
+   agent selections are separate from the primary choice.
+2. Read already-approved evidence for that model's actual served context and
+   output limits. Align only that provider/model's declared limits with those
+   facts. In v2.1.4, custom definitions live under `providers`, with models in
+   `providers.<provider-id>.models.<model-id>` and per-model `limit.context`,
+   optional distinct `limit.input`, and `limit.output`; see the pinned
+   [provider/model schema](https://github.com/anomalyco/opencode/blob/68bc26b7da1990ce10ffecfbc1e09eb13aa5d824/packages/schema/src/config/provider.ts).
+   Omit a separate input limit when none is attested; do not invent one from
+   context. Increasing client metadata cannot increase native serving capacity.
+3. Review compaction separately from output settings. The pinned
+   [compaction policy](https://github.com/anomalyco/opencode/blob/68bc26b7da1990ce10ffecfbc1e09eb13aa5d824/packages/core/src/session/compaction.ts)
+   uses a positive `limit.input`, otherwise `limit.context`, as its effective
+   window. For example, with context `32768` and no separate input limit,
+   `compaction.buffer: 40960` is ignored because it is at least the window.
+   The fallback reserve is `16000`, leaving a compaction ceiling of `16768`,
+   not a negative budget. A valid buffer below the window changes the trigger;
+   it cannot shrink fixed instructions or tools. `compaction.keep.tokens`
+   controls the retained conversation tail. Turning off `compaction.auto`
+   also removes automatic provider-overflow recovery in this version. No
+   numeric buffer adjustment is a universal fix.
+4. Keep output defaults and hook/provider-specific maximum-output options
+   within independently attested serving bounds too. OpenCode's
+   [output fitting and request hooks](https://github.com/anomalyco/opencode/blob/68bc26b7da1990ce10ffecfbc1e09eb13aa5d824/packages/core/src/session/model-request.ts)
+   are separate from the compaction trigger. A catalog output limit alone does
+   not prove the final request's output bound. PAIR retains its independent
+   input/output admission on qualified paths.
+
+If the current full coding profile cannot fit any already-authorized serving
+envelope, stop submissions. The owner can explicitly choose another
+already-supported primary model with a verified suitable envelope, or approve
+a named reduction of optional tools or instruction material. Preserve owner
+instructions by default. A new session changes history but does not remove
+fixed overhead; a title-only or chat-only success does not validate the coding
+profile. PAIR cannot remove OpenCode's fixed prompt material.
+
+A bounded diagnostic for fixed material that cannot fit, or history with no
+eligible conversation left to summarize, is **pending external OpenCode work**.
+It can be relied on only after a specifically identified patched or released
+build is delivered and validated; no such build is established by this guide.
+Stock v2.1.4 does not provide that correction, and configuration changes alone
+do not repair its repeated-compaction state machine. The pinned
+[runner](https://github.com/anomalyco/opencode/blob/68bc26b7da1990ce10ffecfbc1e09eb13aa5d824/packages/core/src/session/runner/llm.ts)
+checks automatic compaction before preparing the primary request, so a
+compaction failure can prevent primary dispatch even when an auxiliary title
+succeeds. This is source-based compatibility guidance, not a diagnosis of an
+installed failure. Model inference settings, remote edit locks, and ordinary
+direct-model output enforcement remain separate work.
+
 ## Requests Work but PAIR Shows No Jobs
 
 If inference succeeds and yet **Jobs** stays empty, and the machine you sent the
