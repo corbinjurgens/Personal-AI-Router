@@ -39,7 +39,7 @@ func TestProbeConfigScannerDefaultAndDisabledArguments(t *testing.T) {
 
 func TestScannerNamespaceSurvivesSupervisedRestart(t *testing.T) {
 	fixture := buildServicePortFixture(t)
-	namespace := &noderec.MDNSNamespace{Service: "_PAIR-Fixture._TCP.", Domain: "Fixture-123.Local."}
+	namespace := &noderec.MDNSNamespace{Service: "_PAIR-Fixture._TCP.", Domain: "LOCAL."}
 	b := NewBroker(nil, workerPaths{scanner: fixture, scannerNamespace: namespace, clusterDir: filepath.Join(t.TempDir(), "cluster")})
 	sup := newSupervisor("node-scanner", restartPolicy{baseDelay: 10 * time.Millisecond, maxDelay: 10 * time.Millisecond, maxAttempts: 3}, b.spawnScanner)
 	if err := sup.Start(); err != nil {
@@ -50,16 +50,9 @@ func TestScannerNamespaceSurvivesSupervisedRestart(t *testing.T) {
 	assertArgs := func() {
 		t.Helper()
 		args := b.getScanner().cmd.Args
-		for _, want := range [][]string{{"--mdns-service", "_pair-fixture._tcp"}, {"--mdns-domain", "fixture-123.local"}} {
-			found := false
-			for i := 0; i+1 < len(args); i++ {
-				if args[i] == want[0] && args[i+1] == want[1] {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatalf("scanner argv %q missing %q", args, want)
-			}
+		i := slices.Index(args, "--mdns-service")
+		if i < 0 || i+1 >= len(args) || args[i+1] != "_pair-fixture._tcp" {
+			t.Fatalf("scanner argv %q missing normalized private service", args)
 		}
 	}
 	assertArgs()
@@ -78,11 +71,14 @@ func TestScannerNamespaceSurvivesSupervisedRestart(t *testing.T) {
 
 func TestScannerNamespaceInvalidBeforeIdentityAndSpawn(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		disabled bool
+		name      string
+		disabled  bool
+		namespace noderec.MDNSNamespace
 	}{
-		{"multicast enabled", false},
-		{"multicast disabled", true},
+		{"missing domain with multicast enabled", false, noderec.MDNSNamespace{Service: noderec.ServiceType}},
+		{"missing domain with multicast disabled", true, noderec.MDNSNamespace{Service: noderec.ServiceType}},
+		{"custom domain with multicast enabled", false, noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: "fixture.local"}},
+		{"custom domain with multicast disabled", true, noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: "fixture.local"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "must-not-exist")
@@ -94,7 +90,7 @@ func TestScannerNamespaceInvalidBeforeIdentityAndSpawn(t *testing.T) {
 			}
 			b := NewBroker(nil, workerPaths{
 				scanner: "must-not-start", clusterDir: filepath.Join(root, "cluster"), disableMDNS: tc.disabled,
-				scannerNamespace: &noderec.MDNSNamespace{Service: noderec.ServiceType},
+				scannerNamespace: &tc.namespace,
 			})
 			assertNoIdentity()
 			if b.nodeID != "" {

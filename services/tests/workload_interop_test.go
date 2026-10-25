@@ -557,7 +557,7 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	stdin, msgs, cleanup := startBrokerProcWithPorts(t, fx.nodeDir, ports,
 		"--scanner-path", scannerBin,
 		"--workload-manager-path", workloadMgrBin,
-		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service, "--scanner-mdns-domain", fx.namespace.Domain,
+		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service,
 	)
 	t.Cleanup(cleanup)
 

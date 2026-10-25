@@ -11,7 +11,7 @@ import (
 func TestMDNSNamespaceNormalization(t *testing.T) {
 	for _, input := range []MDNSNamespace{
 		{ServiceType, Domain},
-		{"_PAIR-Fixture._TCP.", "Fixture-123.Local."},
+		{"_PAIR-Fixture._TCP.", "LOCAL."},
 	} {
 		got, err := input.Normalize()
 		if err != nil {
@@ -30,6 +30,7 @@ func TestMDNSNamespaceRejectsInvalidExplicitNames(t *testing.T) {
 		{"_pair._udp", Domain}, {"_pair._tcp.extra", Domain}, {"_pair bad._tcp", Domain},
 		{"_" + strings.Repeat("a", 63) + "._tcp", Domain},
 		{ServiceType, ".local"}, {ServiceType, "fixture..local"},
+		{ServiceType, "fixture.local"}, {ServiceType, "example.org"},
 		{ServiceType, "fixture.local.."}, {ServiceType, "bad_name.local"},
 		{"_K._tcp", Domain}, {ServiceType, "K.local"},
 		{ServiceType, "-bad.local"}, {ServiceType, "bad-.local"},

@@ -28,10 +28,9 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	mdnsEnabled := flag.Bool("mdns", true, "browse and advertise nodes over mDNS")
 	mdnsService := flag.String("mdns-service", noderec.ServiceType, "mDNS DNS-SD service used for browsing and advertising (_name._tcp)")
-	mdnsDomain := flag.String("mdns-domain", noderec.Domain, "mDNS domain used for browsing, advertising and the responder hostname")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
-	namespace, err := (noderec.MDNSNamespace{Service: *mdnsService, Domain: *mdnsDomain}).Normalize()
+	namespace, err := (noderec.MDNSNamespace{Service: *mdnsService, Domain: noderec.Domain}).Normalize()
 	if err != nil {
 		log.Fatal(err)
 	}

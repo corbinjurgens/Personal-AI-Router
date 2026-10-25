@@ -172,7 +172,7 @@ func TestMDNSDisabledPeerServicesRefreshAndMaintenance(t *testing.T) {
 }
 
 func TestScannerNamespaceReachesBrowserAndResponder(t *testing.T) {
-	namespace := noderec.MDNSNamespace{Service: "_PAIR-Fixture._TCP.", Domain: "Fixture-123.Local."}
+	namespace := noderec.MDNSNamespace{Service: "_PAIR-Fixture._TCP.", Domain: "LOCAL."}
 	dir := filepath.Join(t.TempDir(), "cluster")
 	scanner, err := NewScanner(nil, clustertrust.Open(dir), dir, nil, true, namespace)
 	if err != nil {
@@ -180,21 +180,21 @@ func TestScannerNamespaceReachesBrowserAndResponder(t *testing.T) {
 	}
 	d := scanner.daemon
 	// Inspect the constructed owners without running them or emitting multicast.
-	for field, want := range map[string]string{"service": "_pair-fixture._tcp", "domain": "fixture-123.local"} {
+	for field, want := range map[string]string{"service": "_pair-fixture._tcp", "domain": noderec.Domain} {
 		if got := reflect.ValueOf(d.browser).Elem().FieldByName(field).String(); got != want {
 			t.Fatalf("browser %s = %q, want %q", field, got, want)
 		}
 	}
 	if d.responder == nil {
-		if _, err := mdns.NewResponder(d.instance, "_pair-fixture._tcp", "fixture-123.local", noderec.SRVPort, nil); err == nil {
+		if _, err := mdns.NewResponder(d.instance, "_pair-fixture._tcp", noderec.Domain, noderec.SRVPort, nil); err == nil {
 			t.Fatal("configured responder missing despite available interfaces")
 		}
 		t.Skip("responder construction unavailable without a multicast-capable interface; browser checked")
 	}
 	for field, want := range map[string]string{
-		"serviceName":  "_pair-fixture._tcp.fixture-123.local.",
-		"instanceName": strings.Trim(d.instance, ".") + "._pair-fixture._tcp.fixture-123.local.",
-		"hostName":     strings.Trim(d.instance, ".") + ".fixture-123.local.",
+		"serviceName":  "_pair-fixture._tcp.local.",
+		"instanceName": strings.Trim(d.instance, ".") + "._pair-fixture._tcp.local.",
+		"hostName":     strings.Trim(d.instance, ".") + ".local.",
 	} {
 		if got := reflect.ValueOf(d.responder).Elem().FieldByName(field).String(); got != want {
 			t.Fatalf("responder %s = %q, want %q", field, got, want)
@@ -203,16 +203,22 @@ func TestScannerNamespaceReachesBrowserAndResponder(t *testing.T) {
 }
 
 func TestScannerRejectsNamespaceBeforeIdentityEffects(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		dir := filepath.Join(t.TempDir(), "must-not-exist", "cluster")
-		scanner, err := NewScanner(nil, nil, dir, nil, enabled, noderec.MDNSNamespace{Service: noderec.ServiceType})
-		if err == nil || scanner != nil {
-			t.Fatalf("invalid namespace constructed scanner: %v, %v", scanner, err)
-		}
-		if _, err := os.Stat(filepath.Dir(dir)); !os.IsNotExist(err) {
-			t.Fatalf("invalid namespace touched identity directory: %v", err)
-		}
+	test := func(name string, enabled bool, namespace noderec.MDNSNamespace) {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "must-not-exist", "cluster")
+			scanner, err := NewScanner(nil, nil, dir, nil, enabled, namespace)
+			if err == nil || scanner != nil {
+				t.Fatalf("invalid namespace constructed scanner: %v, %v", scanner, err)
+			}
+			if _, err := os.Stat(filepath.Dir(dir)); !os.IsNotExist(err) {
+				t.Fatalf("invalid namespace touched identity directory: %v", err)
+			}
+		})
 	}
+	test("missing domain with multicast disabled", false, noderec.MDNSNamespace{Service: noderec.ServiceType})
+	test("missing domain with multicast enabled", true, noderec.MDNSNamespace{Service: noderec.ServiceType})
+	test("custom domain with multicast disabled", false, noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: "fixture.local"})
+	test("custom domain with multicast enabled", true, noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: "fixture.local"})
 }
 
 func TestMDNSDisabledRefreshesInventory(t *testing.T) {

@@ -26,7 +26,7 @@ import (
 // the fixture's node-info port. This is the new consolidated discovery record
 // (distinct from node-info's own transitional _nvpair-node-info advertisement).
 //
-// A private service/domain separates the fixture from installed PAIR. The
+// A private service under local separates the fixture from installed PAIR. The
 // record must also carry the fixture's own node UUID.
 func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 	namespace := newFixtureMDNSNamespace(t)
@@ -34,7 +34,7 @@ func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 	hostUUID := fixtureNodeUUID(t, base)
 	ports := reserveFixtureServicePorts(t)
 	_, msgs, stderr, cleanup := startBrokerWithPorts(t, t.TempDir(), filepath.Join(base, "cluster"), nil, ports,
-		"--scanner-mdns=true", "--scanner-mdns-service", namespace.Service, "--scanner-mdns-domain", namespace.Domain,
+		"--scanner-mdns=true", "--scanner-mdns-service", namespace.Service,
 		"--node-info-path", nodeInfoBin)
 	t.Cleanup(cleanup)
 	// Drain the broker's stdout/stderr so it doesn't stall on a full pipe while

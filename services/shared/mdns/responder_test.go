@@ -4,9 +4,17 @@
 package mdns
 
 import (
+	"context"
+	"crypto/rand"
+	"fmt"
 	"net"
+	"slices"
 	"testing"
+	"time"
 
+	"nvpair-shared/noderec"
+
+	"github.com/grandcat/zeroconf"
 	"github.com/miekg/dns"
 )
 
@@ -149,6 +157,70 @@ func TestAddrsForResponse(t *testing.T) {
 	// ifIndex 0 (unknown receiving iface) also returns all.
 	if got := r.addrsForResponse(0); len(got) != 2 {
 		t.Errorf("addrsForResponse(0) = %v, want all (2) addresses", got)
+	}
+}
+
+// Exercise zeroconf's actual receive matching, not just the emitted DNS names.
+// Both synthetic services share their instance and hostname, as two PAIR
+// processes on one host do. All packets stay on the loopback interface.
+func TestPrivateServiceUnderLocalReachesZeroconf(t *testing.T) {
+	ifi, source := loopbackIPv4(t)
+	var token [12]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		t.Fatal(err)
+	}
+	namespace, err := (noderec.MDNSNamespace{
+		Service: fmt.Sprintf("_pair-%x._tcp", token[:]), Domain: "LOCAL.",
+	}).Normalize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := zeroconf.NewResolver(zeroconf.SelectIfaces([]net.Interface{*ifi}), zeroconf.SelectIPTraffic(zeroconf.IPv4))
+	if err != nil {
+		t.Fatalf("create loopback resolver: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	entries := make(chan *zeroconf.ServiceEntry, 16)
+	if err := resolver.Browse(ctx, namespace.Service, namespace.Domain, entries); err != nil {
+		t.Fatalf("browse private service: %v", err)
+	}
+	r := testResponder([]string{"v=1", "uuid=private-fixture"})
+	r.service = namespace.Service
+	r.serviceName = namespace.Service + ".local."
+	r.instanceName = r.instance + "." + r.serviceName
+	r.ifaceAddrs = map[int][]net.IP{ifi.Index: {source}}
+	msg := &dns.Msg{MsgHdr: dns.MsgHdr{Response: true, Authoritative: true}}
+	r.appendBrowseRRs(msg, ifi.Index)
+	// A sibling's SRV/TXT records must not be accepted merely because its A
+	// target and instance label match. Use another private service so no
+	// production browser can discover either synthetic fixture.
+	sibling := testResponder([]string{"v=1", "uuid=sibling-fixture"})
+	sibling.serviceName = fmt.Sprintf("_other-%x._tcp.local.", token[:])
+	sibling.instanceName = sibling.instance + "." + sibling.serviceName
+	sibling.ifaceAddrs = r.ifaceAddrs
+	sibling.appendBrowseRRs(msg, ifi.Index)
+	packet, err := msg.Pack()
+	if err != nil {
+		t.Fatalf("pack fixture records: %v", err)
+	}
+	if err := r.sendOnInterface(packet, ifi.Index, mdnsTargetV4); err != nil {
+		t.Fatalf("send loopback fixture: %v", err)
+	}
+	var received []*zeroconf.ServiceEntry
+	for entry := range entries {
+		received = append(received, entry)
+	}
+	if len(received) != 1 {
+		t.Fatalf("received entries = %+v, want only the private fixture", received)
+	}
+	got := received[0]
+	if got.Service != namespace.Service || got.Domain != noderec.Domain || got.Instance != r.instance ||
+		got.HostName != r.hostName || got.Port != r.port || !slices.Equal(got.Text, r.currentTXT()) {
+		t.Fatalf("received entry = %+v, want private service %s with fixture identity and endpoint", got, namespace.Service)
+	}
+	if len(got.AddrIPv4) == 0 || !got.AddrIPv4[0].Equal(source) {
+		t.Fatalf("received addresses = %v, want loopback %s", got.AddrIPv4, source)
 	}
 }
 

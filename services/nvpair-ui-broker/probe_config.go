@@ -49,7 +49,7 @@ func (b *Broker) scannerArgs() ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		args = append(args, "--mdns-service", namespace.Service, "--mdns-domain", namespace.Domain)
+		args = append(args, "--mdns-service", namespace.Service)
 	}
 	if b.disableMDNS {
 		args = append(args, "--mdns=false")

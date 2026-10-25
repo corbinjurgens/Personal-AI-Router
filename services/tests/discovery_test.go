@@ -136,6 +136,9 @@ func startMDNSAdvertiser(t *testing.T, fixture mdnsAdvertiserFixture) func() {
 
 func TestInProcessDiscovery(t *testing.T) {
 	namespace := newFixtureMDNSNamespace(t)
+	if namespace.Domain != noderec.Domain || namespace.Service == noderec.ServiceType {
+		t.Fatalf("positive receive control requires a private service under local: %+v", namespace)
+	}
 	const (
 		instance = "in-proc-test"
 		port     = 55555
@@ -171,6 +174,9 @@ func TestInProcessDiscovery(t *testing.T) {
 
 	select {
 	case entry := <-found:
+		if entry.Service != namespace.Service || entry.Domain != noderec.Domain || entry.HostName != instance+".local." {
+			t.Errorf("received names = %+v, want private service %s under local", entry, namespace.Service)
+		}
 		if entry.Port != port {
 			t.Errorf("port = %d, want %d", entry.Port, port)
 		}

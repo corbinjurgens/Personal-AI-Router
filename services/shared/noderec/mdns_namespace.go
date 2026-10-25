@@ -8,7 +8,8 @@ import (
 	"strings"
 )
 
-// MDNSNamespace selects the DNS-SD names used by both scanner discovery owners.
+// MDNSNamespace selects the DNS-SD service used by both scanner discovery owners
+// under the supported local domain.
 // It changes naming only, never service keys, identity or peer authorization.
 type MDNSNamespace struct {
 	Service string
@@ -29,15 +30,10 @@ func (n MDNSNamespace) Normalize() (MDNSNamespace, error) {
 	if !ok || transport != "_tcp" || !strings.HasPrefix(service, "_") || len(service) > 63 || !dnsLabel(strings.TrimPrefix(service, "_")) {
 		return MDNSNamespace{}, fmt.Errorf("invalid mDNS service %q: expected _name._tcp", n.Service)
 	}
-	// Leave room for a maximal instance label and the DNS root in the full
-	// instance.service.domain name (255 wire bytes).
-	if len(n.Service)+len(n.Domain)+67 > 255 {
-		return MDNSNamespace{}, fmt.Errorf("mDNS namespace is too long")
-	}
-	for _, label := range strings.Split(n.Domain, ".") {
-		if !dnsLabel(label) {
-			return MDNSNamespace{}, fmt.Errorf("invalid mDNS domain %q", n.Domain)
-		}
+	// zeroconf v1.0.0 caches the local service name before Browse sets Domain.
+	// A custom domain would query successfully but never match received records.
+	if n.Domain != Domain {
+		return MDNSNamespace{}, fmt.Errorf("unsupported mDNS domain %q: expected %s", n.Domain, Domain)
 	}
 	return n, nil
 }

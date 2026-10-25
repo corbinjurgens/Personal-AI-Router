@@ -6,7 +6,6 @@ package tests
 import (
 	"crypto/rand"
 	"fmt"
-	"strings"
 	"testing"
 
 	"nvpair-shared/noderec"
@@ -19,7 +18,7 @@ func newFixtureMDNSNamespace(t *testing.T) noderec.MDNSNamespace {
 	if _, err := rand.Read(token[:]); err != nil {
 		t.Fatal(err)
 	}
-	namespace := noderec.MDNSNamespace{Service: fmt.Sprintf("_pair-%x._tcp", token[:]), Domain: fmt.Sprintf("pair-%x.local", token[:])}
+	namespace := noderec.MDNSNamespace{Service: fmt.Sprintf("_pair-%x._tcp", token[:]), Domain: noderec.Domain}
 	if err := validateFixtureMDNSNamespace(namespace); err != nil {
 		t.Fatal(err)
 	}
@@ -32,28 +31,34 @@ func validateFixtureMDNSNamespace(namespace noderec.MDNSNamespace) error {
 	if err != nil {
 		return err
 	}
-	if normalized.Service == noderec.ServiceType || normalized.Domain == noderec.Domain || !strings.HasSuffix(normalized.Domain, ".local") {
-		return fmt.Errorf("fixture mDNS requires a private service and a private domain below local: %+v", namespace)
+	if normalized.Service == noderec.ServiceType {
+		return fmt.Errorf("fixture mDNS requires a private service under local: %+v", namespace)
 	}
 	return nil
 }
 
 func fixtureMDNSBrokerArgs(namespace noderec.MDNSNamespace) []string {
-	return []string{"--scanner-mdns=true", "--scanner-mdns-service", namespace.Service, "--scanner-mdns-domain", namespace.Domain}
+	return []string{"--scanner-mdns=true", "--scanner-mdns-service", namespace.Service}
 }
 
 func fixtureMDNSScannerArgs(namespace noderec.MDNSNamespace) []string {
-	return []string{"--mdns=true", "--mdns-service", namespace.Service, "--mdns-domain", namespace.Domain}
+	return []string{"--mdns=true", "--mdns-service", namespace.Service}
 }
 
 func TestFixtureMDNSNamespaceIsPrivatePerGroup(t *testing.T) {
 	first, second := newFixtureMDNSNamespace(t), newFixtureMDNSNamespace(t)
-	if first.Service == second.Service || first.Domain == second.Domain {
+	if first.Service == second.Service {
 		t.Fatalf("fixture namespaces collide: %+v %+v", first, second)
+	}
+	if first.Domain != noderec.Domain || second.Domain != noderec.Domain {
+		t.Fatalf("fixture domains must be local: %+v %+v", first, second)
+	}
+	if err := validateFixtureMDNSNamespace(noderec.MDNSNamespace{Service: first.Service, Domain: "LOCAL."}); err != nil {
+		t.Fatalf("normalized local domain rejected: %v", err)
 	}
 	for _, namespace := range []noderec.MDNSNamespace{
 		{}, {Service: noderec.ServiceType, Domain: first.Domain},
-		{Service: first.Service, Domain: "LOCAL."}, {Service: first.Service, Domain: "outside.example"},
+		{Service: first.Service, Domain: "fixture.local"}, {Service: first.Service, Domain: "outside.example"},
 	} {
 		if err := validateFixtureMDNSNamespace(namespace); err == nil {
 			t.Fatalf("unsafe namespace accepted: %+v", namespace)

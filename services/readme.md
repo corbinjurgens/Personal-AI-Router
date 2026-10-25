@@ -270,14 +270,16 @@ broker fixtures forward `--scanner-mdns=false` before scanner startup.
 
 Tests that assert real multicast discovery explicitly retain mDNS. The real
 scanner and each test's advertisers/browsers share a freshly generated private
-service and domain below `local`. The domain scopes the OS-hostname SRV/A target
-as well as the service record. Broker/service launch guards refuse multicast
-reenablement without private names; direct scanner launches use the same check
-and default to multicast off. This covers broker advertisement, ghost-node
+service type under the supported `local` domain. A private domain is unsupported
+by zeroconf v1.0.0's receive matching. The unchanged OS-hostname SRV/A target
+does not admit another service's PTR/SRV/TXT records. Broker/service launch guards
+refuse multicast reenablement without a private service; direct scanner launches
+use the same check and default to multicast off. This covers broker advertisement, ghost-node
 eviction, model enrichment/refresh, mDNS node-loss, workload peer discovery and
 rehydration, reverse node-info/control discovery, and standalone multicast
 fixtures. The Windows fixture's query, reply and goodbye names use that same
-domain. No global per-test registry or replacement discovery directory is used.
+service under `local`. No global per-test registry or replacement discovery
+directory is used.
 
 Namespace and listener separation do not establish universal beside-installed
 isolation. Configured/authenticated peer endpoints, engine-manager's configured
@@ -329,12 +331,11 @@ Some tests need something the machine may not have, and skip rather than fail:
   ports (`11434`, `1234`, `8080`), skip when that port is held on IPv4 or IPv6,
   so quit PAIR before running them, or expect gaps.
 - Ordinary fixture scanners disable mDNS. Cases explicitly testing multicast
-  still browse and advertise `_nvpair-node`; they can contact installed peers
-  and require independent discovery isolation before beside-installed runs.
-- A broker with a ready facade can still probe a stock engine port when
-  engine-manager is absent or an engine status RPC fails. Private manual
-  probe targets do not isolate this broker advertiser path. Review engine
-  targets independently before beside-installed execution.
+  browse and advertise a private per-test service under `local`.
+- Broker advertiser health checks require a current running endpoint from
+  engine-manager; an absent manager or failed status RPC does not trigger a
+  guessed stock-port probe. Configured engine targets still need separate review
+  before beside-installed execution.
 - Tests needing a real mDNS responder skip when one is unavailable.
 - Live engine tests only run when you opt in:
 

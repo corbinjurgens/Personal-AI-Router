@@ -84,7 +84,7 @@ func validateFixtureBrokerArgs(args []string) error {
 // and direct scanner commands prepend multicast-off before caller overrides.
 func validateFixtureMDNSArgs(args []string, prefix string) error {
 	enabled := false
-	var namespace noderec.MDNSNamespace
+	namespace := noderec.MDNSNamespace{Domain: noderec.Domain}
 	for i := 0; i < len(args); i++ {
 		if !strings.HasPrefix(args[i], "-") || args[i] == "--" {
 			return fmt.Errorf("fixture positional argument %q", args[i])
@@ -110,8 +110,6 @@ func validateFixtureMDNSArgs(args []string, prefix string) error {
 			enabled = parsed
 		case prefix + "mdns-service":
 			namespace.Service = value
-		case prefix + "mdns-domain":
-			namespace.Domain = value
 		}
 	}
 	if enabled {
@@ -132,9 +130,7 @@ func TestFixtureLaunchRejectsProductionMulticast(t *testing.T) {
 	plan := fixtureServicePorts{24001, 24002, 24003, 24004, 24005, 24006}
 	for _, extra := range [][]string{
 		{"--scanner-mdns=true"}, {"--scanner-mdns"},
-		{"--scanner-mdns=true", "--scanner-mdns-service", namespace.Service},
-		{"--scanner-mdns=true", "--scanner-mdns-domain", namespace.Domain},
-		append(fixtureMDNSBrokerArgs(namespace), "--scanner-mdns-domain=LOCAL."),
+		{"--scanner-mdns=true", "--scanner-mdns-service", "_nvpair-node._tcp"},
 		append(fixtureMDNSBrokerArgs(namespace), "-scanner-mdns-service=_NVPAIR-NODE._TCP."),
 	} {
 		if cmd, err := fixtureBrokerCommand("unused", append(plan.args(), extra...)...); err == nil || cmd != nil {
