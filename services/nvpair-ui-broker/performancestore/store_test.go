@@ -136,6 +136,38 @@ func TestOutputTokensSumSamplesWithoutAnyDecodeTiming(t *testing.T) {
 	}
 }
 
+func TestOutputTokensCountTimedAndUntimedSamplesOnce(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	untimed := completed()
+	untimed.OutputTokens = ptr[int64](30)
+	r.record(testKey("m"), untimed)
+
+	native := completed()
+	native.OutputTokens = ptr[int64](20)
+	native.EngineDecodeNs = ptr[int64](400_000_000)
+	native.EngineDecodeTokensPerSecond = ptr(47.5)
+	r.record(testKey("m"), native)
+
+	timed := completed()
+	timed.OutputTokens = ptr[int64](7)
+	timed.DecodeNs = ptr[int64](100_000_000)
+	r.record(testKey("m"), timed)
+
+	e := onlyEntry(t, s)
+	if e.Samples != 3 || e.OutputTokens == nil || *e.OutputTokens != 57 {
+		t.Fatalf("aggregate = %+v, want three samples totaling 57 output tokens", e)
+	}
+	wantDecode := performancewire.Rate{Samples: 1, Tokens: 7, DurationNs: 100_000_000, TokensPerSecond: 70}
+	if e.Decode == nil || *e.Decode != wantDecode {
+		t.Fatalf("decode = %+v, want only the matching timed count %+v", e.Decode, wantDecode)
+	}
+	wantEngine := performancewire.ReportedRate{Samples: 1, DurationNs: 400_000_000, TokensPerSecond: 47.5}
+	if e.EngineDecode == nil || *e.EngineDecode != wantEngine {
+		t.Fatalf("engineDecode = %+v, want independent native rate %+v", e.EngineDecode, wantEngine)
+	}
+}
+
 func TestOutputTokensDoNotAliasCallerOrLocalSummary(t *testing.T) {
 	s, _ := newTestStore(t, "")
 	r := &recorder{t: t, s: s}

@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -750,6 +751,73 @@ func (w *performanceOutput) frames(t *testing.T) []Message {
 		t.Fatalf("read output: %v", err)
 	}
 	return frames
+}
+
+func TestPerformanceGetReturnsOutputTokensIndependentlyOfDecodeTiming(t *testing.T) {
+	duration, rate := int64(400_000_000), 47.5
+	tests := []struct {
+		name       string
+		engine     string
+		decodeNs   *int64
+		engineNs   *int64
+		engineRate *float64
+		wantDecode *performancewire.Rate
+		wantEngine *performancewire.ReportedRate
+	}{
+		{
+			name: "llama.cpp native timings", engine: "llamacpp",
+			engineNs: &duration, engineRate: &rate,
+			wantEngine: &performancewire.ReportedRate{Samples: 2, DurationNs: 800_000_000, TokensPerSecond: 47.5},
+		},
+		{name: "llama.cpp usage without timings", engine: "llamacpp"},
+		{
+			name: "Ollama legacy decode timing counts output once", engine: "ollama",
+			decodeNs:   &duration,
+			wantDecode: &performancewire.Rate{Samples: 2, Tokens: 40, DurationNs: 800_000_000, TokensPerSecond: 50},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newBrokerPerformanceFixture(t)
+			out := &performanceOutput{wake: make(chan struct{}, 1)}
+			f.b.codec = NewCodec(readWriter{Reader: strings.NewReader(""), Writer: out})
+			for _, seq := range []uint64{1, 2} {
+				sample := performanceTestSample(seq)
+				sample.Key.Engine = tt.engine
+				complete, tokens := true, int64(20)
+				sample.ProtocolComplete = &complete
+				sample.OutputTokens = &tokens
+				sample.DecodeNs = tt.decodeNs
+				sample.EngineDecodeNs = tt.engineNs
+				sample.EngineDecodeTokensPerSecond = tt.engineRate
+				if err := f.b.ingestPerformanceSample(performanceJSON(t, sample)); err != nil {
+					t.Fatalf("ingest sample %d: %v", seq, err)
+				}
+			}
+			id := json.RawMessage("1")
+			if !f.b.handlePerformanceRequest(&Message{JSONRPC: "2.0", Method: methodPerformanceGet, ID: &id, Params: json.RawMessage("{}")}) {
+				t.Fatal("performance:get not handled")
+			}
+			frames := out.frames(t)
+			if len(frames) != 1 || frames[0].Error != nil || frames[0].ID == nil || !bytes.Equal(*frames[0].ID, id) {
+				t.Fatalf("RPC responses = %+v, want one successful response with ID 1", frames)
+			}
+			var projection performanceProjection
+			if err := json.Unmarshal(frames[0].Result, &projection); err != nil {
+				t.Fatalf("decode performance:get: %v", err)
+			}
+			if projection.Local.Summary == nil || len(projection.Local.Summary.Entries) != 1 {
+				t.Fatalf("local projection = %+v, want one aggregate", projection.Local)
+			}
+			e := projection.Local.Summary.Entries[0]
+			if e.Samples != 2 || e.Completed != 2 || e.OutputTokens == nil || *e.OutputTokens != 40 {
+				t.Fatalf("RPC aggregate = %+v, want two completed samples totaling 40 output tokens", e)
+			}
+			if !reflect.DeepEqual(e.Decode, tt.wantDecode) || !reflect.DeepEqual(e.EngineDecode, tt.wantEngine) {
+				t.Fatalf("rates = decode %+v engineDecode %+v, want decode %+v engineDecode %+v", e.Decode, e.EngineDecode, tt.wantDecode, tt.wantEngine)
+			}
+		})
+	}
 }
 
 func TestPerformanceReadRPCAndSubscriptionBaselineDoNotLeakWorkerFrames(t *testing.T) {
