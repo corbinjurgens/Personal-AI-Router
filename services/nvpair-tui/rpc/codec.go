@@ -14,6 +14,7 @@ package rpc
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,6 +98,11 @@ func NewCodec(r io.Reader, w io.Writer) *Codec {
 
 // Read returns the next frame, or io.EOF when the stream closes.
 func (c *Codec) Read() (*Message, error) {
+	if c.scanner == nil {
+		// History clients use this baseline-shaped Codec only as a writer. Their
+		// single session owns input; direct reads cannot initialize another owner.
+		return nil, ErrStreamBroken
+	}
 	if !c.scanner.Scan() {
 		if err := c.scanner.Err(); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrStreamBroken, err)
@@ -111,6 +117,64 @@ func (c *Codec) Read() (*Message, error) {
 		return nil, fmt.Errorf("unsupported JSON-RPC version: %q", msg.JSONRPC)
 	}
 	return &msg, nil
+}
+
+// readHistoryFrame owns only transport framing. The one Client arena funds raw
+// H across replacements; a Codec never retains that arena. Classification and
+// stripping belong exclusively to the published shared guard below.
+func readHistoryFrame(reader *bufio.Reader, raw []byte) ([]byte, error) {
+	raw = raw[:0]
+	for {
+		part, err := reader.ReadSlice('\n')
+		if len(part) > cap(raw)-len(raw) {
+			return nil, ErrStreamBroken
+		}
+		raw = append(raw, part...)
+		if err == nil {
+			return raw, nil
+		}
+		if err == bufio.ErrBufferFull && len(raw) < cap(raw) {
+			continue
+		}
+		if err == io.EOF && len(raw) == 0 {
+			return nil, io.EOF
+		}
+		return nil, ErrStreamBroken
+	}
+}
+
+type historyFrameIO struct {
+	io.Reader
+	io.Writer
+}
+
+func guardHistoryFrame(raw []byte, offsets []uint32, correlation *jsonrpc.HistoryCorrelation, schema jsonrpc.HistorySchema) (*jsonrpc.Message, error) {
+	codec, err := jsonrpc.NewHistoryCodec(historyFrameIO{bytes.NewReader(raw), io.Discard}, maxFrame, raw[:0], nil, offsets, correlation, schema, nil)
+	if err != nil {
+		return nil, err
+	}
+	msg, err := codec.Read()
+	if errors.Is(err, jsonrpc.ErrHistoryFraming) {
+		return nil, ErrStreamBroken
+	}
+	var ordinary *jsonrpc.DecodeError
+	if errors.As(err, &ordinary) && len(raw) > maxFrame {
+		return nil, ErrStreamBroken
+	}
+	return msg, err
+}
+
+// The caller retains preencoded control backing through actual Write return.
+// This shares the existing writer gate with ordinary calls; no history deadline
+// can release or overwrite an active writer's frame.
+func (c *Codec) writeHistoryFrame(frame []byte) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	n, err := c.writer.Write(frame)
+	if err == nil && n != len(frame) {
+		return io.ErrShortWrite
+	}
+	return err
 }
 
 // Write marshals and emits a single frame terminated by a newline.
