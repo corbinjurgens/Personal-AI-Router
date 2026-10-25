@@ -1288,7 +1288,7 @@ identity and the target replaces the incoming node alias.
 `engine:remote-switch-fence` resolves the peer through the existing pinned
 client and sends POST `/v1/engine-switch/fence`. The route is a management
 mutation, requiring a fresh grant, and relays local `engine:switch-fence` with
-the authenticated caller. Strict shared `SwitchFenceRequest` is
+the authenticated caller. Validated shared `SwitchFenceRequest` is
 `{nodeId?, requestId}`. The target normalizes node identity; no onward hop,
 executor effect or payload-supplied caller is allowed. `SwitchFenceResult`
 validates exactly `{nodeId, requestId, fenced:true}` or

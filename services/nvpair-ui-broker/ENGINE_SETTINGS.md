@@ -171,6 +171,26 @@ configuration fence is separate and passes unchanged in internal envelopes.
 The same caller and payload under the same request ID retrieve the original
 operation before revision checking; another caller or payload cannot reuse it.
 
+An unknown receipt is only a point-in-time absence observation. To prevent a
+late original request, call `engine:switch-fence {nodeId?, requestId}`. Under
+the same admission lock, the broker returns either an unchanged owned receipt
+or `{nodeId, requestId, fenced:true}` after durable tombstone persistence. The
+receipt variant is `{nodeId, requestId, fenced:false, receipt}`. Clients must
+validate this exclusive union and identity; lost, malformed or failed replies
+do not establish a fence. Remote calls use `engine:remote-switch-fence` and
+POST `/v1/engine-switch/fence`, with authenticated caller identity and a fresh
+management grant. Fencing does not cancel or start engine work.
+
+The journal retains at most 32 caller/request-ID pairs, evicting the oldest
+insertion. Duplicate fencing neither writes nor refreshes insertion order.
+Retained pairs reject that caller's switch admission as `fenced` (`-32010`);
+other callers retain their own namespace. Persistence advances the existing
+journal generation, so the original request's expected revision stays stale
+after eviction or restart. This does not reserve an evicted ID against a new
+payload with a fresh revision. Read a fresh baseline after a confirmed fence
+before deliberately submitting a new ID. Storage uncertainty never becomes a
+fence acknowledgement merely by retrying within the same process.
+
 `afterSequence` requires requestId and waits at most 25 seconds for a newer
 receipt, without holding operation/configuration locks. A timeout returns the
 unchanged receipt. Each durable sequence emits
