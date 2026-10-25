@@ -15,7 +15,9 @@ function historyWindow(event: IpcMainInvokeEvent): BrowserWindow {
 }
 
 export function registerServiceBridgeIpc(): void {
-    getRoutingDelivery().setDemandListener(active => getModularSupervisor().setRoutingHistorySubscribed(active))
+    getRoutingDelivery().setDemandListener(active =>
+        getModularSupervisor().setRoutingHistorySubscribed(active)
+    )
     safeHandle('service-bridge:invoke', async (event, payload) => {
         if (payload.channel === 'routing:subscribe') {
             const generation = getRoutingDelivery().subscribe(historyWindow(event))

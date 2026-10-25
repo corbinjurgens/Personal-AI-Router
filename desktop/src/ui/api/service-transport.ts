@@ -38,15 +38,24 @@ function unwrap<T>(result: IpcResult<T>): T {
 function historyCompletion<T>() {
     let accept: ((value: T) => void) | null = null
     let refuse: ((error: Error) => void) | null = null
-    const promise = new Promise<T>((resolve, reject) => { accept = resolve; refuse = reject })
+    const promise = new Promise<T>((resolve, reject) => {
+        accept = resolve
+        refuse = reject
+    })
     const complete = (result: IpcResult<T> | null): undefined => {
-        let resolve = accept, reject = refuse
-        accept = null; refuse = null
+        let resolve = accept,
+            reject = refuse
+        accept = null
+        refuse = null
         if (!resolve || !reject || !result) return undefined
         try {
             if (result.success) resolve(result.data)
             else reject(new ServiceCallError(result.error, result.code))
-        } finally { resolve = null; reject = null; result = null }
+        } finally {
+            resolve = null
+            reject = null
+            result = null
+        }
         return undefined
     }
     return { promise, complete }
@@ -64,7 +73,8 @@ export function serviceTransport(preload: PreloadServiceTransport): ServiceTrans
             if (isHistoryInvoke(args[0])) {
                 const completion = historyCompletion<WsInvokeResponse<C>>()
                 try {
-                    if (preload.invokeHistory<C>(completion.complete, ...args) !== undefined) throw new Error('history-invalid')
+                    if (preload.invokeHistory<C>(completion.complete, ...args) !== undefined)
+                        throw new Error('history-invalid')
                 } catch {
                     // Detach resolver references on synchronous bridge failure
                     // too; never fall back to the ordinary Promise entry.

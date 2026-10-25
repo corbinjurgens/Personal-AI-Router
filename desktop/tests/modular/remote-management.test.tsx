@@ -602,7 +602,8 @@ describe('permission and pairing API contracts', () => {
             const invoke = vi.fn<PreloadServiceTransport['invoke']>()
             invoke.mockResolvedValue({ success: false, error: 'service refused', code })
             const preload = {
-                ...mockTransport(), invoke,
+                ...mockTransport(),
+                invoke,
                 invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
                     throw new Error('Unexpected history invoke in ordinary transport fixture')
                 })

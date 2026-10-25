@@ -4,17 +4,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ipcRenderer } from 'electron'
 import type { IpcResult } from '@/shared/types/ipc-channels'
-import { RoutingHistoryBank, type RoutingHistoryReady, type RoutingHistoryRecord, type RoutingHistoryCommit } from '@/shared/types/routing'
+import {
+    RoutingHistoryBank,
+    type RoutingHistoryReady,
+    type RoutingHistoryRecord,
+    type RoutingHistoryCommit
+} from '@/shared/types/routing'
 
 const boundary = vi.hoisted(() => {
-    const listeners = new Map<string, (...args: Parameters<Parameters<typeof ipcRenderer.on>[1]>) => void>()
+    const listeners = new Map<
+        string,
+        (...args: Parameters<Parameters<typeof ipcRenderer.on>[1]>) => void
+    >()
     return { invoke: vi.fn<typeof ipcRenderer.invoke>(), listeners }
 })
-vi.mock('electron', () => ({ ipcRenderer: {
-    invoke: boundary.invoke,
-    on: (channel: string, listener: Parameters<typeof ipcRenderer.on>[1]) => { boundary.listeners.set(channel, listener) },
-    removeListener: (channel: string) => { boundary.listeners.delete(channel) }
-} }))
+vi.mock('electron', () => ({
+    ipcRenderer: {
+        invoke: boundary.invoke,
+        on: (channel: string, listener: Parameters<typeof ipcRenderer.on>[1]) => {
+            boundary.listeners.set(channel, listener)
+        },
+        removeListener: (channel: string) => {
+            boundary.listeners.delete(channel)
+        }
+    }
+}))
 
 import { createPairTransport } from '@/preload/api/pair-transport.api'
 import { serviceTransport } from '@/ui/api/service-transport'
@@ -24,7 +38,9 @@ import { createPairApi } from '@/ui/api/pair-api'
 const frames = new Map<number, FrameRequestCallback>()
 let pairTransport = createPairTransport(ipcRenderer)
 let nextFrame = 0
-async function settle(): Promise<void> { for (let i = 0; i < 12; i++) await Promise.resolve() }
+async function settle(): Promise<void> {
+    for (let i = 0; i < 12; i++) await Promise.resolve()
+}
 function ready(message: RoutingHistoryReady): void {
     const listener = boundary.listeners.get('routing-history:ready')
     if (!listener) throw new Error('missing production preload listener')
@@ -33,40 +49,91 @@ function ready(message: RoutingHistoryReady): void {
 function commitFrame(): void {
     const entry = frames.entries().next().value
     if (!entry) throw new Error('missing renderer frame')
-    frames.delete(entry[0]); entry[1](0)
+    frames.delete(entry[0])
+    entry[1](0)
 }
 function fixture(): RoutingHistoryRecord {
     return {
-        schema: 1, request: { originNodeId: 'node', proxyRunId: 'run', requestId: '1' },
-        workload: null, seq: 1, requested: { model: '', tier: '', mode: 'other' },
-        createdAt: 1, endedAt: 1, state: 'failed', reason: 'request-invalid', status: null,
-        served: null, recoverable: false, spend: {
-            currency: 'USD', ceilingNanoUsd: null, grantedNanoUsd: null,
-            heldNanoUsd: null, chargedNanoUsd: null, accounting: 'none'
-        }, droppedAttempts: 0, attempts: []
+        schema: 1,
+        request: { originNodeId: 'node', proxyRunId: 'run', requestId: '1' },
+        workload: null,
+        seq: 1,
+        requested: { model: '', tier: '', mode: 'other' },
+        createdAt: 1,
+        endedAt: 1,
+        state: 'failed',
+        reason: 'request-invalid',
+        status: null,
+        served: null,
+        recoverable: false,
+        spend: {
+            currency: 'USD',
+            ceilingNanoUsd: null,
+            grantedNanoUsd: null,
+            heldNanoUsd: null,
+            chargedNanoUsd: null,
+            accounting: 'none'
+        },
+        droppedAttempts: 0,
+        attempts: []
     }
 }
 function replies(records: RoutingHistoryRecord[] = []): void {
     const bank = new RoutingHistoryBank()
     for (const row of records) bank.apply(new TextEncoder().encode(JSON.stringify(row)))
     boundary.invoke.mockResolvedValueOnce({ success: true, data: { generation: 1 } })
-    for (let index = 0; index < bank.size; index++) boundary.invoke
-        .mockResolvedValueOnce({ success: true, data: { state: 'data', generation: 1, lease: index + 1, initial: true, index, bytes: bank.at(index).slice() } })
-        .mockResolvedValueOnce({ success: true, data: { state: 'accepted', generation: 1 } })
-    boundary.invoke.mockResolvedValueOnce({ success: true, data: { state: 'end', generation: 1, lease: bank.size + 1, count: bank.size, retired: false } })
+    for (let index = 0; index < bank.size; index++)
+        boundary.invoke
+            .mockResolvedValueOnce({
+                success: true,
+                data: {
+                    state: 'data',
+                    generation: 1,
+                    lease: index + 1,
+                    initial: true,
+                    index,
+                    bytes: bank.at(index).slice()
+                }
+            })
+            .mockResolvedValueOnce({ success: true, data: { state: 'accepted', generation: 1 } })
+    boundary.invoke
+        .mockResolvedValueOnce({
+            success: true,
+            data: {
+                state: 'end',
+                generation: 1,
+                lease: bank.size + 1,
+                count: bank.size,
+                retired: false
+            }
+        })
         .mockResolvedValueOnce({ success: true, data: { state: 'accepted', generation: 1 } })
 }
 beforeEach(() => {
-    boundary.invoke.mockReset(); boundary.listeners.clear(); frames.clear()
+    boundary.invoke.mockReset()
+    boundary.listeners.clear()
+    frames.clear()
     pairTransport = createPairTransport(ipcRenderer)
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++nextFrame, callback); return nextFrame })
-    vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+        frames.set(++nextFrame, callback)
+        return nextFrame
+    })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+        frames.delete(id)
+    })
 })
-afterEach(async () => { pairTransport.destroy(); await settle(); vi.unstubAllGlobals() })
+afterEach(async () => {
+    pairTransport.destroy()
+    await settle()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+})
 
 describe('production preload and bounded renderer API', () => {
     it('returns undefined for history callbacks and rejects the Promise entry before native transmission', async () => {
-        const complete = vi.fn<(result: IpcResult<RoutingHistoryReady>) => undefined>(() => undefined)
+        const complete = vi.fn<(result: IpcResult<RoutingHistoryReady>) => undefined>(
+            () => undefined
+        )
         boundary.invoke.mockResolvedValueOnce({ success: true, data: { generation: 7 } })
         expect(pairTransport.invokeHistory(complete, 'routing:subscribe')).toBeUndefined()
         expect(complete).not.toHaveBeenCalled()
@@ -74,7 +141,9 @@ describe('production preload and bounded renderer API', () => {
         await settle()
         expect(complete.mock.calls).toEqual([[{ success: true, data: { generation: 7 } }]])
         expect(boundary.invoke).toHaveBeenCalledTimes(1)
-        const rejected = vi.fn<(result: IpcResult<{ requests: RoutingHistoryRecord[] }>) => undefined>(() => undefined)
+        const rejected = vi.fn<
+            (result: IpcResult<{ requests: RoutingHistoryRecord[] }>) => undefined
+        >(() => undefined)
         expect(pairTransport.invokeHistory(rejected, 'routing:get-initial')).toBeUndefined()
         expect(rejected.mock.calls).toEqual([[{ success: false, error: 'history-invalid' }]])
         expect(boundary.invoke).toHaveBeenCalledTimes(1)
@@ -82,14 +151,23 @@ describe('production preload and bounded renderer API', () => {
 
     it('keeps one native history completion while ordinary invokes proceed and clears failure before reuse', async () => {
         let fail: ((error: Error) => void) | null = null
-        boundary.invoke.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+        boundary.invoke
+            .mockReturnValueOnce(
+                new Promise((_resolve, reject) => {
+                    fail = reject
+                })
+            )
             .mockResolvedValueOnce({ success: true, data: { requests: [] } })
-        const complete = vi.fn<(result: IpcResult<RoutingHistoryReady>) => undefined>(() => undefined)
+        const complete = vi.fn<(result: IpcResult<RoutingHistoryReady>) => undefined>(
+            () => undefined
+        )
         const busy = vi.fn<(result: IpcResult<null>) => undefined>(() => undefined)
         expect(pairTransport.invokeHistory(complete, 'routing:subscribe')).toBeUndefined()
         expect(pairTransport.invokeHistory(busy, 'routing:unsubscribe')).toBeUndefined()
         expect(busy.mock.calls).toEqual([[{ success: false, error: 'history-busy' }]])
-        await expect(serviceTransport(pairTransport).invoke('routing:active', {})).resolves.toEqual({ requests: [] })
+        await expect(serviceTransport(pairTransport).invoke('routing:active', {})).resolves.toEqual(
+            { requests: [] }
+        )
         if (!fail) throw new Error('missing native completion')
         Reflect.apply(fail, undefined, [new Error('private-native-error-sentinel')])
         fail = null
@@ -104,24 +182,44 @@ describe('production preload and bounded renderer API', () => {
     it('delivers retired and stale control results without Promise returns across repeated callback turns', async () => {
         const transport = serviceTransport(pairTransport)
         for (let turn = 1; turn <= 40; turn++) {
-            boundary.invoke.mockResolvedValueOnce({ success: true, data: { state: 'retired', generation: turn } })
-                .mockResolvedValueOnce({ success: true, data: { state: 'stale', generation: turn } })
-            await expect(transport.invoke('routing-history:pull', { generation: turn, initial: false }))
-                .resolves.toEqual({ state: 'retired', generation: turn })
-            await expect(transport.invoke('routing-history:consumed', { generation: turn, lease: turn }))
-                .resolves.toEqual({ state: 'stale', generation: turn })
+            boundary.invoke
+                .mockResolvedValueOnce({
+                    success: true,
+                    data: { state: 'retired', generation: turn }
+                })
+                .mockResolvedValueOnce({
+                    success: true,
+                    data: { state: 'stale', generation: turn }
+                })
+            await expect(
+                transport.invoke('routing-history:pull', { generation: turn, initial: false })
+            ).resolves.toEqual({ state: 'retired', generation: turn })
+            await expect(
+                transport.invoke('routing-history:consumed', { generation: turn, lease: turn })
+            ).resolves.toEqual({ state: 'stale', generation: turn })
         }
         expect(boundary.invoke).toHaveBeenCalledTimes(80)
     })
 
     it('completes callback failures and preserves ordinary errors without a Promise fallback', async () => {
         const transport = serviceTransport(pairTransport)
-        boundary.invoke.mockResolvedValueOnce({ success: false, error: 'history-invalid', code: -32096 })
-            .mockImplementationOnce(() => { throw new Error('private-synchronous-native-sentinel') })
+        boundary.invoke
+            .mockResolvedValueOnce({ success: false, error: 'history-invalid', code: -32096 })
+            .mockImplementationOnce(() => {
+                throw new Error('private-synchronous-native-sentinel')
+            })
             .mockResolvedValueOnce({ success: false, error: 'ordinary-refusal', code: -32012 })
-        await expect(transport.invoke('routing:subscribe')).rejects.toMatchObject({ message: 'history-invalid', code: -32096 })
-        await expect(transport.invoke('routing:unsubscribe')).rejects.toMatchObject({ message: 'history-invalid' })
-        await expect(transport.invoke('routing:active', {})).rejects.toMatchObject({ message: 'ordinary-refusal', code: -32012 })
+        await expect(transport.invoke('routing:subscribe')).rejects.toMatchObject({
+            message: 'history-invalid',
+            code: -32096
+        })
+        await expect(transport.invoke('routing:unsubscribe')).rejects.toMatchObject({
+            message: 'history-invalid'
+        })
+        await expect(transport.invoke('routing:active', {})).rejects.toMatchObject({
+            message: 'ordinary-refusal',
+            code: -32012
+        })
         expect(boundary.invoke).toHaveBeenCalledTimes(3)
     })
 
@@ -138,9 +236,12 @@ describe('production preload and bounded renderer API', () => {
     })
 
     it('detaches completion and reports failure even when a scalar control listener throws', async () => {
-        const remove = pairTransport.subscribePush('routing-history:committed', () => { throw new Error('listener-failed') })
+        const remove = pairTransport.subscribePush('routing-history:committed', () => {
+            throw new Error('listener-failed')
+        })
         const transport = serviceTransport(pairTransport)
-        boundary.invoke.mockResolvedValueOnce({ success: true, data: null })
+        boundary.invoke
+            .mockResolvedValueOnce({ success: true, data: null })
             .mockResolvedValueOnce({ success: true, data: { generation: 3 } })
         await expect(transport.invoke('routing:unsubscribe')).rejects.toThrow('history-invalid')
         remove()
@@ -150,10 +251,18 @@ describe('production preload and bounded renderer API', () => {
 
     it('defers destroy cleanup until actual native completion and returns only undefined', async () => {
         let finish: ((result: IpcResult<RoutingHistoryReady>) => void) | null = null
-        boundary.invoke.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+        boundary.invoke
+            .mockReturnValueOnce(
+                new Promise(resolve => {
+                    finish = resolve
+                })
+            )
             .mockResolvedValueOnce({ success: true, data: null })
         let completions = 0
-        pairTransport.invokeHistory(() => { completions++; return undefined }, 'routing:subscribe')
+        pairTransport.invokeHistory(() => {
+            completions++
+            return undefined
+        }, 'routing:subscribe')
         expect(pairTransport.destroy()).toBeUndefined()
         expect(pairTransport.destroy()).toBeUndefined()
         expect(boundary.invoke).toHaveBeenCalledTimes(1)
@@ -169,15 +278,29 @@ describe('production preload and bounded renderer API', () => {
     })
 
     it('keeps destroy cleanup behind an admitted packet until its validated consumed result', async () => {
-        const bank = new RoutingHistoryBank(), transport = serviceTransport(pairTransport)
+        const bank = new RoutingHistoryBank(),
+            transport = serviceTransport(pairTransport)
         bank.apply(new TextEncoder().encode(JSON.stringify(fixture())))
-        boundary.invoke.mockResolvedValueOnce({ success: true, data: { generation: 1 } })
-            .mockResolvedValueOnce({ success: true, data: { state: 'data', generation: 1, lease: 2, initial: true, index: 0, bytes: bank.at(0).slice() } })
+        boundary.invoke
+            .mockResolvedValueOnce({ success: true, data: { generation: 1 } })
+            .mockResolvedValueOnce({
+                success: true,
+                data: {
+                    state: 'data',
+                    generation: 1,
+                    lease: 2,
+                    initial: true,
+                    index: 0,
+                    bytes: bank.at(0).slice()
+                }
+            })
             .mockResolvedValueOnce({ success: true, data: { state: 'stale', generation: 1 } })
             .mockResolvedValueOnce({ success: true, data: { state: 'accepted', generation: 1 } })
             .mockResolvedValueOnce({ success: true, data: null })
         await transport.invoke('routing:subscribe')
-        await expect(transport.invoke('routing-history:pull', { generation: 1, initial: true })).resolves.toMatchObject({ state: 'data', lease: 2 })
+        await expect(
+            transport.invoke('routing-history:pull', { generation: 1, initial: true })
+        ).resolves.toMatchObject({ state: 'data', lease: 2 })
         expect(pairTransport.destroy()).toBeUndefined()
         expect(boundary.invoke).toHaveBeenCalledTimes(2)
         await transport.invoke('routing-history:consumed', { generation: 1, lease: 1 })
@@ -185,26 +308,48 @@ describe('production preload and bounded renderer API', () => {
         await transport.invoke('routing-history:consumed', { generation: 1, lease: 2 })
         await settle()
         expect(boundary.invoke.mock.calls.map(([channel]) => channel)).toEqual([
-            'service-bridge:invoke', 'routing-history:pull', 'routing-history:consumed', 'routing-history:consumed', 'service-bridge:invoke'
+            'service-bridge:invoke',
+            'routing-history:pull',
+            'routing-history:consumed',
+            'routing-history:consumed',
+            'service-bridge:invoke'
         ])
     })
 
     it('rejects a mismatching scalar end without acknowledging or exposing a partial baseline', async () => {
         const bank = new RoutingHistoryBank()
         bank.apply(new TextEncoder().encode(JSON.stringify(fixture())))
-        boundary.invoke.mockResolvedValueOnce({ success: true, data: { generation: 1 } })
-            .mockResolvedValueOnce({ success: true, data: { state: 'data', generation: 1, lease: 1, initial: true, index: 0, bytes: bank.at(0).slice() } })
+        boundary.invoke
+            .mockResolvedValueOnce({ success: true, data: { generation: 1 } })
+            .mockResolvedValueOnce({
+                success: true,
+                data: {
+                    state: 'data',
+                    generation: 1,
+                    lease: 1,
+                    initial: true,
+                    index: 0,
+                    bytes: bank.at(0).slice()
+                }
+            })
             .mockResolvedValueOnce({ success: true, data: { state: 'accepted', generation: 1 } })
-            .mockResolvedValueOnce({ success: true, data: { state: 'end', generation: 1, lease: 2, count: 2, retired: false } })
+            .mockResolvedValueOnce({
+                success: true,
+                data: { state: 'end', generation: 1, lease: 2, count: 2, retired: false }
+            })
         const history = createRoutingHistory(serviceTransport(pairTransport))
-        const initial = history.getInitial(), rejected = expect(initial).rejects.toThrow('history-invalid')
-        await settle(); ready({ generation: 1 }); await settle()
-        ready({ generation: 1 }); await rejected
+        const initial = history.getInitial(),
+            rejected = expect(initial).rejects.toThrow('history-invalid')
+        await settle()
+        ready({ generation: 1 })
+        await settle()
+        ready({ generation: 1 })
+        await rejected
         expect(history.size).toBe(0)
         expect(frames.size).toBe(0)
-        expect(boundary.invoke.mock.calls.filter(([channel]) => channel === 'routing-history:consumed')).toEqual([
-            ['routing-history:consumed', { generation: 1, lease: 1 }]
-        ])
+        expect(
+            boundary.invoke.mock.calls.filter(([channel]) => channel === 'routing-history:consumed')
+        ).toEqual([['routing-history:consumed', { generation: 1, lease: 1 }]])
         history.destroy()
     })
 
@@ -214,21 +359,31 @@ describe('production preload and bounded renderer API', () => {
         const first = history.getInitial()
         expect(history.getInitial()).toBe(first)
         await settle()
-        ready({ generation: 1 }); await settle()
-        expect(boundary.invoke.mock.calls.map(([channel]) => channel)).toEqual(['service-bridge:invoke', 'routing-history:pull'])
+        ready({ generation: 1 })
+        await settle()
+        expect(boundary.invoke.mock.calls.map(([channel]) => channel)).toEqual([
+            'service-bridge:invoke',
+            'routing-history:pull'
+        ])
         expect(history.loading).toBe(true)
-        commitFrame(); await settle()
+        commitFrame()
+        await settle()
         await expect(first).resolves.toBeUndefined()
         expect(history.getInitial()).toBe(first)
         expect(history.size).toBe(0)
         expect(history.loading).toBe(false)
         expect(boundary.invoke.mock.calls.map(([channel]) => channel)).toEqual([
-            'service-bridge:invoke', 'routing-history:pull', 'routing-history:consumed'
+            'service-bridge:invoke',
+            'routing-history:pull',
+            'routing-history:consumed'
         ])
-        boundary.invoke.mockResolvedValueOnce({ success: true, data: null })
+        boundary.invoke
+            .mockResolvedValueOnce({ success: true, data: null })
             .mockResolvedValueOnce({ success: true, data: { state: 'retired', generation: 0 } })
         const retired = history.unsubscribe()
-        await settle(); ready({ generation: 1 }); await retired
+        await settle()
+        ready({ generation: 1 })
+        await retired
     })
 
     it('consumes staged records but does not acknowledge scalar end before coherent rAF commit', async () => {
@@ -237,16 +392,23 @@ describe('production preload and bounded renderer API', () => {
         const changed = vi.fn<(token: RoutingHistoryCommit) => undefined>(() => undefined)
         history.onChanged(changed)
         const first = history.getInitial()
-        await settle(); ready({ generation: 1 }); await settle()
+        await settle()
+        ready({ generation: 1 })
+        await settle()
         expect(changed).not.toHaveBeenCalled()
         expect(history.size).toBe(0)
         expect(frames.size).toBe(0)
         expect(boundary.invoke).toHaveBeenCalledTimes(3)
-        ready({ generation: 1 }); await settle()
+        ready({ generation: 1 })
+        await settle()
         expect(boundary.invoke).toHaveBeenCalledTimes(4)
-        commitFrame(); await first
+        commitFrame()
+        await first
         expect(changed).toHaveBeenCalledWith({ generation: 1, revision: 2 })
-        expect(boundary.invoke.mock.calls[4]).toEqual(['routing-history:consumed', { generation: 1, lease: 2 }])
+        expect(boundary.invoke.mock.calls[4]).toEqual([
+            'routing-history:consumed',
+            { generation: 1, lease: 2 }
+        ])
         history.destroy()
     })
 
@@ -254,36 +416,101 @@ describe('production preload and bounded renderer API', () => {
         replies([fixture()])
         const history = createRoutingHistory(serviceTransport(pairTransport))
         const first = history.getInitial()
-        await settle(); ready({ generation: 1 }); await settle(); ready({ generation: 1 }); await settle(); commitFrame(); await first
-        expect(history.consumeCurrent(0, row => {
-            expect(row.request.requestId).toBe('1')
-            expect(() => history.consumeCurrent(0, () => undefined)).toThrow('history-busy')
-            expect(() => history.getInitial()).toThrow('history-busy')
-            expect(() => history.unsubscribe()).toThrow('history-busy')
-            return undefined
-        })).toBe(true)
+        await settle()
+        ready({ generation: 1 })
+        await settle()
+        ready({ generation: 1 })
+        await settle()
+        commitFrame()
+        await first
+        expect(
+            history.consumeCurrent(0, row => {
+                expect(row.request.requestId).toBe('1')
+                expect(() => history.consumeCurrent(0, () => undefined)).toThrow('history-busy')
+                expect(() => history.getInitial()).toThrow('history-busy')
+                expect(() => history.unsubscribe()).toThrow('history-busy')
+                return undefined
+            })
+        ).toBe(true)
         // @ts-expect-error A loan callback explicitly returns undefined, not Promise<void>.
         expect(() => history.consumeCurrent(0, async () => {})).toThrow('history-invalid')
         expect(history.consumeCurrent(1, () => undefined)).toBe(false)
         history.destroy()
     })
 
-    it('keeps a busy initial loading with no renderer retry timer or early empty result', async () => {
-        boundary.invoke.mockResolvedValueOnce({ success: true, data: { generation: 1 } })
-            .mockResolvedValueOnce({ success: true, data: { state: 'busy', generation: 1 } })
+    it('keeps a busy initial loading with one bounded backoff timer and no early empty result', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        boundary.invoke
+            .mockResolvedValueOnce({ success: true, data: { generation: 1 } })
+            .mockResolvedValue({
+                success: true,
+                data: { state: 'busy', generation: 1, loading: true }
+            })
         const history = createRoutingHistory(serviceTransport(pairTransport))
-        const first = history.getInitial(), finished = vi.fn<() => void>()
+        const first = history.getInitial(),
+            finished = vi.fn<() => void>()
         void first.then(finished)
-        await settle(); ready({ generation: 1 }); await settle()
+        await settle()
+        ready({ generation: 1 })
+        await settle()
         expect(finished).not.toHaveBeenCalled()
         expect(history.loading).toBe(true)
         expect(frames.size).toBe(0)
-        boundary.invoke.mockResolvedValueOnce({ success: true, data: {
-            state: 'end', generation: 1, lease: 1, count: 0, retired: false
-        } }).mockResolvedValueOnce({ success: true, data: { state: 'accepted', generation: 1 } })
-        ready({ generation: 1 }); await settle(); commitFrame(); await first
+        for (const delay of [250, 500, 1000, 1000]) {
+            const calls = boundary.invoke.mock.calls.length
+            expect(vi.getTimerCount()).toBe(1)
+            await vi.advanceTimersByTimeAsync(delay - 1)
+            expect(boundary.invoke).toHaveBeenCalledTimes(calls)
+            await vi.advanceTimersByTimeAsync(1)
+            expect(boundary.invoke).toHaveBeenCalledTimes(calls + 1)
+            expect(history.loading).toBe(true)
+        }
+        boundary.invoke
+            .mockResolvedValueOnce({
+                success: true,
+                data: {
+                    state: 'end',
+                    generation: 1,
+                    lease: 1,
+                    count: 0,
+                    retired: false
+                }
+            })
+            .mockResolvedValueOnce({ success: true, data: { state: 'accepted', generation: 1 } })
+        await vi.advanceTimersByTimeAsync(1000)
+        await settle()
+        commitFrame()
+        await first
         expect(finished).toHaveBeenCalledOnce()
+        expect(vi.getTimerCount()).toBe(0)
         history.destroy()
+        vi.useRealTimers()
+    })
+
+    it('cancels the busy initial retry when unsubscribed', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        boundary.invoke
+            .mockResolvedValueOnce({ success: true, data: { generation: 1 } })
+            .mockResolvedValue({
+                success: true,
+                data: { state: 'busy', generation: 1, loading: true }
+            })
+        const history = createRoutingHistory(serviceTransport(pairTransport))
+        const initial = expect(history.getInitial()).rejects.toThrow('history-retired')
+        await settle()
+        ready({ generation: 1 })
+        await settle()
+        expect(vi.getTimerCount()).toBe(1)
+        boundary.invoke.mockResolvedValueOnce({ success: true, data: null })
+        void history.unsubscribe()
+        await initial
+        await settle()
+        expect(vi.getTimerCount()).toBe(0)
+        const calls = boundary.invoke.mock.calls.length
+        await vi.advanceTimersByTimeAsync(5000)
+        expect(boundary.invoke).toHaveBeenCalledTimes(calls)
+        history.destroy()
+        vi.useRealTimers()
     })
 
     it('finishes an admitted retired commit before acknowledgement and cancels its visible rAF on unsubscribe', async () => {
@@ -291,16 +518,24 @@ describe('production preload and bounded renderer API', () => {
         const history = createRoutingHistory(serviceTransport(pairTransport))
         const first = history.getInitial()
         const cancelled = expect(first).rejects.toThrow('history-retired')
-        await settle(); ready({ generation: 1 }); await settle()
-        ready({ generation: 1 }); await settle()
+        await settle()
+        ready({ generation: 1 })
+        await settle()
+        ready({ generation: 1 })
+        await settle()
         expect(frames.size).toBe(1)
         boundary.invoke.mockReset()
-        boundary.invoke.mockResolvedValueOnce({ success: true, data: null })
+        boundary.invoke
+            .mockResolvedValueOnce({ success: true, data: null })
             .mockResolvedValueOnce({ success: true, data: { state: 'retired', generation: 0 } })
-        await history.unsubscribe(); await cancelled; await settle()
+        await history.unsubscribe()
+        await cancelled
+        await settle()
         expect(frames.size).toBe(0)
         expect(history.size).toBe(0)
-        expect(boundary.invoke.mock.calls.some(([channel]) => channel === 'routing-history:consumed')).toBe(true)
+        expect(
+            boundary.invoke.mock.calls.some(([channel]) => channel === 'routing-history:consumed')
+        ).toBe(true)
         history.destroy()
     })
 })

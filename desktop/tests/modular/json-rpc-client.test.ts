@@ -102,7 +102,8 @@ class MemoryService extends Duplex {
 
     releaseWrite(): void {
         const finish = this.finishWrite
-        this.finishWrite = null; this.blockedWrite = false
+        this.finishWrite = null
+        this.blockedWrite = false
         finish?.()
     }
 
@@ -121,43 +122,71 @@ class MemoryService extends Duplex {
 describe('JsonRpcSocketClient history ingress', () => {
     it('pins its actual control write after logical cancellation while ordinary input still resolves', async () => {
         const service = new MemoryService()
-        const client = new JsonRpcSocketClient('broker', async () => service, [], async () => service)
+        const client = new JsonRpcSocketClient(
+            'broker',
+            async () => service,
+            [],
+            async () => service
+        )
         try {
-            client.start(); await Promise.resolve()
+            client.start()
+            await Promise.resolve()
             const ordinary = client.call('echo', {})
             await Promise.resolve()
             service.blockedWrite = true
             const initial = client.callHistory('routing:get-initial', () => true)
             const retired = expect(initial).rejects.toThrow('history-invalid')
-            client.cancelHistory(); await retired
+            client.cancelHistory()
+            await retired
             expect(client.historyWritable).toBe(false)
-            await expect(client.callHistory('routing:unsubscribe', () => true)).rejects.toThrow('routing history busy; retry')
+            await expect(client.callHistory('routing:unsubscribe', () => true)).rejects.toThrow(
+                'routing history busy; retry'
+            )
             service.reply(1, { ok: true })
             await expect(ordinary).resolves.toEqual({ ok: true })
-            service.releaseWrite(); await Promise.resolve()
+            service.releaseWrite()
+            await Promise.resolve()
             expect(client.historyWritable).toBe(true)
             const cleanup = client.callHistory('routing:unsubscribe', () => true)
             expect(service.received.map(frame => frame.id)).toEqual([1, 'jh:1', 'jh:2'])
             service.reply('jh:2', { requests: [] })
             await cleanup
-        } finally { service.releaseWrite(); await client.detach() }
+        } finally {
+            service.releaseWrite()
+            await client.detach()
+        }
     })
 
     it('rejects ordinary call, send and notify history methods before transmission', async () => {
         const service = new MemoryService()
-        const client = new JsonRpcSocketClient('broker', async () => service, [], async () => service)
+        const client = new JsonRpcSocketClient(
+            'broker',
+            async () => service,
+            [],
+            async () => service
+        )
         try {
-            client.start(); await Promise.resolve()
+            client.start()
+            await Promise.resolve()
             await expect(client.call('routing:get-initial', {})).rejects.toThrow('history-invalid')
             await expect(client.send('routing:subscribe', {})).rejects.toThrow('history-invalid')
-            await expect(client.notify('routing:unsubscribe', {})).rejects.toThrow('history-invalid')
+            await expect(client.notify('routing:unsubscribe', {})).rejects.toThrow(
+                'history-invalid'
+            )
             expect(service.received).toEqual([])
-        } finally { await client.detach() }
+        } finally {
+            await client.detach()
+        }
     })
 
     it('mints disjoint history IDs and consumes only guarded known fields', async () => {
         const service = new MemoryService()
-        const client = new JsonRpcSocketClient('broker', async () => service, [], async () => service)
+        const client = new JsonRpcSocketClient(
+            'broker',
+            async () => service,
+            [],
+            async () => service
+        )
         try {
             client.start()
             await Promise.resolve()
@@ -170,12 +199,19 @@ describe('JsonRpcSocketClient history ingress', () => {
             service.reply('jh:1', { requests: [], discarded: 'synthetic-secret' })
             await response
             expect(seen).toEqual(['{"requests":[]}'])
-        } finally { await client.detach() }
+        } finally {
+            await client.detach()
+        }
     })
 
     it('quarantines mixed ID candidates while ordinary RPC and same-connection refetch progress', async () => {
         const service = new MemoryService()
-        const client = new JsonRpcSocketClient('broker', async () => service, [], async () => service)
+        const client = new JsonRpcSocketClient(
+            'broker',
+            async () => service,
+            [],
+            async () => service
+        )
         try {
             client.start()
             await Promise.resolve()
@@ -192,40 +228,97 @@ describe('JsonRpcSocketClient history ingress', () => {
             service.reply('jh:999', { discarded: 'synthetic-secret' })
             service.reply('jh:2', { requests: [] })
             await next
-        } finally { await client.detach() }
+        } finally {
+            await client.detach()
+        }
+    })
+
+    it('reports only fixed diagnostics for malformed history before raw trace while ordinary RPC progresses', async () => {
+        const service = new MemoryService()
+        const client = new JsonRpcSocketClient(
+            'broker',
+            async () => service,
+            [],
+            async () => service
+        )
+        const logs: string[] = []
+        client.on('log', entry => logs.push(entry.text))
+        client.setProtocolTrace(true)
+        try {
+            client.start()
+            await Promise.resolve()
+            for (const params of [
+                '{"sentinel":"synthetic-secret","\\u0073entinel":"other-secret"}',
+                '{"\\u0073entinel":"other-secret","sentinel":"synthetic-secret"}'
+            ])
+                service.push(`{"jsonrpc":"2.0","method":"routing:changed","params":${params}}\n`)
+            service.push('{"jsonrpc":"2.0","method":"synthetic-secret",\n')
+            const ordinary = client.call('echo', {})
+            await Promise.resolve()
+            service.reply(1, { ok: true })
+            await expect(ordinary).resolves.toEqual({ ok: true })
+            expect(logs.slice(0, 3)).toEqual(Array(3).fill('history-unknown history-invalid 1'))
+            expect(logs.join(' ')).not.toMatch(/synthetic-secret|other-secret|sentinel/)
+        } finally {
+            await client.detach()
+        }
     })
 
     it('closes physical overflow through the existing single reconnect owner without raw trace', async () => {
         vi.useFakeTimers()
-        const first = new MemoryService(), second = new MemoryService()
-        const connect = vi.fn<() => Promise<Duplex>>().mockResolvedValueOnce(first).mockResolvedValueOnce(second)
+        const first = new MemoryService(),
+            second = new MemoryService()
+        const connect = vi
+            .fn<() => Promise<Duplex>>()
+            .mockResolvedValueOnce(first)
+            .mockResolvedValueOnce(second)
         const client = new JsonRpcSocketClient('broker', connect, [1], async () => second)
-        const lost = vi.fn(), trace = vi.fn()
-        client.on('disconnected', lost); client.on('log', trace); client.setProtocolTrace(true)
+        const lost = vi.fn(),
+            trace = vi.fn()
+        client.on('disconnected', lost)
+        client.on('log', trace)
+        client.setProtocolTrace(true)
         try {
-            client.start(); await vi.advanceTimersByTimeAsync(0)
+            client.start()
+            await vi.advanceTimersByTimeAsync(0)
             first.push(Buffer.alloc(33558528, 120))
             await vi.advanceTimersByTimeAsync(1)
             expect(lost).toHaveBeenCalledOnce()
             expect(connect).toHaveBeenCalledTimes(2)
             expect(client.running).toBe(true)
             expect(trace).not.toHaveBeenCalled()
-        } finally { await client.detach(); vi.useRealTimers() }
+        } finally {
+            await client.detach()
+            vi.useRealTimers()
+        }
     })
 
     it('stops history at uint64 exhaustion while ordinary numeric calls remain usable', async () => {
         const service = new MemoryService()
-        const client = new JsonRpcSocketClient('broker', async () => service, [], async () => service)
+        const client = new JsonRpcSocketClient(
+            'broker',
+            async () => service,
+            [],
+            async () => service
+        )
         try {
-            client.start(); await Promise.resolve()
-            Object.defineProperty(client, 'historyIssued', { value: 18446744073709551615n, writable: true })
-            await expect(client.callHistory('routing:get-initial', () => true)).rejects.toThrow('history-exhausted')
+            client.start()
+            await Promise.resolve()
+            Object.defineProperty(client, 'historyIssued', {
+                value: 18446744073709551615n,
+                writable: true
+            })
+            await expect(client.callHistory('routing:get-initial', () => true)).rejects.toThrow(
+                'history-exhausted'
+            )
             const ordinary = client.call('echo', {})
             await Promise.resolve()
             service.reply(1, { ok: true })
             await expect(ordinary).resolves.toEqual({ ok: true })
             expect(service.received.map(frame => frame.id)).toEqual([1])
-        } finally { await client.detach() }
+        } finally {
+            await client.detach()
+        }
     })
 })
 

@@ -35,6 +35,27 @@ They do not imply a WebSocket connection. Browser clients are not supported.
 
 ## Renderer API
 
+### `pairApi.routing`
+
+`subscribe()` and `getInitial()` share one initial-load promise, resolving void
+after a coherent baseline commit and acknowledgement. `size` and `loading`
+describe the bounded current bank; `consumeCurrent(index, callback)` lends one
+read-only record synchronously. The callback must return `undefined`, and all
+record referents expire when it returns. `onChanged(callback)` reports scalar
+commit/loading tokens, never a queued history graph. `unsubscribe()` retires
+the subscription and cancels its busy retry timer. Existing `active()` and
+`cancel(request)` controls retain their behavior.
+
+The transport subscribes before initial hydration, merges accepted revisions by
+full request identity, retains newest history with a fixed window bound, and
+rejects stale or terminal-regressing updates. A baseline is sent as leased
+packed-record packets followed by a scalar end; its global initial lease stays
+pinned between packets and through the end acknowledgement. Concurrent initial
+loads remain loading with validated rows retained and one retry timer at
+250/500/1000 ms, then 1000 ms until available. Generation changes, disconnect
+and unsubscribe cancel the retry. A stopped renderer may hold its transfer
+indefinitely while other renderers and ordinary invokes continue.
+
 ### `pairApi.app`
 
 - `getInitial()` returns connection state and the local node ID.

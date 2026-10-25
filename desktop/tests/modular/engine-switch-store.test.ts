@@ -106,6 +106,9 @@ beforeEach(() => {
         serviceTransport({
             connected: true,
             invoke,
+            invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
+                throw new Error('Unexpected history invoke in ordinary transport fixture')
+            }),
             subscribePush: () => stopListener,
             onConnect: () => stopListener,
             onDisconnect: () => stopListener,

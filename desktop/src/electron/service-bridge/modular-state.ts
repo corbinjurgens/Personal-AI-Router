@@ -1259,9 +1259,10 @@ class ModularBridgeState {
         if (isProxyEngine(engineType)) return this.discoveryModelsForNode(node, engineType, node.id)
         const loaded = loadedNamesForEngine(node, engineType)
         const engine = engineManagerName(engineType)
-        const models = node.modelsByEngine !== undefined && Object.hasOwn(node.modelsByEngine, engine)
-            ? node.modelsByEngine[engine]
-            : []
+        const models =
+            node.modelsByEngine !== undefined && Object.hasOwn(node.modelsByEngine, engine)
+                ? node.modelsByEngine[engine]
+                : []
         return {
             engineType,
             nodeId: node.id,
@@ -1630,7 +1631,9 @@ class ModularBridgeState {
         // noderec.DirectoryNode.EngineModels.
         if (node.modelsByEngine !== undefined) {
             const managerEngine = engineManagerName(engine)
-            return Object.hasOwn(node.modelsByEngine, managerEngine) ? node.modelsByEngine[managerEngine] : []
+            return Object.hasOwn(node.modelsByEngine, managerEngine)
+                ? node.modelsByEngine[managerEngine]
+                : []
         }
         // Fallback for a pre-attribution peer: the flat union is unattributed, so
         // attribute it only when exactly one proxy engine is active on the node,
@@ -2121,13 +2124,15 @@ class ModularBridgeState {
                     existing.modelsByEngine !== undefined &&
                     Object.hasOwn(existing.modelsByEngine, managerEngine)
                 const hasEngine =
-                    merged.modelsByEngine !== undefined && Object.hasOwn(merged.modelsByEngine, managerEngine)
+                    merged.modelsByEngine !== undefined &&
+                    Object.hasOwn(merged.modelsByEngine, managerEngine)
                 const attributionChanged =
-                    (existing.modelsByEngine === undefined) !== (merged.modelsByEngine === undefined) ||
+                    (existing.modelsByEngine === undefined) !==
+                        (merged.modelsByEngine === undefined) ||
                     hadEngine !== hasEngine ||
                     !sameStringList(
-                        hadEngine ? existing.modelsByEngine?.[managerEngine] ?? [] : [],
-                        hasEngine ? merged.modelsByEngine?.[managerEngine] ?? [] : []
+                        hadEngine ? (existing.modelsByEngine?.[managerEngine] ?? []) : [],
+                        hasEngine ? (merged.modelsByEngine?.[managerEngine] ?? []) : []
                     )
                 // Proxy presence is not a lifecycle fact: the broker can keep
                 // serving engine-manager while this optional routing proxy is

@@ -129,8 +129,10 @@ export interface IWorkloadsApi {
     cancel(request: WorkloadCancelRequest): Promise<{ ok: boolean }>
 }
 
-interface IRoutingApi extends Pick<ReturnType<typeof createRoutingHistory>,
-    'subscribe' | 'unsubscribe' | 'getInitial' | 'onChanged' | 'consumeCurrent' | 'size' | 'loading'> {
+interface IRoutingApi extends Pick<
+    ReturnType<typeof createRoutingHistory>,
+    'subscribe' | 'unsubscribe' | 'getInitial' | 'onChanged' | 'consumeCurrent' | 'size' | 'loading'
+> {
     /** Cancel an origin-local routing request using its complete process identity. */
     cancel(request: RoutingCancelParams): Promise<RoutingCancelResult>
     /** Read the origin-local active request keys without model or content details. */
@@ -276,8 +278,12 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
             subscribe: () => history.subscribe(),
             unsubscribe: () => history.unsubscribe(),
             getInitial: history.getInitial,
-            get size() { return history.size },
-            get loading() { return history.loading },
+            get size() {
+                return history.size
+            },
+            get loading() {
+                return history.loading
+            },
             consumeCurrent: (index, consume) => history.consumeCurrent(index, consume),
             onChanged: callback => history.onChanged(callback),
             cancel: request => transport.invoke('routing:cancel', request),

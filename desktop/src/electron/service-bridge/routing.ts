@@ -96,17 +96,27 @@ export function applyRoutingHistoryChanged(raw: Uint8Array): void {
 }
 
 /** Sender-owned IPC handles these channels before generic service dispatch. */
-export function historySenderRequired(): never { throw new Error('history-invalid') }
+export function historySenderRequired(): never {
+    throw new Error('history-invalid')
+}
 
-type HistoryPeer = Pick<JsonRpcSocketClient, 'callHistory' | 'cancelHistory' | 'setHistoryHandlers' | 'historyWritable'>
+type HistoryPeer = Pick<
+    JsonRpcSocketClient,
+    'callHistory' | 'cancelHistory' | 'setHistoryHandlers' | 'historyWritable'
+>
 
 /** One desktop subscription and one timer, retargeted to native cleanup when needed. */
 export class RoutingHistorySubscription {
-    constructor(private readonly apply: (raw: Uint8Array, initial: boolean) => undefined = (raw, initial) => {
-        if (initial) applyRoutingHistoryInitial(raw)
-        else applyRoutingHistoryChanged(raw)
-        return undefined
-    }) {}
+    constructor(
+        private readonly apply: (raw: Uint8Array, initial: boolean) => undefined = (
+            raw,
+            initial
+        ) => {
+            if (initial) applyRoutingHistoryInitial(raw)
+            else applyRoutingHistoryChanged(raw)
+            return undefined
+        }
+    ) {}
     private peer: HistoryPeer | null = null
     private generation = 0
     private intent = 0
@@ -130,7 +140,11 @@ export class RoutingHistorySubscription {
         this.drive()
     }
     connect(peer: HistoryPeer): void {
-        if (this.peer === peer) { this.paused = false; this.drive(); return }
+        if (this.peer === peer) {
+            this.paused = false
+            this.drive()
+            return
+        }
         // A replacement cannot erase cleanup belonging to an unfenced native
         // connection. The actual close owner must call disconnected first.
         if (this.peer || this.exhausted) return
@@ -139,12 +153,28 @@ export class RoutingHistorySubscription {
         const generation = this.generation
         peer.setHistoryHandlers({
             notification: raw => {
-                if (this.peer === peer && generation === this.generation && this.wanted && !this.paused && !this.exhausted && this.apply(raw, false) !== undefined) throw new Error('history-invalid')
+                if (
+                    this.peer === peer &&
+                    generation === this.generation &&
+                    this.wanted &&
+                    !this.paused &&
+                    !this.exhausted &&
+                    this.apply(raw, false) !== undefined
+                )
+                    throw new Error('history-invalid')
                 return undefined
             },
             invalid: () => {
-                if (this.peer !== peer || generation !== this.generation || !this.wanted || this.paused || this.exhausted) return
-                this.needsInitial = true; getRoutingDelivery().setLoading(true)
+                if (
+                    this.peer !== peer ||
+                    generation !== this.generation ||
+                    !this.wanted ||
+                    this.paused ||
+                    this.exhausted
+                )
+                    return
+                this.needsInitial = true
+                getRoutingDelivery().setLoading(true)
                 this.scheduleRetry()
             },
             writable: () => {
@@ -157,7 +187,8 @@ export class RoutingHistorySubscription {
     }
     /** Broker replacement fences source callbacks; the service connection survives. */
     sourceReset(): void {
-        this.paused = true; this.needsInitial = true
+        this.paused = true
+        this.needsInitial = true
         this.retireIntent()
         getRoutingDelivery().reset()
         this.drive()
@@ -170,9 +201,13 @@ export class RoutingHistorySubscription {
         this.peer?.setHistoryHandlers(null)
         this.peer?.cancelHistory()
         this.peer = null
-        this.intent = 0; this.paused = true
-        this.flight = false; this.waitingWrite = false; this.exhausted = !canAdvance
-        this.needsInitial = true; this.needsUnsubscribe = false
+        this.intent = 0
+        this.paused = true
+        this.flight = false
+        this.waitingWrite = false
+        this.exhausted = !canAdvance
+        this.needsInitial = true
+        this.needsUnsubscribe = false
         getRoutingDelivery().reset()
     }
     private retireIntent(): void {
@@ -186,11 +221,20 @@ export class RoutingHistorySubscription {
     }
     private cancelRetry(): void {
         if (this.timer) clearTimeout(this.timer)
-        this.timer = null; this.retry = 0
+        this.timer = null
+        this.retry = 0
     }
     private scheduleRetry(): void {
-        if (this.timer || !this.peer || this.exhausted || (!this.needsUnsubscribe && (!this.wanted || this.paused))) return
-        const generation = this.generation, intent = this.intent, delay = this.retry === 0 ? 250 : this.retry === 1 ? 500 : 1000
+        if (
+            this.timer ||
+            !this.peer ||
+            this.exhausted ||
+            (!this.needsUnsubscribe && (!this.wanted || this.paused))
+        )
+            return
+        const generation = this.generation,
+            intent = this.intent,
+            delay = this.retry === 0 ? 250 : this.retry === 1 ? 500 : 1000
         this.retry = Math.min(this.retry + 1, 2)
         this.timer = setTimeout(() => {
             this.timer = null
@@ -201,35 +245,66 @@ export class RoutingHistorySubscription {
         const peer = this.peer
         if (!peer || this.flight || this.timer || this.waitingWrite || this.exhausted) return
         if (!this.needsUnsubscribe && (!this.wanted || !this.needsInitial || this.paused)) return
-        if (!peer.historyWritable) { this.waitingWrite = true; return }
-        const generation = this.generation, intent = this.intent, unsubscribe = this.needsUnsubscribe
+        if (!peer.historyWritable) {
+            this.waitingWrite = true
+            return
+        }
+        const generation = this.generation,
+            intent = this.intent,
+            unsubscribe = this.needsUnsubscribe
         this.flight = true
         if (!unsubscribe) getRoutingDelivery().setLoading(true)
         let retry = false
-        void peer.callHistory(unsubscribe ? 'routing:unsubscribe' : 'routing:subscribe', raw => {
-            if (this.peer !== peer || generation !== this.generation || intent !== this.intent || this.exhausted) return false
-            if (unsubscribe) return true
-            if (!this.wanted || this.paused) return false
-            if (this.apply(raw, true) !== undefined) throw new Error('history-invalid')
-            return true
-        }).then(() => {
-            if (this.peer !== peer || generation !== this.generation || intent !== this.intent || this.exhausted) return
-            if (unsubscribe) this.needsUnsubscribe = false
-            else this.needsInitial = false
-            this.cancelRetry()
-        }).catch(error => {
-            if (this.peer !== peer || generation !== this.generation || intent !== this.intent || this.exhausted) return
-            if (error instanceof Error && error.message === 'history-exhausted') { this.exhausted = true; this.cancelRetry(); return }
-            if (!peer.historyWritable) this.waitingWrite = true
-            else retry = true
-            // Busy is not native completion. The same timer now retries cleanup
-            // until a matching success or actual connection destruction.
-        }).finally(() => {
-            if (this.peer !== peer || generation !== this.generation) return
-            this.flight = false
-            if (intent !== this.intent) this.drive()
-            else if (retry) this.scheduleRetry()
-            else this.drive()
-        })
+        void peer
+            .callHistory(unsubscribe ? 'routing:unsubscribe' : 'routing:subscribe', raw => {
+                if (
+                    this.peer !== peer ||
+                    generation !== this.generation ||
+                    intent !== this.intent ||
+                    this.exhausted
+                )
+                    return false
+                if (unsubscribe) return true
+                if (!this.wanted || this.paused) return false
+                if (this.apply(raw, true) !== undefined) throw new Error('history-invalid')
+                return true
+            })
+            .then(() => {
+                if (
+                    this.peer !== peer ||
+                    generation !== this.generation ||
+                    intent !== this.intent ||
+                    this.exhausted
+                )
+                    return
+                if (unsubscribe) this.needsUnsubscribe = false
+                else this.needsInitial = false
+                this.cancelRetry()
+            })
+            .catch(error => {
+                if (
+                    this.peer !== peer ||
+                    generation !== this.generation ||
+                    intent !== this.intent ||
+                    this.exhausted
+                )
+                    return
+                if (error instanceof Error && error.message === 'history-exhausted') {
+                    this.exhausted = true
+                    this.cancelRetry()
+                    return
+                }
+                if (!peer.historyWritable) this.waitingWrite = true
+                else retry = true
+                // Busy is not native completion. The same timer now retries cleanup
+                // until a matching success or actual connection destruction.
+            })
+            .finally(() => {
+                if (this.peer !== peer || generation !== this.generation) return
+                this.flight = false
+                if (intent !== this.intent) this.drive()
+                else if (retry) this.scheduleRetry()
+                else this.drive()
+            })
     }
 }

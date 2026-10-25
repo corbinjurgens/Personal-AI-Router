@@ -164,6 +164,11 @@ function guardExternalNavigation(window: BrowserWindow): void {
 function attachWebContentsDiagnostics(window: BrowserWindow): void {
     const { webContents } = window
 
+    // A committed main-frame navigation replaces the document; in-page and
+    // canceled navigations do not. All three events end its transfer allowance.
+    webContents.on('did-navigate', () => getRoutingDelivery().contextDestroyed(window))
+    webContents.on('destroyed', () => getRoutingDelivery().contextDestroyed(window))
+
     webContents.on(
         'did-fail-load',
         (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {

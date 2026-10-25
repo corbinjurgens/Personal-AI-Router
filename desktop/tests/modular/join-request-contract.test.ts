@@ -432,7 +432,8 @@ describe('join request API and bridge propagation', () => {
                 .fn<PreloadServiceTransport['invoke']>()
                 .mockResolvedValue({ success: false, error: refusal.message, code })
             const preload = {
-                ...mockTransport(), invoke,
+                ...mockTransport(),
+                invoke,
                 invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
                     throw new Error('Unexpected history invoke in ordinary transport fixture')
                 })

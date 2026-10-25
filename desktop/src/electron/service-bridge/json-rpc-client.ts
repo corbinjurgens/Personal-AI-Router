@@ -6,7 +6,11 @@ import type { Duplex } from 'stream'
 import getErrorString from '@/shared/utils/get-error-string'
 import { createStructuredLogger } from '@/shared/utils/log'
 import { redactSensitiveLogText } from '@/electron/redact-log'
-import { ROUTING_FRAME_BYTES, getRoutingJsonProjector, type RoutingHistoryMethod } from './routing-json'
+import {
+    ROUTING_FRAME_BYTES,
+    getRoutingJsonProjector,
+    type RoutingHistoryMethod
+} from './routing-json'
 
 export type JsonValue = string | number | boolean | null | JsonObject | JsonValue[]
 
@@ -107,11 +111,14 @@ const log = createStructuredLogger('service-bridge')
 // actual write callback. The wake always targets the current connection owner.
 const historyControl = new Uint8Array(4096)
 let historyControlBusy = false
-let historyWake: (() => void) | null = null
-let historyWakeOwner: JsonRpcSocketClient | null = null
+let historyWakeHandlers: HistoryHandlers | null = null
 
 function isHistoryCall(method: string): method is RoutingHistoryMethod {
-    return method === 'routing:get-initial' || method === 'routing:subscribe' || method === 'routing:unsubscribe'
+    return (
+        method === 'routing:get-initial' ||
+        method === 'routing:subscribe' ||
+        method === 'routing:unsubscribe'
+    )
 }
 
 function isJsonObject(value: JsonValue | undefined): value is JsonObject {
@@ -252,12 +259,17 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     }
 
     /** One generated call; its raw result is consumed before the receiver reuses backing. */
-    callHistory(method: RoutingHistoryMethod, consume: (raw: Uint8Array) => boolean): Promise<void> {
+    callHistory(
+        method: RoutingHistoryMethod,
+        consume: (raw: Uint8Array) => boolean
+    ): Promise<void> {
         const socket = this.socket
         if (!isHistoryCall(method)) return Promise.reject(new Error('history-invalid'))
         if (!socket) return Promise.reject(new Error('history-invalid'))
-        if (this.historyPending || historyControlBusy) return Promise.reject(new JsonRpcResponseError(-32096, 'routing history busy; retry'))
-        if (this.historyIssued === 18446744073709551615n) return Promise.reject(new Error('history-exhausted'))
+        if (this.historyPending || historyControlBusy)
+            return Promise.reject(new JsonRpcResponseError(-32096, 'routing history busy; retry'))
+        if (this.historyIssued === 18446744073709551615n)
+            return Promise.reject(new Error('history-exhausted'))
         const ordinal = ++this.historyIssued
         const frame = `{"jsonrpc":"2.0","id":"jh:${ordinal}","method":"${method}","params":{}}\n`
         const length = new TextEncoder().encodeInto(frame, historyControl).written
@@ -274,19 +286,21 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
                 // logical timeout/quarantine and even socket replacement.
                 historyControlBusy = false
                 if (error && this.socket === socket) socket.destroy(error)
-                historyWake?.()
+                historyWakeHandlers?.writable()
             })
         })
     }
-    get historyWritable(): boolean { return !historyControlBusy }
-    cancelHistory(): void { this.rejectHistory() }
+    get historyWritable(): boolean {
+        return !historyControlBusy
+    }
+    cancelHistory(): void {
+        this.rejectHistory()
+    }
     /** Borrowed bytes must be consumed synchronously; they never enter an event queue. */
     setHistoryHandlers(handlers: HistoryHandlers | null): void {
+        const previous = this.historyHandlers
         this.historyHandlers = handlers
-        if (handlers) {
-            historyWakeOwner = this
-            historyWake = () => this.historyHandlers?.writable()
-        } else if (historyWakeOwner === this) { historyWakeOwner = null; historyWake = null }
+        if (handlers || historyWakeHandlers === previous) historyWakeHandlers = handlers
     }
 
     /**
@@ -399,7 +413,10 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
             if (this.socket !== socket || !this.rawFrame || socket.destroyed) return
             const rawFrame = this.rawFrame
             for (const byte of chunk) {
-                if (this.rawLength === ROUTING_FRAME_BYTES || (byte !== 10 && this.rawLength === ROUTING_FRAME_BYTES - 1)) {
+                if (
+                    this.rawLength === ROUTING_FRAME_BYTES ||
+                    (byte !== 10 && this.rawLength === ROUTING_FRAME_BYTES - 1)
+                ) {
                     // The existing close owner fails pending work and schedules
                     // its one reconnect. No input bytes enter diagnostics.
                     socket.destroy()
@@ -438,21 +455,43 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     private rejectHistory(): void {
         const pending = this.historyPending
         this.historyPending = null
-        if (pending) { clearTimeout(pending.timer); pending.reject(new Error('history-invalid')) }
+        if (pending) {
+            clearTimeout(pending.timer)
+            pending.reject(new Error('history-invalid'))
+        }
+    }
+
+    private reportInvalidHistory(): void {
+        this.emit('log', {
+            source: this.name,
+            stream: 'stdout',
+            text: 'history-unknown history-invalid 1'
+        })
     }
 
     private handleRawFrame(raw: Uint8Array): void {
         if (raw.length === 0) return
-        const selected = this.historyProjector.frame(raw, this.historyPending?.ordinal ?? null, this.historyIssued)
+        const selected = this.historyProjector.frame(
+            raw,
+            this.historyPending?.ordinal ?? null,
+            this.historyIssued
+        )
         if (selected.kind === 'ordinary') {
             if (raw.length + 1 > 8 * 1024 * 1024) {
-                this.emit('log', { source: this.name, stream: 'stdout', text: 'history-unknown limit-exceeded 1' })
+                this.emit('log', {
+                    source: this.name,
+                    stream: 'stdout',
+                    text: 'history-unknown limit-exceeded 1'
+                })
                 return
             }
             this.handleLine(new TextDecoder().decode(raw))
             return
         }
-        if (selected.kind === 'discard') return
+        if (selected.kind === 'discard') {
+            if (selected.category !== 'history-stale') this.reportInvalidHistory()
+            return
+        }
         if (selected.kind === 'refuse') {
             const socket = this.socket
             if (!socket) return
@@ -465,12 +504,14 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
             return
         }
         if (selected.kind === 'quarantine') {
+            this.reportInvalidHistory()
             this.historyQuarantined = true
             this.rejectHistory()
             this.historyHandlers?.invalid()
             return
         }
         if (selected.kind === 'error') {
+            if (selected.code !== -32096) this.reportInvalidHistory()
             const pending = this.historyPending
             this.historyPending = null
             if (pending) {
@@ -481,17 +522,25 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         }
         try {
             if (selected.kind === 'notification') {
-                if (!this.historyQuarantined && this.historyHandlers?.notification(selected.value) !== undefined) throw new Error('history-invalid')
+                if (
+                    !this.historyQuarantined &&
+                    this.historyHandlers?.notification(selected.value) !== undefined
+                )
+                    throw new Error('history-invalid')
             } else {
                 const pending = this.historyPending
                 if (!pending) return
-                if (pending.consume(selected.value) !== true) { this.rejectHistory(); return }
+                if (pending.consume(selected.value) !== true) {
+                    this.rejectHistory()
+                    return
+                }
                 this.historyPending = null
                 if (pending.method !== 'routing:unsubscribe') this.historyQuarantined = false
                 clearTimeout(pending.timer)
                 pending.resolve()
             }
         } catch {
+            this.reportInvalidHistory()
             this.historyQuarantined = true
             this.rejectHistory()
             this.historyHandlers?.invalid()
@@ -539,13 +588,16 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         this.writeTail = this.writeTail.then(
             () =>
                 new Promise<void>((resolve, reject) => {
-                    socket.write(typeof frame === 'string' ? frame : `${JSON.stringify(frame)}\n`, err => {
-                        if (err) {
-                            reject(err)
-                            return
+                    socket.write(
+                        typeof frame === 'string' ? frame : `${JSON.stringify(frame)}\n`,
+                        err => {
+                            if (err) {
+                                reject(err)
+                                return
+                            }
+                            resolve()
                         }
-                        resolve()
-                    })
+                    )
                 })
         )
         return this.writeTail

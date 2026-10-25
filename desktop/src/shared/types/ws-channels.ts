@@ -66,8 +66,14 @@ import type {
     RoutingActiveResult,
     RoutingCancelParams,
     RoutingCancelResult,
-    RoutingHistoryConsumed, RoutingHistoryInitial, RoutingHistoryPull, RoutingHistoryReady,
-    RoutingHistoryRecord, RoutingHistoryTransfer, RoutingHistoryConsumption, RoutingHistoryCommit
+    RoutingHistoryConsumed,
+    RoutingHistoryInitial,
+    RoutingHistoryPull,
+    RoutingHistoryReady,
+    RoutingHistoryRecord,
+    RoutingHistoryTransfer,
+    RoutingHistoryConsumption,
+    RoutingHistoryCommit
 } from '@/shared/types/routing'
 import type {
     AvailableNode,
@@ -179,7 +185,10 @@ export interface WsInvokeChannelMap {
     'routing:get-initial': { request: void; response: RoutingHistoryInitial }
     // Electron delivery controls. Never relayed as service/peer RPC methods.
     'routing-history:pull': { request: RoutingHistoryPull; response: RoutingHistoryTransfer }
-    'routing-history:consumed': { request: RoutingHistoryConsumed; response: RoutingHistoryConsumption }
+    'routing-history:consumed': {
+        request: RoutingHistoryConsumed
+        response: RoutingHistoryConsumption
+    }
 
     // Node policy and availability
     'policy:get': { request: NodePolicyTarget; response: NodePolicyDocument }

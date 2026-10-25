@@ -28,8 +28,13 @@ export type ServiceInvokeArgs<C extends WsInvokeChannel> =
 
 /** Only this private history family uses the synchronous contextBridge adapter. */
 export function isHistoryInvoke(channel: WsInvokeChannel): boolean {
-    return channel === 'routing:subscribe' || channel === 'routing:unsubscribe' || channel === 'routing:get-initial' ||
-        channel === 'routing-history:pull' || channel === 'routing-history:consumed'
+    return (
+        channel === 'routing:subscribe' ||
+        channel === 'routing:unsubscribe' ||
+        channel === 'routing:get-initial' ||
+        channel === 'routing-history:pull' ||
+        channel === 'routing-history:consumed'
+    )
 }
 
 /** The renderer's service transport. A failed invoke rejects with an error carrying the service's code. */
