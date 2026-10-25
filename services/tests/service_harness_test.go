@@ -276,26 +276,15 @@ func (f *serviceFixture) args() []string {
 
 // newProxyServiceFixture is newServiceFixture with the broker fronting llama.cpp
 // through a copied nvpair-proxy, so policy activation is acknowledged by a real
-// proxy. Its facade restores an OS-assigned port from the fixture's app directory.
+// proxy. Its facade and unavailable health endpoint are private to the fixture.
 func newProxyServiceFixture(t *testing.T) *serviceFixture {
 	t.Helper()
 	f := newServiceFixture(t)
 	f.proxyPath = f.copyBinary(proxyBin)
 	f.inventory.paths = append(f.inventory.paths, f.proxyPath)
 	f.facadePort = freePort(t)
+	writePrivateBrokerEngineSettings(t, f.configDir, f.clusterDir, map[string]int{"llamacpp": f.facadePort})
 	portPath := filepath.Join(filepath.Dir(f.policyPath()), "llamacpp-proxy-port.json")
-	data, err := json.Marshal(struct {
-		Port int `json:"port"`
-	}{Port: f.facadePort})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(portPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(portPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	t.Logf("fixture_facade_config engine=llamacpp port=%d path=%q", f.facadePort, portPath)
 	return f
 }
