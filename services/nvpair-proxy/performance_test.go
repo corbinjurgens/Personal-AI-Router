@@ -397,7 +397,7 @@ func TestPerformancePreparationAllowanceTransfer(t *testing.T) {
 		t.Fatalf("preparation capacity=%d err=%v, want %d", n, err, wantStorage)
 	}
 	const parserBytes int64 = 96 << 10
-	const responseBytes int64 = streamFrameMetadataBytes + 1 + 3*streamFrameReadChunk + streamFrameNumericBytes
+	const responseBytes int64 = streamFrameMetadataBytes + 1 + streamFrameReadChunk + streamFrameNumericBytes + 4*streamFrameMaxBytes
 	const totalBytes int64 = parserBytes + streamFrameNumericBytes + wantStorage + responseBytes
 	root, err := newBufferBudget(totalBytes, 0)
 	if err != nil {

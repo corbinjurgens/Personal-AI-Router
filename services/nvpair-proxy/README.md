@@ -382,11 +382,13 @@ Frames use volatile memory only, with a 1 MiB raw-frame limit and 64 MiB of live
 frame-buffer reservations shared across facades. No response content is logged
 or persisted, and no whole-response prefix is retained.
 
-Effectively enabled streams prepay reader storage; each aggregate acquisition
+Effectively enabled streams prepay a bounded reader envelope, including raw-frame
+and SSE payload replacement overlap up to the frame limit. Allocations borrow
+that lease and cannot exceed it. Each aggregate acquisition
 may use the configured inference-buffer wait, while a full stream category
 refuses immediately. Local non-streams retain telemetry preparation and peer
-non-streams add none. Admitted readers drain within existing storage after a
-cap decrease; growth and pre-output retries require current capacity. See the
+non-streams add none. Admitted readers can grow within that envelope and drain
+after a cap decrease; new admissions and pre-output retries require current capacity. See the
 spec's preparation ceiling table and drain conditions, including protocol
 defaults and responses that acquire fresh reader grants.
 

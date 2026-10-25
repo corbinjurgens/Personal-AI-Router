@@ -29,7 +29,7 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 			fx := newTierFixture(t, ollamaCase(t), policy, map[string][]string{
 				"a": {"small:1b"}, "b": {"large:7b"},
 			}, nil)
-			root := bufferTestBudget(t, 2<<20, 0)
+			root := bufferTestBudget(t, 8<<20, 0)
 			fx.p.buffers = root
 			queued := make(chan struct{}, 1)
 			// Existing allocator clock injection exposes FIFO entry, rather than
@@ -114,13 +114,13 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 			root.mu.Unlock()
 			// Manual peers forward NDJSON without local numeric extraction or
 			// the decoded-payload scratch used only by SSE.
-			wantResponseBytes := int64(streamFrameMetadataBytes + 1 + streamFrameSyntaxBytes + 2*streamFrameReadChunk)
+			wantResponseBytes := int64(streamFrameMetadataBytes + 1 + streamFrameSyntaxBytes + streamFrameReadChunk + 2*streamFrameMaxBytes)
 			if firstResponseBytes != wantResponseBytes {
 				t.Fatalf("first response preparation = %d bytes, want %d", firstResponseBytes, wantResponseBytes)
 			}
 			var blocker *bufferLease
 			if insufficient {
-				blocker = bufferMustAcquire(t, root, 128<<10)
+				blocker = bufferMustAcquire(t, root, wantResponseBytes+(128<<10))
 				defer blocker.close()
 			}
 			fx.p.admission.mu.Lock()
@@ -143,9 +143,9 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 			if advanced != generation+1 {
 				t.Fatalf("policy generation = %d, want %d", advanced, generation+1)
 			}
-			capacity, wait := int64(1<<20), time.Duration(0)
+			capacity, wait := int64(4<<20), time.Duration(0)
 			if insufficient {
-				capacity, wait = 256<<10, 3*time.Second
+				capacity, wait = wantResponseBytes+(256<<10), 3*time.Second
 			}
 			if err := root.reconfigure(capacity, wait); err != nil {
 				t.Fatal(err)
@@ -157,7 +157,7 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 				used, pending := root.used, root.waiters.Len()
 				responseBytes := root.streams.used
 				root.mu.Unlock()
-				if pending != 1 || responseBytes != 0 || used-(128<<10) > firstUsed-firstResponseBytes {
+				if pending != 1 || responseBytes != 0 || used-wantResponseBytes-(128<<10) > firstUsed-firstResponseBytes {
 					t.Fatalf("old preparation retained during rebuild: queued=%d response=%d used=%d first=%d preparation=%d", pending, responseBytes, used, firstUsed, firstResponseBytes)
 				}
 				fx.p.priorityMu.Lock()

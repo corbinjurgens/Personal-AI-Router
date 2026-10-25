@@ -301,8 +301,9 @@ func TestUnifiedDispatchPassthroughBeforeOwner(t *testing.T) {
 	test("control 503 makes one pass over concrete candidates", http.StatusServiceUnavailable, http.StatusOK, 1)
 }
 
-func TestUnifiedDispatchPostcommitAllocationRefusal(t *testing.T) {
+func TestUnifiedDispatchPostcommitAllocationDrains(t *testing.T) {
 	received, resume := make(chan struct{}), make(chan struct{})
+	frame := strings.Replace(continuitySSEEvent, "intact", strings.Repeat("x", streamFrameReadChunk), 1)
 	var resumeOnce sync.Once
 	release := func() { resumeOnce.Do(func() { close(resume) }) }
 	t.Cleanup(release)
@@ -315,10 +316,9 @@ func TestUnifiedDispatchPostcommitAllocationRefusal(t *testing.T) {
 		<-resume
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusAccepted)
-		// The initial raw array is prepaid. Make the first frame require a
-		// replacement grant after commitment, before any frame can be delivered.
-		event := strings.Replace(continuitySSEEvent, "intact", strings.Repeat("x", streamFrameReadChunk), 1)
-		if _, err := io.WriteString(w, event+"data: [DONE]\n\n"); err != nil {
+		// Require a replacement allocation after commitment while the root is
+		// full. The admitted frame envelope must cover it without a new grant.
+		if _, err := io.WriteString(w, frame+"data: [DONE]\n\n"); err != nil {
 			t.Error(err)
 		}
 	}))
@@ -330,7 +330,7 @@ func TestUnifiedDispatchPostcommitAllocationRefusal(t *testing.T) {
 	writer := &recordingWriter{}
 	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(writer), discovery, 0)
 	p.SetPriority([]string{"a", "b"})
-	p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureRemotePreparationBytes(t, `{"model":"m","stream":true}`), 0)
+	p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 	recorder, done := httptest.NewRecorder(), make(chan struct{})
 	go func() {
 		defer close(done)
@@ -342,9 +342,9 @@ func TestUnifiedDispatchPostcommitAllocationRefusal(t *testing.T) {
 	p.buffers.mu.Unlock()
 	blocker := bufferMustAcquire(t, p.buffers, remaining)
 	release()
-	waitChan(t, done, "postcommit refusal cleanup")
-	if recorder.Code != http.StatusAccepted || recorder.Body.String() != string(wantSSEInterruption(streamInterruptReasonBudget)) || other.hits() != 0 {
-		t.Fatalf("committed refusal rewrote status or fell back: status=%d body=%q fallback=%d", recorder.Code, recorder.Body.String(), other.hits())
+	waitChan(t, done, "postcommit drain cleanup")
+	if recorder.Code != http.StatusAccepted || recorder.Body.String() != frame+"data: [DONE]\n\n" || other.hits() != 0 {
+		t.Fatalf("admitted stream did not drain: status=%d bytes=%d fallback=%d", recorder.Code, recorder.Body.Len(), other.hits())
 	}
 	var event RequestEvent
 	completed := notificationsOf(t, writer, engines.AddressMethod(p.soleFacade().profile.Name, "proxy/request"))
@@ -354,8 +354,8 @@ func TestUnifiedDispatchPostcommitAllocationRefusal(t *testing.T) {
 	if err := json.Unmarshal(completed[0], &event); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(event.Error, streamInterruptReasonBudget) {
-		t.Fatalf("allocation reason lost: %+v", event)
+	if event.Error != "" {
+		t.Fatalf("drained stream reported an error: %+v", event)
 	}
 	blocker.close()
 	ownedAssertHandlerDrained(t, p, nil)
@@ -723,7 +723,7 @@ func TestUnifiedDispatchPreparedStreamOutlivesDeadline(t *testing.T) {
 	for _, path := range []string{"self", "ingress", "self strict", "ingress strict"} {
 		t.Run(path, func(t *testing.T) {
 			p, _ := strictHTTPFixture(t)
-			p.buffers = bufferTestBudget(t, 2<<20, 0)
+			p.buffers = bufferTestBudget(t, (2<<20)+bufferFixtureResponseBytes, 0)
 			release := make(chan struct{})
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
@@ -1251,7 +1251,7 @@ func TestUnifiedDispatchIngressPanicCleanup(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			p, _ := strictHTTPFixture(t)
-			p.buffers = bufferTestBudget(t, 2<<20, 0)
+			p.buffers = bufferTestBudget(t, (2<<20)+bufferFixtureResponseBytes, 0)
 			engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
 					return
@@ -1324,7 +1324,7 @@ func TestUnifiedDispatchPostcommitModifyResponseRefusal(t *testing.T) {
 			discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
 			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
 			p.SetPriority([]string{"a", "b"})
-			p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureRemotePreparationBytes(t, `{"model":"m","stream":true}`), 0)
+			p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 			transport := p.plainHTTPTransport()
 			dial := transport.DialContext
 			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -1467,7 +1467,7 @@ func TestUnifiedDispatchCommittedPeekTimer(t *testing.T) {
 			writer := &recordingWriter{}
 			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(writer), discovery, 0)
 			p.SetPriority([]string{"a", "b"})
-			p.buffers = bufferTestBudget(t, 256<<10+bufferFixtureRemotePreparationBytes(t, `{"model":"m","stream":true}`), 0)
+			p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 			rec, done := httptest.NewRecorder(), make(chan struct{})
 			go func() {
 				defer close(done)

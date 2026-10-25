@@ -873,8 +873,11 @@ Frames are held in volatile memory only: at most 1 MiB per raw frame and
 before allocation/growth. Exhaustion terminates explicitly rather than waiting
 for memory. The category is subordinate to the inference aggregate budget.
 Before dispatch, an effectively enabled managed stream reserves separate response
-working grants for metadata, choice tracking, read scratch, its parser,
-initial raw frame storage and, for SSE, multiline assembly. Local numeric
+working storage for metadata, choice tracking, read scratch, its parser,
+raw frame storage and, for SSE, multiline assembly. One bounded lease covers
+the fixed storage plus two 1 MiB raw arrays and, for SSE, two 1 MiB payload
+arrays, so replacement overlap is prepaid before allocation. Actual frame
+allocations borrow that lease and their total cannot exceed its capacity. Local numeric
 streams reserve a 96 KiB parser; local syntax-only and peer streams reserve
 16 KiB. OpenAI `/v1` routes default to non-streaming when `stream` is omitted
 or null; native Ollama NDJSON routes default to streaming. An unexpected
@@ -883,7 +886,7 @@ grants as at base and is not protected against a prior capacity decrease.
 Local requests also retain their existing fixed and fingerprint
 preparation, including non-streaming requests. Peers reserve no fingerprint
 storage, and peer non-streaming requests reserve no preparation grants.
-These grants do not share the request parser or performance fingerprint charge.
+This envelope does not share the request parser or performance fingerprint charge.
 Each pre-dispatch aggregate acquisition may wait up to the configured I8
 `waitSeconds` (zero for immediate refusal). Each acquisition joins the FIFO
 tail with a fresh deadline and holds earlier grants while queued; a full
@@ -891,16 +894,16 @@ stream category refuses at once. Exhausted capacity returns 503, while a request
 choice count that cannot fit the applicable limit returns 413, including an
 impossible OpenAI choice count on a non-streaming request. Native NDJSON routes
 ignore `n`. Reader growth does not wait.
-The response reader claims the admitted grants without another charge even
+The response reader claims the admitted storage without another root charge even
 if aggregate capacity decreases before the first output. Live readers retain
 their working allocations between frames, so an admitted stream can drain
 through its original terminal frame while usage exceeds a reduced aggregate
-cap. New admissions and larger replacement allocations still require capacity;
-growth charges both arrays during copying. Unclaimed preparation grants and
-reader-owned grants are released by their respective owners. Drain requires
-subsequent raw frames, joined SSE payloads and choice tracking to fit the
-reader's existing grants or retained high-water storage. Larger replacement
-storage still needs capacity and may interrupt the stream after a decrease.
+cap. New admissions still require capacity; frame and payload growth within
+the admitted envelope charges both arrays during copying without increasing
+the root charge, including frames larger than earlier frames up to the protocol
+frame limit. Unclaimed preparation borrowers and reader-owned borrowers are
+released by their respective owners. The envelope stays charged until the last
+allocation releases, including when the preparation or request owner closes first.
 A pre-output retry is a new dispatch admission: it releases the failed attempt's
 preparation and must satisfy current policy and capacity, including a changed
 policy generation. Same-attempt drain does not authorize that retry.
@@ -917,20 +920,20 @@ also bind first. These isolated preparation ceilings are not throughput guarante
 
 | Preparation class | 192 MiB | 256 MiB | 1024 MiB |
 | --- | ---: | ---: | ---: |
-| Self numeric stream | 564 | 564 | 564 |
-| Self syntax stream | 754 | 1005 | 1820 |
+| Self numeric stream | 15 | 15 | 15 |
+| Self syntax stream | 15 | 15 | 15 |
 | Self non-stream | 874 | 1166 | 4665 |
 | Self omitted-flag OpenAI non-stream | 875 | 1167 | 4671 |
-| Peer stream | 1489 | 1820 | 1820 |
+| Peer stream | 15 | 15 | 15 |
 | Peer non-stream | 2047 | 2729 | 10919 |
 
 The omitted-flag row uses `{"model":"m"}`; the explicit non-stream row
 includes `"stream":false`, so its retained request and fingerprint are larger.
 Each ceiling is the smaller of the aggregate capacity divided by the request
 charge and the existing 64 MiB stream category divided by the frame charge
-(the latter is absent for non-streams). The 564 self numeric bound equals the
-base live-reader ceiling: admission now pays that existing charge before
-dispatch. Metadata-only preparation counts do not include reader storage.
+(the latter is absent for non-streams). Prepaying worst-case frame overlap
+reduces the one-choice SSE ceiling to 15 under the fixed 64 MiB stream category.
+The envelope is a logical reservation; arrays still allocate only as needed.
 The stream category does not scale with I8 capacity. No whole-response prefix
 is retained. Real slow-model acceptance of the idle default remains pending.
 
@@ -1447,8 +1450,9 @@ A live capacity decrease never revokes storage already held. Usage can remain
 above the new cap while owners drain; new grants cannot increase that excess.
 Queued proposals made impossible by the decrease are removed with 413;
 remaining waiters retain their original deadlines. Admitted streams drain
-within retained grants, but larger replacement allocations and pre-output
-retries require current capacity; see §5.2 for the reader-specific conditions.
+within their admitted envelopes, including larger later frames up to the frame
+limit. New admissions and pre-output retries require current capacity; see §5.2
+for the reader-specific conditions.
 The desktop's Node policy JSON editor can change these settings; the TUI has
 no buffer controls. See [Hybrid routing](../../docs/hybrid-routing.mdx) for the
 desktop edit example.

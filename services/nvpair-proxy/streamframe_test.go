@@ -114,6 +114,38 @@ func TestStreamFrameFixedLeaseSlots(t *testing.T) {
 	budget.release(2)
 }
 
+func TestStreamFrameAdmittedAllowanceBound(t *testing.T) {
+	budget := newFrameBudget(200)
+	root := budget.scope.budget
+	if err := budget.admit(context.Background(), 100); err != nil {
+		t.Fatal(err)
+	}
+	defer budget.releasePreparation()
+	if err := budget.prepare(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	if !budget.reserve(10) || !budget.reserve(90) {
+		t.Fatal("admitted allocations were refused")
+	}
+	if budget.reserve(1) {
+		t.Fatal("frame allocations exceeded their own lease despite spare root capacity")
+	}
+	bufferAssertTotals(t, root, 100, 1, 0)
+	if err := root.reconfigure(1, 0); err != nil {
+		t.Fatal(err)
+	}
+	budget.releasePreparation()
+	budget.release(90)
+	if !budget.reserve(90) || budget.reserve(1) {
+		t.Fatal("decrease changed the admitted envelope")
+	}
+	bufferAssertTotals(t, root, 100, 1, 0)
+	budget.release(90)
+	bufferAssertTotals(t, root, 100, 1, 0)
+	budget.release(10)
+	bufferAssertTotals(t, root, 0, 0, 0)
+}
+
 func TestStreamFramePeerInterruptionPreserved(t *testing.T) {
 	for reason, frames := range streamInterruptionFramesByReason {
 		for _, protocol := range []streamProtocol{streamProtocolSSE, streamProtocolNDJSON} {

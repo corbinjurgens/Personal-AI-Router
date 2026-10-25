@@ -103,7 +103,7 @@ func TestBufferDecreaseNumericPreparationWithoutObservationDrains(t *testing.T) 
 	bufferAssertTotals(t, root, 0, 0, 0)
 }
 
-func TestBufferDecreaseGrowthRefusesWithoutWaiting(t *testing.T) {
+func TestBufferDecreaseGrowthBorrowsWithoutWaiting(t *testing.T) {
 	for _, storage := range []string{"raw frame", "SSE payload"} {
 		t.Run(storage, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -145,7 +145,7 @@ func TestBufferDecreaseGrowthRefusesWithoutWaiting(t *testing.T) {
 				raw := bytes.Clone(r.buf[:cap(r.buf)])
 				payload := bytes.Clone(r.payload[:cap(r.payload)])
 				rawStart, payloadStart := &r.buf[:cap(r.buf)][0], &r.payload[:cap(r.payload)][0]
-				rawLen, payloadLen, charged, frameCharges := len(r.buf), len(r.payload), r.reserved, r.budget.inUse()
+				rawLen, payloadLen := len(r.buf), len(r.payload)
 				started := time.Now()
 				r.mu.Lock()
 				var grew bool
@@ -155,14 +155,17 @@ func TestBufferDecreaseGrowthRefusesWithoutWaiting(t *testing.T) {
 					grew = r.growPayloadLocked(cap(r.payload) + 1)
 				}
 				r.mu.Unlock()
-				if elapsed := time.Since(started); grew || elapsed != 0 {
-					t.Fatalf("growth = %v after %v virtual time, want immediate refusal", grew, elapsed)
+				if elapsed := time.Since(started); !grew || elapsed != 0 {
+					t.Fatalf("growth = %v after %v virtual time, want immediate borrowed growth", grew, elapsed)
 				}
-				if len(r.buf) != rawLen || len(r.payload) != payloadLen || cap(r.buf) != len(raw) || cap(r.payload) != len(payload) || &r.buf[:cap(r.buf)][0] != rawStart || &r.payload[:cap(r.payload)][0] != payloadStart || !bytes.Equal(r.buf[:cap(r.buf)], raw) || !bytes.Equal(r.payload[:cap(r.payload)], payload) {
-					t.Fatal("refused growth changed original raw or payload storage")
+				if len(r.buf) != rawLen || len(r.payload) != payloadLen || !bytes.Equal(r.buf, raw[:rawLen]) || !bytes.Equal(r.payload, payload[:payloadLen]) {
+					t.Fatal("borrowed growth changed original raw or payload contents")
 				}
-				if r.reserved != charged || r.budget.inUse() != frameCharges {
-					t.Fatal("refused growth changed reader charges")
+				if storage == "raw frame" && (&r.buf[:cap(r.buf)][0] == rawStart || cap(r.buf) <= len(raw)) {
+					t.Fatal("raw frame did not acquire replacement storage")
+				}
+				if storage == "SSE payload" && (&r.payload[:cap(r.payload)][0] == payloadStart || cap(r.payload) <= len(payload)) {
+					t.Fatal("SSE payload did not acquire replacement storage")
 				}
 				bufferAssertTotals(t, root, used, live, 0)
 				tail, err := io.ReadAll(r)

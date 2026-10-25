@@ -720,7 +720,7 @@ func TestRequestRegistryRetainedThroughFinalBorrower(t *testing.T) {
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
 			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
-			p.buffers = bufferTestBudget(t, 2<<20, 0)
+			p.buffers = bufferTestBudget(t, (2<<20)+bufferFixtureResponseBytes, 0)
 			transport := p.plainHTTPTransport()
 			dial := transport.DialContext
 			var retainOnce sync.Once
