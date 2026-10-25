@@ -20,6 +20,9 @@
 package tests
 
 import (
+	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -556,12 +559,103 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 // workload event that the broker stamps and forwards to the manager, which
 // broadcasts it to a discovered peer.
 func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
-	// Fake Ollama upstream the proxy forwards to (200 on any request).
+	captureWorkloadBroadcast(t)
+}
+
+// The allowlist is deliberately test-owned: decoding into the product's DTO
+// would silently grow this privacy contract whenever a private field was added.
+type workloadBroadcastFrame struct {
+	JSONRPC string `json:"jsonrpc"`
+	Method  string `json:"method"`
+	Params  struct {
+		WorkloadInfo struct {
+			ID             string  `json:"id"`
+			Model          string  `json:"model"`
+			Engine         string  `json:"engine"`
+			RunID          string  `json:"runId"`
+			Seq            int64   `json:"seq"`
+			State          string  `json:"state"`
+			OriginatedFrom string  `json:"originatedFrom"`
+			ScheduledOn    string  `json:"scheduledOn"`
+			CreatedAt      int64   `json:"createdAt"`
+			StartedAt      *int64  `json:"startedAt"`
+			CompletedAt    *int64  `json:"completedAt"`
+			Error          *string `json:"error"`
+			RequesterID    *string `json:"requesterId"`
+			RequestedModel string  `json:"requestedModel"`
+		} `json:"workloadInfo"`
+		Resync *bool `json:"resync"`
+	} `json:"params"`
+}
+
+func TestWorkloadBroadcastCarriesNoRoutingFields(t *testing.T) {
+	frames := captureWorkloadBroadcast(t)
+	for i, raw := range frames {
+		var frame workloadBroadcastFrame
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&frame); err != nil {
+			t.Fatalf("peer frame %d violates the workload envelope/nested field allowlist: %v", i, err)
+		}
+		if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+			t.Fatalf("peer frame %d has trailing data: %v", i, err)
+		}
+		if frame.JSONRPC != "2.0" {
+			t.Fatalf("peer frame %d jsonrpc=%q, want 2.0", i, frame.JSONRPC)
+		}
+		switch frame.Method {
+		case "workload:submitted", "workload:started", "workload:completed", "workload:errored":
+		default:
+			t.Fatalf("peer frame %d carries non-workload/private method %q", i, frame.Method)
+		}
+	}
+	t.Logf("checked the complete peer capture: %d workload frames", len(frames))
+}
+
+const (
+	workloadBroadcastModel      = "privacy-routing-request-model"
+	workloadBroadcastReadyModel = "privacy-readiness-model"
+	workloadBroadcastNode       = "privacy-upstream-node"
+	workloadBroadcastMessage    = "privacy-synthetic-message"
+)
+
+// captureWorkloadBroadcast keeps the original real proxy -> broker -> manager
+// fixture, but first proves peer readiness with a distinct model. The measured
+// inference is sent once, after that peer has delivered a terminal frame.
+func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
+	t.Helper()
+	var measuredRequests atomic.Int32
 	ollama := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.Copy(io.Discard, r.Body)
+		if r.Method != http.MethodPost || r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		var request struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode synthetic Ollama request: %v", err)
+			http.Error(w, "invalid fixture request", http.StatusBadRequest)
+			return
+		}
+		if (request.Model != workloadBroadcastModel && request.Model != workloadBroadcastReadyModel) ||
+			len(request.Messages) != 1 || request.Messages[0].Role != "user" || request.Messages[0].Content != workloadBroadcastMessage {
+			t.Error("fake Ollama received unexpected model/messages")
+			http.Error(w, "unexpected fixture request", http.StatusBadRequest)
+			return
+		}
+		if request.Model == workloadBroadcastModel {
+			measuredRequests.Add(1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"done":true}`))
+		if _, err := w.Write([]byte(`{"done":true}`)); err != nil {
+			t.Errorf("write fake Ollama completion: %v", err)
+		}
 	}))
 	ollamaPort := ollama.Listener.Addr().(*net.TCPAddr).Port
 	t.Cleanup(func() {
@@ -575,7 +669,7 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 	// never dialed at all. The fixture feeds the public worker discovery seam,
 	// avoiding installed peers and multicast registration/teardown dependencies.
 	fx := newInterNodeCluster(t)
-	received, peerPort := fx.startDirectClusterPeer(t)
+	received, peerPort, stopPeer := startWorkloadBroadcastPeer(t, fx)
 	base := t.TempDir()
 	executable, err := os.Executable()
 	if err != nil {
@@ -589,6 +683,13 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 	if err := os.WriteFile(bridge, data, 0o700); err != nil {
 		t.Fatalf("copy workload bridge to %q (a previous process may still be running): %v", bridge, err)
 	}
+	// Reuse the registered empty-directory scanner role. The bridge supplies
+	// only the pinned peer to the workload worker; no production scanner runs.
+	scanner := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
+	if err := os.WriteFile(scanner, data, 0o700); err != nil {
+		t.Fatalf("copy empty scanner to %q: %v", scanner, err)
+	}
+	scannerPort := temporaryClusterPort(t)
 	ports := reserveFixtureServicePorts(t)
 	workerPort := ports.workload
 	proxyPort := temporaryClusterPort(t)
@@ -608,20 +709,20 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 		HostUUID: "stub-wm-peer-uuid", ClusterUUID: fx.peerUUID, IP: "127.0.0.1",
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceWorkload: {Port: peerPort}},
 	}}}
-	args, err := ports.brokerArgs(fx.nodeDir,
+	args := append([]string{"--scanner-path", scanner, "--cluster-dir", fx.nodeDir}, ports.args()...)
+	args = append(args,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--workload-manager-path", bridge,
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	p := startInteropProcess(t, base, brokerBin, workerPort, []string{
 		"OLLAMA_HOST=",
+		"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
+		"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(scannerPort),
 		"NVPAIR_TEST_WORKLOAD_BRIDGE=" + bridge,
 		"NVPAIR_TEST_WORKLOAD_BINARY=" + workloadMgrBin,
 		"NVPAIR_TEST_WORKLOAD_NODES=" + string(mustMarshal(t, directory)),
 	}, args...)
-	p.paths = append(p.paths, scannerBin, proxyBin, bridge, workloadMgrBin)
+	p.paths = append(p.paths, scanner, proxyBin, bridge, workloadMgrBin)
 	for i, path := range p.paths {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
@@ -639,8 +740,9 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 	if readyPort := waitProxyReady(t, stdin, msgs, 15*time.Second); readyPort != proxyPort {
 		t.Fatalf("proxy port=%d want fixture port=%d", readyPort, proxyPort)
 	}
-	p.ports = append(p.ports, proxyPort)
+	p.ports = append(p.ports, proxyPort, scannerPort)
 	waitTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(workerPort)), 10*time.Second)
+	waitTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(scannerPort)), 10*time.Second)
 	owned, err := p.inventory.scan()
 	if err != nil || len(owned) != len(p.paths) {
 		t.Fatalf("fixture process inventory: owned=%+v err=%v want paths=%v", owned, err, p.paths)
@@ -658,73 +760,191 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 
 	// Register the fake Ollama as a manual node and pin it as the target so
 	// the proxy forwards there deterministically.
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["test-model"]}}`, ollamaPort))
+	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":%q,"host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":[%q,%q]}}`, workloadBroadcastNode, ollamaPort, workloadBroadcastModel, workloadBroadcastReadyModel))
 	if reply := waitForResponse(t, msgs, 5*time.Second); reply.Error != nil {
 		t.Fatalf("add manual upstream: %+v", reply.Error)
 	}
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":"fake-ollama"}}`)
+	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":%q}}`, workloadBroadcastNode))
 	if reply := waitForResponse(t, msgs, 5*time.Second); reply.Error != nil {
 		t.Fatalf("select upstream: %+v", reply.Error)
 	}
 	t.Log("fake ollama pinned as proxy target")
 
-	// Fire inference requests until the stub peer records a broadcast. The
-	// retry loop absorbs worker discovery latency (the manager refreshes its
-	// peer set every 5 s and only broadcasts to peers it already knows).
+	// A completed warmup is the discovery/delivery barrier. All frames,
+	// including warmups and teardown, remain in the privacy capture.
 	client := &http.Client{Timeout: 3 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
-	fire := func() {
+	fire := func(model string) {
+		t.Helper()
 		resp, err := client.Post(
 			fmt.Sprintf("http://127.0.0.1:%d/api/chat", proxyPort),
 			"application/json",
-			strings.NewReader(`{"model":"test-model","messages":[]}`),
+			strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}]}`, model, workloadBroadcastMessage)),
 		)
 		if err != nil {
 			t.Fatalf("inference through real proxy: %v", err)
 		}
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			t.Errorf("read inference response: %v", err)
-		}
-		if err := resp.Body.Close(); err != nil {
-			t.Errorf("close inference response: %v", err)
+		body, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil || closeErr != nil {
+			t.Fatalf("read inference response: read=%v close=%v", readErr, closeErr)
 		}
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("inference status=%d want=200", resp.StatusCode)
 		}
-	}
-	fire()
-
-	deadline := time.After(50 * time.Second)
-	reqTick := time.NewTicker(2500 * time.Millisecond)
-	defer reqTick.Stop()
-	for {
-		select {
-		case msg := <-received:
-			if !strings.HasPrefix(msg.Method, "workload:") {
-				continue
-			}
-			var p wlParams
-			if err := json.Unmarshal(msg.Params, &p); err != nil {
-				t.Fatalf("unmarshal broadcast params: %v\nraw: %s", err, msg.Params)
-			}
-			if p.WorkloadInfo.Model != "test-model" {
-				continue
-			}
-			if p.WorkloadInfo.OriginatedFrom != fx.nodeUUID {
-				t.Errorf("broadcast workload originatedFrom=%q want=%q", p.WorkloadInfo.OriginatedFrom, fx.nodeUUID)
-			}
-			if p.WorkloadInfo.Engine != "ollama" {
-				t.Errorf("broadcast workload engine = %q, want %q", p.WorkloadInfo.Engine, "ollama")
-			}
-			t.Logf("outbound OK: stub peer received %s for model %q from node %q",
-				msg.Method, p.WorkloadInfo.Model, p.WorkloadInfo.OriginatedFrom)
-			return
-		case <-reqTick.C:
-			fire()
-		case <-deadline:
-			t.Fatal("timed out: stub peer never received a workload broadcast")
+		var completion struct {
+			Done bool `json:"done"`
+		}
+		if err := json.Unmarshal(body, &completion); err != nil || !completion.Done {
+			t.Fatalf("inference completion done=%t err=%v", completion.Done, err)
 		}
 	}
+	var capture []json.RawMessage
+	read := func(raw json.RawMessage) workloadBroadcastFrame {
+		t.Helper()
+		capture = append(capture, raw)
+		var frame workloadBroadcastFrame
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatalf("decode captured peer frame: %v", err)
+		}
+		return frame
+	}
+	waitReady := func() {
+		t.Helper()
+		fire(workloadBroadcastReadyModel)
+		deadline := time.NewTimer(30 * time.Second)
+		defer deadline.Stop()
+		retry := time.NewTicker(2500 * time.Millisecond)
+		defer retry.Stop()
+		for {
+			select {
+			case raw := <-received:
+				frame := read(raw)
+				info := frame.Params.WorkloadInfo
+				if frame.Method == "workload:completed" && info.Model == workloadBroadcastReadyModel && info.State == "completed" {
+					return
+				}
+			case <-retry.C:
+				fire(workloadBroadcastReadyModel)
+			case <-deadline.C:
+				t.Fatal("timed out waiting for pinned peer's completed readiness workload")
+			}
+		}
+	}
+	waitReady()
+	fire(workloadBroadcastModel)
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	var id, runID string
+	var submittedSeq int64
+	terminal := false
+	for !terminal {
+		select {
+		case raw := <-received:
+			frame := read(raw)
+			info := frame.Params.WorkloadInfo
+			if info.Model != workloadBroadcastModel {
+				continue
+			}
+			if info.OriginatedFrom != fx.nodeUUID || info.Engine != "ollama" || info.ID == "" || info.RunID == "" {
+				t.Fatalf("broadcast identity: origin=%q engine=%q workload=%q run=%q", info.OriginatedFrom, info.Engine, info.ID, info.RunID)
+			}
+			if id == "" {
+				if frame.Method != "workload:submitted" || info.State != "queued" || info.Seq <= 0 {
+					t.Fatalf("first measured frame method=%q state=%q seq=%d, want submitted/queued", frame.Method, info.State, info.Seq)
+				}
+				id, runID, submittedSeq = info.ID, info.RunID, info.Seq
+			}
+			if info.ID != id || info.RunID != runID {
+				t.Fatalf("measured workload identity changed: workload=%q run=%q, want %q/%q", info.ID, info.RunID, id, runID)
+			}
+			if frame.Method == "workload:errored" {
+				t.Fatalf("measured workload failed: state=%q", info.State)
+			}
+			if frame.Method == "workload:completed" {
+				if info.State != "completed" || info.Seq <= submittedSeq || info.ScheduledOn != workloadBroadcastNode || info.Error != nil {
+					t.Fatalf("terminal broadcast state=%q seq=%d scheduledOn=%q error=%v", info.State, info.Seq, info.ScheduledOn, info.Error)
+				}
+				terminal = true
+			}
+		case <-deadline.C:
+			t.Fatalf("timed out draining measured workload: submitted=%t terminal=%t", id != "", terminal)
+		}
+	}
+	// Join the producing processes and peer handlers before inspecting the
+	// remaining capture. This is a finite observation window, not a sleep used
+	// as evidence of absence; terminal delivery is its positive end barrier.
+	p.cleanup()
+	stopPeer()
+	for raw := range received {
+		read(raw)
+	}
+	if measuredRequests.Load() != 1 || len(capture) == 0 {
+		t.Fatalf("measured upstream requests=%d peer frames=%d, want one request and nonempty capture", measuredRequests.Load(), len(capture))
+	}
+	t.Logf("outbound controls: origin=%q engine=ollama run=%q workload=%q submitted/terminal delivered", fx.nodeUUID, runID, id)
+	return capture
+}
+
+// Preserve the entire wire body: jsonrpc.Message alone would discard unknown
+// envelope members before the privacy assertion could inspect them.
+func startWorkloadBroadcastPeer(t *testing.T, fx *interNodeCluster) (<-chan json.RawMessage, int, func()) {
+	t.Helper()
+	received := make(chan json.RawMessage, 128)
+	listener := listenFixtureLoopback(t)
+	port := listener.Addr().(*net.TCPAddr).Port
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := fx.peer.VerifyClientPin(r); !ok {
+			http.Error(w, "not a pinned cluster peer", http.StatusForbidden)
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/workloads/events" {
+			t.Errorf("unexpected peer request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read peer frame: %v", err)
+			http.Error(w, "read peer frame", http.StatusBadRequest)
+			return
+		}
+		select {
+		case received <- json.RawMessage(body):
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Error("peer capture exceeded its frame budget")
+			http.Error(w, "capture full", http.StatusServiceUnavailable)
+		}
+	})}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(tls.NewListener(listener, fx.peer.ServerTLSConfig())) }()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := server.Shutdown(ctx); err != nil {
+				if closeErr := server.Close(); closeErr != nil {
+					t.Errorf("close peer: %v", closeErr)
+				}
+				t.Fatalf("join peer handlers before freezing capture: %v", err)
+			}
+			select {
+			case err := <-done:
+				if err != http.ErrServerClosed {
+					t.Errorf("peer server exit: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("peer server did not exit before freezing capture")
+			}
+			close(received)
+			assertInteropListenerClosed(t, port)
+		})
+	}
+	t.Cleanup(stop)
+	t.Logf("fixture_listener peer_port=%d", port)
+	return received, port, stop
 }
 
 // postPeerEvent POSTs a peer workload frame to the manager's inter-node endpoint
