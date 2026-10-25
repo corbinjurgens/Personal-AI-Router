@@ -32,8 +32,10 @@ live `routing:active`/`routing:cancel` controls remain independent.
 
 The wire synchronously validates and packs known fields into current, pending
 and baseline banks; the client exposes coalesced scalar `HistoryReady` tokens,
-not queued record DTOs. Presentation has no Bubble Tea history event consumer
-yet. Merge uses full origin/run/request identity and increasing seq, rejecting
+not queued record DTOs. The Routing view borrows one record at a time to build
+bounded table cells and a scrollable attempt detail. The shell's existing tick
+drains ready tokens, so changes appear within one second without another timer.
+Merge uses full origin/run/request identity and increasing seq, rejecting
 stale/terminal-regressing updates. Keep newest 256 requests and newest 32 attempts
 with original indexes and `droppedAttempts`; delayed baselines cannot resurrect
 trimmed rows. Busy initial loads keep validated rows and remain loading with one
@@ -56,9 +58,18 @@ History capacities bound owned representations, not RSS; TUI's allowance is
 `3W+H+M+P+C` = 117,710,848 bytes. The service has eight concurrent writers and
 no subscriber cap, so a waiting TUI does not block ordinary calls or inference.
 
-This activates consumer banks only. Original Task 5 owns the Routing tab and
-original Task 4 owns desktop Settings/card presentation; neither view is claimed
-here. History adds no cancel action, SC-b continuation or public-provider activation.
+The Routing tab follows Jobs. `r` refreshes history; `enter` shows or hides the
+selected request's attempts, and `esc` returns to the table. Narrow layouts keep
+Model, State and Attempts; detail retains all fields, full destination/account
+IDs, admission/first-byte waits, HTTP status and separate ceiling, cumulative
+granted, current held, charged and accounting labels. Disconnection clears rows
+and displays Disconnected. Its privacy footer states the memory/restart bounds.
+Desktop Settings → Routing uses the same labels and exact money/wait meanings.
+Recoverable interruption says Streaming paused, waiting to resume; only an
+actual linked successor says Interrupted, resumed. SC-b continuation remains
+unimplemented, so exhausted interrupted streams say Stream interrupted.
+History adds no cancel action or public-provider activation. Fixture rendering
+does not establish installed/native TUI acceptance.
 
 ## What it does
 
@@ -95,6 +106,7 @@ of its own.
 | --- | --- |
 | **Nodes** | Every machine PAIR knows about — discovered, added by hand, or paired into the cluster — merged into one table. Reachability (`STATUS`) and membership (`CLUSTER`) are separate columns because they are independent facts. `enter` opens the node's detail screen; `p` pairs, `n` pairs by address, `f` finds by address, `c` cancels a pairing request you sent, `r` removes — un-pairing a member asks you to confirm, dropping a hand-added entry does not — `a`/`d` answer an inbound pairing request, `l` leaves the cluster (with a confirmation), `/` filters by name or address. The keys follow the words on screen: everything here is "pair", so `p` starts one and `a` accepts one. A filtered table says so, and the cluster summary still counts every node rather than the visible ones. |
 | **Jobs** | Inference work across the cluster (`workloads:get-initial` plus the live `workloads:upsert` / `workloads:remove` stream), headed by the proxy endpoints local clients connect to. `FROM` and `RAN ON` are the job's `originatedFrom` and `scheduledOn` nodes. `a` toggles finished work. `t` starts or stops the Inference Demo — a sixty-second burst of synthetic traffic through those endpoints, which is why it lives here rather than with the service controls: the ports it needs are already on this tab and the jobs it produces land in the table below. |
+| **Routing** | Origin-local request history with model, state, attempts, destination, spend and fixed reason labels. `r` refreshes; `enter` opens scrollable attempts, including destination/account IDs and measured waits; `esc` returns. Private to this machine, memory only; broker restart clears history. |
 | **Service** | Broker version and uptime (`ping`), a row per supervised worker derived from `supervisor:subprocess-crashed:*` errors, the cluster name, the fleet log level (a picker over the four `applog` levels), a confirmed stop of the service (the same as `Q`), and a confirmed data reset. The reset uninstalls the engines PAIR installed, stops the service, and deletes the data directory — engine files live outside that directory when a vendor installer chose their location — and keeps every engine's downloaded models. Ports are not here — they live on the node detail screen beside the engine each one serves. `force-ports` and `cluster-auto-sync` are persisted by `nvpair-node-settings` but not offered: nothing currently acts on either. |
 | **Errors** | The service-error datastore (`errors:get-initial` plus live `errors:update`); `c` clears the selected entry. Only entries this node reported are clearable: `errors:clear` is delete-by-id on the receiving node and cross-node propagation is unbuilt (`shared/errors` stamps `ClearedBy` for it and ignores it), so clearing a peer's entry is reverted by the next sync. The broker acknowledges the relay rather than the outcome, so the reply cannot be used to detect it — the key is withdrawn for a peer's entry instead, naming the node to clear it from. Node ids are resolved to names, and a line under the table carries the selected entry's engine, operation, model, and suggested action. |
 | **Logs** | The broker's and workers' stderr, relayed by the service as `service/log` (lines from before this session attached are in `<appdir>/logs/broker.log`), with a substring filter (`/`), a follow toggle (`t`, for tail — `f` belongs to the viewport's paging), and save-to-file (`s`). |
@@ -316,7 +328,7 @@ Client timeout disowns the result locally rather than sending wire cancellation.
 
 ## Keys
 
-- `tab` / `shift+tab` or the digits `1`-`5` — switch tabs
+- `tab` / `shift+tab` or the digits `1`-`6` — switch tabs
 - `?` — full help
 - `ctrl+x` — dismiss the update notice, while one is showing
 - `q` / `ctrl+c` — quit; the service, the broker, and inference keep running

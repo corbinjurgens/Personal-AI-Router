@@ -45,7 +45,8 @@ const logLineBuffer = 2000
 // the views use, and the broker's stderr reassembled from service/log
 // notifications for the Logs view.
 type serviceLink struct {
-	Client *rpc.Client
+	Client  *rpc.Client
+	history *ui.RoutingHistoryClient
 	// Logs yields one broker stderr line per line, as the broker's stderr pipe
 	// did when the TUI owned the broker.
 	Logs      io.Reader
@@ -105,7 +106,9 @@ func connectService(ctx context.Context, servicePath string) (*serviceLink, erro
 		_ = conn.Close()
 		return nil, err
 	}
-	return startServiceLink(ctx, client), nil
+	link := startServiceLink(ctx, client.Client)
+	link.history = client
+	return link, nil
 }
 
 func newServiceLink(ctx context.Context, conn io.ReadWriteCloser) *serviceLink {

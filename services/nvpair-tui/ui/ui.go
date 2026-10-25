@@ -16,14 +16,14 @@ import (
 // the broker's stderr stream, and blocks until the user quits. The caller
 // detaches afterwards, and honours the returned Outcome: stopping the service,
 // and wiping the data directory once it has stopped.
-func Run(client *rpc.Client, stderr io.Reader) (Outcome, error) {
+func Run(client *RoutingHistoryClient, stderr io.Reader) (Outcome, error) {
 	logCh := make(chan string, 2000)
 	go scanLines(stderr, logCh)
 	logOut.attach(logCh)
 	defer logOut.detach()
 
 	views := defaultViews(client)
-	p := tea.NewProgram(New(client, logCh, views), tea.WithAltScreen())
+	p := tea.NewProgram(New(client.Client, logCh, views), tea.WithAltScreen())
 	final, err := p.Run()
 	// Before returning, so a demo still inside its window does not leave
 	// dispatcher processes behind for the shell to inherit.
@@ -64,10 +64,15 @@ func scanLines(r io.Reader, out chan<- string) {
 // shadowed a view's own verb or a digit that looked like a tab number without
 // being one. Its count rides on the tab label instead, so the tab bar is the
 // indicator and there is nothing extra to learn.
-func defaultViews(client *rpc.Client) []View {
+func defaultViews(history *RoutingHistoryClient) []View {
+	var client *rpc.Client
+	if history != nil {
+		client = history.Client
+	}
 	return []View{
 		newNodesView(client),
 		newJobsView(client),
+		newRoutingView(history),
 		newServiceView(client),
 		newErrorsView(client),
 		newLogsView(client),

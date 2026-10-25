@@ -118,7 +118,7 @@ func main() {
 	// The broker's stderr (its logs plus every worker's, prefixed), relayed by
 	// the service as service/log, is fed into the UI's Logs view rather than
 	// the terminal, so it never collides with the full-screen TUI on stdout.
-	outcome, err := ui.Run(link.Client, link.Logs)
+	outcome, err := ui.Run(link.history, link.Logs)
 	if err != nil {
 		slog.Error("ui error", "err", err)
 	}
