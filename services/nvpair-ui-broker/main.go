@@ -4,7 +4,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -20,6 +19,7 @@ import (
 	"nvpair-shared/appdir"
 	"nvpair-shared/applog"
 	"nvpair-shared/engines"
+	"nvpair-shared/jsonrpc"
 )
 
 func main() {
@@ -246,8 +246,9 @@ func main() {
 	}
 	defer transport.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	lifetime := newBrokerMainLifetime()
+	ctx := lifetime.root
+	defer lifetime.cancel()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -255,11 +256,13 @@ func main() {
 		select {
 		case sig := <-sigCh:
 			slog.Info("received signal, shutting down", "signal", sig.String())
-			cancel()
+			lifetime.cancel()
 		case <-ctx.Done():
 		}
 	}()
 
+	// Task318 joins newRoutingHistoryLocalCodec after broker-owner construction,
+	// together with the private source codec and verified activation binding.
 	codec := NewCodec(transport)
 	paths := workerPaths{
 		scanner:              resolvedScanner,
@@ -281,10 +284,25 @@ func main() {
 		scheduler:            resolvedScheduler,
 		clusterDir:           clusterDir,
 	}
-	if err := NewBroker(codec, paths).Serve(ctx); err != nil && ctx.Err() == nil {
+	if err := NewBroker(codec, paths).serveMainLifetime(lifetime); err != nil && ctx.Err() == nil {
 		fatalf("broker error: %v", err)
 	}
 	slog.Info("shutdown complete")
+}
+
+// Task318 local construction seam. IPC owns a real connection; stdioTransport's
+// Close is a no-op, so standard input itself is the read-interruption owner.
+// Tests with other transports use the explicit owner hook at acquire instead.
+// This function is deliberately not invoked by production construction yet.
+func newRoutingHistoryLocalCodec(b *Broker, transport io.ReadWriteCloser, ipc bool) (*Codec, error) {
+	if b.routingHistory == nil {
+		return nil, jsonrpc.ErrHistoryInvalid
+	}
+	var input io.Closer = os.Stdin
+	if ipc {
+		input = transport
+	}
+	return b.routingHistory.readers.acquire(historyLocalControl, transport, func() { _ = input.Close() }, nil)
 }
 
 // defaultClusterDir resolves the cluster subtree this node's workers read and

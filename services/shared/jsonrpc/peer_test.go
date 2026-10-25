@@ -1116,3 +1116,411 @@ func TestPeerWriteInterruptNotificationAndResponseFailures(t *testing.T) {
 	test("error response", func(p *Peer) error { return p.RespondError(&id, -32603, "first") })
 	test("error response with data", func(p *Peer) error { return p.RespondErrorData(&id, -32603, "first", map[string]int{"key": 1}) })
 }
+
+func TestPeerReadRetirementReusesBackingDuringOrdinaryCallbacks(t *testing.T) {
+	backing := newReadRetirementBacking()
+	callbacksRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseCallbacks := func() { releaseOnce.Do(func() { close(callbacksRelease) }) }
+	t.Cleanup(releaseCallbacks)
+	type oldGeneration struct {
+		peer   *Peer
+		reader *HistoryReader
+		done   chan struct{}
+	}
+	var old []oldGeneration
+	callbackErrors := make(chan error, 4)
+	for generation := 0; generation < cap(callbackErrors); generation++ {
+		frame := fmt.Sprintf("{\"jsonrpc\":\"2.0\",\"method\":\"ordinary\",\"params\":{\"generation\":%d}}\n", generation)
+		// The second frame is deliberately buffered behind the blocked callback.
+		c := newReadRetirementCodec(t, rw{strings.NewReader(frame + frame), io.Discard}, backing, &HistoryCorrelation{}, func() { t.Error("ordinary callback must not pin an active read") })
+		if &c.history.Load().raw[:cap(c.history.Load().raw)][0] != &backing.raw[:cap(backing.raw)][0] ||
+			&c.history.Load().output[:cap(c.history.Load().output)][0] != &backing.output[:cap(backing.output)][0] ||
+			&c.history.Load().offsets[:cap(c.history.Load().offsets)][0] != &backing.offsets[0] {
+			t.Fatal("replacement allocated different reader backing")
+		}
+		p := NewPeer(c)
+		control := backing.control
+		if c.history.Load().readControl != control {
+			t.Fatal("generation allocated a new control instead of rebinding the role")
+		}
+		if err := p.SetHistoryReadHandlers(func(*Message) { t.Error("retired pump called a history request handler") }, func(HistoryFailure) { t.Error("retired pump called a history failure handler") }); err != nil {
+			t.Fatal(err)
+		}
+		entered, pumpDone := make(chan struct{}), make(chan struct{})
+		want := generation
+		go func() {
+			p.Serve(nil, func(_ string, params json.RawMessage) {
+				close(entered)
+				<-callbacksRelease
+				var value struct {
+					Generation int `json:"generation"`
+				}
+				if err := json.Unmarshal(params, &value); err != nil {
+					callbackErrors <- err
+				} else if value.Generation != want {
+					callbackErrors <- fmt.Errorf("owned callback generation = %d, want %d", value.Generation, want)
+				} else {
+					callbackErrors <- nil
+				}
+			})
+			close(pumpDone)
+		}()
+		awaitPeerSignal(t, entered, "blocked ordinary callback")
+		reader := c.history.Load()
+		p.Close()
+		awaitPeerSignal(t, c.RetireRead(), "ordinary callback independent retirement")
+		assertReadRetirementDetached(t, c, reader)
+		control.mu.Lock()
+		retained := control.codec != nil || control.reader != nil || control.done != nil || control.onRequest != nil || control.onHistoryFailure != nil || control.interrupt != nil || control.fence != nil
+		control.mu.Unlock()
+		if retained {
+			t.Fatal("old ordinary callback retained generation control/handlers")
+		}
+		select {
+		case <-pumpDone:
+			t.Fatal("fixture did not keep old callback/pump alive")
+		default:
+		}
+		old = append(old, oldGeneration{p, reader, pumpDone})
+		// Retained old peer references cannot access a bank admitted to a later
+		// generation, even though their ordinary callbacks are still running.
+		for _, previous := range old {
+			previous.peer.Close()
+			assertReadRetirementDetached(t, previous.peer.Codec(), previous.reader)
+		}
+	}
+	releaseCallbacks()
+	for _, previous := range old {
+		awaitPeerSignal(t, previous.done, "late old pump exit")
+		if err := awaitPeerError(t, callbackErrors); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestPeerReadRetirementOwnedRequestsUseOnlyOrdinaryHandler(t *testing.T) {
+	backing := newReadRetirementBacking()
+	releaseCallbacks := make(chan struct{})
+	var once sync.Once
+	finish := func() { once.Do(func() { close(releaseCallbacks) }) }
+	t.Cleanup(finish)
+	var pumps []chan struct{}
+	for generation := 0; generation < 3; generation++ {
+		frame := `{"jsonrpc":"2.0","id":"first","ID":"second","method":"ollama:routing/request","params":{}}` + "\n"
+		codec := newReadRetirementCodec(t, rw{strings.NewReader(frame + frame), io.Discard}, backing, &HistoryCorrelation{}, func() { t.Error("owned request callback pinned reader") })
+		peer := NewPeer(codec)
+		if err := peer.SetHistoryReadHandlers(func(*Message) { t.Error("owned request captured J handler") }, func(HistoryFailure) { t.Error("owned request captured J failure handler") }); err != nil {
+			t.Fatal(err)
+		}
+		entered, done := make(chan struct{}), make(chan struct{})
+		pumps = append(pumps, done)
+		go func() {
+			peer.Serve(func(msg *Message) {
+				if msg.borrowedRead || msg.ID == nil || string(*msg.ID) != `"second"` {
+					t.Errorf("ordinary decoder/ownership changed: %+v", msg)
+				}
+				close(entered)
+				<-releaseCallbacks
+			}, nil)
+			close(done)
+		}()
+		awaitPeerSignal(t, entered, "owned ordinary request callback")
+		reader := codec.history.Load()
+		peer.Close()
+		awaitPeerSignal(t, codec.RetireRead(), "retirement during ordinary request callback")
+		assertReadRetirementDetached(t, codec, reader)
+		if !backing.control.Available() {
+			t.Fatal("ordinary request callback prevented role rebind")
+		}
+		select {
+		case <-done:
+			t.Fatal("ordinary request callback was not paused across rebind")
+		default:
+		}
+	}
+	finish()
+	for _, done := range pumps {
+		awaitPeerSignal(t, done, "old owned-request pump exit")
+	}
+}
+
+func TestPeerReadRetirementCanonicalRequestKeepsHistoryBorrow(t *testing.T) {
+	frame := `{"jsonrpc":"2.0","id":"request","method":"routing:subscribe","params":{}}` + "\n"
+	backing := newReadRetirementBacking()
+	codec := newReadRetirementCodec(t, rw{strings.NewReader(frame), io.Discard}, backing, &HistoryCorrelation{}, func() { t.Error("request borrow is not active IO") })
+	peer := NewPeer(codec)
+	entered, finish, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(finish) }) }
+	t.Cleanup(release)
+	if err := peer.SetHistoryReadHandlers(func(msg *Message) {
+		if !msg.borrowedRead {
+			t.Error("J request was not raw-validated and borrowed")
+		}
+		close(entered)
+		<-finish
+		if string(*msg.ID) != `"request"` || string(msg.Params) != `{}` {
+			t.Error("borrowed canonical request changed before completion")
+		}
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		peer.Serve(func(*Message) { t.Error("canonical J request entered ordinary handler") }, nil)
+		close(done)
+	}()
+	awaitPeerSignal(t, entered, "canonical J request")
+	peer.Close()
+	retired := codec.RetireRead()
+	assertReadRetirementPending(t, retired)
+	if backing.control.Available() {
+		t.Fatal("canonical request released before synchronous use")
+	}
+	release()
+	awaitPeerSignal(t, retired, "canonical request consumption")
+	awaitPeerSignal(t, done, "canonical request pump exit")
+}
+
+func TestPeerReadRetirementHistoryFailureKeepsBorrow(t *testing.T) {
+	frame := `{"jsonrpc":"2.0","method":"routing/request","params":{"schema":"invalid"}}` + "\n"
+	backing := newReadRetirementBacking()
+	codec := newReadRetirementCodec(t, rw{strings.NewReader(frame), io.Discard}, backing, &HistoryCorrelation{}, func() { t.Error("failure callback is not active IO") })
+	peer := NewPeer(codec)
+	entered, finish, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(finish) }) }
+	t.Cleanup(release)
+	go func() {
+		peer.ServeWithHistoryFailures(nil, nil, func(failure HistoryFailure) {
+			if failure.Refusal != nil || failure.Category != "history-invalid" {
+				t.Errorf("expected validated non-refusal failure, got %+v", failure)
+			}
+			close(entered)
+			<-finish
+		})
+		close(done)
+	}()
+	awaitPeerSignal(t, entered, "typed non-refusal history failure")
+	peer.Close()
+	retired := codec.RetireRead()
+	assertReadRetirementPending(t, retired)
+	if backing.control.Available() {
+		t.Fatal("typed failure callback escaped its reader borrow")
+	}
+	release()
+	awaitPeerSignal(t, retired, "typed failure consumption")
+	awaitPeerSignal(t, done, "typed failure pump exit")
+}
+
+func TestPeerReadRetirementHoldsHistoryCallbackAndWakesCall(t *testing.T) {
+	frame := `{"jsonrpc":"2.0","method":"routing/request","params":{"schema":1}}` + "\n"
+	stream, releaseStream := newPeerHistoryStream(t, frame, io.EOF)
+	defer releaseStream()
+	c := newReadRetirementCodec(t, stream, newReadRetirementBacking(), &HistoryCorrelation{}, releaseStream)
+	reader := c.history.Load()
+	p := NewPeer(c)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	callDone := make(chan error, 1)
+	go func() { _, _, err := p.Call(ctx, "ordinary", nil); callDone <- err }()
+	awaitPeerSignal(t, stream.written, "pending ordinary Call")
+	entered, callbackRelease, pumpDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	releaseCallback := func() { once.Do(func() { close(callbackRelease) }) }
+	t.Cleanup(releaseCallback)
+	callbackResult := make(chan error, 1)
+	go func() {
+		p.Serve(nil, func(_ string, params json.RawMessage) {
+			// Both owner locks remain available throughout synchronous consumption.
+			p.mu.Lock()
+			p.mu.Unlock()
+			reader.readControl.mu.Lock()
+			reader.readControl.mu.Unlock()
+			close(entered)
+			<-callbackRelease
+			var value historyTestValue
+			if err := json.Unmarshal(params, &value); err != nil {
+				callbackResult <- err
+			} else if value.Schema != 1 {
+				callbackResult <- errors.New("borrowed history params changed before callback completion")
+			} else {
+				callbackResult <- nil
+			}
+		})
+		close(pumpDone)
+	}()
+	awaitPeerSignal(t, entered, "history callback")
+	p.Close()
+	if err := awaitPeerError(t, callDone); !errors.Is(err, ErrPeerClosed) {
+		t.Fatalf("pending Call did not wake during history borrow: %v", err)
+	}
+	done := c.RetireRead()
+	assertReadRetirementPending(t, done)
+	releaseCallback()
+	if err := awaitPeerError(t, callbackResult); err != nil {
+		t.Fatal(err)
+	}
+	awaitPeerSignal(t, done, "history callback release")
+	awaitPeerSignal(t, pumpDone, "retired history pump exit")
+	assertReadRetirementDetached(t, c, reader)
+}
+
+func TestPeerReadRetirementHoldsRefusalCallback(t *testing.T) {
+	frame := `{"jsonrpc":"2.0","id":"\u0061","method":"routing:subscribe","params":null}` + "\n"
+	c := newReadRetirementCodec(t, rw{strings.NewReader(frame), io.Discard}, newReadRetirementBacking(), &HistoryCorrelation{}, func() { t.Error("refusal consumption is not an active read") })
+	reader := c.history.Load()
+	p := NewPeer(c)
+	entered, callbackRelease, pumpDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(callbackRelease) }) }
+	t.Cleanup(release)
+	callbackResult := make(chan error, 1)
+	go func() {
+		p.ServeWithHistoryFailures(nil, nil, func(failure HistoryFailure) {
+			close(entered)
+			<-callbackRelease
+			if failure.Disposition != "refuse-request" || failure.Refusal == nil || string(failure.Refusal.ReplyID) != `"\u0061"` || failure.Refusal.Code != HistoryInvalidCode {
+				callbackResult <- errors.New("borrowed refusal changed before consumption")
+			} else {
+				callbackResult <- nil
+			}
+		})
+		close(pumpDone)
+	}()
+	awaitPeerSignal(t, entered, "refusal callback")
+	p.Close()
+	done := c.RetireRead()
+	assertReadRetirementPending(t, done)
+	release()
+	if err := awaitPeerError(t, callbackResult); err != nil {
+		t.Fatal(err)
+	}
+	awaitPeerSignal(t, done, "refusal callback release")
+	awaitPeerSignal(t, pumpDone, "refusal pump exit")
+	assertReadRetirementDetached(t, c, reader)
+}
+
+func TestPeerHistoryBorrowedResponsesNeverReachWaiters(t *testing.T) {
+	test := func(name, payload string, relay bool) {
+		t.Run(name, func(t *testing.T) {
+			var correlation HistoryCorrelation
+			if err := correlation.Begin([]byte("1")); err != nil {
+				t.Fatal(err)
+			}
+			frame := `{"jsonrpc":"2.0","id":1,` + payload + "}\n"
+			stream, release := newPeerHistoryStream(t, frame, io.EOF)
+			defer release()
+			// Deliberately leave retirement unconfigured: the validated borrowed
+			// flag is the only discriminator, independently of the Call method.
+			p := newHistoryTestPeer(t, stream, &correlation)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			outcome := make(chan error, 1)
+			check := func(result json.RawMessage, rpcErr *RPCError, err error) {
+				if err != nil {
+					outcome <- err
+				} else if result != nil || rpcErr == nil || rpcErr.Code != -32603 || rpcErr.Message != "borrowed history response unsupported" || rpcErr.Data != nil {
+					outcome <- errors.New("borrowed response escaped into waiter")
+				} else {
+					outcome <- nil
+				}
+			}
+			if relay {
+				if err := p.RelayRequest("ordinary-looking", nil, check); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				go func() { result, rpcErr, err := p.Call(ctx, "ordinary-looking", nil); check(result, rpcErr, err) }()
+			}
+			awaitPeerSignal(t, stream.written, "outbound request")
+			pumpDone := make(chan struct{})
+			go func() { p.Serve(nil, nil); close(pumpDone) }()
+			if err := awaitPeerError(t, outcome); err != nil {
+				t.Fatal(err)
+			}
+			assertPeerPending(t, p, 0)
+			release()
+			awaitPeerSignal(t, pumpDone, "borrowed response pump exit")
+		})
+	}
+	test("Call result", `"result":{"requests":[]}`, false)
+	test("Call error ID", `"error":{"code":-32096,"message":"routing history busy; retry"}`, false)
+	test("RelayRequest result", `"result":{"requests":[]}`, true)
+	test("RelayRequest error ID", `"error":{"code":-32096,"message":"routing history busy; retry"}`, true)
+}
+
+func TestPeerCloseWithoutReadRetirementPreservesPump(t *testing.T) {
+	frame := `{"jsonrpc":"2.0","method":"ordinary"}` + "\n"
+	p := NewPeer(readCodec(strings.NewReader(frame + frame)))
+	var received int
+	p.Serve(nil, func(string, json.RawMessage) {
+		received++
+		p.Close()
+	})
+	if received != 2 || p.Codec().RetireRead() != nil {
+		t.Fatalf("default Close/pump behavior changed: received %d", received)
+	}
+}
+
+func TestPeerReadRetirementDoesNotJoinOutput(t *testing.T) {
+	w := newBlockedPeerWriter(t, 0, false)
+	c := newReadRetirementCodec(t, rw{strings.NewReader(""), w}, newReadRetirementBacking(), &HistoryCorrelation{}, func() { t.Error("idle reader invoked interruption") })
+	reader := c.history.Load()
+	p := NewPeer(c)
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- p.Notify("ordinary", nil) }()
+	awaitPeerSignal(t, w.entered, "active output")
+	p.Close()
+	awaitPeerSignal(t, c.RetireRead(), "reader retirement during blocked output")
+	assertReadRetirementDetached(t, c, reader)
+	select {
+	case err := <-writeDone:
+		t.Fatalf("fixture output did not remain blocked: %v", err)
+	default:
+	}
+	w.unblock()
+	if err := awaitPeerError(t, writeDone); err != nil {
+		t.Fatalf("ordinary output completion: %v", err)
+	}
+}
+
+func TestPeerReadRetirementCloseWakesCallBeforeInterruptReturns(t *testing.T) {
+	stream, releaseStream := newPeerHistoryStream(t, "", io.EOF)
+	defer releaseStream()
+	r := &readRetirementObservedReader{Reader: stream, entered: make(chan struct{})}
+	interruptEntered, interruptRelease := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	releaseInterrupt := func() { once.Do(func() { close(interruptRelease) }) }
+	t.Cleanup(releaseInterrupt)
+	var p *Peer
+	c := newReadRetirementCodec(t, rw{r, stream}, newReadRetirementBacking(), &HistoryCorrelation{}, func() {
+		p.Close() // Reentry must not wait on closeOnce or the read mutex.
+		close(interruptEntered)
+		<-interruptRelease
+		releaseStream()
+	})
+	reader := c.history.Load()
+	p = NewPeer(c)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	callDone := make(chan error, 1)
+	go func() { _, _, err := p.Call(ctx, "ordinary", nil); callDone <- err }()
+	awaitPeerSignal(t, stream.written, "pending Call before active read")
+	pumpDone := make(chan struct{})
+	go func() { p.Serve(nil, nil); close(pumpDone) }()
+	awaitPeerSignal(t, r.entered, "active read")
+	closeReturned := make(chan struct{})
+	go func() { p.Close(); close(closeReturned) }()
+	awaitPeerSignal(t, interruptEntered, "held owner interrupt")
+	if err := awaitPeerError(t, callDone); !errors.Is(err, ErrPeerClosed) {
+		t.Fatalf("Call waited for interruption completion: %v", err)
+	}
+	done := c.RetireRead()
+	assertReadRetirementPending(t, done)
+	releaseInterrupt()
+	awaitPeerSignal(t, closeReturned, "Close return")
+	awaitPeerSignal(t, done, "active read release after Close")
+	awaitPeerSignal(t, pumpDone, "closed peer pump exit")
+	assertReadRetirementDetached(t, c, reader)
+}

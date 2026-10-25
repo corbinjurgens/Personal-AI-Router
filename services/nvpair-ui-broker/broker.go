@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	"nvpair-shared/errors"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodeid"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -158,6 +160,15 @@ type Broker struct {
 	portAvailableCheck func(int) bool
 	// routingForward bounds routing control forwarding to one operation.
 	routingForward atomic.Bool
+	// Constructed only at the Task318 integration owner. History data and its
+	// writer are independent of discovery/workload subscriptions.
+	routingHistory *brokerRoutingHistory
+	// All source identity/fence fields below are guarded by workersMu. No
+	// history mutex, copy or output is allowed while workersMu is held.
+	historyIncarnation    uint64
+	historyRetiredThrough uint64
+	historyOrigin         string
+	historyRun            string
 	// settingsApplyMu serializes engine settings applies end to end, including
 	// the engine stop and restart. engineConfigMu guards only the journal and
 	// is released while an engine restarts, so this is what keeps two applies —
@@ -1125,6 +1136,9 @@ func enginePeerRelayNotification(method string) bool {
 // Identity and running-state observations are fenced by its source; control-plane
 // requests and subscribed client notifications follow their respective relays.
 func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, method string, params json.RawMessage) {
+	if routingHistoryMethod(method) {
+		return
+	}
 	if method == residentDispatchRequestMethod {
 		b.dispatchResidentFrom(source, params)
 		return
@@ -1688,10 +1702,37 @@ func (b *Broker) onErrorsUpdate(params json.RawMessage) {
 // if no nodes have been found yet — mDNS browsing takes a moment to
 // populate).
 func (b *Broker) Serve(ctx context.Context) error {
+	return b.serve(ctx, nil)
+}
+
+// Private main construction owns both standard cancellation branches. The
+// public Serve path continues deriving from its caller's original context.
+func (b *Broker) serveMainLifetime(lifetime *brokerMainLifetime) error {
+	if lifetime == nil {
+		return jsonrpc.ErrHistoryInvalid
+	}
+	return b.serve(nil, lifetime)
+}
+
+func (b *Broker) newServeContext(parent context.Context, lifetime *brokerMainLifetime) (context.Context, context.CancelFunc, error) {
+	if lifetime == nil {
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, cancel, nil
+	}
+	if b.routingHistory != nil && b.routingHistory.lifetime != lifetime {
+		return nil, nil, jsonrpc.ErrHistoryInvalid
+	}
+	return lifetime.startServe()
+}
+
+func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error {
 	if err := validateServicePorts(b.servicePorts()); err != nil {
 		return fmt.Errorf("service ports: %w", err)
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel, err := b.newServeContext(ctx, lifetime)
+	if err != nil {
+		return err
+	}
 	b.cancel = cancel
 	b.setServeCtx(ctx)
 	defer cancel()
@@ -1930,7 +1971,7 @@ func (b *Broker) Serve(ctx context.Context) error {
 	b.store.SetOnChange(b.emitNodesChanged)
 	defer b.store.SetOnChange(nil)
 
-	err := b.readLoop(ctx)
+	err = b.readLoop(ctx)
 	cancel()
 	b.shutdownInferenceStack()
 	return err
@@ -2116,21 +2157,77 @@ func (b *Broker) readLoop(ctx context.Context) error {
 	// stdin — Serve would never return, its deferred worker teardown would
 	// never run, and the broker would appear to hang on Ctrl+C.
 	type readResult struct {
-		msg *Message
-		err error
+		msg      *Message
+		err      error
+		release  func()
+		consumed chan struct{}
+	}
+	codec := b.codec
+	retirementParent := ctx
+	var beforeRetirementDone func()
+	if h := b.routingHistory; h != nil {
+		var err error
+		retirementParent, err = h.lifetime.localRetirementParent(ctx)
+		if err != nil {
+			return err
+		}
+		beforeRetirementDone = h.beforeLocalRetirementDone
+	}
+	retire := func() {
+		if b.routingHistory != nil {
+			b.routingHistory.readers.retire(historyLocalControl, codec)
+		} else {
+			codec.RetireRead()
+		}
+	}
+	if b.routingHistory == nil {
+		stopRetirement := context.AfterFunc(ctx, retire)
+		defer func() { stopRetirement(); retire() }()
+	} else {
+		retirementDone := make(chan struct{})
+		stopRetirement := context.AfterFunc(retirementParent, func() {
+			retire()
+			if beforeRetirementDone != nil {
+				beforeRetirementDone()
+			}
+			close(retirementDone) // final application access of the actual callback
+		})
+		defer func() {
+			if !stopRetirement() {
+				<-retirementDone
+			}
+			retire()
+		}()
 	}
 	reads := make(chan readResult)
 	go func() {
 		for {
-			msg, err := b.codec.Read()
+			msg, release, err := codec.ReadWithRelease()
+			var consumed chan struct{}
+			if release != nil {
+				consumed = make(chan struct{})
+			}
 			select {
-			case reads <- readResult{msg: msg, err: err}:
+			case reads <- readResult{msg: msg, err: err, release: release, consumed: consumed}:
 			case <-ctx.Done():
+				if release != nil {
+					release()
+				}
 				return
 			}
-			// EOF is terminal (stream closed); other errors are per-line
-			// (e.g. a bad JSON frame) and the next Read advances past them.
-			if err == io.EOF {
+			// History Params/ID borrow reader backing. The dispatcher finishes
+			// synchronous use (or copies a bounded ID) before the next Read.
+			// Once handed off, only the dispatcher can release. Cancellation
+			// retires the reader but cannot stand in for actual consumption.
+			if consumed != nil {
+				<-consumed
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			var decode *jsonrpc.DecodeError
+			var history *jsonrpc.HistoryFailure
+			if err != nil && !stderrors.As(err, &decode) && !stderrors.As(err, &history) {
 				return
 			}
 		}
@@ -2141,15 +2238,48 @@ func (b *Broker) readLoop(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case r := <-reads:
-			if r.err != nil {
-				if r.err == io.EOF || ctx.Err() != nil {
+			err := func() error {
+				if r.consumed != nil {
+					defer close(r.consumed)
+				}
+				if r.release != nil {
+					defer r.release()
+				}
+				if ctx.Err() != nil {
 					return nil
 				}
-				slog.Warn("JSON-RPC read error", "err", r.err)
-				continue
+				if r.err == nil {
+					if !b.handlePerformanceRequest(r.msg) {
+						b.handleMessage(r.msg)
+					}
+					return nil
+				}
+				var history *jsonrpc.HistoryFailure
+				if stderrors.As(r.err, &history) {
+					// Refusal IDs borrow even when msg is nil. The synchronous
+					// response finishes before release/next Read; no raw-ID tail
+					// or cancellation-based early reuse is admitted.
+					if refusal := history.Refusal; refusal != nil {
+						respondLocalHistoryError(codec, &refusal.ReplyID, refusal.Code)
+					}
+					slog.Debug("routing history control rejected", "category", "history-invalid", "count", history.Count)
+					return nil
+				}
+				var decode *jsonrpc.DecodeError
+				if stderrors.As(r.err, &decode) {
+					slog.Warn("JSON-RPC read error", "category", "invalid-shape")
+					return nil
+				}
+				if r.err == io.EOF {
+					return io.EOF
+				}
+				return jsonrpc.ErrHistoryFraming
+			}()
+			if err == io.EOF {
+				return nil
 			}
-			if !b.handlePerformanceRequest(r.msg) {
-				b.handleMessage(r.msg)
+			if err != nil {
+				return err
 			}
 			if ctx.Err() != nil {
 				return nil
@@ -2166,6 +2296,9 @@ func (b *Broker) readLoop(ctx context.Context) error {
 // errors:clear are routed into the nvpair-errors pipeline (the broker now
 // supervises it) rather than dropped.
 func (b *Broker) forwardClusterManagerNotification(method string, params json.RawMessage) {
+	if routingHistoryMethod(method) {
+		return
+	}
 	// Private authority envelopes never reach ordinary clients, even if an
 	// alternate internal caller bypasses the child-bound notification hook.
 	if method == peerServicesEvent {
