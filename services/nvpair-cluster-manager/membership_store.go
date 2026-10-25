@@ -22,6 +22,16 @@ func (m *Manager) membersPath() string {
 	return filepath.Join(m.clusterDir, membersFile)
 }
 
+// peerServiceIncarnation excludes member replacements from both durable roster
+// reads in the Mesh authority check. Callers must not hold membersStoreMu or
+// memMu; composition/session owners may remain held. Mesh takes only its own
+// leaf locks and never calls back into the Manager.
+func (m *Manager) peerServiceIncarnation(uuid string) (string, bool) {
+	m.membersStoreMu.Lock()
+	defer m.membersStoreMu.Unlock()
+	return m.mesh.PeerServiceIncarnation(uuid)
+}
+
 // persistMembers atomically writes the confirmed member roster.
 func (m *Manager) persistMembers() {
 	if err := m.persistMembersErr(); err != nil {

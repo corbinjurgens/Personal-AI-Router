@@ -157,7 +157,7 @@ func (m *Manager) completePairingReceiptLocked(receipt pairingReceipt) error {
 	if owner, err := m.pairingGuardOwner(); err != nil || owner != receipt.InviteID {
 		return fmt.Errorf("pairing publication guard mismatch: %w", err)
 	}
-	incarnation, ok := m.mesh.PeerServiceIncarnation(pi.NodeUUID)
+	incarnation, ok := m.peerServiceIncarnation(pi.NodeUUID)
 	if !ok {
 		return fmt.Errorf("paired peer has no current incarnation")
 	}

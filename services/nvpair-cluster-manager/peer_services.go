@@ -202,7 +202,7 @@ func (m *Manager) peerServicesLoop(ctx context.Context) {
 
 func (m *Manager) refreshPeerServices(ctx context.Context, uuid string) error {
 	m.mesh.Refresh()
-	incarnation, ok := m.mesh.PeerServiceIncarnation(uuid)
+	incarnation, ok := m.peerServiceIncarnation(uuid)
 	if !ok {
 		return errors.New("no current admission")
 	}
