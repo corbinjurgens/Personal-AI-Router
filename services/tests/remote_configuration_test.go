@@ -367,7 +367,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 	assertNoVetoReceipt := func(t *testing.T) {
 		t.Helper()
 		m := task2Response(t, origin, origin.send(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: p.mesh.b.uuid, RequestID: vetoReq.RequestID}, true))
-		if m.Error == nil || m.Error.Code != settings.SwitchOperationErrorCode || m.Error.Message != "remote engine switch: HTTP 409: Unknown switch receipt for this caller." || len(m.Result) != 0 {
+		if m.Error == nil || m.Error.Code != settings.SwitchOperationErrorCode || m.Error.Message != "Unknown switch receipt for this caller." || len(m.Result) != 0 {
 			t.Fatalf("paused switch receipt lookup = %+v, want exact unknown receipt", m.Error)
 		}
 		status := p.remoteStatus(t, "")
@@ -400,7 +400,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 		vetoReq = p.request(t, "xa-switch-veto")
 		id := origin.send(t, settings.RemoteSwitchMethod, vetoReq, true)
 		m := task2Response(t, origin, id)
-		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != "remote engine switch: HTTP 409: This node is paused. Resume it on this node before managing it remotely." || len(m.Result) != 0 {
+		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != "This node is paused. Resume it on this node before managing it remotely." || len(m.Result) != 0 {
 			t.Fatalf("paused switch error = %+v, want common pause refusal", m.Error)
 		}
 		assertNoVetoReceipt(t)
@@ -412,7 +412,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 
 	if !t.Run("repeated paused refusal still has no coordinator receipt", func(t *testing.T) {
 		m := task2Response(t, origin, origin.send(t, settings.RemoteSwitchMethod, vetoReq, true))
-		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != "remote engine switch: HTTP 409: This node is paused. Resume it on this node before managing it remotely." || len(m.Result) != 0 {
+		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != "This node is paused. Resume it on this node before managing it remotely." || len(m.Result) != 0 {
 			t.Fatalf("repeated paused switch error = %+v, want common pause refusal", m.Error)
 		}
 		assertNoVetoReceipt(t)

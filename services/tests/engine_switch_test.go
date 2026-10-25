@@ -784,7 +784,8 @@ func TestE4SwitchClientDenialRevocationVetoConflict(t *testing.T) {
 		}
 		actual, _, data = managementHTTPResponse(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchStatusPath,
 			settings.SwitchStatusRequest{RequestID: request.RequestID})
-		if actual != http.StatusConflict || string(data) != "Unknown switch receipt for this caller.\n" {
+		task2Decode(t, data, &failure)
+		if actual != http.StatusConflict || failure.Code != "operation_error" || failure.Error != "Unknown switch receipt for this caller." {
 			t.Fatalf("paused switch receipt lookup status=%d body=%s, want exact unknown receipt", actual, data)
 		}
 		var status settings.SwitchStatus
