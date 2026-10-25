@@ -1188,7 +1188,27 @@ class ModularBridgeState {
     private applyModelCopyFrame(params: JsonValue | undefined): void {
         const frame = parseModelCopyFrame(params)
         if (!frame) return
-        const copy = this.modelCopies.get(frame.opId)
+        let copy = this.modelCopies.get(frame.opId)
+        if (!copy) {
+            // Other clients can admit a copy while this observer is already open.
+            // Only live authoritative progress may introduce an observed operation.
+            if (
+                isModelCopyTerminal(frame.stage) ||
+                Array.from(this.modelCopies.values()).filter(copy => copy.active).length >= 8
+            )
+                return
+            this.beginModelCopy(
+                {
+                    opId: frame.opId,
+                    sourceNodeId: frame.sourceNodeId,
+                    destinationNodeId: frame.destinationNodeId,
+                    engine: frame.engine,
+                    model: frame.model
+                },
+                false
+            )
+            copy = this.modelCopies.get(frame.opId)
+        }
         if (!copy?.active || !sameModelCopy(copy.request, frame)) return
         const progress = modelCopyProgress(
             frame,
@@ -1210,7 +1230,7 @@ class ModularBridgeState {
                     frame.stage === 'done' ? 'unknown' : (copy.terminal ?? 'unknown'),
                     undefined,
                     frame.stage === 'done'
-                        ? 'Copy finished while detached; its verified result is unavailable. Retry with the export identity to confirm the outcome.'
+                        ? 'Copy finished; this client did not receive its verified result. Retry with the export identity to confirm the outcome.'
                         : frame.message
                 )
                 return

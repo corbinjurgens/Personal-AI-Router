@@ -235,12 +235,12 @@ describe('copy wire boundary', () => {
 })
 
 describe('copy state', () => {
-    it('isolates simultaneous destinations and rejects wrong op or tuple progress', () => {
+    it('isolates simultaneous destinations and rejects unknown terminal or mismatched tuple progress', () => {
         const other = { ...request, opId: 'c'.repeat(32), destinationNodeId: 'PC3' }
         state.beginModelCopy(request)
         state.beginModelCopy(other)
         vi.mocked(emitBridgePush).mockClear()
-        state.applyRemoteEngineProgress(frame({ opId: 'd'.repeat(32) }))
+        state.applyRemoteEngineProgress(frame({ opId: 'd'.repeat(32), stage: 'done' }))
         state.applyRemoteEngineProgress(frame({ destinationNodeId: 'PC3' }))
         expect(emitBridgePush).not.toHaveBeenCalled()
         state.applyRemoteEngineProgress(frame())
@@ -767,5 +767,206 @@ describe('production supervisor copy reconnect', () => {
             await supervisor.stop()
             vi.useRealTimers()
         }
+    })
+})
+
+describe('already-open copy observers', () => {
+    const calls: string[] = []
+    const clients: JsonRpcSocketClient[] = []
+
+    beforeEach(() => {
+        const userData = process.env.PAIR_USER_DATA
+        if (!userData) throw new Error('Missing isolated user data')
+        initPlatform({
+            getUserData: () => userData,
+            getTemp: () => os.tmpdir(),
+            getResourcesPath: () => userData
+        })
+        vi.useFakeTimers()
+        calls.length = 0
+        clients.length = 0
+        vi.spyOn(fs, 'existsSync').mockImplementation(file => String(file).includes('nvpair-'))
+        vi.spyOn(JsonRpcSocketClient.prototype, 'start').mockImplementation(function (
+            this: JsonRpcSocketClient
+        ) {
+            clients.push(this)
+        })
+        vi.spyOn(JsonRpcSocketClient.prototype, 'detach').mockResolvedValue(undefined)
+        vi.spyOn(JsonRpcSocketClient.prototype, 'call').mockImplementation(
+            async (method): Promise<JsonValue> => {
+                calls.push(method)
+                if (method === 'engine:active-model-copies') return { operations: [] }
+                if (method === 'cluster:get-node-id')
+                    return { nodeUuid: state.getSelfId() ?? 'Joes' }
+                if (method === 'workloads:get-initial') return { workloads: [] }
+                if (method === 'engine:descriptors' || method === 'engine:get-installed')
+                    return { engines: [] }
+                if (method === 'nodes:get-initial') return { nodes: [] }
+                return {}
+            }
+        )
+    })
+    afterEach(async () => {
+        await supervisor.stop()
+        vi.useRealTimers()
+    })
+
+    async function connectObserver(selfId = 'Joes'): Promise<JsonRpcSocketClient> {
+        state.setSelfId(selfId)
+        supervisor.start()
+        const client = clients[0]
+        if (!client) throw new Error('Supervisor did not create its client')
+        client.emit('notification', { source: 'broker', method: 'app:ready' })
+        await flush()
+        expect(calls).toContain('engine:subscribe')
+        expect(calls.filter(method => method === 'engine:active-model-copies')).toHaveLength(1)
+        return client
+    }
+    function notify(client: JsonRpcSocketClient, progress: JsonValue): void {
+        client.emit('notification', {
+            source: 'broker',
+            method: 'engine:remote-progress',
+            params: progress
+        })
+    }
+
+    it.each(['Joes', 'Other observer'])(
+        'adopts an admitted inbound copy after %s has already connected',
+        async selfId => {
+            const client = await connectObserver(selfId)
+            expect(
+                state.getEngineInitialState().activeProgress.some(p => p.opId === request.opId)
+            ).toBe(false)
+            vi.mocked(emitBridgePush).mockClear()
+            notify(client, frame())
+            expect(emitBridgePush).toHaveBeenCalledWith(
+                'engines:progress-changed',
+                expect.objectContaining({
+                    opId: request.opId,
+                    sourceNodeId: 'MSI',
+                    destinationNodeId: 'Joes',
+                    nodeId: 'Joes',
+                    engineType: 'llama-cpp',
+                    model: request.model,
+                    status: 'downloading',
+                    exportId,
+                    completed: 8
+                })
+            )
+            notify(client, frame({ bytesDone: 12 }))
+            expect(
+                state.getEngineInitialState().activeProgress.filter(p => p.opId === request.opId)
+            ).toHaveLength(1)
+            expect(
+                state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)
+                    ?.completed
+            ).toBe(12)
+            notify(client, frame({ stage: 'done', bytesDone: 19 }))
+            expect(
+                state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)
+            ).toMatchObject({ status: 'unknown', exportId, completed: 19 })
+            expect(
+                state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)
+                    ?.copyResult
+            ).toBeUndefined()
+            expect(calls.filter(method => method === 'engine:active-model-copies')).toHaveLength(1)
+        }
+    )
+
+    it('ignores terminal-only unknown operations, invalid identity and mismatched tuples', async () => {
+        const client = await connectObserver()
+        const strayId = '1'.repeat(32)
+        vi.mocked(emitBridgePush).mockClear()
+        notify(client, frame({ opId: strayId, stage: 'done' }))
+        notify(client, frame({ opId: strayId, stage: 'error' }))
+        notify(client, frame({ opId: strayId, stage: 'cancelled' }))
+        notify(client, frame({ opId: '', stage: 'downloading' }))
+        expect(emitBridgePush).not.toHaveBeenCalled()
+        notify(client, frame())
+        vi.mocked(emitBridgePush).mockClear()
+        notify(client, frame({ destinationNodeId: 'different', stage: 'done' }))
+        notify(client, frame({ model: 'different', bytesDone: 18 }))
+        expect(emitBridgePush).not.toHaveBeenCalled()
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)
+        ).toMatchObject({ status: 'downloading', completed: 8 })
+        expect(state.getEngineInitialState().activeProgress.some(p => p.opId === strayId)).toBe(
+            false
+        )
+    })
+
+    it('preserves awaited result ownership and imported operations when progress arrives', async () => {
+        const client = await connectObserver()
+        const imported = {
+            ...request,
+            opId: request.opId.replace(/^./, 'b'),
+            expectedExportId: exportId
+        }
+        state.beginModelCopy(request)
+        state.reconcileModelCopies([{ ...request }, imported])
+        notify(client, frame())
+        notify(client, frame({ ...imported }))
+        notify(client, frame({ stage: 'done' }))
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)?.status
+        ).toBe('awaiting-result')
+        notify(client, frame({ ...imported, stage: 'done' }))
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === imported.opId)
+        ).toMatchObject({ status: 'unknown', expectedExportId: exportId })
+        state.finishModelCopy(
+            request,
+            'done',
+            parseModelCopyResult({ opId: request.opId, result }, request).result
+        )
+        notify(client, frame({ bytesDone: 1 }))
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)
+        ).toMatchObject({ status: 'done', copyResult: result })
+    })
+
+    it('keeps observed active copies and last outcomes bounded without displacing admitted work', async () => {
+        const client = await connectObserver()
+        const activeIds = Array.from(
+            { length: 8 },
+            (_, index) => `${request.opId.slice(0, 30)}${index.toString(16).padStart(2, '0')}`
+        )
+        const first = activeIds[0]
+        if (!first) throw new Error('Missing first active operation')
+        const awaited = { ...request, opId: first }
+        state.beginModelCopy(awaited)
+        for (const opId of activeIds) notify(client, frame({ opId }))
+        const excessId = `${request.opId.slice(0, 30)}ff`
+        expect(() => notify(client, frame({ opId: excessId }))).not.toThrow()
+        expect(
+            state.getEngineInitialState().activeProgress.filter(isEngineCopyInProgress)
+        ).toHaveLength(8)
+        expect(state.getEngineInitialState().activeProgress.some(p => p.opId === excessId)).toBe(
+            false
+        )
+        notify(client, frame({ opId: first, bytesDone: 15 }))
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === first)?.completed
+        ).toBe(15)
+        for (const opId of activeIds) notify(client, frame({ opId, stage: 'done' }))
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === first)?.status
+        ).toBe('awaiting-result')
+        state.finishModelCopy(
+            awaited,
+            'done',
+            parseModelCopyResult({ opId: first, result }, awaited).result
+        )
+        for (let index = 8; index < 24; index++) {
+            const opId = `${request.opId.slice(0, 30)}${index.toString(16).padStart(2, '0')}`
+            notify(client, frame({ opId }))
+            notify(client, frame({ opId, stage: 'done' }))
+        }
+        expect(
+            state.getEngineInitialState().activeProgress.filter(p => p.operation === 'copy')
+        ).toHaveLength(8)
+        expect(
+            state.getEngineInitialState().activeProgress.filter(isEngineCopyInProgress)
+        ).toHaveLength(0)
     })
 })
