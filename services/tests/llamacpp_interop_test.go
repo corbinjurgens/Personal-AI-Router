@@ -24,8 +24,9 @@ func TestLlamaCPPProxyIsIncludedInBrokerDefaults(t *testing.T) {
 	}()
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-	if port := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second); port <= 0 {
-		t.Fatalf("default llama.cpp proxy port = %d, want a listening facade", port)
+	port := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
+	if err := validateFixturePort(port); err != nil {
+		t.Fatalf("default llama.cpp facade is not private: %v", err)
 	}
 }
 
@@ -39,6 +40,10 @@ func TestBrokerLlamaCPPProxySetPortRejectsInvalidPorts(t *testing.T) {
 		}
 	}()
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
+	port := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
+	if err := validateFixturePort(port); err != nil {
+		t.Fatalf("llama.cpp facade is not private: %v", err)
+	}
 	for i, tc := range []struct{ name, params string }{
 		{"missing port", `{}`},
 		{"zero port", `{"port":0}`},
@@ -95,6 +100,9 @@ func TestLlamaCPPFacadeUsesRouterInventoryAndExactModelIDs(t *testing.T) {
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 	proxyPort := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
+	if err := validateFixturePort(proxyPort); err != nil {
+		t.Fatalf("llama.cpp routing facade is not private: %v", err)
+	}
 	callBrokerRPC(t, stdin, msgs, 7200, "llamacpp-proxy:node/add-manual", map[string]any{
 		"id":        "llamacpp-owner",
 		"host":      "127.0.0.1",

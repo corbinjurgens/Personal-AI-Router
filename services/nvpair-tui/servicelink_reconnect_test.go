@@ -46,6 +46,40 @@ func TestServiceLinkProductionHistoryReconnect(t *testing.T) {
 	t.Cleanup(cancel)
 	stop := context.AfterFunc(ctx, func() { _ = listener.Close() })
 	t.Cleanup(func() { stop() })
+	type accepted struct {
+		peer net.Conn
+		err  error
+	}
+	acceptNext := func() <-chan accepted {
+		result := make(chan accepted, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			peer, err := listener.Accept()
+			result <- accepted{peer: peer, err: err}
+		}()
+		t.Cleanup(func() {
+			_ = listener.Close()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Error("fixture accept did not join after listener close")
+			}
+			select {
+			case orphan := <-result:
+				if orphan.peer != nil {
+					if err := orphan.peer.Close(); err != nil {
+						t.Errorf("close unclaimed fixture connection: %v", err)
+					}
+				}
+			default:
+			}
+		})
+		return result
+	}
+	// Windows creates a connectable named-pipe instance from Accept, unlike a
+	// Unix listening socket. Own that bounded accept before the initial dial.
+	pending := acceptNext()
 	link, err := connectService(ctx, filepath.Join(dir, "must-not-start"))
 	if err != nil {
 		t.Fatal(err)
@@ -61,10 +95,16 @@ func TestServiceLinkProductionHistoryReconnect(t *testing.T) {
 		}
 	}()
 	for generation := uint64(1); generation <= 2; generation++ {
-		peer, err := listener.Accept()
-		if err != nil {
-			t.Fatal(err)
+		var connection accepted
+		select {
+		case connection = <-pending:
+		case <-ctx.Done():
+			t.Fatal("fixture accept exceeded the connection budget")
 		}
+		if connection.err != nil {
+			t.Fatal(connection.err)
+		}
+		peer := connection.peer
 		t.Cleanup(func() { _ = peer.Close() })
 		if err := peer.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 			t.Fatal(err)
@@ -120,6 +160,7 @@ func TestServiceLinkProductionHistoryReconnect(t *testing.T) {
 			t.Fatal(err)
 		}
 		if generation == 1 {
+			pending = acceptNext()
 			if err := peer.Close(); err != nil {
 				t.Fatal(err)
 			}

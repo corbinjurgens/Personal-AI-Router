@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +21,7 @@ import (
 
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/testbin"
 )
 
 func TestRoutingIdentityProcess(t *testing.T) {
@@ -67,9 +70,6 @@ func TestRoutingIdentityProcess(t *testing.T) {
 	})
 
 	t.Run("late peer old-run frames have no effect and peer cancel reaches owner", func(t *testing.T) {
-		if portBusy(11435) {
-			t.Skip("ollama-proxy default port 11435 already in use")
-		}
 		cluster := newInterNodeCluster(t)
 		ports := reserveFixtureServicePorts(t)
 		engine := newRoutingIdentityEngine(t, "departed-run-model", "application/x-ndjson",
@@ -376,8 +376,19 @@ func routingIdentityBroker(t *testing.T, clusterDir string, ports fixtureService
 		client: &http.Client{Transport: &http.Transport{}, Timeout: 60 * time.Second}}
 	var cancel context.CancelFunc
 	f.ctx, cancel = context.WithCancel(context.Background())
-	stdin, messages, stderr, cleanup := startBrokerWithPorts(t, routingIdentityAppDir(t), clusterDir,
-		[]string{"OLLAMA_HOST="}, ports, "--proxy-path", proxyBin, "--proxy-engines", "ollama", "--workload-manager-path", workloadMgrBin)
+	configDir := routingIdentityAppDir(t)
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"ollama": freePort(t)})
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
+	jointCopyExecutable(t, self, scanner)
+	stdin, messages, stderr, cleanup := startBrokerWithPorts(t, configDir, clusterDir,
+		[]string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
+			"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(freePort(t))}, ports,
+		"--scanner-path", scanner, "--engine-manager-path", engineMgrBin,
+		"--proxy-path", proxyBin, "--proxy-engines", "ollama", "--workload-manager-path", workloadMgrBin)
 	f.stdin = stdin
 	control, events, lines := make(chan jsonrpc.Message, 64), make(chan jsonrpc.Message, 64), make(chan string, 8)
 	f.control, f.events, f.proxyLines = control, events, lines
