@@ -39,6 +39,7 @@ type client struct {
 	// written is closed when the writer goroutine has finished and the
 	// connection is closed.
 	written chan struct{}
+	history historyCursor
 }
 
 func newClient(id int, conn io.ReadWriteCloser) *client {
@@ -56,7 +57,7 @@ func (c *client) writeLoop() {
 	defer close(c.written)
 	defer c.conn.Close()
 	for frame := range c.out {
-		if _, err := c.conn.Write(frame); err != nil {
+		if err := c.writeFrame(frame); err != nil {
 			// The reader notices the closed connection and detaches the
 			// client; drain so senders never block on a dead queue.
 			_ = c.conn.Close()
@@ -64,7 +65,33 @@ func (c *client) writeLoop() {
 			}
 			return
 		}
+		// attach queues app:ready first while holding the service registry.
+		// History bypasses this queue and must wait for that actual write.
+		c.history.awaitReady.Store(false)
 	}
+}
+
+// The same frame gate covers ordinary and leased history data. A lease is
+// released by its fixed service writer only after this returns, including a
+// partial write followed by failure. No timer may release a blocked borrower.
+func (c *client) writeFrame(frame []byte) error {
+	c.history.writeMu.Lock()
+	defer c.history.writeMu.Unlock()
+	return c.writeFrameLocked(frame)
+}
+
+func (c *client) writeFrameLocked(frame []byte) error {
+	for len(frame) > 0 {
+		n, err := c.conn.Write(frame)
+		if err != nil {
+			return err
+		}
+		if n <= 0 || n > len(frame) {
+			return io.ErrShortWrite
+		}
+		frame = frame[n:]
+	}
+	return nil
 }
 
 // send queues one frame (which must end in a newline). It never blocks; a full
