@@ -74,6 +74,25 @@ and active/cancel consumers stay checked without an ignored-method entry.
 
 ## Runtime ownership
 
+Peer model copy uses existing `engine:copy-model`,
+`engine:model-copy-capabilities`, `engine:cancel-model-copy` and
+`engine:active-model-copies` through the typed bridge. Electron relays only
+control/status metadata. For MSI → Joes controlled on Mac, Joes alone fetches
+and installs the artifacts from MSI; only Joes' status/inventory is refreshed.
+Both endpoint engines need an installed supported model store and intersecting
+layouts. Engines may be stopped. The destination needs a fresh caller grant,
+live source pins and clear pause/recovery gates. UI availability never grants
+authority and never triggers installation, startup or source deletion.
+
+Full-tuple/opId progress survives close/reopen and reconnect. An absent active
+operation becomes unknown unless the verified response was retained. Explicit
+export-ID retries recheck destination authority and reject alias rebindings;
+legacy layouts without identity offer a fresh resolution, not an identical
+content guarantee. Conflicts preserve existing content and offer no overwrite.
+Custom receipts establish artifact installation, not native serving readiness;
+configuration and loading remain separate destination actions. Landed but
+uncertain publication durability stays qualified in the retained result.
+
 `nvpair-service` is the only backend process Electron ever starts, and only when
 nothing answers on its endpoint. It owns `nvpair-ui-broker`, outlives Electron,
 and lets Electron and the TUI attach over a local socket or named pipe. The

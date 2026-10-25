@@ -8,8 +8,7 @@ import { ModelRowHeader } from './ModelRowHeader'
 import { ModelRowSecondaryRow } from './ModelRowSecondaryRow'
 import type { ModelRowProps } from '@/ui/types/model-row'
 import type { EngineCommandType } from '@/shared/types/engine-api'
-import { isEngineCopyInProgress, isEnginePullInProgress } from '@/shared/utils/engine-progress'
-import { formatCopyProgressLabel } from '@/ui/utils/formatters'
+import { isEnginePullInProgress } from '@/shared/utils/engine-progress'
 
 /** "Working" label shown on the secondary row while an optimistic action is in flight. */
 function pendingLabel(action: EngineCommandType): string | null {
@@ -33,8 +32,7 @@ function ModelRowInner({
     capabilities,
     progress,
     pendingAction,
-    canCopyToThisPc,
-    copyProgress,
+    canCopy,
     displayName,
     onAction,
     onExpiryChange
@@ -77,10 +75,10 @@ function ModelRowInner({
                 disabled: busy || !isRunning || !isLoaded
             })
         }
-        if (canCopyToThisPc) {
+        if (canCopy) {
             items.push({
                 id: 'copy',
-                children: 'Copy to this PC',
+                children: 'Copy to device…',
                 disabled: busy || !ready
             })
         }
@@ -89,7 +87,7 @@ function ModelRowInner({
         }
         return items
     }, [
-        canCopyToThisPc,
+        canCopy,
         capabilities.hasLoad,
         capabilities.hasEject,
         capabilities.hasDeleteModel,
@@ -114,12 +112,7 @@ function ModelRowInner({
     // Pull already renders its own progress spinner via `progress`; only fall
     // back to the generic busy label for the actions the backend gives no
     // progress signal for (load/eject/delete) so we never double up.
-    const busyLabel =
-        copyProgress && isEngineCopyInProgress(copyProgress)
-            ? formatCopyProgressLabel(copyProgress)
-            : pendingAction
-              ? pendingLabel(pendingAction)
-              : null
+    const busyLabel = pendingAction ? pendingLabel(pendingAction) : null
 
     return (
         <Stack gap="3" className="min-w-0">

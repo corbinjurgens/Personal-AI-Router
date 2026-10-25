@@ -55,7 +55,7 @@ export function emptyEngineProgress(at: {
     return entry
 }
 
-/** Whether this progress is a copy of a model to this PC that has not ended. */
+/** Whether this exact model copy operation has not ended. */
 export function isEngineCopyInProgress(
     p: Pick<EngineProgress, 'operation' | 'status'> | undefined
 ): boolean {
@@ -80,6 +80,19 @@ export function shouldApplyEngineProgress(
     next: EngineProgress,
     previous?: EngineProgress
 ): boolean {
+    if (previous?.operation === 'copy' && next.operation === 'copy') {
+        if (
+            previous.opId !== next.opId ||
+            previous.sourceNodeId !== next.sourceNodeId ||
+            previous.destinationNodeId !== next.destinationNodeId ||
+            previous.model !== next.model ||
+            previous.engineType !== next.engineType
+        )
+            return false
+        // A late snapshot/progress frame must not revive settled work or erase
+        // its verified setup/durability qualification. Unknown may hydrate active.
+        if (['done', 'error', 'cancelled'].includes(previous.status)) return false
+    }
     if (!previous?.downloadState) return true
     if (!next.downloadState) return false
     if (next.downloadSourceId !== previous.downloadSourceId) return true
