@@ -334,6 +334,10 @@ func preparePerformanceBuffers(ctx context.Context, body []byte, request originS
 		parserBytes = streamFrameNumericBytes
 	}
 	choices := max(request.choices, 1)
+	if err := frames.admit(ctx, streamFrameAllowance(request.protocol, int64(choices), parserBytes)); err != nil {
+		release()
+		return ctx, nil, err
+	}
 	for _, size := range []int64{streamFrameMetadataBytes, int64(choices), streamFrameReadChunk, parserBytes, streamFrameReadChunk} {
 		if err := frames.prepare(ctx, size); err != nil {
 			release()

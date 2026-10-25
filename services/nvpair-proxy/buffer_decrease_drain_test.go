@@ -4,8 +4,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -76,8 +76,8 @@ func TestBufferDecreaseAdmittedStreamDrains(t *testing.T) {
 				}
 				// Request parser, fingerprint scratch and preparation storage remain
 				// owned alongside the response grants during handover.
-				wantLiveBytes := (96 << 10) + streamFrameNumericBytes + preparationBytes + responseBytes
-				wantLiveLeases := 3 + len(responseCharges)
+				wantLiveBytes := (96 << 10) + streamFrameNumericBytes + preparationBytes + streamFrameAllowance(fixture.protocol, 1, streamFrameNumericBytes)
+				wantLiveLeases := 4
 				bufferAssertTotals(t, root, wantLiveBytes, wantLiveLeases, 0)
 				body := &decreaseDrainBody{}
 				for _, frame := range fixture.frames {
@@ -183,7 +183,7 @@ func TestBufferDecreaseAdmittedStreamDrains(t *testing.T) {
 	}
 }
 
-func TestBufferDecreaseStreamGrowthRefused(t *testing.T) {
+func TestBufferDecreaseStreamGrowthDrains(t *testing.T) {
 	root := bufferTestBudget(t, 192<<20, 0)
 	ctx, owner := decreaseDrainOwner(t, root)
 	prepared, release, err := preparePerformanceBuffers(ctx, []byte(`{"stream":true}`), originStreamRequest{protocol: streamProtocolSSE, declared: true, choices: 1}, performancePrepareLocalNumeric)
@@ -192,7 +192,8 @@ func TestBufferDecreaseStreamGrowthRefused(t *testing.T) {
 	}
 	defer release()
 	first := "data: {\"choices\":[]}\n\n"
-	body := &decreaseDrainBody{frames: [][]byte{[]byte(first), []byte("data: {\"padding\":\"" + strings.Repeat("x", 8192) + "\"}\n\n"), []byte("data: [DONE]\n\n")}}
+	later := "data: {\"padding\":\"" + strings.Repeat("x", int(streamFrameMaxBytes)-64) + "\"}\n\n"
+	body := &decreaseDrainBody{frames: [][]byte{[]byte(first), []byte(later), []byte("data: [DONE]\n\n")}}
 	r, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolSSE, Upstream: body, Parent: prepared})
 	if err != nil {
 		t.Fatal(err)
@@ -205,22 +206,22 @@ func TestBufferDecreaseStreamGrowthRefused(t *testing.T) {
 	if err := root.reconfigure(1, 0); err != nil {
 		t.Fatal(err)
 	}
-	capacity, charged, total := cap(r.buf), r.reserved, root.used
-	if r.growLocked(capacity + 1) {
-		t.Fatal("frame replacement grew above aggregate cap")
-	}
-	if cap(r.buf) != capacity || r.reserved != charged || root.used != total {
-		t.Fatal("refused replacement disturbed existing storage or charge")
-	}
+	total := root.used
+	// Claimed storage survives both preparation and request-owner release.
+	release()
+	owner.close()
 	tail, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(tail, streamInterruptionFramesByReason[streamInterruptReasonBudget].sse) {
-		t.Fatalf("growth output = %q", tail)
+	if string(tail) != later+"data: [DONE]\n\n" {
+		t.Fatalf("growth output differs: got %d bytes", len(tail))
 	}
-	if result := r.Result(); result.Outcome != streamOutcomeInterrupted || result.Reason != streamInterruptReasonBudget {
+	if result := r.Result(); result.Outcome != streamOutcomeCompleted || result.Reason != "" {
 		t.Fatalf("result = %+v", result)
+	}
+	if root.used > total {
+		t.Fatal("draining stream increased the aggregate charge")
 	}
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
@@ -228,6 +229,66 @@ func TestBufferDecreaseStreamGrowthRefused(t *testing.T) {
 	release()
 	owner.close()
 	bufferAssertTotals(t, root, 0, 0, 0)
+}
+
+func TestBufferDecreaseFourStreamsDrain(t *testing.T) {
+	root := bufferTestBudget(t, 256<<20, 0)
+	t.Cleanup(func() { bufferAssertTotals(t, root, 0, 0, 0) })
+	var readers []*streamFrameReader
+	for i := 0; i < 4; i++ {
+		ctx, owner := decreaseDrainOwner(t, root)
+		prepared, release, err := preparePerformanceBuffers(ctx, []byte(`{"stream":true}`), originStreamRequest{protocol: streamProtocolSSE, declared: true, choices: 1}, performancePrepareLocalNumeric)
+		if err != nil {
+			t.Fatalf("stream %d admission: %v", i, err)
+		}
+		t.Cleanup(release)
+		// Include each response envelope in a 50 MiB admitted request footprint.
+		padding, err := owner.scope.acquire(ctx, (50<<20)-owner.scope.used)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner.retain(padding)
+		first := "data: {\"choices\":[]}\n\n"
+		later := fmt.Sprintf("data: {\"padding\":\"%s\"}\n\n", strings.Repeat("x", 32<<10))
+		reader, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolSSE, Parent: prepared, Upstream: &decreaseDrainBody{frames: [][]byte{[]byte(first), []byte(later), []byte("data: [DONE]\n\n")}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := reader.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		buf := make([]byte, len(first))
+		if _, err := io.ReadFull(reader, buf); err != nil || string(buf) != first {
+			t.Fatalf("first frame: %q, %v", buf, err)
+		}
+		readers = append(readers, reader)
+	}
+	if root.used != 200<<20 {
+		t.Fatalf("admitted bytes=%d, want 200 MiB", root.used)
+	}
+	if err := root.reconfigure(192<<20, 0); err != nil {
+		t.Fatal(err)
+	}
+	if lease, err := root.acquire(context.Background(), 1); err == nil {
+		lease.close()
+		t.Fatal("new admission succeeded above the reduced capacity")
+	} else {
+		bufferAssertBusy(t, err)
+	}
+	for i, reader := range readers {
+		t.Run(fmt.Sprintf("stream %d", i+1), func(t *testing.T) {
+			out, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := fmt.Sprintf("data: {\"padding\":\"%s\"}\n\ndata: [DONE]\n\n", strings.Repeat("x", 32<<10))
+			if string(out) != want || reader.Result().Outcome != streamOutcomeCompleted {
+				t.Fatalf("stream did not complete: bytes=%d result=%+v", len(out), reader.Result())
+			}
+		})
+	}
 }
 
 func TestBufferDecreasePreparationSharesStreamCategory(t *testing.T) {

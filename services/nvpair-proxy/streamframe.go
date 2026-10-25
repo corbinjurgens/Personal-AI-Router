@@ -60,14 +60,62 @@ const (
 // frameBudget reserves frame-buffer bytes before they are allocated so that a
 // burst of streams terminates explicitly instead of waiting for memory.
 type frameBudget struct {
-	mu     sync.Mutex
-	limit  int64
-	used   int64
-	scope  *bufferScope
-	leases [32]struct {
+	mu    sync.Mutex
+	limit int64
+	used  int64
+	scope *bufferScope
+	// An admitted reader borrows this bounded envelope instead of seeking new
+	// root capacity. It stays charged until the last frame allocation releases.
+	allowance *bufferLease
+	leases    [32]struct {
 		bytes   int64
 		lease   *bufferLease
 		pending bool
+	}
+}
+
+// Prepay replacement overlap as well as useful storage. At most two raw
+// arrays and (for SSE) two joined payload arrays coexist during growth.
+func streamFrameAllowance(protocol streamProtocol, choices, parserBytes int64) int64 {
+	n := streamFrameMetadataBytes + choices + streamFrameReadChunk + parserBytes + 2*streamFrameMaxBytes
+	if protocol == streamProtocolSSE {
+		n += 2 * streamFrameMaxBytes
+	}
+	return n
+}
+
+func (b *frameBudget) admit(ctx context.Context, n int64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.allowance != nil || b.used != 0 {
+		return errBufferInvalid
+	}
+	lease, err := b.scope.acquire(ctx, n)
+	if err != nil {
+		return err
+	}
+	b.allowance = lease
+	b.limit = n
+	return nil
+}
+
+func (b *frameBudget) acquireLocked(ctx context.Context, n int64, mayWait bool) (*bufferLease, error) {
+	if b.allowance != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, &bufferBusyError{cause: err}
+		}
+		return b.allowance.borrow()
+	}
+	if mayWait {
+		return b.scope.acquire(ctx, n)
+	}
+	return b.scope.tryAcquire(ctx, n)
+}
+
+func (b *frameBudget) releaseAllowanceLocked() {
+	if b.used == 0 && b.allowance != nil {
+		b.allowance.close()
+		b.allowance = nil
 	}
 }
 
@@ -132,7 +180,7 @@ func (b *frameBudget) reserve(n int64) bool {
 	if slot < 0 {
 		return false
 	}
-	lease, err := b.scope.tryAcquire(context.Background(), n)
+	lease, err := b.acquireLocked(context.Background(), n, false)
 	if err != nil {
 		return false
 	}
@@ -154,6 +202,7 @@ func (b *frameBudget) release(n int64) {
 			b.leases[i].bytes = 0
 			b.used -= n
 			record.lease.close()
+			b.releaseAllowanceLocked()
 			return
 		}
 	}
@@ -176,7 +225,7 @@ func (b *frameBudget) prepare(ctx context.Context, n int64) error {
 		if b.leases[i].lease != nil {
 			continue
 		}
-		lease, err := b.scope.acquire(ctx, n)
+		lease, err := b.acquireLocked(ctx, n, true)
 		if err != nil {
 			return err
 		}
@@ -199,6 +248,7 @@ func (b *frameBudget) releasePreparation() {
 			b.leases[i].pending = false
 		}
 	}
+	b.releaseAllowanceLocked()
 }
 
 // inUse is the live reservation, which tests use to prove a closed reader gave
@@ -468,8 +518,8 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 		}
 	}
 	// Admit reusable working storage before reading upstream. Reusing these
-	// allocations needs no new grant after a live capacity decrease; larger
-	// frames still require their full replacement capacity while copying.
+	// allocations and growing within the admitted envelope need no new root
+	// grant after a live capacity decrease. Both arrays are charged while copying.
 	parserBytes := int64(streamFrameSyntaxBytes)
 	if numeric {
 		parserBytes = streamFrameNumericBytes

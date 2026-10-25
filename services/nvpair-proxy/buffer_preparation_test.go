@@ -41,11 +41,11 @@ type preparationClass struct {
 
 func preparationClasses() []preparationClass {
 	return []preparationClass{
-		{name: "self numeric", mode: performancePrepareLocalNumeric, stream: true, numeric: true, ceilings: [3]int{564, 564, 564}},
-		{name: "self syntax", mode: performancePrepareLocalSyntax, stream: true, ceilings: [3]int{754, 1005, 1820}},
+		{name: "self numeric", mode: performancePrepareLocalNumeric, stream: true, numeric: true, ceilings: [3]int{15, 15, 15}},
+		{name: "self syntax", mode: performancePrepareLocalSyntax, stream: true, ceilings: [3]int{15, 15, 15}},
 		{name: "self nonstream", mode: performancePrepareLocalNumeric, ceilings: [3]int{874, 1166, 4665}},
 		{name: "self omitted OpenAI", raw: `{"model":"m"}`, mode: performancePrepareLocalNumeric},
-		{name: "peer stream", mode: performancePreparePeer, stream: true, peer: true, ceilings: [3]int{1489, 1820, 1820}},
+		{name: "peer stream", mode: performancePreparePeer, stream: true, peer: true, ceilings: [3]int{15, 15, 15}},
 		{name: "peer nonstream", mode: performancePreparePeer, peer: true, ceilings: [3]int{2047, 2729, 10919}},
 	}
 }
@@ -124,7 +124,7 @@ func TestBufferPreparationChargeClasses(t *testing.T) {
 				if class.numeric {
 					parser = streamFrameNumericBytes
 				}
-				wantFrames = streamFrameMetadataBytes + 1 + 3*streamFrameReadChunk + parser
+				wantFrames = streamFrameMetadataBytes + 1 + streamFrameReadChunk + parser + 4*streamFrameMaxBytes
 			}
 			after, frames := preparationUsed(root)
 			if after-before != wantBase+wantFrames || frames != wantFrames {

@@ -997,7 +997,7 @@ func TestOwnedInferenceBuffersStrictIdentifierStorage(t *testing.T) {
 
 // Each fixture requests one choice. Keep response grants distinct from the
 // fingerprint scanner/storage and the request's retained parser allowance.
-const bufferFixtureResponseBytes int64 = streamFrameMetadataBytes + 1 + 3*streamFrameReadChunk + streamFrameNumericBytes
+const bufferFixtureResponseBytes int64 = streamFrameMetadataBytes + 1 + streamFrameReadChunk + streamFrameNumericBytes + 4*streamFrameMaxBytes
 
 func bufferFixtureRemotePreparationBytes(t *testing.T, body string) int64 {
 	t.Helper()
@@ -1010,7 +1010,7 @@ func bufferFixtureRemotePreparationBytes(t *testing.T, body string) int64 {
 	}
 	// The origin observes peer framing with syntax storage only; it does not
 	// fingerprint remote execution. Native NDJSON has no SSE payload grant.
-	return streamFrameMetadataBytes + int64(request.choices) + 2*streamFrameReadChunk + streamFrameSyntaxBytes
+	return streamFrameAllowance(request.protocol, int64(request.choices), streamFrameSyntaxBytes)
 }
 
 func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
