@@ -402,6 +402,7 @@
 | `log/set-level` | notification (we consume) | ✅ yes |
 | `performance:changed` | notification (we consume) | ✅ yes |
 | `scheduler:telemetry` | notification (we consume) | ➖ ignored |
+| `service/engine-notifications-reset` | notification (we consume) | ➖ ignored |
 | `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
 | `admission/state` | request (we call) | ➖ ignored |
@@ -470,8 +471,9 @@
 | `workloads:unsubscribe` | request (we call) | ⚠️ not called |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
-- `method (var)  (broker.go, 3 sites)`
+- `method (var)  (broker.go, 2 sites)`
 - `method (var)  (clustermanager.go)`
+- `event.method (var)  (engine_notifications.go)`
 - `method (var)  (errors.go)`
 - `msg.Method (var)  (nodeinfo.go)`
 - `method (var)  (policy.go)`

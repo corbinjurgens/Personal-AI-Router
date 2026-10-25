@@ -353,6 +353,10 @@ func newRoutingHistoryLocalCodec(b *Broker, transport io.ReadWriteCloser, ipc bo
 	codec, err := b.routingHistory.readers.acquire(historyLocalControl, transport, func() { _ = input.Close() }, interrupt)
 	if err == nil {
 		b.routingHistory.interruptLocalWrite = interrupt
+		b.disconnectClient = func() {
+			_ = output.Close()
+			_ = input.Close()
+		}
 	}
 	return codec, err
 }

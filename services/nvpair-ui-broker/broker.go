@@ -193,6 +193,10 @@ type Broker struct {
 	settingsCancels      map[string]context.CancelFunc
 	activeSettings       map[string]activeSettingsOperation
 	codec                *Codec
+	// Published before workers start; the service-facing session owns the
+	// relay and its physical transport interruption, including blocked writes.
+	engineNotifications  *engineNotificationRelay
+	disconnectClient     func()
 	cancel               context.CancelFunc
 	startedAt            time.Time
 	nodeID               string
@@ -1247,9 +1251,7 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 	if !subscribed {
 		return
 	}
-	if err := b.codec.Notify(method, params); err != nil {
-		slog.Warn("forward engine notification failed", "method", method, "err", err)
-	}
+	b.queueEngineNotification(source, method, params)
 }
 
 // handleEngineSubscribe wires engine-manager's discovery:subscribe into the
@@ -1764,6 +1766,8 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 	b.cancel = cancel
 	b.setServeCtx(ctx)
 	defer cancel()
+	stopEngineNotifications := b.startEngineNotificationRelay(ctx)
+	defer stopEngineNotifications()
 	if h := b.routingHistory; h != nil {
 		// Required local replies use background write contexts and can hold the
 		// dispatcher inside RespondHistoryError. Interrupt output independently
@@ -2352,7 +2356,7 @@ func (b *Broker) readLoop(ctx context.Context) error {
 // errors:clear are routed into the nvpair-errors pipeline (the broker now
 // supervises it) rather than dropped.
 func (b *Broker) forwardClusterManagerNotification(method string, params json.RawMessage) {
-	if routingHistoryMethod(method) {
+	if routingHistoryMethod(method) || method == notifyEngineNotificationsReset {
 		return
 	}
 	// Private authority envelopes never reach ordinary clients, even if an

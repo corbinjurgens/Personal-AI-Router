@@ -378,9 +378,29 @@ Only the existing process watcher fences worker exit and closes its `Done`
 channel after `cmd.Wait`. Interruption does not call `Stop`, join the process,
 or force-kill engine-manager: stdin EOF retains its ordinary engine cleanup
 path and the broker's existing graceful engine-manager shutdown policy.
-The subscribed engine event relay still writes synchronously to the
-service-facing codec on the engine reader goroutine. A stalled downstream can
-therefore stop engine stdout draining; decoupling that relay is separate work.
+The subscribed engine event relay and manager-originated switch progress use
+one FIFO queue for the broker's service-facing client. The queue holds at most
+32 waiting events and 8 MiB of method/parameter bytes including the event in
+flight. It owns copies of queued parameters. Enqueue never waits for client IO
+or space: overflow drops that client's engine subscription and pending engine
+events without cancelling the broker, closing its ordinary transport or stopping
+engine-manager. An already-admitted event may finish. One fixed pending reset
+bit wakes the sole sender, which writes private
+`service/engine-notifications-reset` after the active Write returns. The service
+consumes it for the current broker run, invalidates engine subscription/baseline
+ownership and disconnects its attached clients. Those clients already receive
+all broadcast engine events; their existing reconnect, subscribe and initial
+state reads recover from the gap without stopping the broker or engines. This
+requires the matching service version; it is not a desktop/TUI event or a client
+request. Actual transport failure retains ordinary session failure semantics.
+A single sender preserves engine-event order, rejects queued events from retired
+manager sources, and is cancelled and joined with its captured transport
+interruption callback before Serve returns. An event already handed to the codec
+may finish after its source retires. Other ordinary traffic shares the codec's
+per-frame write gate; history does not enter this queue and never holds that gate
+while waiting for another history frame. A fully blocked stdout still couples other
+ordinary client traffic. Policy replay's synchronous client announcement under
+the push slot and proxy supervisor lock remains a separate limitation.
 
 On startup — **before** emitting `app:ready` — the broker spawns the scanner and (when available) node-info, `nvpair-proxy`, the workload-manager, and the cluster-manager as child processes over stdio. The proxy is spawned up front but doesn't gate `app:ready` — each of its facades announces its listen port asynchronously (see below). None of the auxiliary workers gate `app:ready`.
 
