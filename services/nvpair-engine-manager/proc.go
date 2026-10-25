@@ -207,17 +207,21 @@ func linuxEngineImage(path, exe string) string {
 
 // isOurEngineImage reports whether the listener on our managed port is
 // running the same binary this service manages for the engine (st.binPath).
-// The compare is path-cleaned (canonical on Darwin) so a PAIR-owned orphan on
+// The compare is path-cleaned (symlinks resolved on Unix) so a PAIR-owned orphan on
 // our managed port is reclaimed by Stop, while an unrelated process that
 // merely grabbed the port is left for the caller to decline. An empty image
 // (e.g. a PID we can't introspect) never matches, so Stop fails closed.
 func isOurEngineImage(image, binPath string) bool {
+	return isOurEngineImageOn(image, binPath, runtime.GOOS)
+}
+
+func isOurEngineImageOn(image, binPath, platform string) bool {
 	if image == "" || binPath == "" {
 		return false
 	}
-	image = normalizeEngineImage(image, runtime.GOOS)
+	image = normalizeEngineImage(image, platform)
 	binPath = filepath.Clean(binPath)
-	if runtime.GOOS == "darwin" {
+	if platform == "darwin" {
 		var err error
 		image, err = filepath.EvalSymlinks(image)
 		if err != nil {
@@ -234,6 +238,15 @@ func isOurEngineImage(image, binPath string) bool {
 		imageInfo, imageErr := os.Stat(image)
 		binInfo, binErr := os.Stat(binPath)
 		return strings.EqualFold(image, binPath) && imageErr == nil && binErr == nil && os.SameFile(imageInfo, binInfo)
+	}
+	if platform != "windows" {
+		if resolved, err := filepath.EvalSymlinks(image); err == nil {
+			image = resolved
+		}
+		if resolved, err := filepath.EvalSymlinks(binPath); err == nil {
+			binPath = resolved
+		}
+		return image == binPath
 	}
 	return strings.EqualFold(image, binPath)
 }

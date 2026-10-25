@@ -13,6 +13,8 @@ import (
 	"testing"
 )
 
+func procImage(pid int) string { return imagePathForPID(pid) }
+
 func TestParsePSComm(t *testing.T) {
 	test := func(name, output string, want []string) {
 		t.Run(name, func(t *testing.T) {

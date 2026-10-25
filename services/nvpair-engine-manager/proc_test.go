@@ -21,7 +21,7 @@ func TestIsOurEngineImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	upper := filepath.Join(filepath.Dir(bin), "OLLAMA.EXE")
-	caseAlias := true
+	caseAlias := runtime.GOOS != "linux"
 	if runtime.GOOS == "darwin" {
 		_, err := os.Stat(upper)
 		caseAlias = err == nil
@@ -48,6 +48,32 @@ func TestIsOurEngineImage(t *testing.T) {
 	if isOurEngineImage(bin, ``) {
 		t.Fatal("empty binPath must not match")
 	}
+}
+
+func TestIsOurEngineImageLinuxCanonicalMatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix executable symlink fixtures")
+	}
+	bin := filepath.Join(t.TempDir(), "managed-engine")
+	if err := os.WriteFile(bin, []byte("image fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(filepath.Dir(bin), "engine-link")
+	if err := os.Symlink(bin, alias); err != nil {
+		t.Fatal(err)
+	}
+	test := func(name, image, managed string, want bool) {
+		t.Run(name, func(t *testing.T) {
+			if got := isOurEngineImageOn(image, managed, "linux"); got != want {
+				t.Fatalf("Linux image match (%q, %q) = %v, want %v", image, managed, got, want)
+			}
+		})
+	}
+	test("resolves inspected symlink", alias, bin, true)
+	test("resolves configured symlink", bin, alias, true)
+	test("rejects different case", strings.ToUpper(bin), bin, false)
+	test("retains deleted annotation matching", bin+" (deleted)", alias, true)
+	test("retains unresolved deleted path", bin+"-gone (deleted)", bin+"-gone", true)
 }
 
 func TestIsOurEngineImageLiteralDeletedSuffix(t *testing.T) {

@@ -28,6 +28,14 @@ processes are preserved. A clean stop clears the endpoint while shutdown
 preserves saved On/Off intent. Older files without endpoint metadata keep their
 existing restore behavior.
 
+Reclaim also checks a saved positive PID for the same endpoint, revalidating
+both its recorded executable and its current OS image against the managed
+install. A matching child is stopped and its exit confirmed even before it
+binds, so restore cannot race it with a cold child. Missing PID records and the
+spawn-to-PID-save crash window retain listener-based reclaim. Linux image
+matching resolves available symlinks and compares case-sensitively; macOS
+retains canonical paths and filesystem-verified case aliases.
+
 ### llama.cpp backend checkpoint
 
 The `llamacpp` manifest runs `llama-server` in router mode on loopback port
