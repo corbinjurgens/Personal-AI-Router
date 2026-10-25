@@ -24,6 +24,7 @@ import type {
 } from '@/shared/types/engine-api'
 import type { EngineDescriptor, EngineProgress, EngineType } from '@/shared/types/engines'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
+import { refreshNodeManagement } from '@/ui/stores/node-configuration.store'
 import type {
     EngineSettingsTarget,
     EngineSettingsRequest,
@@ -104,19 +105,30 @@ function fireCommand(transport: ServiceTransport, payload: EngineCommandPayload)
     // the user gets immediate feedback even when the backend push lags (esp.
     // remote nodes). The entry clears itself on the superseding push / timeout.
     usePendingActionsStore.getState().begin(payload)
-    transport.invoke('engine:command', payload).catch(() => {})
+    transport
+        .invoke('engine:command', payload)
+        .then(() => refreshNodeManagement(payload.nodeId))
+        .catch(() => {})
 }
 
 export function createEngineApi(transport: ServiceTransport): IEngineApi {
     return {
         getIntent: () => transport.invoke('engines:get-intent'),
         onIntentChanged: cb => transport.subscribePush('engines:intent-changed', cb),
-        switchEngine: request => transport.invoke('engines:switch', request),
+        switchEngine: request =>
+            transport.invoke('engines:switch', request).then(result => {
+                refreshNodeManagement(request.nodeId)
+                return result
+            }),
         switchStatus: request => transport.invoke('engines:switch-status', request),
         onSwitchChanged: cb => transport.subscribePush('engines:switch-changed', cb),
         getSettings: target => transport.invoke('engines:get-settings', target),
         previewSettings: request => transport.invoke('engines:preview-settings', request),
-        applySettings: request => transport.invoke('engines:apply-settings', request),
+        applySettings: request =>
+            transport.invoke('engines:apply-settings', request).then(result => {
+                refreshNodeManagement(request.nodeId)
+                return result
+            }),
         onSettingsChanged: cb => transport.subscribePush('engines:settings-changed', cb),
         onSettingsDisconnected: cb => transport.subscribePush('engines:settings-disconnected', cb),
         getInitialState: () => transport.invoke('engines:get-initial'),

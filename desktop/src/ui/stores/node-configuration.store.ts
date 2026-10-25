@@ -368,7 +368,7 @@ interface BulkSelection {
 
 interface NodeConfigurationState {
     management: Map<string, NodeManagementEntry>
-    readManagement(targetId: string, nodeId: string | undefined): Promise<void>
+    readManagement(targetId: string, nodeId: string | undefined, fresh?: boolean): Promise<void>
     disconnectManagement(targetId: string): void
     /** Keyed by the broker's node id; this PC's is the self id. */
     editors: Map<string, RoleEditorEntry>
@@ -446,17 +446,33 @@ interface ManagementTarget {
     generation: number
     consumers: number
     request: Promise<void> | null
+    refreshAfterRead: boolean
 }
 
 const managementTargets = new Map<string, ManagementTarget>()
 let managementUnsubs: Array<() => void> = []
 let managementContextUnsubscribe: (() => void) | null = null
 
+/** Successful remote mutations refresh open editors without creating new watches. */
+export function refreshNodeManagement(nodeId: string | undefined): void {
+    if (!nodeId) return
+    for (const [id, target] of managementTargets) {
+        if (target.consumers === 0 || target.nodeId !== nodeId) continue
+        void useNodeConfigurationStore.getState().readManagement(id, nodeId, true)
+    }
+}
+
 function managementTarget(targetId: string, nodeId: string | undefined): ManagementTarget {
     const existing = managementTargets.get(targetId)
     if (existing && existing.nodeId === nodeId) return existing
     if (existing) useNodeConfigurationStore.getState().disconnectManagement(targetId)
-    const target = { nodeId, generation: 0, consumers: 0, request: null }
+    const target: ManagementTarget = {
+        nodeId,
+        generation: 0,
+        consumers: 0,
+        request: null,
+        refreshAfterRead: false
+    }
     managementTargets.set(targetId, target)
     return target
 }
@@ -540,6 +556,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             if (target) {
                 target.generation++
                 target.request = null
+                target.refreshAfterRead = false
             }
             const management = new Map(get().management)
             management.set(targetId, {
@@ -550,13 +567,20 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             set({ management })
         },
 
-        readManagement: (targetId, nodeId) => {
+        readManagement: (targetId, nodeId, fresh = false) => {
             const target = managementTarget(targetId, nodeId)
-            if (target.request) return target.request
             const currentGeneration = target.generation
             const current = () =>
                 managementTargets.get(targetId) === target &&
                 target.generation === currentGeneration
+            if (target.request) {
+                if (!fresh) return target.request
+                target.refreshAfterRead = true
+                // The pending read's finalizer starts the coalesced fresh read.
+                return target.request.then(() =>
+                    current() ? (target.request ?? undefined) : undefined
+                )
+            }
             const putManagement = (entry: NodeManagementEntry) => {
                 const management = new Map(get().management)
                 management.set(targetId, {
@@ -605,7 +629,12 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                         })
                 })
                 .finally(() => {
-                    if (current()) target.request = null
+                    if (!current()) return
+                    target.request = null
+                    if (target.refreshAfterRead) {
+                        target.refreshAfterRead = false
+                        if (target.consumers > 0) void get().readManagement(targetId, nodeId)
+                    }
                 })
             return target.request
         },

@@ -260,7 +260,12 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
         let token = ++nextStatusRead
         put(nodeId, { revision: undefined })
         try {
-            const status = await window.pairApi.engines.switchStatus({ nodeId })
+            const [status] = await Promise.all([
+                window.pairApi.engines.switchStatus({ nodeId }),
+                useConnectionStore.getState().selfId === nodeId
+                    ? Promise.resolve()
+                    : useNodeConfigurationStore.getState().readManagement(nodeId, nodeId, true)
+            ])
             if (!current(nodeId, watch, generation) || watch.read !== read) return false
             put(nodeId, {
                 revision: status.configurationRevision || undefined,

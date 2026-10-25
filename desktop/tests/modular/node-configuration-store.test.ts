@@ -7,6 +7,7 @@ import type { ClusterInitialSnapshot } from '@/shared/types/bootstrap'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type { IClusterApi } from '@/ui/api/pair-api'
 import { getPairTransport } from '@/ui/api/bootstrap'
+import { createEngineApi } from '@/ui/api/engine-api'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import {
     useNodeConfigurationStore,
@@ -92,6 +93,7 @@ beforeEach(() => {
     connected = true
     vi.mocked(getPairTransport).mockReturnValue(transport)
     read.mockReset().mockResolvedValue(capability('allowed'))
+    vi.mocked(transport.invoke).mockReset().mockResolvedValue(null)
     vi.stubGlobal('window', {
         pairApi: {
             cluster: {
@@ -115,6 +117,60 @@ afterEach(() => {
 })
 
 describe('shared target management capability', () => {
+    const staleStates: RemoteManagementCapability['state'][] = ['unreviewed', 'denied']
+    it.each(staleStates)(
+        'rereads an open %s permission after a successful remote management command',
+        async state => {
+            read.mockResolvedValueOnce(capability(state))
+            cleanups.push(watchNodeManagement('peer', 'peer'))
+            await store().readManagement('peer', 'peer')
+            expect(store().management.get('peer')?.state).toBe(state)
+
+            createEngineApi(transport).toggle('ollama', 'peer')
+
+            await vi.waitFor(() => expect(store().management.get('peer')?.state).toBe('allowed'))
+            expect(read).toHaveBeenCalledTimes(2)
+            expect(connects.size).toBe(1)
+        }
+    )
+
+    it('does not refresh permission after a failed management command or create an unwatched target', async () => {
+        read.mockResolvedValue(capability('denied'))
+        cleanups.push(watchNodeManagement('peer', 'peer'))
+        await store().readManagement('peer', 'peer')
+        vi.mocked(transport.invoke).mockRejectedValueOnce(new Error('Remote management denied'))
+        const api = createEngineApi(transport)
+        api.toggle('ollama', 'peer')
+        await Promise.resolve()
+        await Promise.resolve()
+        api.toggle('ollama', 'unwatched')
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(read).toHaveBeenCalledTimes(1)
+        expect(store().management.get('peer')?.state).toBe('denied')
+        expect(store().management.has('unwatched')).toBe(false)
+    })
+
+    it('coalesces mutations during an older read into one fresh capability read', async () => {
+        const old = deferred<RemoteManagementCapability>()
+        read.mockReturnValueOnce(old.promise)
+        cleanups.push(watchNodeManagement('peer', 'peer'))
+        const initial = store().readManagement('peer', 'peer')
+        const api = createEngineApi(transport)
+        api.toggle('ollama', 'peer')
+        api.toggle('llama-cpp', 'peer')
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(read).toHaveBeenCalledTimes(1)
+
+        old.resolve(capability('unreviewed'))
+        await initial
+        await store().readManagement('peer', 'peer')
+
+        expect(read).toHaveBeenCalledTimes(2)
+        expect(store().management.get('peer')?.state).toBe('allowed')
+    })
+
     it('fences an old capability after same-UUID removal and readmission', async () => {
         const cluster = useClusterInvitationsStore.getState()
         const snapshot = clusterSnapshot()

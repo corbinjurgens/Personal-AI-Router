@@ -5,13 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SwitchChanged, SwitchReceipt, SwitchRequest } from '@/shared/types/engine-switch'
 import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
 import type { NodePolicyDocument } from '@/shared/types/node-policy'
-import type { INodePolicyApi } from '@/ui/api/pair-api'
+import type { IClusterApi, INodePolicyApi } from '@/ui/api/pair-api'
 import { createEngineApi } from '@/ui/api/engine-api'
 import { serviceTransport } from '@/ui/api/service-transport'
 import { useEngineSwitchStore, watchEngineSwitch } from '@/ui/stores/engine-switch.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
-import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
+import {
+    useNodeConfigurationStore,
+    watchNodeManagement
+} from '@/ui/stores/node-configuration.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { emptyEngineStatus } from '@/shared/utils/engines'
 import { parseEngineSwitchStatus } from '@/electron/service-bridge/engine-switch'
@@ -135,6 +138,78 @@ afterEach(async () => {
 })
 
 describe('node-scoped engine switch store', () => {
+    it('Refresh waits for a fresh permission read after an older pre-grant read', async () => {
+        useConnectionStore.setState({ selfId: 'controller' })
+        const older = deferred<Awaited<ReturnType<IClusterApi['getRemoteManagementForNode']>>>()
+        const granted = deferred<Awaited<ReturnType<IClusterApi['getRemoteManagementForNode']>>>()
+        const read = vi
+            .fn<IClusterApi['getRemoteManagementForNode']>()
+            .mockReturnValueOnce(older.promise)
+            .mockReturnValueOnce(granted.promise)
+        vi.stubGlobal('window', {
+            pairApi: { ...window.pairApi, cluster: { getRemoteManagementForNode: read } }
+        })
+        stops.push(watchNodeManagement('node-a', 'node-a'))
+        await flush()
+        invoke.mockResolvedValue({ success: true, data: { configurationRevision: revision } })
+        stops.push(watchEngineSwitch('node-a'))
+        let completed = false
+        const refresh = store
+            .getState()
+            .refresh('node-a')
+            .then(result => {
+                completed = true
+                return result
+            })
+        older.resolve({ version: 1, state: 'unreviewed', allowed: false, revision: '5' })
+        await flush()
+        expect(read).toHaveBeenCalledTimes(2)
+        expect(completed).toBe(false)
+
+        granted.resolve({ version: 1, state: 'allowed', allowed: true, revision: '6' })
+
+        expect(await refresh).toBe(true)
+        expect(useNodeConfigurationStore.getState().management.get('node-a')).toMatchObject({
+            state: 'allowed',
+            revision: '6'
+        })
+    })
+
+    it('refreshes a permission granted while connected without a denial receipt or reconnect', async () => {
+        useConnectionStore.setState({ selfId: 'controller' })
+        const read = vi.fn<IClusterApi['getRemoteManagementForNode']>().mockResolvedValue({
+            version: 1,
+            state: 'unreviewed',
+            allowed: false,
+            revision: '5'
+        })
+        vi.stubGlobal('window', {
+            pairApi: {
+                ...window.pairApi,
+                cluster: { getRemoteManagementForNode: read }
+            }
+        })
+        stops.push(watchNodeManagement('node-a', 'node-a'))
+        await useNodeConfigurationStore.getState().readManagement('node-a', 'node-a')
+        await idle()
+        expect(useNodeConfigurationStore.getState().management.get('node-a')?.state).toBe(
+            'unreviewed'
+        )
+        read.mockResolvedValue({ version: 1, state: 'allowed', allowed: true, revision: '6' })
+        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
+
+        expect(await store.getState().refresh('node-a')).toBe(true)
+
+        expect(useNodeConfigurationStore.getState().management.get('node-a')).toMatchObject({
+            state: 'allowed',
+            revision: '6'
+        })
+        expect(useConnectionStore.getState().connected).toBe(true)
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
+            0
+        )
+    })
+
     it('reads fresh policy for a retained veto receipt without resubmitting the switch', async () => {
         readPolicy.mockResolvedValue({
             policy: JSON.stringify({ availability: 'paused', pausedBy: 'peer' }),
@@ -434,7 +509,8 @@ describe('node-scoped engine switch store', () => {
         })
         await submit
         expect(store.getState().entries['node-a'].unknown).toBe(false)
-        expect(permission).toHaveBeenCalledTimes(2)
+        // Initial/remounted status refresh and submit's refresh now also read permission.
+        expect(permission).toHaveBeenCalledTimes(5)
         expect(store.getState().entries['node-a'].refused).toContain('refused before acceptance')
         expect(store.getState().entries['node-a'].request).toBe(original)
         expect(store.getState().reserved('node-a', 'ollama')).toBe(false)
