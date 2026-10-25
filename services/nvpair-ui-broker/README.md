@@ -5,6 +5,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+Model identifiers must be nonempty valid UTF-8, at most 512 UTF-8 bytes, with
+no C0 (U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F) characters. New
+policy writes enforce this rule atomically. Only disk loading uses
+`nodepolicy.ParseStored`: it removes invalid model entries and repairs their
+dependent references in memory while preserving valid siblings, revision,
+availability, budgets and explicit empty served permission. It neither rewrites
+the file nor advances its revision. Unrelated malformed policies retain the
+existing conservative recovery behavior. Peer updates and activation remain
+strict; model filtering adds no public method or payload field.
+
 Resident reconciliation runs on the broker's Serve-owned idle/event loop. A
 policy save persists the declaration and activates it without waiting for a
 model load. Local and paired `policy:get`, `policy:set`, and `policy:changed`
@@ -1030,8 +1040,9 @@ Cancellation of an existing key requires no new byte grant
 and remains available when the root is full; its entry is released only on final
 cleanup. Partially drained proxy registry/index map backing stays funded until
 discarded and is reused by insertions; empty workload-index backing is released
-independently of live canonical owners. There is no separate live-entry count cap. These methods currently have
-no desktop consumer.
+independently of live canonical owners. There is no separate live-entry count cap.
+The desktop service bridge validates and relays `routing:cancel` and
+`routing:active` through their existing typed IPC API contracts.
 
 #### `discovery:get-node-info`
 
@@ -1105,7 +1116,7 @@ Field-by-field:
 | `trusted` | bool | whether this node is a paired cluster peer (the daemon holds a pin for its `cluster-uuid`); false for non-cluster/unknown nodes. |
 | `clustered` | bool | whether this node belongs to some cluster (it advertises a `cluster-uuid`), independent of whether we're paired with it (`trusted`). A client uses it to suppress a cluster invite that an already-clustered peer would reject. Omitted (false) for standalone/unknown nodes. |
 | `models` | string[] | the node's available model names, enriched by the daemon from the node's engine-manager `em` endpoint (`GET /v1/models`). Omitted when the node advertises no engine-manager or no engine is running. |
-| `modelsByEngine` | object | the same models attributed to the engine that serves each (keyed by engine name, e.g. `ollama` / `lmstudio`). Additive alongside the flat `models` union. A present engine key with `[]` means its inventory was successfully queried and is empty; a missing key means it was not running/queryable. Omitted when no engine inventory was successfully reported. |
+| `modelsByEngine` | object | models attributed to their serving engine (e.g. `ollama` / `lmstudio`), alongside the flat `models` union. Absent or null means unknown attribution and retains the existing legacy flat fallback. Any present map is authoritative: outer `{}` suppresses flat fallback even when `models` contains valid names; an engine key with `[]` is an observed empty inventory; populated keys retain their models and valid sibling engines. A missing engine key in a present map supplies no models for that engine. Nil attribution is omitted; a nonnil empty map stays present. |
 | `loadedByEngine` | object | the models currently **loaded in memory** for each engine (normally a subset of `modelsByEngine`), keyed by engine name. Enriched from the peer's `loadedByEngine`. An engine key with an empty list means "running, nothing loaded"; a missing key means loaded state wasn't reported. Omitted when no engine reports loaded state. |
 | `policy` | object | the node's own policy advertisement, enriched from the same `GET /v1/models` fetch: `revision` (its persisted policy revision), `roles` (tier name to `{engine, model, contextTokens?, capabilities?}`) and `pausedBy?` (`local` or `peer`). Omitted when the node publishes none (an older peer, or before its broker's first push), which means the node declares nothing. |
 

@@ -103,14 +103,15 @@ func manualToEnriched(s manualNodeStatus) EnrichedNode {
 // manualModelsByEngine builds the per-engine attribution for a manual node from
 // the per-engine lists the prober already collected, keyed by the same
 // engine-manager engine names discovered nodes use ("ollama", "lmstudio") so the
-// two discovery sources present ModelsByEngine identically. An engine with no
-// models adds no key; returns nil when neither engine reports any.
+// two discovery sources present ModelsByEngine identically. A nonnil list adds
+// the observed engine even when empty; nil means its inventory is unknown.
+// Returns nil when neither engine reports an inventory.
 func manualModelsByEngine(s manualNodeStatus) map[string][]string {
 	byEngine := map[string][]string{}
-	if len(s.OllamaModels) > 0 {
+	if s.OllamaModels != nil {
 		byEngine["ollama"] = s.OllamaModels
 	}
-	if len(s.LMStudioModels) > 0 {
+	if s.LMStudioModels != nil {
 		byEngine["lmstudio"] = s.LMStudioModels
 	}
 	if len(byEngine) == 0 {

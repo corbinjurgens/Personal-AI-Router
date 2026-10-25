@@ -12,6 +12,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"nvpair-shared/nodepolicy"
 )
 
 type jsonMember struct {
@@ -27,7 +29,7 @@ const maxRequestIdentifierBytes = 256
 type requestIdentifierError struct{}
 
 func (*requestIdentifierError) Error() string {
-	return "model or tier alias exceeds 256 decoded UTF-8 bytes"
+	return "invalid model identifier"
 }
 func (*requestIdentifierError) HTTPStatus() int { return http.StatusBadRequest }
 
@@ -48,13 +50,16 @@ func validateBodyModelIdentifier(body []byte) error {
 	if !ownedJSONValid(body) {
 		return nil
 	}
-	tooLong := false
+	invalid := false
 	visitObject(body, func(key []byte, start, end int) {
-		if jsonKeyEqual(key, "model", true) && end > start && body[start] == '"' && requestJSONStringTooLong(body[start:end]) {
-			tooLong = true
+		if (jsonKeyEqual(key, "model", true) || jsonKeyEqual(key, "name", true)) && end > start && body[start] == '"' {
+			raw := body[start:end]
+			if requestJSONStringTooLong(raw) || nodepolicy.ValidateModelIdentifierJSON(raw) != nil {
+				invalid = true
+			}
 		}
 	})
-	if tooLong {
+	if invalid {
 		return &requestIdentifierError{}
 	}
 	return nil

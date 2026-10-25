@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"nvpair-shared/cors"
+	"nvpair-shared/nodepolicy"
 )
 
 var modelListClient = &http.Client{
@@ -151,6 +152,26 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 			}
 			items := make([]modelListItem, 0, len(*models))
 			for _, raw := range *models {
+				if !isJSONObject(raw) {
+					results[i].err = fmt.Errorf("invalid model record")
+					return
+				}
+				invalid, hasIdentity := false, false
+				visitObject(raw, func(field []byte, start, end int) {
+					if (openAI && jsonKeyEqual(field, "id", true)) || (!openAI && (jsonKeyEqual(field, "model", true) || jsonKeyEqual(field, "name", true))) {
+						hasIdentity = true
+					}
+					if (jsonKeyEqual(field, "id", true) || jsonKeyEqual(field, "model", true) || jsonKeyEqual(field, "name", true)) && nodepolicy.ValidateModelIdentifierJSON(raw[start:end]) != nil {
+						invalid = true
+					}
+				})
+				if !hasIdentity {
+					results[i].err = fmt.Errorf("model record has no identity")
+					return
+				}
+				if invalid {
+					continue
+				}
 				var identity struct {
 					ID     string `json:"id"`
 					Model  string `json:"model"`
@@ -167,11 +188,13 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 					if key == "" {
 						key = identity.Name
 					}
+					if nodepolicy.ValidateModelIdentifier(key) != nil {
+						continue
+					}
 					key = f.profile.normalizeModel(key)
 				}
-				if key == "" {
-					results[i].err = fmt.Errorf("model record has no identity")
-					return
+				if nodepolicy.ValidateModelIdentifier(key) != nil {
+					continue
 				}
 				items = append(items, modelListItem{key: key, digest: identity.Digest, raw: raw})
 			}

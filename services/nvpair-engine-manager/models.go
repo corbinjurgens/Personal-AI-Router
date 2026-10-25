@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -185,7 +186,8 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 				run := e.engineRunID(name)
 				listRaw, listErr = e.Action(ctx, name, "list_models", nil)
 				if listErr != nil {
-					slog.Debug("engine:models list_models failed", "engine", name, "err", listErr)
+					category, status := inventoryFailureCategory(listErr)
+					slog.Debug("engine:models list_models failed", "engine", name, "action", "list_models", "category", category, "status", status)
 				} else if models, ok := extractStringsResult(listRaw, listSpec); ok {
 					perEngine[i] = models
 					listOK[i] = true
@@ -203,7 +205,8 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 				}
 				if err != nil {
 					loadedTransportFailed = true
-					slog.Debug("engine:models loaded_models failed", "engine", name, "err", err)
+					category, status := inventoryFailureCategory(err)
+					slog.Debug("engine:models loaded_models failed", "engine", name, "action", "loaded_models", "category", category, "status", status)
 				} else if models, ok := extractStringsResult(raw, loadedSpec); ok {
 					loadedRaw[i] = raw
 					// A successful query — even an empty result — records the key
@@ -277,6 +280,17 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 	return res
 }
 
+// Inventory failures can retain response bodies, credentials or transport URLs.
+// Classify without formatting arbitrary errors; the action's public error stays
+// unchanged. Zero status means no HTTP response status was available.
+func inventoryFailureCategory(err error) (string, int) {
+	var response *ActionHTTPError
+	if errors.As(err, &response) {
+		return "http-status", response.StatusCode
+	}
+	return "action-failed", 0
+}
+
 // extractStrings is the value-only wrapper used by focused extractor tests.
 // Callers that must distinguish a valid empty inventory from an invalid
 // response use extractStringsResult.
@@ -293,8 +307,9 @@ func extractStrings(raw json.RawMessage, spec *ActionResult) []string {
 // empty inventory. A missing, null, or wrong-typed array is unknown and returns
 // ok=false so callers do not label it authoritative empty. Malformed rows
 // inside a valid array are skipped, preserving additive response compatibility. For an
-// unfiltered inventory, however, a non-empty array with no usable names is
-// malformed rather than authoritative empty.
+// unfiltered inventory, however, a non-empty array with no string fields is
+// malformed rather than authoritative empty. Strings rejected by identifier
+// validation are filtered entries, so an all-rejected list is known-empty.
 func extractStringsResult(raw json.RawMessage, spec *ActionResult) ([]string, bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -309,6 +324,7 @@ func extractStringsResult(raw json.RawMessage, spec *ActionResult) ([]string, bo
 		return nil, false
 	}
 	out := make([]string, 0)
+	haveString := false
 	for _, el := range arr {
 		if spec.Match != nil && !matchRow(el, spec.Match) {
 			continue
@@ -318,11 +334,15 @@ func extractStringsResult(raw json.RawMessage, spec *ActionResult) ([]string, bo
 			continue
 		}
 		var s string
-		if err := json.Unmarshal(fv, &s); err == nil && s != "" {
+		if err := json.Unmarshal(fv, &s); err == nil && !bytes.Equal(bytes.TrimSpace(fv), []byte("null")) {
+			haveString = true
+			if nodepolicy.ValidateModelIdentifierJSON(fv) != nil {
+				continue
+			}
 			out = append(out, s)
 		}
 	}
-	if spec.Match == nil && len(arr) > 0 && len(out) == 0 {
+	if spec.Match == nil && len(arr) > 0 && !haveString {
 		return nil, false
 	}
 	return out, true
@@ -401,7 +421,17 @@ func (e *Executor) cachedInventory() map[string][]string {
 	defer e.inventoryMu.Unlock()
 	out := make(map[string][]string, len(e.inventory))
 	for name, models := range e.inventory {
-		out[name] = models
+		out[name] = validModelIdentifiers(models)
+	}
+	return out
+}
+
+func validModelIdentifiers(models []string) []string {
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		if nodepolicy.ValidateModelIdentifier(model) == nil {
+			out = append(out, model)
+		}
 	}
 	return out
 }

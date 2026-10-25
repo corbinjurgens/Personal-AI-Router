@@ -108,10 +108,10 @@ interface ModularNode {
     // When present it is authoritative — {@link toEngineModels} attributes each
     // model to the engine that actually serves it, so a dual-engine node no
     // longer blanks its cards. A present engine key with [] is known empty; an
-    // empty object means no successful attribution (or a peer that predates
-    // per-engine attribution) and falls back to {@link models}. Mirrors
+    // empty object is authoritative empty attribution. Only absent/null input
+    // becomes undefined and retains the legacy flat fallback. Mirrors
     // noderec.DirectoryNode.EngineModels.
-    modelsByEngine: Record<string, string[]>
+    modelsByEngine: Record<string, string[]> | undefined
     // Per-engine set of models currently loaded in memory, keyed by
     // engine-manager engine name ("ollama", "lmstudio", "llamacpp"), carried on
     // `AvailableNode.loadedByEngine`. Normally a subset of
@@ -213,18 +213,19 @@ function stringArrayValue(value: JsonValue | undefined): string[] {
 
 /**
  * Parse the broker `AvailableNode.modelsByEngine` map (engine name -> model
- * names). A missing/malformed field yields `{}`, which {@link modelsForEngine}
- * treats as "no attribution" and falls back to the flat union. Keyed by
- * engine-manager engine name ("ollama", "lmstudio").
+ * names). Absent/null input retains unknown attribution; a present empty or
+ * malformed value cannot authorize flat fallback. Loaded inventory callers
+ * keep their existing empty-map default. Keyed by engine-manager engine name.
  */
-function parseModelsByEngine(value: JsonValue | undefined): Record<string, string[]> {
+function parseModelsByEngine(value: JsonValue | undefined): Record<string, string[]> | undefined {
+    if (value === undefined || value === null) return undefined
     const obj = objectValue(value)
     if (!obj) return {}
-    const out: Record<string, string[]> = {}
-    for (const [engine, list] of Object.entries(obj)) {
-        out[engine] = stringArrayValue(list)
-    }
-    return out
+    // Engine IDs are data keys, including names inherited by ordinary objects.
+    // fromEntries defines own members faithfully, including __proto__.
+    return Object.fromEntries(
+        Object.entries(obj).map(([engine, list]) => [engine, stringArrayValue(list)])
+    )
 }
 
 /**
@@ -245,7 +246,8 @@ function optionalStringArrayValue(value: JsonValue | undefined): string[] | unde
  * `loadedByEngine`), whose keys use the engine-manager's spelling.
  */
 function loadedNamesForEngine(node: ModularNode | undefined, engineType: EngineType): Set<string> {
-    return new Set(node?.loadedByEngine[engineManagerName(engineType)] ?? [])
+    const engine = engineManagerName(engineType)
+    return new Set(node && Object.hasOwn(node.loadedByEngine, engine) ? node.loadedByEngine[engine] : [])
 }
 
 function sameStringList(left: string[], right: string[]): boolean {
@@ -606,7 +608,7 @@ function parseProxyNode(params: JsonValue | undefined, engine: ProxyEngine): Mod
         // moved it off the mDNS TXT to the broker's `AvailableNode.models`); a
         // proxy-sourced node contributes engine presence only, never models.
         models: [],
-        modelsByEngine: {},
+        modelsByEngine: undefined,
         // A proxy `node/*` event carries no loaded-model state either; the
         // broker-enriched value is preserved across the proxy merge (see mergeNode).
         loadedByEngine: {},
@@ -672,15 +674,14 @@ function parseBrokerNode(params: JsonValue | undefined): ModularNode | null {
         // retired. `omitempty` on the wire — absent when the node runs no engines.
         models: stringArrayValue(obj.models),
         // Broker `AvailableNode.modelsByEngine`: the same list attributed per
-        // engine. `omitempty` on the wire — an empty object (no engines, or a
-        // peer that predates per-engine attribution) drives the
-        // {@link modelsForEngine} fallback to the flat union.
+        // engine. Nil attribution is omitted; a nonnil empty map remains {}
+        // and suppresses the legacy flat fallback in {@link modelsForEngine}.
         modelsByEngine: parseModelsByEngine(obj.modelsByEngine),
         // Broker `AvailableNode.loadedByEngine`: the per-engine set of models
         // loaded in memory, enriched from the peer's engine-manager
         // `/v1/models`. `omitempty` on the wire — absent for a peer that reports
         // no loaded state, which stamps every model `idle`.
-        loadedByEngine: parseModelsByEngine(obj.loadedByEngine),
+        loadedByEngine: parseModelsByEngine(obj.loadedByEngine) ?? {},
         // Broker `AvailableNode.policy`: `omitempty` on the wire, absent until
         // the node's broker has published one.
         policy: parsePolicyAdvertisement(obj.policy),
@@ -752,13 +753,14 @@ function sameNode(left: ModularNode, right: ModularNode): boolean {
  * {@link sameStringList} on `models` or a card would miss the re-attribution.
  */
 function sameModelsByEngine(
-    left: Record<string, string[]>,
-    right: Record<string, string[]>
+    left: Record<string, string[]> | undefined,
+    right: Record<string, string[]> | undefined
 ): boolean {
+    if (left === undefined || right === undefined) return left === right
     const leftKeys = Object.keys(left)
     if (leftKeys.length !== Object.keys(right).length) return false
     for (const key of leftKeys) {
-        if (!(key in right) || !sameStringList(left[key], right[key])) return false
+        if (!Object.hasOwn(right, key) || !sameStringList(left[key], right[key])) return false
     }
     return true
 }

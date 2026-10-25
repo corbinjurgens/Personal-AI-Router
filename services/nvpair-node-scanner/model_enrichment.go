@@ -134,10 +134,10 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 		return modelInventory{}, false
 	}
 	var body struct {
-		Models         []string            `json:"models"`
-		ModelsByEngine map[string][]string `json:"modelsByEngine"`
-		LoadedByEngine map[string][]string `json:"loadedByEngine"`
-		Policy         json.RawMessage     `json:"policy"`
+		Models         []json.RawMessage            `json:"models"`
+		ModelsByEngine map[string][]json.RawMessage `json:"modelsByEngine"`
+		LoadedByEngine map[string][]json.RawMessage `json:"loadedByEngine"`
+		Policy         json.RawMessage              `json:"policy"`
 	}
 	decoder := json.NewDecoder(resp.Body)
 	if err := decoder.Decode(&body); err != nil {
@@ -145,6 +145,18 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
+		return modelInventory{}, false
+	}
+	models, err := decodeInventoryModelNames(body.Models)
+	if err != nil {
+		return modelInventory{}, false
+	}
+	byEngine, err := decodeInventoryEngineModels(body.ModelsByEngine)
+	if err != nil {
+		return modelInventory{}, false
+	}
+	loadedByEngine, err := decodeInventoryEngineModels(body.LoadedByEngine)
+	if err != nil {
 		return modelInventory{}, false
 	}
 	// Decoder errors can quote the peer's field names, so only a fixed
@@ -160,7 +172,44 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 	if !current() {
 		return modelInventory{}, false
 	}
-	return modelInventory{models: body.Models, byEngine: body.ModelsByEngine, loadedByEngine: body.LoadedByEngine, policy: policy}, true
+	return modelInventory{models: models, byEngine: byEngine, loadedByEngine: loadedByEngine, policy: policy}, true
+}
+
+// Keep model tokens raw until the shared validator has seen their original
+// encoding. A typed string decoder alone would repair malformed UTF-8. Invalid
+// identifiers are removed individually; unrelated type errors still fail the
+// document, retaining the caller's last-good inventory.
+func decodeInventoryModelNames(raw []json.RawMessage) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	models := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		valid := nodepolicy.ValidateModelIdentifierJSON(entry) == nil
+		var model string
+		if err := json.Unmarshal(entry, &model); err != nil {
+			return nil, err
+		}
+		if valid {
+			models = append(models, model)
+		}
+	}
+	return models, nil
+}
+
+func decodeInventoryEngineModels(raw map[string][]json.RawMessage) (map[string][]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	models := make(map[string][]string, len(raw))
+	for engine, entries := range raw {
+		clean, err := decodeInventoryModelNames(entries)
+		if err != nil {
+			return nil, err
+		}
+		models[engine] = clean
+	}
+	return models, nil
 }
 
 // decodeInventoryPolicy reads the policy object of a /v1/models document; nil

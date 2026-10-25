@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
 
 const (
@@ -218,6 +219,21 @@ type modelActionRequest struct {
 	Model  string `json:"model"`
 }
 
+func (p *modelActionRequest) UnmarshalJSON(data []byte) error {
+	// Supplied tokens must be checked before typed decoding; absent models
+	// retain the callers' structural engine/model checks before any effects.
+	if err := validateModelRequest(data, false); err != nil {
+		return err
+	}
+	type request modelActionRequest
+	var next request
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	*p = modelActionRequest(next)
+	return nil
+}
+
 // ModelLoad warms a model into engine memory through the engine's load binding.
 func (e *Executor) ModelLoad(ctx context.Context, engine, model string) (json.RawMessage, error) {
 	return e.modelOperation(ctx, engine, engines.OperationLoad, model)
@@ -243,8 +259,8 @@ func (e *Executor) modelOperation(ctx context.Context, engine, op, model string)
 
 // modelOperationCall resolves an operation to the action and params to run.
 func (e *Executor) modelOperationCall(engine, op, model string) (string, json.RawMessage, error) {
-	if model == "" {
-		return "", nil, fmt.Errorf("model is required")
+	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
+		return "", nil, err
 	}
 	m, ok := e.reg.Get(engine)
 	if !ok {
@@ -259,6 +275,67 @@ func (e *Executor) modelOperationCall(engine, op, model string) (string, json.Ra
 		return "", nil, err
 	}
 	return b.Action, params, nil
+}
+
+// A cold identifier refusal must not enter the pull-failure reporting pipeline.
+type modelIdentifierRefusal struct{ error }
+
+// validateActionModelParams checks only operation-owned identifiers, never
+// arbitrary action content. Conventional names identify model actions, but do
+// not declare a required HTTP body/query schema. Required keys come from
+// explicit bindings or actual template/resolver/progress consumers.
+// Validate JSON before decoding can repair UTF-8.
+// Bound keys use the exact spelling dispatch consumes. Common model aliases are
+// case-insensitive, but cannot satisfy a differently spelled required key.
+func (m *Manifest) validateActionModelParams(action string, params json.RawMessage, requireBound bool) error {
+	keys := map[string]bool{}
+	modelAction := action == pullModelAction
+	for _, op := range engines.Operations() {
+		if binding, ok := m.operationBinding(op); ok && binding.Action == action {
+			modelAction = true
+			if _, declared := m.Operations[op]; declared {
+				keys[binding.modelParam()] = true
+			}
+		}
+	}
+	act := m.Actions[action]
+	if act.ModelResolution != "" || act.ProgressProtocol != "" || templatesParam(act.Cmd, defaultModelParam) ||
+		(act.RemovePath != nil && templatesParam([]string{act.RemovePath.Root, act.RemovePath.Path}, defaultModelParam)) {
+		keys[defaultModelParam] = true
+		modelAction = true
+	}
+	if modelAction && (templatesParam(act.Cmd, "name") ||
+		(act.RemovePath != nil && templatesParam([]string{act.RemovePath.Root, act.RemovePath.Path}, "name"))) {
+		keys["name"] = true
+	}
+	if !modelAction {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if len(params) != 0 && json.Unmarshal(params, &fields) != nil {
+		return &modelIdentifierRefusal{fmt.Errorf("model parameters must be a JSON object")}
+	}
+	for field, raw := range fields {
+		_, bound := keys[field]
+		common := strings.EqualFold(field, "name") || strings.EqualFold(field, "model")
+		if !bound && !common {
+			continue
+		}
+		if err := nodepolicy.ValidateModelIdentifierJSON(raw); err != nil {
+			return &modelIdentifierRefusal{err}
+		}
+		if bound {
+			keys[field] = false
+		}
+	}
+	if requireBound {
+		for _, missing := range keys {
+			if missing {
+				return &modelIdentifierRefusal{nodepolicy.ValidateModelIdentifierJSON(nil)}
+			}
+		}
+	}
+	return nil
 }
 
 // pullParams is the pull_model params for a pull that names only a model.
@@ -312,4 +389,26 @@ func (m *Manager) runModelOperation(ctx context.Context, msg *Message) {
 	}
 	m.exec.pokeLoaded()
 	m.codec.Respond(msg.ID, res)
+}
+
+// Typed model requests keep their existing shape; inspect the original field
+// as well so malformed UTF-8 cannot become a selectable replacement character.
+func validateModelRequest(params json.RawMessage, required bool) error {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(params, &fields) != nil {
+		return fmt.Errorf("model parameters must be a JSON object")
+	}
+	present := false
+	for field, raw := range fields {
+		if strings.EqualFold(field, "model") {
+			present = true
+			if err := nodepolicy.ValidateModelIdentifierJSON(raw); err != nil {
+				return err
+			}
+		}
+	}
+	if required && !present {
+		return nodepolicy.ValidateModelIdentifierJSON(nil)
+	}
+	return nil
 }

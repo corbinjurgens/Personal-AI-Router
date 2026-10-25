@@ -310,6 +310,29 @@ func peerServicesEnrichmentClaim(t *testing.T, f *scannerReverseFixture) noderec
 		}}}
 }
 
+func TestPeerServicesDirectEnrichmentUsesOwnedLogicalAddress(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	f.direct.Store(true)
+	claim := peerServicesEnrichmentClaim(t, f)
+	if !f.d.acceptPeerServices(claim) {
+		t.Fatal("authenticated claim rejected")
+	}
+	waitPeerServicesCondition(t, "direct logical-address enrichment", func() bool {
+		f.d.peerServicesMu.Lock()
+		busy := f.d.peerServicesEnriching["peer"]
+		f.d.peerServicesMu.Unlock()
+		return !busy
+	})
+	node := peerServicesNode(t, f.d)
+	if node.IP != "192.0.2.40" || node.ClusterUUID != "peer" || !node.Trusted || len(node.GPUs) != 1 || node.GPUs[0].Name != "reverse GPU" || !reflect.DeepEqual(node.Models, []string{"model"}) {
+		t.Fatalf("direct authenticated enrichment = %+v", node)
+	}
+	if f.directDials.Load() != 2 || f.directInfo.Load() != 1 || f.directModels.Load() != 1 || f.reverseInfo.Load() != 0 || f.reverseModels.Load() != 0 {
+		t.Fatalf("logical direct route: dials=%d ni=%d em=%d reverse=%d/%d, want 2/1/1/0/0",
+			f.directDials.Load(), f.directInfo.Load(), f.directModels.Load(), f.reverseInfo.Load(), f.reverseModels.Load())
+	}
+}
+
 func waitPeerServicesCondition(t *testing.T, description string, condition func() bool) {
 	t.Helper()
 	deadline := time.After(5 * time.Second)

@@ -5,6 +5,23 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-node-scanner
 
+Model enrichment accepts only nonempty valid UTF-8 identifiers of at most 512
+UTF-8 bytes, with no C0 (U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F)
+characters. Flat, per-engine and loaded model lists are filtered entry by entry
+before cache/directory updates; raw model tokens are checked before JSON string
+decoding can replace malformed UTF-8. Valid siblings retain their order and
+engine attribution. A successful all-invalid list replaces last-good data with
+an empty list; malformed documents and failed fetches retain last-good data.
+Policy advertisements reuse the shared raw model-entry filter, including its
+explicit empty served permission and opaque unsupported-capability behavior.
+
+New policy writes remain strict. Only the broker's stored-policy loader removes
+invalid old model entries and dependent references in memory, without changing
+the stored file, revision or surviving policy. No identifier is trimmed,
+truncated or replaced by a fallback name to pass validation. Ordinary Unicode,
+spaces, tags and slashes keep their existing meaning; public methods and
+payload fields are unchanged.
+
 **The consolidated discovery daemon.** Promoted from a plain node-info browser: it is now the single place this host advertises itself on and discovers the LAN through. Every other service registers its port with this daemon instead of advertising its own mDNS service, and consumers query/subscribe to it instead of browsing themselves.
 
 Concretely, the daemon:

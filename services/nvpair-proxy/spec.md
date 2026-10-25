@@ -11,6 +11,22 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 1. Purpose
 
+### Model identifiers
+
+Accepted model metadata is nonempty valid UTF-8, at most 512 UTF-8 bytes, with
+no C0 (U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F) characters. The
+shared `nodepolicy` validator checks original identifiers before normalization
+and selectable normalized results afterward. Identifiers are never truncated
+or repaired into fallback names; ordinary Unicode, spaces, tags and slashes
+retain their existing meaning. Request identifiers keep the stricter 256-byte
+ingress cap. A short tier alias can select a valid 512-byte concrete model.
+
+Invalid inventory/catalog entries are skipped individually. New policy writes
+are rejected atomically; only the broker's stored-policy loader sanitizes old
+invalid model entries and their dependent references in memory, preserving
+valid siblings and explicit deny-all permissions without rewriting the file or
+advancing its revision. These rules add no routing method or payload field.
+
 ### Local execution observations (T2)
 
 Each actual engine-facing inference attempt may emit one `performance:sample`
@@ -198,15 +214,45 @@ digest and model content digests. It is decoded strictly, validated, answered
 previous identity kept. The capability is derived from the active policy, that
 identity and the qualification registry read once at start from the `appdir`
 artifact `local-qualification.json` (absent: empty; invalid: empty and logged).
+The accepted artifact schema integer is `2`: every entry requires non-null
+`shapes` with boolean `tools`, an array `structuredOutput` of distinct
+`json_object`/`json_schema` names, and boolean `reasoningReplay`. Replay is
+currently unsupported, so `reasoningReplay` must be `false`; `true` rejects the
+document. Missing/partial/null declarations, wrong types, unknown fields or modes,
+repeated keys/modes and unsupported versions reject the whole artifact. Version-1
+operator evidence needs explicit requalification against current identities,
+defaults, tokenizer/template, shapes and measured bounds, not a version-number
+edit or automatic migration. Shipped synthetic fixtures qualify no real target;
+they do not establish that operators have no evidence.
+
 A profile with `qualification {id, revision}` installs its normalized model only
 when the registry entry exists for the same engine and model, its
 `launchDigests` and `modelDigests` contain the identity's launch digest and the
 model's digest (looked up under every name normalizing to it; disagreeing names
 give none), the profile's `requestOptions` equal the qualified ones, its
 `contextTokens` and `maxOutputTokens` do not exceed the qualified ones, and the
-effective concurrency is finite. Two profiles normalizing to one model install
+effective concurrency is finite. Capability coverage fails closed: `tools`
+requires `shapes.tools:true`, `structured` requires both JSON modes, and vision,
+embeddings or unknown capabilities refuse installation. Empty capabilities add
+no shape requirement; one-mode evidence can serve that mode without advertising
+the broad structured capability. Two profiles normalizing to one model install
 neither. The installed identity is `{engineRunId, settingsFingerprint,
-modelDigest}`.
+modelDigest}`. Coverage withdrawal uses the existing generation fence.
+
+For an NE identity with `serving`, readiness also requires the normalized model's
+valid, unambiguous content-bound envelope: qualification context/output must fit
+its per-slot/output ceilings, effective concurrency must fit slots, and profile
+memory must cover declared VRAM. RAM is a separate domain. A nil serving map
+retains the non-NE inventory/digest rules. NE owns content/config/template identity:
+`modelDigests` consumes its canonical `pair-serving-content-v1` manifest SHA-256
+over ordered artifact role, size and trusted full-file SHA-256; `launchDigests`
+consumes `pair-serving-launch-v1`, binding the pre-snapshot launch digest and
+approved prepared digest, excluding random generation directories. Existing
+artifact attestation provenance and explicit renewed verification/apply remain
+required; B adds no provenance acceptance field or alternate identity store.
+Changed content, launch inputs, declarations/envelopes or defaults invalidate
+stale evidence. Inventory digest absence alone does not permanently exclude an
+approved NE llama.cpp launch. See [identity and attestation](../../docs/local-qualification.mdx#ne-artifact-attestation).
 
 `serveStrictLocal` calls `qualifyStrict` before `AdmitStrict`: the model must be
 installed under the request's identity (else 503 `strict-admission`), and the
@@ -215,18 +261,61 @@ body is validated against the installed qualification (else 400
 `/v1/chat/completions` shape is supported: allowlisted top-level fields, text
 content, function tools, `json_object`/`json_schema` formats, no repeated or
 case-variant keys, nesting at most 64. The profile's `requestOptions` are merged
-in first and the effective body is what is accounted and forwarded; a request
-may not send a field outside the allowlist, so it cannot override a qualified
-default or the context length. One finite output bound is required
+as defaults for absent fields. Incoming keys and every post-merge effective key
+are checked; defaults cannot inject unknown keys or context overrides.
+`reasoning_effort` and `parallel_tool_calls` are refused whenever present,
+including null, false and defaults-injected values. The effective body is what
+is accounted and forwarded, preserving accepted fields except the sole
+validated no-op removal below. One finite output bound is required
 (`max_tokens`/`max_completion_tokens`, equal if both) and may not exceed the
 lower of the profile's and the qualification's ceilings. The input bound is
 computed by the qualification's accounting method (`utf8-bytes`: request,
 message, tool and schema overheads plus the UTF-8 bytes of role, name, tool call
 id and text and of the compact tool call, tool, tool choice and schema JSON; the
-qualified context is at most 2^24 tokens); input plus
-output must not exceed the profile's context. `AdmitStrict` takes the
-generation `qualifyStrict` validated against and refuses a model reinstalled
+qualified context is at most 2^24 tokens); string choices contribute decoded
+UTF-8 bytes, object choices compact JSON bytes. `json_object` charges schema
+overhead; `json_schema` also charges its name, description and compact schema.
+Input plus output must fit the smaller profile/qualification context.
+`AdmitStrict` takes the generation `qualifyStrict` validated against and refuses a model reinstalled
 since. All of this happens before any wake, unload, slot or inference.
+
+Present tools must be a non-null array; omitted tools and `tools:[]` have no
+active definitions and zero definition overhead. Choice omitted/`none`/`auto`
+permits either; `required` and named choices require nonempty definitions and
+tools evidence. Named functions may omit `parameters`; supplied parameters must
+be an object. Definitions, assistant calls and tool-role history require tools
+evidence, including history with empty/omitted definitions. Assistant null content
+still requires nonempty calls. Null tool arrays, calls, choices, supplied
+parameters and formats, malformed members and new shapes are refused. JSON
+modes are independent evidence entries; omission/text grants no
+JSON mode and needs none. Nested decode failures retain generic diagnostics such
+as `unsupported shape`, not a specialized policy denial for every malformed
+member. Existing non-shape scalar, sampling, streaming and output rules remain.
+
+PAIR accepts `store:false` as a no-op, removes it before forwarding, and applies no accounting charge; `store:true` is explicitly refused because PAIR does not store requests. Omitting `store` preserves existing behavior.
+
+Both raw and merged store values are validated with normal defaults precedence;
+null and non-boolean values are refused. This local exception does not add
+`store` to the public-account adapter's allowlist. Pinned OpenCode 2.0.32 generic
+provider lowering emits false by default; `compatibility.supportsStore:false`
+was a pre-fix workaround, not a requirement after Task 7. The historical 2.0.32
+and 2.1.1 inventories, immutable native-source links, configuration conditions and
+synthetic examples are in [Pinned OpenCode compatibility](../../docs/local-qualification.mdx#pinned-opencode-compatibility);
+they make no installed-2.1.4 claim.
+
+Both inventoried releases automatically replay present assistant
+`reasoning_content`, with no established client replay-off switch. Current local
+validation refuses that member, including empty strings/null and every role;
+replay is never silently stripped. Future assistant-only replay would require
+approved exact NE-bound content/launch/template/reasoning-format evidence,
+unchanged forwarding and UTF-8 accounting (empty string zero bytes) plus existing
+message/template overheads. Schema `2` does not enable that future contract.
+Unqualified local reasoning turns remain incompatible, and exact-template
+qualification cannot alone bypass the current unsupported implementation.
+The named `replay-with-tool-roundtrip-refused` and `empty-replay-refused` fixtures
+record refusal; synthetic native streaming response forwarding is not real
+provider/model or successful replay qualification. None of this activates provider
+egress or waives the common HTTP entry's existing permission/acceptance gates.
 
 Before forwarding to an engine, ingress and self dispatch strip every
 `X-PAIR-*` header (strict, admission wait/result and routing model/engine/node/tier
@@ -875,7 +964,8 @@ Delivery remains best effort if the client has disconnected or writes fail.
 The sink records continuation as unavailable. SC-b's qualified same-model
 continuation remains pending and must use this request owner and sink rather
 than introduce another dispatch or delivery owner. Destination ingress remains
-local-only and gains no workload/attempt owner or onward route; parsing a terminal marker
+local-only, with its own local request/attempt arbitration and response sink,
+but no origin registry key or onward route; parsing a terminal marker
 does not establish engine termination or release an uncertain strict hold.
 
 ### 5.3 Per-attempt cancellation
@@ -1266,7 +1356,7 @@ state in force. The broker re-sends policy state whenever the proxy starts; unti
 
 | Method | Params | Effect |
 | --- | --- | --- |
-| `node/set-policy` | the whole `Policy` | validated with `nodepolicy.Parse`; its `availability` field is ignored; its `revision` becomes the active revision, and a revision older than the active one is refused with the previous policy kept |
+| `node/set-policy` | private `{originNodeId, policy}` | the policy is validated with `nodepolicy.Parse`; `originNodeId` binds the process's origin identity; the policy's `availability` field is ignored; its `revision` becomes the active revision, and a revision older than the active one is refused with the previous policy kept |
 | `node/set-availability` | `{state, cancelActive?}` | `available`, `draining` or `paused`; `cancelActive` cancels every admitted execution on this node; it never changes the active revision (§12.1.1) |
 | `node/set-engine-drain` | `{engine, drain}` | refuse new work for one engine during a settings restart |
 | `node/set-residency` | `{loadedByEngine}` | the models loaded per engine on this node, normalized per engine |
@@ -1292,7 +1382,8 @@ never sees a revision without its policy, or the reverse. It starts with no
 revision, older than any.
 
 `node/set-policy` is the only request that activates a revision. It answers
-`{revision, runId}`: the revision applied, and `runId`, this process's run nonce
+`{originNodeId, revision, runId}`: the bound origin identity, the revision applied,
+and `runId`, this process's run nonce
 (the one stamped on workloads). A revision lower than the active one is out of
 order: the request is refused with `-32602` and the previous policy and
 revision stay. The same revision again is an idempotent replay.
@@ -2045,15 +2136,18 @@ uses `reserveChatAccount` before sending and independently calls `reconcile`,
   credential-reference change are activation gates; equivalent provider
   credentials under different references are outside the local guarantee.
 
-### 12.8 Strict Chat adapter library (E; inactive)
+### 12.8 Strict Chat adapter library (E; provider dispatch gated)
 
 `chat_adapter.go`, `api_transport.go` and `runChatAccountAttempt` in `accounts.go`
 provide a private single-attempt library behind G's `runPublicChatAttempt` wrapper
-(§12.9). No HTTP handler, listener or JSON-RPC method exposes the wrapper; no real
-provider qualification is supplied here.
+(§12.9). Public HTTP inference enters the accepted `facade.serveInference`
+common entry, including API selection and bounded diagnostic refusals. Its
+provider attempt path uses this wrapper subject to the production provider
+gate; no real provider qualification is supplied here.
 `remoteDispatchAvailable` in `shared/nodepolicy/routing.go` remains false:
 enabled deployments and remote/paid tier permissions are refused. This section
-does not change concrete engine routing or the unavailable API aliases.
+does not disable that common HTTP entry or concrete engine routing. Provider
+dispatch and its diagnostic refusal remain distinct from ingress acceptance.
 
 #### Request and qualification contract
 
@@ -2224,14 +2318,15 @@ needs acceptance. Synthetic profiles/tests prove library boundaries only and
 cannot enable providers, establish vendor-wide ceilings or close native/live
 acceptance. No default fake profile or activation path is supplied.
 
-### 12.9 Public egress lease and stable consumer (G; disabled)
+### 12.9 Public egress lease and stable consumer (G; provider dispatch disabled)
 
 `shared/nodepolicy/routing.go` owns the single `remoteDispatchAvailable=false`
 constant. Policy validation refuses enabled deployments and remote/paid tier
 permissions; G's early and final production gates read the same value through
 `PublicDispatchAvailable()`. No environment variable, flag, policy field, mutable
-test switch or alternate enable bit exists. Production public traffic remains
-zero even if private lease messages are acknowledged. Activation requires a later
+test switch or alternate enable bit exists. Production provider egress remains
+zero even if private lease messages are acknowledged; the accepted public HTTP
+common entry and its diagnostic responses remain available. Provider activation requires a later
 reviewed source change after F's real OpenCode qualification, D's native durability
 and recovery gates, B's finite qualification, I's complete ingress/attempt/cancel
 path and final acceptance evidence. Qualification never flips availability.

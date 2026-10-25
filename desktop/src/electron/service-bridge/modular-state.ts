@@ -1258,12 +1258,14 @@ class ModularBridgeState {
     private remoteEngineModels(node: ModularNode, engineType: EngineType): EngineModels {
         if (isProxyEngine(engineType)) return this.discoveryModelsForNode(node, engineType, node.id)
         const loaded = loadedNamesForEngine(node, engineType)
+        const engine = engineManagerName(engineType)
+        const models = node.modelsByEngine !== undefined && Object.hasOwn(node.modelsByEngine, engine)
+            ? node.modelsByEngine[engine]
+            : []
         return {
             engineType,
             nodeId: node.id,
-            models: (node.modelsByEngine[engineManagerName(engineType)] ?? []).map(name =>
-                modelItem(name, loaded.has(name))
-            )
+            models: models.map(name => modelItem(name, loaded.has(name)))
         }
     }
 
@@ -1621,13 +1623,14 @@ class ModularBridgeState {
      * noderec.DirectoryNode.EngineModels.
      */
     private modelsForEngine(node: ModularNode, engine: ProxyEngine): string[] {
-        // Per-engine attribution is authoritative when the node carries any:
+        // Per-engine attribution is authoritative whenever present, including {}:
         // return exactly this engine's models so a dual-engine node attributes
         // each model to the engine that serves it, and a missing key means this
         // engine serves none (NOT the cross-engine union). Mirrors
         // noderec.DirectoryNode.EngineModels.
-        if (Object.keys(node.modelsByEngine).length > 0) {
-            return node.modelsByEngine[engineManagerName(engine)] ?? []
+        if (node.modelsByEngine !== undefined) {
+            const managerEngine = engineManagerName(engine)
+            return Object.hasOwn(node.modelsByEngine, managerEngine) ? node.modelsByEngine[managerEngine] : []
         }
         // Fallback for a pre-attribution peer: the flat union is unattributed, so
         // attribute it only when exactly one proxy engine is active on the node,
@@ -2114,13 +2117,17 @@ class ModularBridgeState {
             const unionChanged = !sameStringList(existing.models, merged.models)
             for (const engine of PROXY_ENGINES) {
                 const managerEngine = engineManagerName(engine)
-                const hadEngine = managerEngine in existing.modelsByEngine
-                const hasEngine = managerEngine in merged.modelsByEngine
+                const hadEngine =
+                    existing.modelsByEngine !== undefined &&
+                    Object.hasOwn(existing.modelsByEngine, managerEngine)
+                const hasEngine =
+                    merged.modelsByEngine !== undefined && Object.hasOwn(merged.modelsByEngine, managerEngine)
                 const attributionChanged =
+                    (existing.modelsByEngine === undefined) !== (merged.modelsByEngine === undefined) ||
                     hadEngine !== hasEngine ||
                     !sameStringList(
-                        existing.modelsByEngine[managerEngine] ?? [],
-                        merged.modelsByEngine[managerEngine] ?? []
+                        hadEngine ? existing.modelsByEngine?.[managerEngine] ?? [] : [],
+                        hasEngine ? merged.modelsByEngine?.[managerEngine] ?? [] : []
                     )
                 // Proxy presence is not a lifecycle fact: the broker can keep
                 // serving engine-manager while this optional routing proxy is

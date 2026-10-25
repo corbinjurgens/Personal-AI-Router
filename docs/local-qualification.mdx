@@ -11,12 +11,15 @@ qualification evidence a node holds, how each strict request is checked against
 it, and the identity that keeps that evidence current. It builds on
 [Strict local admission](strict-local-admission.mdx).
 
-Hybrid inference is still disabled: no origin sends the strict envelope yet, and
-the `-local` and `-api` aliases are refused. No node ships with qualification
-evidence. Until an actual model has been qualified on its machine, the evidence
-file is absent, nothing is installed, and every strict request is refused. The
-synthetic fixture in `services/nvpair-proxy/testdata/local-qualification.json`
-qualifies nothing real.
+The unified HTTP listener uses the common inference lifecycle and qualified
+local/peer selection; engine facades retain their own alias-refusal rules.
+Provider API egress remains disabled by build availability and policy permission
+gates, so API-only aliases cannot fall back to local candidates. Qualification
+does not activate those paths or establish real-host acceptance. No qualification
+evidence ships with PAIR; operator-created evidence may exist and must satisfy
+the current contract. The synthetic fixtures in
+`services/nvpair-proxy/testdata/local-qualification.json` and
+`services/nvpair-proxy/testdata/opencode-shapes.json` qualify nothing real.
 
 ## Qualification evidence
 
@@ -29,13 +32,13 @@ fails validation is ignored as a whole and logged; nothing is qualified from it.
 {
   "version": 2,
   "qualifications": [{
-    "id": "msi-example",
+    "id": "synthetic-example",
     "revision": "1",
     "engine": "ollama",
     "model": "example:8b",
-    "modelDigests": ["<64 lowercase hex>"],
-    "launchDigests": ["<64 lowercase hex>"],
-    "requestOptions": {"options": {"num_ctx": 8192}},
+    "modelDigests": ["1111111111111111111111111111111111111111111111111111111111111111"],
+    "launchDigests": ["2222222222222222222222222222222222222222222222222222222222222222"],
+    "requestOptions": {"temperature": 0},
     "tokenizer": "example-byte-level-bpe",
     "chatTemplate": "example-template@sha256-prefix",
     "contextTokens": 8192,
@@ -53,13 +56,14 @@ fails validation is ignored as a whole and logged; nothing is qualified from it.
       "toolOverheadTokens": 32,
       "schemaOverheadTokens": 32
     },
-    "evidence": "Where and how the bounds and overheads were measured."
+    "evidence": "Synthetic example only; these digests and bounds qualify no real model, launch, tokenizer or template."
   }]
 }
 ```
 
 | Field | Meaning |
 | --- | --- |
+| `version` | Document schema integer `2`; older evidence is not migrated automatically. |
 | `id`, `revision` | Identity of this qualification. A profile names exactly one id and revision. |
 | `engine`, `model` | The engine and model; the model is compared after the engine's naming normalization. |
 | `modelDigests` | Content identities of the model the bounds hold for. Ollama uses its `/api/tags` digest; NE uses the aggregate artifact manifest digest described below. |
@@ -69,11 +73,21 @@ fails validation is ignored as a whole and logged; nothing is qualified from it.
 | `contextTokens` | The served context the bounds hold for, at most 16777216. Each overhead is below it. |
 | `maxOutputTokens` | The largest output a request may ask for; below `contextTokens`. |
 | `routes` | Request shapes covered. Only `/v1/chat/completions` is supported. |
+| `shapes.tools` | Required non-null boolean covering function definitions, requiring choices and tool history. `false` grants none of them. |
+| `shapes.structuredOutput` | Required non-null array of distinct `json_object` and/or `json_schema` names. Each mode requires its own evidence; `[]` grants neither. |
+| `shapes.reasoningReplay` | Required non-null boolean; currently must be `false`. `true` is refused while replay is unsupported. |
 | `accounting` | How input tokens are bounded (below). |
 | `evidence` | Nonsecret provenance of the measurement. |
 
-Unknown fields, an unsupported version, method or route, or a repeated id and
-revision reject the whole document.
+Unknown fields, repeated JSON keys, missing/null/partial shape declarations,
+wrong shape types, unknown or repeated JSON modes, an unsupported version,
+method or route, or a repeated id and revision reject the whole document.
+Version-1 evidence is rejected, with no compatibility fallback. Requalify
+explicitly against the current content, launch, defaults, tokenizer and template,
+record the measured shapes and bounds under schema `2`, and update the profile's
+qualification reference when its revision changes. Merely changing the version
+integer is not requalification. This applies to existing operator evidence too;
+the shipped fixtures establish no fleet-wide absence of evidence.
 
 ### Accounting
 
@@ -83,12 +97,23 @@ token covers at least one byte. The template's own tokens are covered by the
 declared overheads. For one request the input bound is the request overhead, plus
 for each message its overhead and the bytes of its role, name, tool call id and
 text content and the compact JSON of each of its tool calls, plus for each tool
-its overhead and the bytes of its compact JSON, plus the compact `tool_choice`,
+definition its overhead and the bytes of its compact JSON, plus the UTF-8 bytes
+of a string `tool_choice` or the compact JSON bytes of an object choice,
 plus, for a structured response, the schema overhead and the bytes of its name,
 description and compact schema. A qualification is valid only when its evidence
 shows the tokenizer is byte-level and the overheads cover the template's rendering
 of every allowed shape, including tools and schemas. An estimate such as bytes
 divided by four is never used.
+
+Empty `tools:[]` contributes zero definition overhead. `json_object` adds the
+schema overhead; `json_schema` also adds its name, description and compact schema
+bytes. Streaming/usage metadata adds no input charge. In the synthetic
+`empty-tools` fixture, request/message overheads are 8/4 and `user`/`hi` contribute
+4/2 bytes: `8 + 4 + 4 + 2 = 18`, with output 16 supplied by matching defaults.
+The `overlay-json-object` and `overlay-json-schema` fixtures independently bound
+those modes at 34 and 52 input tokens with those fixtures' schema overhead 16.
+These are fixture arithmetic, not measured overheads for the example above or a
+real template. Replay is refused and has no accepted input accounting today.
 
 ## Profiles
 
@@ -97,8 +122,8 @@ A model opts in through its profile in the node policy:
 ```json
 {"name": "example", "engine": "ollama", "model": "example:8b",
  "contextTokens": 8192, "maxOutputTokens": 2048, "maxConcurrent": 1,
- "qualification": {"id": "msi-example", "revision": "1"},
- "requestOptions": {"options": {"num_ctx": 8192}}}
+ "qualification": {"id": "synthetic-example", "revision": "1"},
+ "requestOptions": {"temperature": 0}}
 ```
 
 A profile with a qualification needs nonzero `contextTokens` and
@@ -123,6 +148,14 @@ all of the following hold:
 - the profile's `requestOptions` equal the qualified ones, and its `contextTokens`
   and `maxOutputTokens` do not exceed the qualified ones;
 - the model's effective concurrency is finite.
+
+Capability coverage also fails closed: a profile advertising `tools` requires
+`shapes.tools:true`; `structured` requires both JSON modes because that capability
+has no per-mode granularity. A profile declaring only one JSON mode may serve it
+without advertising the broad `structured` capability. Empty capabilities add no
+shape requirement. Vision, embeddings and unknown capabilities do not install
+through this text-only contract; missing coverage does not silently downgrade a
+profile.
 
 When the current identity includes a `serving` map, the normalized model must
 also have a valid envelope bound to that content digest. Missing envelopes,
@@ -149,19 +182,101 @@ Before any wake, unload, slot or inference, the destination:
 
 1. requires the model to be installed under exactly the identity the request
    names (otherwise 503 `strict-admission`);
-2. merges the profile's `requestOptions` into the body; the merged body is what is
-   checked and what the engine receives;
-3. rejects (400 `strict-qualification`) a body with a field outside the supported
-   shape, a repeated or letter-case variant key, an image or other non-text part,
-   or a request-level setting such as a context length, so a request cannot
-   override a qualified default;
+2. checks incoming keys and merges the profile's `requestOptions` as defaults
+   for absent fields, then checks every effective top-level key again, including
+   defaults-injected keys;
+3. rejects (400 `strict-qualification`) unsupported fields/shapes, repeated or
+   case-variant top-level keys, images or other non-text parts, and request-level
+   context overrides. `reasoning_effort` and `parallel_tool_calls` are refused
+   whenever present, including `null`, `false` and defaults-injected values;
 4. requires one finite output bound (`max_tokens` or `max_completion_tokens`,
    equal when both are sent), no larger than the profile's and the
    qualification's output ceilings;
-5. requires the input bound plus the output bound to fit the profile's served
-   context.
+5. requires the input bound plus the output bound to fit the smaller of the
+   profile's and qualification's contexts, then forwards the validated effective
+   body unchanged except for the explicit `store:false` removal below.
 
-Rejections name fields and bounds only, never request content.
+Policy denials name fields and bounds, never request content. Nested malformed
+members can retain generic diagnostics such as `unsupported shape`; there is no
+promise of a specialized shape-policy error for every decode failure. Existing
+text, sampling, streaming and output/default behavior remains subject to its
+existing validation; this shape contract is not a general scalar/null tightening.
+
+### Tools, JSON modes and replay
+
+Present `tools` must be a non-null array. Omission and `tools:[]` mean no active
+definitions and do not by themselves require tools evidence. An absent choice,
+`none` or `auto` permits omitted/empty definitions; `required` and a named function
+choice require both tools evidence and nonempty definitions. Function
+`parameters` is optional, but must be an object when supplied. Nonempty
+definitions, assistant `tool_calls` and tool-role history require `shapes.tools`.
+Qualified history needs no active definitions in that request. Assistant null
+content still requires nonempty tool calls; calls belong only to an assistant
+and `tool_call_id` only to a tool message. Null tool arrays, calls, choices and
+supplied parameters, malformed members and new shapes are refused.
+
+For example, this synthetic history-only request needs tools evidence despite
+having zero active-definition overhead:
+
+```json
+{"model":"fixture-model","messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"ok"}],"tools":[],"max_completion_tokens":16}
+```
+
+`response_format` omission or `{"type":"text"}` needs no JSON-mode evidence.
+`{"type":"json_object"}` requires exactly `json_object` coverage;
+`{"type":"json_schema","json_schema":{"name":"f","schema":{"type":"object"}}}`
+requires exactly `json_schema` coverage. Neither grants the other. Null, malformed
+or unsupported formats are refused.
+
+Schema `2` requires `reasoningReplay:false` and refuses `true`. Inbound
+`reasoning_content` is currently refused on every role, including assistant
+empty strings, nonempty strings and null. It is not stripped to make a request
+pass. Supporting replay would require a separately approved assistant-only,
+exact content/launch/template and reasoning-format qualification, unchanged
+forwarding, and UTF-8 byte accounting (empty string zero bytes) plus existing
+message/template overheads. That is a future qualification boundary, not current
+acceptance. Unqualified local reasoning models remain incompatible with replaying
+turns; exact-template evidence alone cannot enable an unsupported implementation.
+
+### Pinned OpenCode compatibility
+
+The accepted inventories recorded OpenCode CLI 2.0.32 at native release source
+`843a6c514e606b436a7fe713422ace0a93ad3d61` and 2.1.1 at
+`ba546ec1598a70db2570e9c6258028d955ba8f58`, using the native
+`@opencode/ai/providers/openai-compatible` path. These historical versions are
+not a statement about an installed 2.1.4 or the current effective configuration.
+The source-lock SDK devDependency is not the operative converter.
+
+PAIR accepts `store:false` as a no-op, removes it before forwarding, and applies no accounting charge; `store:true` is explicitly refused because PAIR does not store requests. Omitting `store` preserves existing behavior.
+
+Only JSON boolean false is accepted, on both incoming and merged bodies; null
+and every other type are refused. Normal defaults precedence applies before
+removal. OpenCode 2.0.32's pinned generic-provider
+[store detection](https://github.com/anomalyco/opencode/blob/843a6c514e606b436a7fe713422ace0a93ad3d61/packages/ai/src/protocols/openai-chat.ts#L717-L757)
+and [lowering](https://github.com/anomalyco/opencode/blob/843a6c514e606b436a7fe713422ace0a93ad3d61/packages/ai/src/protocols/openai-chat.ts#L787-L803)
+emit `store:false` by default. `compatibility.supportsStore:false` suppresses that
+emission as a pre-fix workaround; it is not required after PAIR's Task 7 fix.
+This local no-op does not extend the separate public-account adapter's fields.
+
+Both inventoried native releases automatically replay present unstructured
+reasoning as assistant `reasoning_content`, even with `requireReasoning:false`:
+[2.0.32 lowering](https://github.com/anomalyco/opencode/blob/843a6c514e606b436a7fe713422ace0a93ad3d61/packages/ai/src/protocols/openai-chat.ts#L412-L665),
+[2.1.1 lowering](https://github.com/anomalyco/opencode/blob/ba546ec1598a70db2570e9c6258028d955ba8f58/packages/ai/src/protocols/openai-chat.ts#L436-L498).
+There is no established client replay-off switch. Native
+[history lowering](https://github.com/anomalyco/opencode/blob/ba546ec1598a70db2570e9c6258028d955ba8f58/packages/ai/src/protocols/openai-chat.ts#L667-L807)
+also emits `tools:[]` for history without active definitions. Generic completion
+maxima and streaming usage depend on the selected provider/call and compatibility
+settings; an omitted maximum needs a qualified profile default. JSON-mode and
+snake-case parallel examples in the fixtures are raw-overlay regression cases,
+not claims of default native emission. Effort/parallel remain refused.
+
+These immutable source claims and retained extracted-converter fixtures establish
+construction only. Binary/source equivalence, effective runtime hooks/config,
+installed wire traffic, full provider HTTP/SSE execution and real local-template
+qualification remain unverified by this evidence. The synthetic
+`native-streaming-usage` path can forward reasoning response data, but its next
+assistant replay is refused; it does not prove working real-model multi-turn
+reasoning.
 
 ## Identity and freshness
 
@@ -352,5 +467,6 @@ allocation observation producer; its declaration alone cannot prove residency.
 - Termination evidence. Strict work still counts as uncertain after it finishes
   until reconciliation proves the engine stopped generating; releasing that
   capacity belongs to hybrid dispatch together with actual engine evidence.
-- Hybrid dispatch itself, which will call the role eligibility and send the
-  strict envelope.
+- The hybrid dispatch lifecycle beyond qualification, including its permission,
+  cancellation and real-host acceptance gates; see
+  [Hybrid routing](hybrid-routing.mdx).

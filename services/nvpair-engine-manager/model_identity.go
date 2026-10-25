@@ -23,6 +23,7 @@ import (
 	"sort"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
 
 // modelIdentityMethod is the notification carrying modelIdentityParams. The
@@ -121,7 +122,7 @@ func extractDigests(raw json.RawMessage, spec *ActionResult) map[string]string {
 	conflicting := map[string]bool{}
 	for _, row := range rows {
 		var name, digest string
-		if json.Unmarshal(row[spec.Field], &name) != nil || name == "" ||
+		if nodepolicy.ValidateModelIdentifierJSON(row[spec.Field]) != nil || json.Unmarshal(row[spec.Field], &name) != nil ||
 			json.Unmarshal(row[spec.Digest], &digest) != nil || !contentDigest.MatchString(digest) {
 			continue
 		}
@@ -173,7 +174,9 @@ func (e *Executor) modelIdentity() modelIdentityParams {
 		}
 		if observed, ok := digests[name]; !serving && ok && observed.runID == id.EngineRunID {
 			for model, digest := range observed.models {
-				id.ModelDigests[model] = digest
+				if nodepolicy.ValidateModelIdentifier(model) == nil {
+					id.ModelDigests[model] = digest
+				}
 			}
 		}
 		out.Engines[name] = id
