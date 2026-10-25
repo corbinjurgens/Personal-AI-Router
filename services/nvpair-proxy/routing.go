@@ -21,7 +21,29 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-type routingState string
+// Compact the existing I states without changing their transitions or text.
+// Zero still denotes the original empty/uninitialized state.
+type routingState uint8
+
+func (s routingState) String() string {
+	switch s {
+	case routingPrepared:
+		return "prepared"
+	case routingReserving:
+		return "reserving-admitting"
+	case routingPreSend:
+		return "pre-send"
+	case routingAwaitBody:
+		return "accepted-await-body"
+	case routingCommitted:
+		return "committed"
+	case routingEnding:
+		return "ending"
+	case routingTerminal:
+		return "terminal"
+	}
+	return ""
+}
 
 // Entry handlers attach the immutable request deadline for shared destination
 // preparation. It is metadata from the owner, not an active-stream deadline.
@@ -40,13 +62,13 @@ func inferencePreparationRefusal(err error) error {
 }
 
 const (
-	routingPrepared  routingState = "prepared"
-	routingReserving routingState = "reserving-admitting"
-	routingPreSend   routingState = "pre-send"
-	routingAwaitBody routingState = "accepted-await-body"
-	routingCommitted routingState = "committed"
-	routingEnding    routingState = "ending"
-	routingTerminal  routingState = "terminal"
+	routingPrepared routingState = iota + 1
+	routingReserving
+	routingPreSend
+	routingAwaitBody
+	routingCommitted
+	routingEnding
+	routingTerminal
 )
 
 // routingSpend is the sole request owner, including free local/peer dispatch.
@@ -61,19 +83,20 @@ func (r *routingSpend) transitionLocked(state routingState, reason string) {
 	r.state, r.reason = state, reason
 }
 
-func (r *routingSpend) newDispatchAttempt(ctx context.Context, cancel context.CancelFunc, nodeID string) (*publicAttemptLifecycle, error) {
+func (r *routingSpend) newDispatchAttempt(ctx context.Context, cancel context.CancelFunc, nodeID string, descriptor ...*routingDestinationDescriptor) (*publicAttemptLifecycle, error) {
 	if r == nil || ctx == nil || ctx.Err() != nil {
 		return nil, errRoutingSpend
 	}
+	started := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	a, err := r.newAttemptLocked()
+	a, err := r.newAttemptLocked(started, descriptor...)
 	if err != nil {
 		return nil, err
 	}
 	a.ctx, a.cancel, a.nodeID = ctx, cancel, nodeID
-	a.state, a.reason = routingReserving, "destination admission"
-	r.transitionLocked(a.state, a.reason)
+	a.state = routingReserving
+	r.transitionLocked(a.state, "destination admission")
 	return a, nil
 }
 
@@ -88,8 +111,8 @@ func (a *publicAttemptLifecycle) acceptResponse() bool {
 		return false
 	}
 	a.accepted = true
-	a.state, a.reason = routingAwaitBody, "accepted destination response"
-	r.transitionLocked(a.state, a.reason)
+	a.state = routingAwaitBody
+	r.transitionLocked(a.state, "accepted destination response")
 	return true
 }
 
@@ -104,7 +127,7 @@ func (a *publicAttemptLifecycle) commit() bool {
 		return false
 	}
 	if !a.committed && !r.deadline.IsZero() && !time.Now().Before(r.deadline) {
-		cancel, _, _ := r.cancelLocked(routingDeadlineReason)
+		cancel, _, _ := r.cancelLockedCause(routingDeadlineReason, factDeadline)
 		r.mu.Unlock()
 		if cancel != nil {
 			cancel()
@@ -112,8 +135,9 @@ func (a *publicAttemptLifecycle) commit() bool {
 		return false
 	}
 	a.committed, r.committed = true, true
-	a.state, a.reason = routingCommitted, "first accepted raw response byte"
-	r.transitionLocked(a.state, a.reason)
+	a.nativeFirstByteLocked()
+	a.state = routingCommitted
+	r.transitionLocked(a.state, "first accepted raw response byte")
 	stop := r.stopPreOutput
 	r.mu.Unlock()
 	if stop != nil {
@@ -131,10 +155,11 @@ func (a *publicAttemptLifecycle) expireFirstBody() bool {
 	var cancel context.CancelFunc
 	if r.active == a && !r.done && !r.cancelled && !a.aborted && a.terminal == nil {
 		if !committed && !r.deadline.IsZero() && !time.Now().Before(r.deadline) {
-			cancel, _, _ = r.cancelLocked(routingDeadlineReason)
+			cancel, _, _ = r.cancelLockedCause(routingDeadlineReason, factDeadline)
 		} else if !committed {
-			a.state, a.reason = routingEnding, errFirstBodyTimeout.Error()
-			r.transitionLocked(a.state, a.reason)
+			a.state = routingEnding
+			r.transitionLocked(a.state, errFirstBodyTimeout.Error())
+			a.observeAttemptLocked(routingAttemptResult{factAttemptFailed, factNoContent, 0, true})
 			// Body Close interrupts this failed upstream read. Cancelling its
 			// context would misclassify the failure as requester cancellation.
 		}
@@ -158,8 +183,9 @@ func (a *publicAttemptLifecycle) admitInterruption(reason string) bool {
 	if r.active != a || r.done || r.cancelled || !r.committed || a.aborted || a.terminal != nil || (a.ctx != nil && a.ctx.Err() != nil) {
 		return false
 	}
-	a.state, a.reason = routingEnding, reason
-	r.transitionLocked(a.state, a.reason)
+	a.state = routingEnding
+	r.transitionLocked(a.state, reason)
+	a.observeAttemptLocked(routingAttemptResult{factInterrupted, factStreamInterrupted, 0, true})
 	return true
 }
 
@@ -191,7 +217,7 @@ func (r *routingSpend) expireBeforeOutput() bool {
 		r.mu.Unlock()
 		return false
 	}
-	cancel, _, changed := r.cancelLocked(routingDeadlineReason)
+	cancel, _, changed := r.cancelLockedCause(routingDeadlineReason, factDeadline)
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -216,8 +242,9 @@ func (a *publicAttemptLifecycle) abandon() bool {
 		return false
 	}
 	a.aborted = true
-	a.state, a.reason = routingEnding, "destination left discovery"
-	r.transitionLocked(a.state, a.reason)
+	a.observeAttemptLocked(routingAttemptResult{factAttemptFailed, factTargetLeft, 0, true})
+	a.state = routingEnding
+	r.transitionLocked(a.state, "destination left discovery")
 	return true
 }
 
@@ -300,6 +327,7 @@ func (r *routingSpend) requestCancelled() bool {
 
 func (r *routingSpend) finish() {
 	r.mu.Lock()
+	r.foldCancellationLocked()
 	r.done = true
 	r.body = nil
 	if r.active != nil {
@@ -320,8 +348,12 @@ func (r *routingSpend) finish() {
 }
 
 func (r *routingSpend) cancelWithReason(reason string) bool {
+	return r.cancelWithCause(reason, factUnknown)
+}
+
+func (r *routingSpend) cancelWithCause(reason string, cause routingFactReason) bool {
 	r.mu.Lock()
-	cancel, callback, changed := r.cancelLocked(reason)
+	cancel, callback, changed := r.cancelLockedCause(reason, cause)
 	r.mu.Unlock()
 	if !changed {
 		return false
@@ -337,10 +369,15 @@ func (r *routingSpend) cancelWithReason(reason string) bool {
 
 // cancelLocked requires mu and records the cancellation before any callback.
 func (r *routingSpend) cancelLocked(reason string) (context.CancelFunc, func(string), bool) {
+	return r.cancelLockedCause(reason, factUnknown)
+}
+
+func (r *routingSpend) cancelLockedCause(reason string, cause routingFactReason) (context.CancelFunc, func(string), bool) {
 	if r.done || r.cancelled {
 		return nil, nil, false
 	}
 	r.cancelled = true
+	r.nativeCancelLocked(cause)
 	r.transitionLocked(routingEnding, reason)
 	var cancel context.CancelFunc
 	if r.active != nil {
@@ -360,8 +397,9 @@ func (r *routingSpend) abortLocalIf(expected *publicAttemptLifecycle) {
 	a := r.active
 	if a != nil && !r.committed && !a.aborted && a.terminal == nil {
 		a.aborted, a.redispatch = true, true
-		a.state, a.reason = routingEnding, "local availability withdrawn"
-		r.transitionLocked(a.state, a.reason)
+		a.observeAttemptLocked(routingAttemptResult{factRedispatched, factNodePaused, 0, true})
+		a.state = routingEnding
+		r.transitionLocked(a.state, "local availability withdrawn")
 		if r.excluded == nil {
 			r.excluded = map[string]bool{}
 		}
@@ -374,7 +412,7 @@ func (r *routingSpend) abortLocalIf(expected *publicAttemptLifecycle) {
 		return
 	}
 	r.mu.Unlock()
-	r.cancelWithReason("cancelled: this node stopped accepting work")
+	r.cancelWithCause("cancelled: this node stopped accepting work", factNodePaused)
 }
 
 // dispatch is the existing concrete inference retry loop, owned by this request.
@@ -553,6 +591,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	if tier != "" {
 		needs, err = parseRequestNeedsOwned(preparationCtx, bodyBytes, r.URL.Path)
 		if err != nil {
+			ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), bufferRequestStatus(err)})
 			writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
 			return
 		}
@@ -704,6 +743,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		candidates, held, err = f.reserveRoundPrepared(preparationCtx, candidates, tier != "", model, prepareCandidate, resolve)
 		if err != nil {
 			err = inferencePreparationRefusal(err)
+			ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), bufferRequestStatus(err)})
 			if r.Context().Err() == nil {
 				writeInferencePreparationError(w, err)
 			}
@@ -736,6 +776,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	// while public selection remains. They are offered inside the loop.
 	publicPending := policy.hybrid && policy.publicAllowed && tier != "" && p.accounts != nil
 	if len(candidates) == 0 && tier != "" && !publicPending {
+		ctl.observeIngress(routingIngressResult{factFailed, factNoOwner, http.StatusNotFound})
 		// Nothing anywhere can answer this tier for this request, which waiting
 		// will not change.
 		slog.Warn("proxy request rejected",
@@ -753,6 +794,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if len(candidates) == 0 && !publicPending {
+		ctl.observeIngress(routingIngressResult{factFailed, factNoOwner, http.StatusBadGateway})
 		rejectionBody := `{"error":"no active node selected or available"}`
 		rejectionError := "no active node"
 		if model != "" {
@@ -834,6 +876,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		}
 		key := workloadKey{engine: f.profile.Name, id: reqID}
 		if err := p.registerWorkload(requestOwner, key); err != nil {
+			ctl.observeIngress(routingIngressResult{factFailed, factUnknown, http.StatusServiceUnavailable})
 			writeIngressError(w, http.StatusServiceUnavailable, "request-unavailable", "routing request workload is unavailable")
 			return
 		}
@@ -932,6 +975,13 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	// first and the node is still counted as loaded while we report.
 	defer func() {
 		aborted := recover()
+		if ctl.sink != nil && currentAttempt != nil {
+			ctl.observeSink(currentAttempt, ctl.sink.nativeFact())
+			if aborted != nil {
+				currentAttempt.observeAttempt(routingAttemptResult{factInterrupted, factStreamInterrupted, 0, true})
+				ctl.observeIngress(routingIngressResult{factFailed, factStreamInterrupted, finalStatus})
+			}
+		}
 		// A managed copy ends with normal HTTP EOF even on protocol failure;
 		// its separate result, rather than the committed status, is decisive.
 		if committedStream != nil {
@@ -1132,7 +1182,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			if !ok {
 				continue
 			}
-			lifecycle, err := ctl.newAttempt()
+			lifecycle, err := ctl.newAttempt(destinationDescriptor(snapshot.deployment.Model, snapshot.deployment.ID, snapshot.account.ID, true))
 			if err != nil {
 				return false
 			}
@@ -1147,6 +1197,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			committed := ctl.committed
 			ctl.mu.Unlock()
 			if err == nil || committed {
+				if err != nil {
+					ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), http.StatusOK})
+				}
 				// Output reached the client: this attempt is the answer even if
 				// it then failed, and nothing else may write a response.
 				servedNodeID, finalStatus = entry.Deployment, http.StatusOK
@@ -1203,6 +1256,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				round, err = takeHeld(resolve())
 				if err != nil {
 					respondedWithError = true
+					ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), bufferRequestStatus(err)})
 					finalStatus = bufferRequestStatus(err)
 					proxyErr = "inference request preparation failed"
 					if r.Context().Err() == nil {
@@ -1226,6 +1280,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					break
 				}
 				if policy.hybrid && len(round) == 0 && len(resolve()) == 0 {
+					ctl.observeIngress(routingIngressResult{factFailed, factNoOwner, http.StatusNotFound})
 					// No local candidate remains and every public one is spent:
 					// the tier has no eligible model, as the first check says.
 					respondedWithError = true
@@ -1239,6 +1294,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// This node refused its own candidate for a reason no backoff will
 			// change, and nothing else can take the request: answer now.
 			if selfRejection != "" && len(resolve()) == 0 {
+				ctl.observeIngress(routingIngressResult{factFailed, admissionFactReason(selfRejection), http.StatusServiceUnavailable})
 				respondedWithError = true
 				finalStatus = http.StatusServiceUnavailable
 				proxyErr = "admission rejected: " + string(selfRejection)
@@ -1254,6 +1310,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				round, err = takeHeld(round)
 				if err != nil {
 					respondedWithError = true
+					ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), bufferRequestStatus(err)})
 					finalStatus = bufferRequestStatus(err)
 					proxyErr = "inference request preparation failed"
 					if r.Context().Err() == nil {
@@ -1268,6 +1325,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				// left. Waiting for an owner would only run out the deadline on
 				// a node this request may not use.
 				if selfRejection != "" {
+					ctl.observeIngress(routingIngressResult{factFailed, admissionFactReason(selfRejection), http.StatusServiceUnavailable})
 					respondedWithError = true
 					finalStatus = http.StatusServiceUnavailable
 					proxyErr = "admission rejected: " + string(selfRejection)
@@ -1316,7 +1374,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// classification both read r.Context(), the parent, so cancelling a
 		// child cannot be mistaken for the client going away.
 		attemptCtx, cancelAttempt := context.WithCancel(r.Context())
-		att, err := ctl.newDispatchAttempt(attemptCtx, cancelAttempt, cand.id)
+		att, err := ctl.newDispatchAttempt(attemptCtx, cancelAttempt, cand.id, destinationDescriptor(candModel, cand.id, candEngine, false))
 		if err != nil {
 			cancelAttempt()
 			break
@@ -1330,6 +1388,8 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		}
 		preparationFailed := func(err error) {
 			err = inferencePreparationRefusal(err)
+			att.observeAttempt(routingAttemptResult{factRejected, failureFactReason(err), 0, true})
+			ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), bufferRequestStatus(err)})
 			cancelAttempt()
 			att.finished(publicAttemptTerminal{})
 			respondedWithError = true
@@ -1371,6 +1431,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// serveStrictLocal admits a peer's: the body is qualified first,
 			// then AdmitStrict spends the remaining queue and cold allowances.
 			var refusal error
+			refusalCause := factReasonNone
 			if m, ok := strictFor[hybridCandidateKey(cand)]; !ok {
 				refusal = errStrictUnavailable
 			} else if req, ok := strictRequestFor(m, 0); !ok {
@@ -1397,11 +1458,17 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				performanceWait = time.Since(admissionStarted)
 				u, ok := candFacade.localBackendTarget()
 				if !ok {
+					refusalCause = factEngineNotRunning
 					refusal = errStrictUnavailable
 				}
 				target = u
 			}
 			if refusal != nil {
+				if refusalCause == factReasonNone {
+					refusalCause = failureFactReason(refusal)
+				}
+				att.observeAdmission(time.Since(admissionStarted))
+				att.observeAttempt(routingAttemptResult{factRejected, refusalCause, 0, true})
 				finishStrict()
 				cancelAttempt()
 				att.finished(publicAttemptTerminal{})
@@ -1412,6 +1479,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				respondedWithError = true
 				servedNodeID, servedTarget = cand.id, cand.url.Host
 				finalStatus = writeStrictSelfRefusal(w, refusal)
+				ctl.observeIngress(routingIngressResult{factFailed, refusalCause, finalStatus})
 				break
 			}
 		} else if cand.self {
@@ -1427,6 +1495,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					prepare:           prepare,
 				})
 			}()
+			att.observeAdmission(time.Since(admissionStarted))
 			rejectSelf := func(errText string, answer func()) bool {
 				cancelAttempt()
 				att.finished(publicAttemptTerminal{})
@@ -1458,6 +1527,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				continue
 			}
 			if decision.reject != "" {
+				att.observeAttempt(routingAttemptResult{factRejected, admissionFactReason(decision.reject), 0, true})
 				if decision.reject == nodepolicy.RejectBusy && len(round) == 1 {
 					// With no alternative, queue slices must not spend the
 					// failover budget. The job deadline still ends the wait.
@@ -1465,6 +1535,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					last = false
 				}
 				if rejectSelf("admission rejected: "+string(decision.reject), func() {
+					ctl.observeIngress(routingIngressResult{factFailed, admissionFactReason(decision.reject), http.StatusServiceUnavailable})
 					writeAdmissionRejection(w, decision.reject)
 				}) {
 					break
@@ -1485,8 +1556,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				// it came up on.
 				u, ok := candFacade.localBackendTarget()
 				if !ok {
+					att.observeAttempt(routingAttemptResult{factRejected, factEngineNotRunning, 0, true})
 					att.ticket.release()
 					if rejectSelf("local engine is not running", func() {
+						ctl.observeIngress(routingIngressResult{factFailed, factEngineNotRunning, http.StatusServiceUnavailable})
 						writeIngressError(w, http.StatusServiceUnavailable, "no-local-backend",
 							"no local inference backend is available on this node")
 					}) {
@@ -1496,6 +1569,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				}
 				target = u
 			}
+		}
+		if cand.self && policy.hybrid {
+			att.observeAdmission(time.Since(admissionStarted))
 		}
 		rebasePrepared(attemptCtx)
 		attemptCtx = preparedCtx
@@ -1607,6 +1683,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				}
 			}
 			if header == "" {
+				att.observeAttempt(routingAttemptResult{factRejected, factUnknown, 0, true})
 				cancelAttempt()
 				att.finished(publicAttemptTerminal{})
 				proxyErr = "strict admission request unavailable"
@@ -1616,6 +1693,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				respondedWithError = true
 				servedNodeID, servedTarget = cand.id, target.Host
 				finalStatus = writeStrictSelfRefusal(w, errStrictUnavailable)
+				ctl.observeIngress(routingIngressResult{factFailed, factUnknown, finalStatus})
 				break
 			}
 			attemptReq.Header.Set(nodepolicy.StrictAdmissionHeader, header)
@@ -1638,6 +1716,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// The engine is marked dirty before any inference byte is sent;
 			// from here a release is uncertain until reconciliation.
 			if err := strictHeld.BeforeStrictDispatch(); err != nil {
+				att.observeAttempt(routingAttemptResult{factRejected, failureFactReason(err), 0, true})
 				finishStrict()
 				cancelAttempt()
 				att.finished(publicAttemptTerminal{})
@@ -1648,6 +1727,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				respondedWithError = true
 				servedNodeID, servedTarget = cand.id, target.Host
 				finalStatus = writeStrictSelfRefusal(w, err)
+				ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), finalStatus})
 				break
 			}
 			strictEvidence = strictUncertain
@@ -1671,6 +1751,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// have arrived but before the body streams. That's both the retry
 			// decision point and, on commit, the time-to-first-byte boundary.
 			ModifyResponse: func(resp *http.Response) error {
+				att.observeStatus(resp.StatusCode)
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					att.observeAttempt(routingAttemptResult{factRejected, factUpstreamStatus, resp.StatusCode, true})
+				}
 				metadata := resp.Header.Values(peerStreamFramingHeader)
 				resp.Header.Del(peerStreamFramingHeader)
 				retryBusy = len(round) == 1 && resp.StatusCode == http.StatusServiceUnavailable &&
@@ -1681,10 +1765,14 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					retry = true
 					return retrySignal{}
 				}
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					ctl.observeIngress(routingIngressResult{factFailed, factUpstreamStatus, resp.StatusCode})
+				}
 				if cand.peerUUID != "" && streamRequest.protocol != streamProtocolUnknown && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 					var err error
 					streamRequest, err = streamRequest.withPeerMetadata(metadata)
 					if err != nil {
+						att.observeAttempt(routingAttemptResult{factAttemptFailed, factPeerFraming, resp.StatusCode, true})
 						return err // existing attempt failure path; never commit body bytes
 					}
 				}
@@ -1728,6 +1816,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 						resp.ContentLength = -1
 						clearOriginStreamIntegrity(resp.Header)
 					} else {
+						att.observeAttempt(routingAttemptResult{factAttemptFailed, factNoContent, resp.StatusCode, true})
 						proxyErr = err.Error()
 						if !last {
 							retry = true
@@ -1758,6 +1847,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 						return retrySignal{}
 					}
 					proxyErr = errTargetGone.Error()
+					att.observeAttempt(routingAttemptResult{factAttemptFailed, factTargetLeft, 0, true})
 					if !last {
 						retry = true
 						slog.Warn("proxy target left discovery as the response committed, failing over",
@@ -1878,6 +1968,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					return // retryable status — the loop advances to the next candidate
 				}
 				if ctl.deadlineExpired() {
+					ctl.observeIngress(routingIngressResult{factFailed, factDeadline, http.StatusServiceUnavailable})
 					respondedWithError = true
 					servedNodeID, servedTarget = cand.id, target.Host
 					proxyErr = routingDeadlineReason
@@ -1894,6 +1985,21 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					retry = true
 					return
 				}
+				cause := factTransport
+				var framing *peerFramingMetadataError
+				if stderrors.As(err, &framing) {
+					cause = factPeerFraming
+				}
+				if stderrors.Is(err, errFirstBodyTimeout) {
+					cause = factNoContent
+				}
+				if stderrors.Is(err, errTargetGone) {
+					cause = factTargetLeft
+				}
+				if stderrors.Is(err, clustertrust.ErrPeerSlotOccupied) {
+					cause = factUnknown
+				}
+				att.observeAttempt(routingAttemptResult{factAttemptFailed, cause, 0, true})
 				// Transport/dial error (not a status-based retry): forget this
 				// node's confirmed address so the next request re-confirms and
 				// can fail over to another of its published addresses
@@ -1928,6 +2034,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				if stderrors.Is(err, errFirstBodyTimeout) {
 					status = http.StatusGatewayTimeout
 				}
+				ctl.observeIngress(routingIngressResult{factFailed, cause, status})
 				writeProxyError(ew, status, []string{"upstream error: ", proxyErr}, nil, false)
 			},
 		}
@@ -1941,6 +2048,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					_ = sc.upstreamBody.Close()
 				}
 				performance.finish(sc, returned)
+				if ctl.sink != nil && !retry {
+					ctl.observeSink(att, ctl.sink.nativeFact())
+				}
 			}()
 			proxy.ServeHTTP(sc, attemptReq)
 			if !retry && sc.wroteErr == nil {
@@ -2000,14 +2110,19 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// five dispatches; or the deadline passed with the candidate set empty,
 		// which is the wait for an owner to come back.
 		reason := "no node advertising the requested model became available before the retry deadline"
+		cause := factNoOwner
 		switch {
 		case regenExhausted:
+			cause = factRegenerateExhausted
 			reason = "no other eligible node remained after the previous one was excluded"
 		case dispatches >= maxDispatches:
+			cause = factAttemptsExhausted
 			reason = "every dispatch attempt failed"
 		case len(round) > 0:
+			cause = factDeadline
 			reason = "the retry deadline passed while dispatch attempts were still failing"
 		}
+		ctl.observeIngress(routingIngressResult{factFailed, cause, http.StatusServiceUnavailable})
 		proxyErr = reason
 		finalStatus = http.StatusServiceUnavailable
 		slog.Warn("proxy request exhausted its retry budget",

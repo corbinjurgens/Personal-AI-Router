@@ -86,8 +86,9 @@ type accountLedger struct {
 	lock  *os.File // held from a successful open until the process ends
 	state ledgerState
 	// nonce and nextAttempt allocate attempt IDs: nonce is fresh per open.
-	nonce       string
-	nextAttempt uint64
+	nonce              string
+	nextAttempt        uint64
+	observationVersion uint64
 
 	// broken latches for the process lifetime once a restrictive transition
 	// could not be recorded: the durable state no longer says what memory
@@ -545,9 +546,9 @@ var errChatConfiguration = errors.New("qualified Chat configuration refused")
 var errChatRateLimit = errors.New("qualified Chat account cooling down")
 var errChatTransient = errors.New("qualified Chat attempt failed")
 
-func (l *accountLedger) reserveChatAccountAllowance(expected chatAccountSnapshot, input, output, remaining int64) (accountReservation, error) {
+func (l *accountLedger) reserveChatAccountAllowance(expected chatAccountSnapshot, input, output, remaining int64, observer ...*publicAttemptLifecycle) (reservation accountReservation, finalErr error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	defer func() { l.transferObservationLocked(reservation.Hold.Attempt, expected.account.ID, finalErr, observer) }()
 	current, err := l.chatAccountLocked(expected.deployment.ID)
 	if err != nil || !reflect.DeepEqual(current, expected) {
 		return accountReservation{Durability: accountReserveNone}, errChatAttempt
@@ -623,6 +624,7 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	}
 	ref, err := nodepolicy.ParseCredentialRef(string(snapshot.account.Credential))
 	if err != nil {
+		lifecycle.observeAccount(accountAttemptObservation{version: 1, flags: factHeldKnown | factChargeKnown, state: factAccountBadCredential, reason: factAccountCredential, refused: true})
 		return result, errChatCredential
 	}
 	target := chatTarget{Protocol: d.Protocol, Endpoint: d.Endpoint, Model: d.Model, Qualification: *d.Qualification,
@@ -651,12 +653,15 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	stopPreparation()
 	key, ok := resolve(ref)
 	if !ok || key == "" || strings.ContainsFunc(key, unicode.IsControl) {
+		// This typed refusal precedes D reservation and ends this attempt, so
+		// no later ledger observation can share its initial source version.
+		lifecycle.observeAccount(accountAttemptObservation{version: 1, flags: factHeldKnown | factChargeKnown, state: factAccountBadCredential, reason: factAccountCredential, refused: true})
 		return result, errChatCredential
 	}
 	if ctx.Err() != nil {
 		return result, errChatAttempt
 	}
-	reservation, err := ledger.reserveChatAccountAllowance(snapshot, prepared.Input, prepared.Output, remaining)
+	reservation, err := ledger.reserveChatAccountAllowance(snapshot, prepared.Input, prepared.Output, remaining, lifecycle)
 	associationErr := lifecycle.associated(reservation)
 	if err != nil || associationErr != nil {
 		return result, errChatAccounting
@@ -692,10 +697,15 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	}
 	outcome, retryAfter := outcomeTransient, time.Duration(0)
 	if attemptErr != nil {
+		lifecycle.observeAttempt(routingAttemptResult{factAttemptFailed, factTransport, 0, true})
 		attemptErr = errChatTransient
 	}
 	// Observed restrictive statuses remain authoritative if body handling fails.
 	if response != nil {
+		lifecycle.observeStatus(response.Status)
+		if response.Status != http.StatusOK {
+			lifecycle.observeAttempt(routingAttemptResult{factRejected, factUpstreamStatus, response.Status, true})
+		}
 		switch response.Status {
 		case http.StatusOK:
 			if attemptErr != nil {
@@ -716,7 +726,7 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 				// completion can fail. Raw transport observation alone commits.
 				cancelled := ctx.Err() != nil || lifecycle.request.requestCancelled()
 				if sink.result().WriteError != nil {
-					lifecycle.request.cancelWithReason("client connection lost")
+					lifecycle.request.cancelWithCause("client connection lost", factClientGone)
 					cancelled = true
 				}
 				if attemptErr != nil && !cancelled && lifecycle.requestCommitted() {
@@ -729,7 +739,7 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 						protocol = streamProtocolSSE
 					}
 					if deliveryErr := sink.interrupt(protocol, reason); deliveryErr != nil {
-						lifecycle.request.cancelWithReason("client connection lost")
+						lifecycle.request.cancelWithCause("client connection lost", factClientGone)
 						cancelled = true
 					}
 				}
@@ -741,6 +751,7 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 				}
 				sink.streamResult(streamFrameResult{Outcome: outcome})
 				terminal.Delivered = sink.result().DeliveryComplete
+				lifecycle.request.observeSink(lifecycle, sink.nativeFact())
 			}
 			if attemptErr == nil {
 				outcome = outcomeOK
@@ -760,20 +771,20 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 		}
 	}
 	// Independent completions must still be attempted after a sibling fails.
-	outcomeErr := ledger.recordOutcome(hold.Attempt, outcome, retryAfter, time.Time{})
+	outcomeErr := ledger.recordOutcome(hold.Attempt, outcome, retryAfter, time.Time{}, lifecycle)
 	var moneyErr, qualificationErr error
 	if result.Complete && (attemptErr == nil || errors.Is(attemptErr, errChatBound)) {
-		moneyErr = ledger.reconcile(hold.Attempt, result.Usage)
+		moneyErr = ledger.reconcile(hold.Attempt, result.Usage, lifecycle)
 	}
 	switch {
 	case errors.Is(attemptErr, errChatIdentity):
-		qualificationErr = ledger.quarantine(hold.Attempt)
+		qualificationErr = ledger.quarantine(hold.Attempt, lifecycle)
 	case result.AboveBound:
 		// reconcile atomically freezes and classifies the immutable identity.
 	case errors.Is(attemptErr, errChatBudget):
 		// Resource refusal prevented classification; leave it unfinished.
 	default:
-		qualificationErr = ledger.recordQualification(hold.Attempt)
+		qualificationErr = ledger.recordQualification(hold.Attempt, lifecycle)
 	}
 	if outcomeErr != nil || (moneyErr != nil && !errors.Is(moneyErr, errUsageAboveBound)) || qualificationErr != nil {
 		terminal.Accounting = publicAccountingFailed
@@ -878,9 +889,10 @@ func (l *accountLedger) newAttemptLocked() string {
 // without reporting usage, which charges the reserved bound. Usage above the
 // hold's token bounds freezes the account and quarantines the deployment
 // identity in the same write.
-func (l *accountLedger) reconcile(attempt string, usage *tokenUsage) error {
+func (l *accountLedger) reconcile(attempt string, usage *tokenUsage, observer ...*publicAttemptLifecycle) (finalErr error) {
+	var committed accountAttemptObservation
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	defer func() { l.transferObservationLocked(attempt, "", finalErr, observer, committed) }()
 	if err := l.ensureOpenLocked(); err != nil {
 		return err
 	}
@@ -925,7 +937,7 @@ func (l *accountLedger) reconcile(attempt string, usage *tokenUsage) error {
 		if spendErr != nil {
 			return spendErr
 		}
-		return l.commitLocked(next)
+		return l.commitAccountObservationLocked(next, attempt, false, observer, &committed)
 	}
 	// Above the bound: whether or not the actual cost is representable, the
 	// account is frozen and the identity quarantined. An unrepresentable cost
@@ -938,7 +950,7 @@ func (l *accountLedger) reconcile(attempt string, usage *tokenUsage) error {
 		return l.broken
 	}
 	nh.QualificationChecked = true
-	if err := l.commitRestrictiveLocked(next); err != nil {
+	if err := l.commitAccountObservationLocked(next, attempt, true, observer, &committed); err != nil {
 		return err
 	}
 	slog.Error("provider usage exceeded the reserved bound; account frozen and deployment quarantined",
@@ -980,9 +992,10 @@ func addSpend(rec *ledgerAccount, at time.Time, amount int64) error {
 // this process reserved, once. Only the probe's success clears suppression,
 // and only if no restrictive transition happened since it was reserved;
 // deadlines merge to the later one. Money is untouched.
-func (l *accountLedger) recordOutcome(attempt string, outcome accountOutcome, retryAfter time.Duration, resetAt time.Time) error {
+func (l *accountLedger) recordOutcome(attempt string, outcome accountOutcome, retryAfter time.Duration, resetAt time.Time, observer ...*publicAttemptLifecycle) (finalErr error) {
+	var committed accountAttemptObservation
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	defer func() { l.transferObservationLocked(attempt, "", finalErr, observer, committed) }()
 	if err := l.ensureOpenLocked(); err != nil {
 		return err
 	}
@@ -1037,10 +1050,10 @@ func (l *accountLedger) recordOutcome(attempt string, outcome accountOutcome, re
 		rec.Probe = ""
 	}
 	if !restrictive {
-		return l.commitLocked(next)
+		return l.commitAccountObservationLocked(next, attempt, false, observer, &committed)
 	}
 	rec.Generation++
-	return l.commitRestrictiveLocked(next)
+	return l.commitAccountObservationLocked(next, attempt, true, observer, &committed)
 }
 
 func laterCooldown(a, b *accountCooldown) *accountCooldown {
@@ -1054,9 +1067,10 @@ func laterCooldown(a, b *accountCooldown) *accountCooldown {
 // with no violation. Call only after all identity and bound checks finish;
 // violations instead call quarantine. Until then its immutable hold is retained,
 // even if reconciliation and the account outcome have already completed.
-func (l *accountLedger) recordQualification(attempt string) error {
+func (l *accountLedger) recordQualification(attempt string, observer ...*publicAttemptLifecycle) (finalErr error) {
+	var committed accountAttemptObservation
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	defer func() { l.transferObservationLocked(attempt, "", finalErr, observer, committed) }()
 	if err := l.ensureOpenLocked(); err != nil {
 		return err
 	}
@@ -1069,16 +1083,17 @@ func (l *accountLedger) recordQualification(attempt string) error {
 	}
 	next := l.state.clone()
 	next.hold(attempt).QualificationChecked = true
-	return l.commitLocked(next)
+	return l.commitAccountObservationLocked(next, attempt, false, observer, &committed)
 }
 
 // quarantine records a qualification failure of the deployment identity the
 // attempt was reserved under, whatever the deployment is called or configured
 // as now. Rename, retirement, re-addition and restart keep it; only a new
 // qualification revision is a different identity.
-func (l *accountLedger) quarantine(attempt string) error {
+func (l *accountLedger) quarantine(attempt string, observer ...*publicAttemptLifecycle) (finalErr error) {
+	var committed accountAttemptObservation
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	defer func() { l.transferObservationLocked(attempt, "", finalErr, observer, committed) }()
 	if err := l.ensureOpenLocked(); err != nil {
 		return err
 	}
@@ -1095,10 +1110,137 @@ func (l *accountLedger) quarantine(attempt string) error {
 		l.broken = fmt.Errorf("%w: quarantine limit reached", errLedgerUnavailable)
 		return l.broken
 	}
-	return l.commitRestrictiveLocked(next)
+	return l.commitAccountObservationLocked(next, attempt, true, observer, &committed)
 }
 
 // --- exact nano-USD arithmetic --------------------------------------------
+
+// Capture at D, then unlock before entering the request owner. This defer also
+// covers failed writes and refused/no-hold candidates; no asynchronous observer
+// or account subscription is created. Existing callers need no observation.
+func (l *accountLedger) transferObservationLocked(attempt, selected string, err error, observers []*publicAttemptLifecycle, committed ...accountAttemptObservation) {
+	if len(observers) == 0 {
+		l.mu.Unlock()
+		return
+	}
+	if attempt != "" && l.state.hold(attempt) == nil && (len(committed) == 0 || committed[0].version == 0) {
+		// A rejected operation on an unknown/pruned hold supplies no new
+		// account facts and cannot erase a previously recorded contribution.
+		l.mu.Unlock()
+		return
+	}
+	o := l.accountObservationLocked(&l.state, attempt, selected, err)
+	if l.state.hold(attempt) == nil && len(committed) != 0 && committed[0].version != 0 {
+		o = committed[0]
+	}
+	l.observationVersion++
+	o.version = l.observationVersion
+	l.mu.Unlock()
+	observers[0].observeAccount(o)
+}
+
+// A completion can prune this very hold. Capture only scalar candidate facts,
+// then qualify them with the actual commit result; failed writes never publish
+// a proposed charge. No candidate ledger object survives the D unlock.
+func (l *accountLedger) commitAccountObservationLocked(next ledgerState, attempt string, restrictive bool, observers []*publicAttemptLifecycle, observed *accountAttemptObservation) error {
+	if len(observers) != 0 {
+		*observed = l.accountObservationLocked(&next, attempt, "", nil)
+		observed.version = 1
+	}
+	var err error
+	if restrictive {
+		err = l.commitRestrictiveLocked(next)
+	} else {
+		err = l.commitLocked(next)
+	}
+	if err != nil {
+		*observed = accountAttemptObservation{}
+	}
+	return err
+}
+
+func (l *accountLedger) accountObservationLocked(state *ledgerState, attempt, selected string, err error) accountAttemptObservation {
+	o := accountAttemptObservation{flags: factHeldKnown | factChargeKnown, state: factAccountUnknown, accounting: factAccountingNone}
+	if err != nil {
+		o.reason = failureFactReason(err)
+	}
+	if h := state.hold(attempt); h != nil {
+		o.state, o.accounting = factAccountOK, factAccountingPending
+		if h.State == holdReconciled {
+			if n, parseErr := h.Actual.Int64(); parseErr == nil {
+				o.charged = n
+			} else {
+				o.flags &^= factChargeKnown
+			}
+		} else {
+			if n, parseErr := h.Reserved.Int64(); parseErr == nil {
+				o.held = n
+			} else {
+				o.flags &^= factHeldKnown
+			}
+			o.accounting = factAccountingRetained
+		}
+		if h.State == holdUncertain {
+			o.accounting = factAccountingUnknown
+		}
+		if h.State == holdReconciled && h.Outcome != "" && h.QualificationChecked {
+			o.accounting = factAccountingRecorded
+		}
+		if h.Probe {
+			o.state = factAccountProbe
+		}
+		// D supplies its observed outcome, never a presentation priority guess.
+		switch h.Outcome {
+		case outcomeRateLimited:
+			o.state, o.reason = factAccountCooling, factAccountCooldown
+		case outcomeExhausted:
+			o.state, o.reason = factAccountIsExhausted, factAccountExhausted
+		case outcomeCredentialFailure:
+			o.state, o.reason = factAccountBadCredential, factAccountCredential
+		}
+		if rec := state.account(h.Account); rec != nil {
+			// Report D's same checked restrictions, including restrictions
+			// another attempt committed before this synchronous completion.
+			if c := rec.Cooldown; c != nil && l.now().UnixMilli() < c.UntilMs {
+				o.state, o.reason = factAccountCooling, factAccountCooldown
+				if c.Reason == cooldownExhausted {
+					o.state, o.reason = factAccountIsExhausted, factAccountExhausted
+				}
+			}
+			if failure := rec.CredentialFailure; failure != nil && failure.Credential == h.Credential {
+				o.state, o.reason = factAccountBadCredential, factAccountCredential
+			}
+			if rec.Frozen != nil {
+				o.state, o.reason = factAccountIsFrozen, factAccountFrozen
+			}
+		}
+	}
+	if err != nil {
+		if !errors.Is(err, errUsageAboveBound) && (attempt != "" || errors.Is(err, errLedgerUnavailable)) {
+			o.accounting = factAccountingFailed
+		}
+		if selected != "" && errors.Is(err, errRoutingSpend) {
+			o.reason = factRequestCeiling
+		}
+		switch o.reason {
+		case factAccountCooldown:
+			o.state = factAccountCooling
+		case factAccountFrozen:
+			o.state = factAccountIsFrozen
+		case factAccountCredential:
+			o.state = factAccountBadCredential
+		case factAccountConflict:
+			o.state = factAccountHasConflict
+		}
+	}
+	if selected != "" && errors.Is(err, errAccountCooldown) {
+		if rec := state.account(selected); rec != nil && rec.Cooldown != nil && rec.Cooldown.Reason == cooldownExhausted {
+			o.state, o.reason = factAccountIsExhausted, factAccountExhausted
+		}
+	}
+	o.refused = attempt == "" && err != nil
+	return o
+}
 
 // chargeNanoUSD is ceil(tokens * perMillion / 1,000,000) with a 128-bit
 // product, so no intermediate overflows; the result must fit signed 64 bits.

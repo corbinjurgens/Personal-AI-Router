@@ -264,10 +264,17 @@ func awaitFirstBody(body io.ReadCloser, budget time.Duration) (io.ReadCloser, er
 		err error
 	}
 	raw, _ := body.(*routingResponseBody)
+	var observed *routingSpend
+	if raw != nil {
+		observed = raw.attempt.request
+	}
+	if strict, ok := body.(*routingStrictFactBody); ok {
+		observed = strict.attempt.request
+	}
 	var borrower *bufferLease
-	if raw != nil && raw.attempt.request.sink != nil && raw.attempt.request.sink.bootstrap != nil {
+	if observed != nil && observed.sink != nil && observed.sink.bootstrap != nil {
 		var err error
-		borrower, err = raw.attempt.request.sink.bootstrap.borrow()
+		borrower, err = observed.sink.bootstrap.borrow()
 		if err != nil {
 			return nil, errStreamFrameBudget
 		}
@@ -275,10 +282,10 @@ func awaitFirstBody(body io.ReadCloser, budget time.Duration) (io.ReadCloser, er
 	ch := make(chan peeked)
 	discard := make(chan struct{})
 	done := make(chan struct{})
-	if raw != nil {
-		raw.attempt.request.mu.Lock()
-		raw.attempt.request.firstBodyDone = done
-		raw.attempt.request.mu.Unlock()
+	if observed != nil {
+		observed.mu.Lock()
+		observed.firstBodyDone = done
+		observed.mu.Unlock()
 	}
 	go func() {
 		defer func() {
@@ -598,13 +605,15 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		return def
 	}
 	ctl := newRoutingRequest(cancelRequest)
+	ctl.observationContext, ctl.processContext = reqCtx, p.serveCtx
 	// One immutable pre-dispatch deadline also bounds initial owned storage.
 	// The live request context remains independent so accepted streams drain.
 	ctl.deadline = policy.deadline
 	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, ctl.deadline))
 	defer ctl.finish()
 	stopCancellation := context.AfterFunc(reqCtx, func() {
-		ctl.cancelWithReason(cancelReasonOr("client disconnected before completion"))
+		cause := routingContextCause(reqCtx, p.serveCtx)
+		ctl.cancelWithCause(cancelReasonOr("client disconnected before completion"), cause)
 	})
 	defer stopCancellation()
 	var requestOwner *routingRequest
@@ -644,7 +653,14 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 			writeIngressError(w, http.StatusServiceUnavailable, "identity-unavailable", "routing request identity or capacity is unavailable")
 			return
 		}
+		p.attachRoutingFacts(requestOwner, start)
 	}
+	defer func() {
+		if aborted := recover(); aborted != nil {
+			ctl.observeIngress(routingIngressResult{factFailed, factUnknown, 0})
+			panic(aborted)
+		}
+	}()
 	// Parse the request's model before choosing a node. Model eligibility only
 	// applies to inference routes; control endpoints retain their existing
 	// routing behavior even when their JSON happens to contain a model field.
@@ -653,6 +669,8 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 	stopBodyPreparation()
 	if err != nil {
 		status := bufferRequestStatus(err)
+		cause := failureFactReason(err)
+		ctl.observeIngress(routingIngressResult{factFailed, cause, status})
 		reason := "request body read failed"
 		message := "request body could not be buffered"
 		var invalidIdentifier *requestIdentifierError
@@ -680,9 +698,15 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		return
 	}
 	if err := validateRequestIdentifiers(r, bodyBytes); err != nil {
+		ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, bufferRequestStatus(err)})
 		writeIngressError(w, bufferRequestStatus(err), "request-identifier", err.Error())
 		return
 	}
+	tier, _, _ := nodepolicy.ParseAlias(model)
+	if nodepolicy.IsTier(model) {
+		tier = model
+	}
+	ctl.observeRequested(requestedDescriptor(model, tier, r.URL.Path))
 	// An inference body naming "model" twice is ambiguous: admission and
 	// workload tracking read the last member while the tier rewrite replaces
 	// the first, so the model admitted here and the model the engine decodes
@@ -698,6 +722,7 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		slog.Warn("proxy request rejected",
 			"id", reqID, "method", r.Method, "path", r.URL.Path,
 			"remote", r.RemoteAddr, "reason", "ambiguous model member")
+		ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, http.StatusBadRequest})
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		_ = f.notify("proxy/request", RequestEvent{
 			ID:       reqID,
@@ -711,11 +736,13 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 	}
 	strict, strictErr := parseStrictAdmission(r.Header)
 	if strictErr != nil {
+		ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, http.StatusBadRequest})
 		writeIngressError(w, http.StatusBadRequest, "strict-admission", strictErr.Error())
 		return
 	}
 	if strict != nil {
 		if policy.hybrid {
+			ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, http.StatusBadRequest})
 			writeIngressError(w, http.StatusBadRequest, "strict-admission", "strict admission requires a destination-local entry")
 			return
 		}
@@ -724,7 +751,7 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		}
 		// The internal strict envelope names destination-local execution. It
 		// cannot grant onward routing or inherit concrete retry loops.
-		f.serveStrictLocal(w, r, bodyBytes, model, *strict, false)
+		f.serveStrictLocal(w, r, bodyBytes, model, *strict, false, ctl)
 		return
 	}
 	if policy.hybrid {
@@ -735,6 +762,7 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		// model member. Nested models are payload, never routing selectors.
 		tier, mode, ok := nodepolicy.ParseAlias(model)
 		if !ok || !bodyModelMatches(bodyBytes, model) {
+			ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, http.StatusBadRequest})
 			writeIngressError(w, http.StatusBadRequest, "unsupported-alias", "inference requires one exact supported tier alias")
 			return
 		}
@@ -746,6 +774,7 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		// A reserved hybrid alias the legacy tier path does not serve is refused
 		// here, before candidates, admission, reservation, workload or upstream.
 		if alias, reason, rejected := requestAliasRejection(r, bodyBytes, model, true); rejected {
+			ctl.observeIngress(routingIngressResult{factFailed, factRequestInvalid, http.StatusBadRequest})
 			slog.Warn("proxy request rejected",
 				"id", reqID, "method", r.Method, "path", r.URL.Path,
 				"remote", r.RemoteAddr, "reason", reason, "alias", alias)
@@ -767,6 +796,7 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		}
 	}
 	if _, err := parseOriginStreamRequest(r.URL.Path, bodyBytes); err != nil {
+		ctl.observeIngress(routingIngressResult{factFailed, failureFactReason(err), bufferRequestStatus(err)})
 		writeOriginStreamRequestError(w, err)
 		reason := "inference request could not be prepared"
 		var invalid *invalidStreamFlagError
@@ -780,7 +810,7 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 		})
 		return
 	}
-	ctl.sink = newResponseSink(w, func() { ctl.cancelWithReason("client connection lost") })
+	ctl.sink = newResponseSink(w, func() { ctl.cancelWithCause("client connection lost", factClientGone) })
 	w = ctl.sink
 	r = r.WithContext(withResponseSink(r.Context(), ctl.sink))
 	ctl.dispatch(f, w, r, start, reqID, bodyBytes, model, streamIdle, cancelReasonOr, requestOwner, policy)

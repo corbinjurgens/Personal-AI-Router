@@ -1730,7 +1730,7 @@ func TestUnifiedDispatchPeekReadErrorAndTimeout(t *testing.T) {
 		default:
 		}
 		owner.mu.Lock()
-		ending, reason := a.state, a.reason
+		ending, reason := a.state, owner.reason
 		owner.mu.Unlock()
 		if ending != routingEnding || reason != errFirstBodyTimeout.Error() {
 			t.Fatalf("timeout did not record its owner transition: state=%s reason=%q", ending, reason)
