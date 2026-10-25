@@ -63,7 +63,7 @@ func (e *Executor) StatusAtPort(engine string, probePort int) (EngineStatus, err
 		// (matching get-installed) rather than erroring, so status is
 		// consistent for the same engine across methods.
 		if m, ok := e.reg.Get(engine); ok {
-			return EngineStatus{Engine: engine, DisplayName: m.DisplayName, Locked: e.lockedStatus(engine)}, nil
+			return e.unsupportedStatus(engine, m), nil
 		}
 		return EngineStatus{}, err
 	}
@@ -88,11 +88,9 @@ func (e *Executor) GetInstalled() []EngineStatus {
 		if err != nil {
 			// Known engine with no block for this host: surface a shell
 			// status so the UI can still list it as unavailable here.
-			dn := name
 			if m, ok := e.reg.Get(name); ok {
-				dn = m.DisplayName
+				out = append(out, e.unsupportedStatus(name, m))
 			}
-			out = append(out, EngineStatus{Engine: name, DisplayName: dn, Locked: e.lockedStatus(name)})
 			continue
 		}
 		st.opMu.Lock()

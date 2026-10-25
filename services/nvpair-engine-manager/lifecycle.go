@@ -447,6 +447,22 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 		st.portCleanupPending = false
 		st.mu.Unlock()
 	}
+	processBin, err := exec.LookPath(launch.Bin)
+	if err != nil {
+		return err
+	}
+	processBin, err = filepath.Abs(processBin)
+	if err != nil {
+		return err
+	}
+	address, addressErr := probeListenerAddress(rt.Ready, port)
+	if addressErr != nil {
+		address = net.JoinHostPort(vars["host"], strconv.Itoa(port))
+	}
+	evidence := processStopEvidence{Bin: processBin, Port: port, Address: address}
+	if err := e.desired.setProcessStop(engine, evidence); err != nil {
+		return fmt.Errorf("persist %s process stop evidence: %w", engine, err)
+	}
 	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
 		if serving {
 			if prepared.Credential != "" {
@@ -494,6 +510,12 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 	st.plat.Runtime.servingBaseDigest = baseDigest
 	st.plat.Runtime.servingDrift = ""
 	st.mu.Unlock()
+	evidence.PID = proc.cmd.Process.Pid
+	if err := e.desired.setProcessStop(engine, evidence); err != nil {
+		proc.stop(stopGrace(rt))
+		e.markStopped(st, engine)
+		return fmt.Errorf("persist %s process identity: %w", engine, err)
+	}
 
 	readyCtx, readyCancel := context.WithCancel(ctx)
 	defer readyCancel()

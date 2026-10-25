@@ -480,6 +480,27 @@ func TestTerminalControlsTypedRefusals(t *testing.T) {
 
 // TestEngineStatusLockReadback keeps a reported lock exact and an unreported one
 // unknown, through decoding and the local state push that replaces a row.
+func TestEngineStatusTerminationReadback(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		verified  bool
+	}{
+		{"positive", `{"engine":"custom","running":false,"terminationVerified":true}`, true},
+		{"negative", `{"engine":"custom","running":false,"terminationVerified":false}`, false},
+		{"legacy omission", `{"engine":"custom","running":false}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var status engineStatus
+			if err := json.Unmarshal([]byte(tc.raw), &status); err != nil {
+				t.Fatal(err)
+			}
+			if status.TerminationVerified != tc.verified {
+				t.Fatalf("status=%+v", status)
+			}
+		})
+	}
+}
+
 func TestEngineStatusLockReadback(t *testing.T) {
 	decode := func(t *testing.T, raw string) engineStatus {
 		t.Helper()

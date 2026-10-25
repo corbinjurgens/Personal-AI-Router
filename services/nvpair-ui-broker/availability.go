@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"nvpair-shared/durablefile"
-	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -325,8 +324,8 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 		}
 	}
 	var failures []string
-	// running:false can also mean failed orphan reclamation with a surviving
-	// process. Only a host-unsupported engine may refuse Sleep benignly.
+	// running:false can also mean an unprobed or failed-reclaim orphan.
+	// Only explicit physical-stop evidence may satisfy a failed Sleep.
 	stopFailed := make(map[string]bool)
 	if inventoryErr != nil {
 		failures = append(failures, "engine inventory unavailable")
@@ -361,10 +360,6 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	var unsupported map[string]bool
-	if len(stopFailed) > 0 {
-		unsupported = pauseUnsupportedEngines(ctx, worker)
-	}
 	stopped, verifyErr := pauseEngineInventory(ctx, worker)
 	b.workersMu.Lock()
 	current := worker != nil && b.engineMgr == worker
@@ -382,11 +377,11 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 			failures = append(failures, engine+": stop failed")
 		}
 	} else {
-		for engine, running := range stopped {
+		for engine, status := range stopped {
 			known[engine] = true
-			if running {
+			if status.Running {
 				failures = append(failures, engine+": still running")
-			} else if stopFailed[engine] && !unsupported[engine] {
+			} else if stopFailed[engine] && !status.TerminationVerified {
 				failures = append(failures, engine+": stop unverified")
 			}
 		}
@@ -511,21 +506,27 @@ func (b *Broker) skipRestoreWhilePaused() bool {
 
 // pauseEngineInventory requires explicit running readback for every reported
 // engine. Missing data is unknown, never evidence of a stopped engine.
-func pauseEngineInventory(ctx context.Context, worker *rpcWorker) (map[string]bool, error) {
+type pauseEngineStatus struct {
+	Running             bool
+	TerminationVerified bool
+}
+
+func pauseEngineInventory(ctx context.Context, worker *rpcWorker) (map[string]pauseEngineStatus, error) {
 	raw, err := callEngineOn(ctx, worker, "engine:get-installed", nil)
 	if err != nil {
 		return nil, err
 	}
 	var inventory struct {
 		Engines *[]struct {
-			Engine  string `json:"engine"`
-			Running *bool  `json:"running"`
+			Engine              string `json:"engine"`
+			Running             *bool  `json:"running"`
+			TerminationVerified bool   `json:"terminationVerified"`
 		} `json:"engines"`
 	}
 	if err := json.Unmarshal(raw, &inventory); err != nil || inventory.Engines == nil {
 		return nil, errors.New("engine inventory is incomplete")
 	}
-	engines := make(map[string]bool)
+	engines := make(map[string]pauseEngineStatus)
 	for _, engine := range *inventory.Engines {
 		if engine.Engine == "" || engine.Running == nil {
 			return nil, errors.New("engine running state is incomplete")
@@ -533,45 +534,9 @@ func pauseEngineInventory(ctx context.Context, worker *rpcWorker) (map[string]bo
 		if _, duplicate := engines[engine.Engine]; duplicate {
 			return nil, errors.New("engine inventory contains duplicate engines")
 		}
-		engines[engine.Engine] = *engine.Running
+		engines[engine.Engine] = pauseEngineStatus{Running: *engine.Running, TerminationVerified: engine.TerminationVerified}
 	}
 	return engines, nil
-}
-
-// pauseUnsupportedEngines reads the same worker's immutable registry, rather
-// than the broker's startup catalog (which omits unavailable engines). The
-// descriptor's available flag means a host-platform block exists, not health
-// or installation state. Without that block Executor.state cannot create a
-// process, so a stopped inventory entry can safely satisfy a failed Sleep.
-// Missing, malformed or unknown-version evidence never forgives a failure.
-func pauseUnsupportedEngines(ctx context.Context, worker *rpcWorker) map[string]bool {
-	ctx, cancel := context.WithTimeout(ctx, engineDescriptorsTimeout)
-	defer cancel()
-	raw, err := callEngineOn(ctx, worker, "engine:descriptors", nil)
-	if err != nil {
-		return nil
-	}
-	var descriptors struct {
-		Engines *[]struct {
-			Version   int    `json:"version"`
-			Engine    string `json:"engine"`
-			Available *bool  `json:"available"`
-		} `json:"engines"`
-	}
-	if err := json.Unmarshal(raw, &descriptors); err != nil || descriptors.Engines == nil {
-		return nil
-	}
-	unsupported := make(map[string]bool)
-	for _, descriptor := range *descriptors.Engines {
-		if descriptor.Version != engines.DescriptorVersion || !engines.ValidID(descriptor.Engine) || descriptor.Available == nil {
-			return nil
-		}
-		if _, duplicate := unsupported[descriptor.Engine]; duplicate {
-			return nil
-		}
-		unsupported[descriptor.Engine] = !*descriptor.Available
-	}
-	return unsupported
 }
 
 func pauseModelInventory(ctx context.Context, worker *rpcWorker) (map[string][]string, error) {

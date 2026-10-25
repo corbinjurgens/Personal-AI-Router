@@ -355,10 +355,9 @@ func TestPauseReplaySkipsRestoreForEveryOrigin(t *testing.T) {
 	test("startup recovery", "", true)
 }
 
-// An engine this host cannot run is reported stopped and refuses Sleep. Pause
-// must not fail on it when the descriptor confirms no host-platform block and
-// the final readback shows nothing running.
-func TestPauseIgnoresSleepRefusalFromAnEngineReportedStopped(t *testing.T) {
+// A lost/refused Sleep response is satisfied only by positive stop evidence
+// in the final inventory from the same worker.
+func TestPauseIgnoresSleepRefusalWithTerminationEvidence(t *testing.T) {
 	b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
 	engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
@@ -367,7 +366,7 @@ func TestPauseIgnoresSleepRefusalFromAnEngineReportedStopped(t *testing.T) {
 		case "engine:get-installed":
 			return map[string]any{"engines": []any{
 				map[string]any{"engine": "ollama", "running": false},
-				map[string]any{"engine": "custom", "running": false},
+				map[string]any{"engine": "custom", "running": false, "terminationVerified": true},
 			}}, ""
 		case "engine:models":
 			return map[string]any{"loadedByEngine": map[string][]string{}}, ""
@@ -429,26 +428,22 @@ func requireUnverifiedPauseFence(t *testing.T, b *Broker, proxy *fakeWorker, out
 	}
 }
 
-func TestPauseFailedSleepRequiresUnsupportedEngineProof(t *testing.T) {
+func TestPauseFailedSleepRequiresTerminationProof(t *testing.T) {
 	const stopped = `{"engines":[{"engine":"ollama","running":false}]}`
 	const unsupported = `{"engines":[{"version":1,"engine":"ollama","available":false}]}`
 	for _, tc := range []struct {
-		name            string
-		inventory       string
-		inventoryError  string
-		descriptors     string
-		descriptorError string
-		wantDetail      string
+		name           string
+		inventory      string
+		inventoryError string
+		descriptors    string
+		wantDetail     string
 	}{
+		{name: "unsupported engine without physical proof", inventory: stopped, descriptors: unsupported, wantDetail: "ollama: stop unverified"},
+		{name: "negative physical proof", inventory: `{"engines":[{"engine":"ollama","running":false,"terminationVerified":false}]}`, descriptors: unsupported, wantDetail: "ollama: stop unverified"},
+		{name: "null physical proof", inventory: `{"engines":[{"engine":"ollama","running":false,"terminationVerified":null}]}`, descriptors: unsupported, wantDetail: "ollama: stop unverified"},
+		{name: "malformed physical proof", inventory: `{"engines":[{"engine":"ollama","running":false,"terminationVerified":"true"}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "positive proof cannot override running", inventory: `{"engines":[{"engine":"ollama","running":true,"terminationVerified":true}]}`, wantDetail: "ollama: still running"},
 		{name: "failed reclaim with surviving PID", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"ollama","available":true}]}`, wantDetail: "ollama: stop unverified"},
-		{name: "descriptor unavailable", inventory: stopped, descriptorError: "descriptors unavailable", wantDetail: "ollama: stop unverified"},
-		{name: "descriptor missing engines", inventory: stopped, descriptors: `{}`, wantDetail: "ollama: stop unverified"},
-		{name: "descriptor missing availability", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"ollama"}]}`, wantDetail: "ollama: stop unverified"},
-		{name: "descriptor null availability", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"ollama","available":null}]}`, wantDetail: "ollama: stop unverified"},
-		{name: "descriptor unknown version", inventory: stopped, descriptors: `{"engines":[{"version":2,"engine":"ollama","available":false}]}`, wantDetail: "ollama: stop unverified"},
-		{name: "descriptor omits engine", inventory: stopped, descriptors: `{"engines":[]}`, wantDetail: "ollama: stop unverified"},
-		{name: "descriptor duplicate engine", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"ollama","available":true},{"version":1,"engine":"ollama","available":false}]}`, wantDetail: "ollama: stop unverified"},
-		{name: "descriptor truncated entry", inventory: stopped, descriptors: `{"engines":[{}]}`, wantDetail: "ollama: stop unverified"},
 		{name: "final inventory unavailable", inventoryError: "inventory unavailable", descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
 		{name: "final inventory missing engines", inventory: `{}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
 		{name: "final inventory truncated entry", inventory: `{"engines":[{}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
@@ -470,7 +465,7 @@ func TestPauseFailedSleepRequiresUnsupportedEngineProof(t *testing.T) {
 					}
 					return json.RawMessage(tc.inventory), tc.inventoryError
 				case "engine:descriptors":
-					return json.RawMessage(tc.descriptors), tc.descriptorError
+					return json.RawMessage(tc.descriptors), ""
 				case "engine:models":
 					return map[string]any{"loadedByEngine": map[string][]string{}}, ""
 				case engineSleepMethod:

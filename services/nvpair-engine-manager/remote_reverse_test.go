@@ -173,7 +173,7 @@ func TestRemoteControlPrefersDirectAndClosesEachConnection(t *testing.T) {
 			if !r.Close {
 				t.Error("control request could retain a replayable idle connection")
 			}
-			remoteFixtureEncode(t, w, map[string]any{"engines": []EngineStatus{{Engine: "fixture", Running: false}}})
+			remoteFixtureEncode(t, w, map[string]any{"engines": []EngineStatus{{Engine: "fixture", Running: false, TerminationVerified: true}}})
 		}))
 	})
 	f.directHealthy.Store(true)
@@ -190,7 +190,7 @@ func TestRemoteControlPrefersDirectAndClosesEachConnection(t *testing.T) {
 		if err := json.Unmarshal(raw, &result); err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Engines) != 1 || result.Engines[0].Engine != "fixture" || result.Engines[0].Running {
+		if len(result.Engines) != 1 || result.Engines[0].Engine != "fixture" || result.Engines[0].Running || !result.Engines[0].TerminationVerified {
 			t.Fatalf("status = %+v", result)
 		}
 	}
