@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ServiceError } from '@/shared/types/errors'
 import type { EngineStatePatch } from '@/shared/types/engine-api'
 import type { EngineProgress, ModelItem } from '@/shared/types/engines'
+import type { ModelDownloadEntry } from '@/shared/types/model-download'
 import type { ServiceStatus } from '@/shared/types/ipc-channels'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
@@ -364,5 +365,148 @@ describe('pending-actions store: model actions', () => {
         progressCb?.(queued)
         expect(store.getModelPending('node-1', 'ollama', 'demo')).toBeUndefined()
         expect(store.getModelPending('node-1', 'ollama', 'other')).toBe('pullModel')
+    })
+
+    const terminalPhases: ModelDownloadEntry['phase'][] = ['failed', 'complete', 'unknown']
+    it.each(terminalPhases)(
+        'settles a new current %s outcome after missed active progress',
+        phase => {
+            const old: EngineProgress = {
+                nodeId: 'node-1',
+                nodeName: '',
+                engineType: 'ollama',
+                operation: 'pull',
+                model: 'demo',
+                status: 'failed',
+                downloadSourceId: 'a'.repeat(32),
+                downloadRevision: '2',
+                downloadStateCurrent: true,
+                downloadState: {
+                    id: '1'.repeat(32),
+                    engine: 'ollama',
+                    model: 'demo',
+                    phase: 'failed',
+                    blocksReadiness: true
+                }
+            }
+            useEngineProgressStore.setState({ progress: new Map([[engineProgressKey(old), old]]) })
+            const store = usePendingActionsStore.getState()
+            store.begin({
+                command: 'pullModel',
+                nodeId: 'node-1',
+                engineType: 'ollama',
+                model: 'demo'
+            })
+            const terminal: EngineProgress = {
+                ...old,
+                status: phase,
+                downloadRevision: '3',
+                downloadState: {
+                    id: '2'.repeat(32),
+                    engine: 'ollama',
+                    model: 'demo',
+                    phase,
+                    blocksReadiness: phase !== 'complete'
+                }
+            }
+            progressCb?.({ ...terminal, downloadRevision: '1' })
+            progressCb?.({ ...terminal, downloadRevision: '2' })
+            progressCb?.({ ...terminal, downloadStateCurrent: false })
+            progressCb?.({ ...terminal, downloadSourceId: undefined })
+            progressCb?.({ ...terminal, nodeId: 'other-node' })
+            expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+            progressCb?.(terminal)
+            expect(store.getModelPending('node-1', 'ollama', 'demo')).toBeUndefined()
+
+            useEngineProgressStore.setState({
+                progress: new Map([[engineProgressKey(terminal), terminal]])
+            })
+            store.begin({
+                command: 'pullModel',
+                nodeId: 'node-1',
+                engineType: 'ollama',
+                model: 'demo'
+            })
+            progressCb?.({ ...terminal, downloadRevision: '4' })
+            expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+        }
+    )
+
+    it('baselines a new pending pull against current progress instead of retired inventory', () => {
+        const terminal: EngineProgress = {
+            nodeId: 'node-1',
+            nodeName: '',
+            engineType: 'ollama',
+            operation: 'pull',
+            model: 'demo',
+            status: 'failed',
+            downloadSourceId: 'b'.repeat(32),
+            downloadRevision: '2',
+            downloadStateCurrent: true,
+            downloadState: {
+                id: '2'.repeat(32),
+                engine: 'ollama',
+                model: 'demo',
+                phase: 'failed',
+                blocksReadiness: true
+            }
+        }
+        useEngineProgressStore.setState({
+            progress: new Map([[engineProgressKey(terminal), terminal]])
+        })
+        useEngineModelsStore.setState({
+            models: new Map([
+                [
+                    'node-1:ollama',
+                    {
+                        nodeId: 'node-1',
+                        engineType: 'ollama',
+                        models: [loadedModel('demo')],
+                        downloadStateCurrent: false,
+                        downloadState: {
+                            version: 1,
+                            sourceId: 'a'.repeat(32),
+                            revision: '9',
+                            recoveryRequired: false,
+                            entries: []
+                        }
+                    }
+                ]
+            ])
+        })
+        const store = usePendingActionsStore.getState()
+        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'ollama', model: 'demo' })
+        progressCb?.({ ...terminal, downloadRevision: '3' })
+        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+    })
+
+    it('settles a terminal pull from a model snapshot without receiving progress', () => {
+        const store = usePendingActionsStore.getState()
+        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'ollama', model: 'demo' })
+        const failed: ModelDownloadEntry = {
+            id: '2'.repeat(32),
+            engine: 'ollama',
+            model: 'demo',
+            phase: 'failed',
+            blocksReadiness: true
+        }
+        stateCb?.({
+            nodeId: 'node-1',
+            engineType: 'ollama',
+            models: {
+                nodeId: 'node-1',
+                engineType: 'ollama',
+                models: [{ ...loadedModel('demo'), downloaded: false, downloadState: failed }],
+                downloadStateCurrent: true,
+                downloadState: {
+                    version: 1,
+                    sourceId: 'a'.repeat(32),
+                    revision: '3',
+                    recoveryRequired: false,
+                    entries: [failed]
+                }
+            }
+        })
+        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBeUndefined()
     })
 })

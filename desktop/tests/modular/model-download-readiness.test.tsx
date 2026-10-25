@@ -82,8 +82,7 @@ function report(
     )
 }
 
-function publish(): void {
-    const initial = bridge.getEngineInitialState()
+function publish(initial = bridge.getEngineInitialState()): void {
     for (const models of initial.models.filter(row => row.nodeId === nodeId)) {
         const patch: EngineStatePatch = { nodeId, engineType: models.engineType, models }
         for (const listener of stateListeners) listener(patch)
@@ -403,7 +402,254 @@ describe('rendered target download readiness', () => {
         await act(async () =>
             useEngineProgressStore.getState().initialize({ ...initial, activeProgress: [newer] })
         )
-        expect(progressListeners.size).toBe(1)
+        expect(progressListeners.size).toBe(2)
+    })
+
+    it('keeps a push received before supplied hydration from enabling Load or Copy', async () => {
+        report([], [MODEL])
+        await mount()
+        const delayed = bridge.getEngineInitialState()
+        act(() => {
+            report([entry({ percent: 42 })], [MODEL], [], '2')
+            publish()
+        })
+        await act(async () => {
+            await useEngineModelsStore.getState().initialize(delayed)
+            await useEngineProgressStore.getState().initialize(delayed)
+        })
+        await openActions()
+        await act(async () => item('Load').click())
+        expect(commands()).toEqual([])
+        expectDisabled('Load')
+        expectDisabled('Copy to this PC')
+        expect(container.textContent).toContain('Downloading')
+        expect(commands()).toEqual([])
+    })
+
+    it('rejects lower revision model and progress pushes after accepting an active pull', async () => {
+        report([entry({ phase: 'failed', blocksReadiness: false })], [MODEL])
+        await mount()
+        const older = bridge.getEngineInitialState()
+        act(() => {
+            report([entry({ id: '2'.repeat(32), percent: 42 })], [MODEL], [], '2')
+            publish()
+            publish(older)
+        })
+        await openActions()
+        expectDisabled('Load')
+        expectDisabled('Copy to this PC')
+        expect(container.textContent).toContain('Downloading')
+        expect(commands()).toEqual([])
+    })
+
+    it('invalidates current ready content on a disconnect push without accepting delayed ready hydration', async () => {
+        report([], [MODEL])
+        await mount()
+        const delayed = bridge.getEngineInitialState()
+        act(() => {
+            bridge.invalidateModelObservations()
+            publish()
+        })
+        await act(async () => {
+            await useEngineModelsStore.getState().initialize(delayed)
+            await useEngineProgressStore.getState().initialize(delayed)
+        })
+        await openActions()
+        expectDisabled('Load')
+        expectDisabled('Copy to this PC')
+        expect(container.textContent).toContain('Disconnected or download status unavailable')
+        expect(commands()).toEqual([])
+    })
+
+    it('treats an unavailable replacement source as unknown while preserving the last accepted identity', async () => {
+        report([], [MODEL])
+        await mount()
+        const acceptedSource = sourceId
+        sourceId = 'e'.repeat(32)
+        report([], [MODEL])
+        bridge.invalidateModelObservations()
+        await act(async () => {
+            const unavailable = bridge.getEngineInitialState()
+            await useEngineModelsStore.getState().initialize(unavailable)
+            await useEngineProgressStore.getState().initialize(unavailable)
+        })
+        await openActions()
+        expectDisabled('Load')
+        expectDisabled('Copy to this PC')
+        expect(
+            useEngineModelsStore.getState().getModels(nodeId, 'llama-cpp').downloadState?.sourceId
+        ).toBe(acceptedSource)
+        expect(commands()).toEqual([])
+    })
+
+    it('retains a completed progress fence omitted from active hydration until current inventory catches up', async () => {
+        report([], [MODEL])
+        await mount()
+        const delayed = bridge.getEngineInitialState()
+        const completed = entry({ phase: 'complete', blocksReadiness: false })
+        const complete: EngineProgress = {
+            nodeId,
+            nodeName: '',
+            engineType: 'llama-cpp',
+            operation: 'pull',
+            model: MODEL,
+            status: 'complete',
+            downloadState: completed,
+            downloadStateCurrent: true,
+            downloadSourceId: sourceId,
+            downloadRevision: '2'
+        }
+        act(() => {
+            for (const listener of progressListeners) listener(complete)
+        })
+        await act(async () => useEngineProgressStore.getState().initialize(delayed))
+        await openActions()
+        expectDisabled('Load')
+        expectDisabled('Copy to this PC')
+        expect(commands()).toEqual([])
+        act(() => {
+            report([completed], [MODEL], [], '2')
+            publish()
+        })
+        await act(async () => item('Load').click())
+        expect(commands()[0]?.command).toBe('loadModel')
+    })
+
+    it('subscribes to model pushes before an internal initial fetch resolves', async () => {
+        report([], [MODEL])
+        const delayed = bridge.getEngineInitialState()
+        let resolveInitial: (snapshot: EngineInitialState) => void = () => {
+            throw new Error('Initial snapshot not requested')
+        }
+        vi.spyOn(window.pairApi.engines, 'getInitialState').mockReturnValue(
+            new Promise(resolve => {
+                resolveInitial = resolve
+            })
+        )
+        const hydration = useEngineModelsStore.getState().initialize()
+        report([entry({ percent: 42 })], [MODEL], [], '2')
+        publish()
+        resolveInitial(delayed)
+        await hydration
+        await useEngineProgressStore.getState().initialize({ ...delayed, activeProgress: [] })
+        await act(async () => root.render(<ModelManager backend={backend()} nodeId={nodeId} />))
+        await openActions()
+        expectDisabled('Load')
+        expectDisabled('Copy to this PC')
+        expect(container.textContent).toContain('Downloading')
+        expect(commands()).toEqual([])
+    })
+
+    it('rejects old source hydration and pushes after accepting a replacement source', async () => {
+        report([], [MODEL])
+        await mount()
+        const retired = bridge.getEngineInitialState()
+        sourceId = 'f'.repeat(32)
+        act(() => {
+            report([entry({ percent: 42 })], [MODEL])
+            publish()
+        })
+        await act(async () => {
+            await useEngineModelsStore.getState().initialize(retired)
+            await useEngineProgressStore.getState().initialize(retired)
+            publish(retired)
+        })
+        await openActions()
+        expectDisabled('Load')
+        expectDisabled('Copy to this PC')
+        expect(container.textContent).toContain('Downloading')
+        expect(
+            useEngineModelsStore.getState().getModels(nodeId, 'llama-cpp').downloadState?.sourceId
+        ).toBe(sourceId)
+        expect(commands()).toEqual([])
+    })
+
+    it('ignores a model fetch from an older initialization generation', async () => {
+        report([], [MODEL])
+        const delayed = bridge.getEngineInitialState()
+        let resolveInitial: (snapshot: EngineInitialState) => void = () => {
+            throw new Error('Initial snapshot not requested')
+        }
+        vi.spyOn(window.pairApi.engines, 'getInitialState').mockReturnValue(
+            new Promise(resolve => {
+                resolveInitial = resolve
+            })
+        )
+        const hydration = useEngineModelsStore.getState().initialize()
+        report([entry({ percent: 42 })], [MODEL], [], '2')
+        await mount()
+        await act(async () => {
+            resolveInitial(delayed)
+            await hydration
+        })
+        await openActions()
+        expectDisabled('Load')
+        expectDisabled('Copy to this PC')
+        expect(stateListeners.size).toBe(3)
+        expect(commands()).toEqual([])
+    })
+
+    it('invalidates ready observations on cleanup and restores freshness only with a fresh read', async () => {
+        report([], [MODEL])
+        await mount()
+        const delayed = bridge.getEngineInitialState()
+        act(() => {
+            useEngineModelsStore.getState().cleanup()
+            useEngineProgressStore.getState().cleanup()
+        })
+        await act(async () => {
+            await useEngineModelsStore.getState().initialize(delayed)
+            await useEngineProgressStore.getState().initialize(delayed)
+        })
+        await openActions()
+        expectDisabled('Load')
+        expectDisabled('Copy to this PC')
+        expect(commands()).toEqual([])
+        vi.spyOn(window.pairApi.engines, 'getInitialState').mockResolvedValue(delayed)
+        await act(async () => {
+            await useEngineModelsStore.getState().initialize()
+            await useEngineProgressStore.getState().initialize()
+        })
+        await act(async () => item('Load').click())
+        expect(commands()[0]?.command).toBe('loadModel')
+    })
+
+    it('clears Starting download when a new failed operation arrives after missed active frames', async () => {
+        report([entry({ phase: 'failed', blocksReadiness: false })], [MODEL])
+        await mount()
+        act(() =>
+            usePendingActionsStore.getState().begin({
+                command: 'pullModel',
+                engineType: 'llama-cpp',
+                nodeId,
+                model: MODEL
+            })
+        )
+        expect(container.textContent).toContain('Starting download...')
+        act(() => {
+            report(
+                [
+                    entry({
+                        id: '2'.repeat(32),
+                        phase: 'failed',
+                        blocksReadiness: false,
+                        reason: 'busy'
+                    })
+                ],
+                [MODEL],
+                [],
+                '2'
+            )
+            publish()
+        })
+        expect(container.textContent).not.toContain('Starting download...')
+        expect(container.textContent).toContain('Download failed')
+        expect(
+            usePendingActionsStore.getState().getModelPending(nodeId, 'llama-cpp', MODEL)
+        ).toBeUndefined()
+        await openActions()
+        await act(async () => item('Load').click())
+        expect(commands()[0]?.command).toBe('loadModel')
     })
 
     it('shows stale disconnected facts without a completed bar or ready actions', async () => {

@@ -169,7 +169,8 @@ function pullSupersedes(entry: PendingAction, progress: EngineProgress): boolean
         download !== undefined &&
         download.model === entry.model &&
         download.engine === engineManagerName(entry.engineType) &&
-        (download.phase === 'queued' || download.phase === 'in_progress') &&
+        !!progress.downloadSourceId &&
+        !!progress.downloadRevision &&
         download.id !== entry.baselineDownloadId &&
         (progress.downloadSourceId !== entry.baselineDownloadSource ||
             !entry.baselineDownloadRevision ||
@@ -277,6 +278,7 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
             const snapshot = observation.downloadState
             const useSnapshot =
                 snapshot &&
+                (observation.downloadStateCurrent === true || !progress.downloadState) &&
                 (snapshot.sourceId !== progress.downloadSourceId ||
                     !progress.downloadRevision ||
                     BigInt(snapshot.revision) >= BigInt(progress.downloadRevision))

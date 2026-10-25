@@ -11,7 +11,12 @@
  */
 import { create } from 'zustand'
 import type { EngineInitialState } from '@/shared/types/engine-api'
-import type { EngineOperationType, EngineProgress, EngineType } from '@/shared/types/engines'
+import type {
+    EngineModels,
+    EngineOperationType,
+    EngineProgress,
+    EngineType
+} from '@/shared/types/engines'
 import {
     emptyEngineProgress,
     engineProgressKey,
@@ -20,7 +25,7 @@ import {
 
 interface EngineProgressState {
     progress: Map<string, EngineProgress>
-    initialize(initial?: EngineInitialState): Promise<void>
+    initialize(initial?: EngineInitialState | Promise<EngineInitialState>): Promise<void>
     cleanup(): void
     /**
      * Always defined; uses {@link emptyEngineProgress} with `status: 'idle'` when no entry exists.
@@ -36,6 +41,8 @@ interface EngineProgressState {
 
 let unsubs: Array<() => void> = []
 let generation = 0
+const retiredSources = new Map<string, Set<string>>()
+const sources = new Map<string, string>()
 
 export const useEngineProgressStore = create<EngineProgressState>((set, get) => ({
     progress: new Map(),
@@ -47,21 +54,117 @@ export const useEngineProgressStore = create<EngineProgressState>((set, get) => 
         unsubs = []
         const currentGeneration = ++generation
         const pushed = new Set<string>()
+        const removedNodes = new Set<string>()
+        const pushedModels = new Set<string>()
         let hydrating = true
 
         if (!window.pairApi) return
 
+        const acceptSource = (
+            nodeId: string,
+            engineType: EngineType,
+            source: string,
+            canReplace: boolean
+        ): boolean => {
+            const key = `${nodeId}:${engineType}`
+            if (retiredSources.get(key)?.has(source)) return false
+            const previous = sources.get(key)
+            if (previous && previous !== source) {
+                if (!canReplace) return false
+                const retired = retiredSources.get(key) ?? new Set<string>()
+                retired.add(previous)
+                retiredSources.set(key, retired)
+            }
+            sources.set(key, source)
+            return true
+        }
+        const apply = (progress: EngineProgress, fromSnapshot: boolean): void => {
+            const key = engineProgressKey(progress)
+            const previous = get().progress.get(key)
+            if (
+                progress.downloadSourceId &&
+                !acceptSource(
+                    progress.nodeId,
+                    progress.engineType,
+                    progress.downloadSourceId,
+                    !fromSnapshot && progress.downloadStateCurrent === true
+                )
+            )
+                return
+            if (previous?.downloadState && progress.downloadState) {
+                if (previous.downloadSourceId !== progress.downloadSourceId) {
+                    if (fromSnapshot || progress.downloadStateCurrent !== true) return
+                } else if (
+                    fromSnapshot &&
+                    previous.downloadRevision === progress.downloadRevision &&
+                    progress.downloadStateCurrent !== false
+                )
+                    return
+            }
+            if (!shouldApplyEngineProgress(progress, previous)) {
+                if (progress.downloadStateCurrent !== false || !previous) return
+                progress = { ...previous, downloadStateCurrent: false }
+            }
+            const map = new Map(get().progress)
+            map.set(key, progress)
+            set({ progress: map })
+        }
+        const observeModels = (models: EngineModels, fromSnapshot: boolean): void => {
+            const snapshot = models.downloadState
+            if (
+                snapshot &&
+                retiredSources.get(`${models.nodeId}:${models.engineType}`)?.has(snapshot.sourceId)
+            )
+                return
+            if (
+                models.downloadStateCurrent === true &&
+                (!snapshot ||
+                    !acceptSource(
+                        models.nodeId,
+                        models.engineType,
+                        snapshot.sourceId,
+                        !fromSnapshot && models.downloadStateCurrent === true
+                    ))
+            )
+                return
+            const map = new Map(get().progress)
+            for (const [key, p] of map) {
+                if (
+                    p.nodeId !== models.nodeId ||
+                    p.engineType !== models.engineType ||
+                    !p.downloadState
+                )
+                    continue
+                if (models.downloadStateCurrent !== true) {
+                    map.set(key, { ...p, downloadStateCurrent: false })
+                } else if (
+                    snapshot &&
+                    (p.downloadSourceId !== snapshot.sourceId ||
+                        (p.downloadRevision &&
+                            BigInt(p.downloadRevision) <= BigInt(snapshot.revision)))
+                ) {
+                    // A current canonical snapshot supersedes an older lifecycle
+                    // fence; omission from activeProgress alone never does.
+                    map.delete(key)
+                }
+            }
+            set({ progress: map })
+        }
         unsubs.push(
+            window.pairApi.engines.onStateChanged(patch => {
+                if (patch.models) {
+                    if (hydrating) pushedModels.add(`${patch.nodeId}:${patch.engineType}`)
+                    observeModels(patch.models, false)
+                }
+            }),
             window.pairApi.engines.onProgress(progress => {
                 const key = engineProgressKey(progress)
                 if (hydrating) pushed.add(key)
-                if (!shouldApplyEngineProgress(progress, get().progress.get(key))) return
-                const map = new Map(get().progress)
-                map.set(key, progress)
-                set({ progress: map })
+                apply(progress, false)
             }),
             window.pairApi.engines.onProgressRemove(key => {
                 if (hydrating) pushed.add(key)
+                if (get().progress.get(key)?.downloadState) return
                 const map = new Map(get().progress)
                 if (map.delete(key)) {
                     set({ progress: map })
@@ -71,6 +174,7 @@ export const useEngineProgressStore = create<EngineProgressState>((set, get) => 
             // (e.g. a remote pull whose terminal was missed) can't linger after the
             // node is gone.
             window.pairApi.nodes.onRemove(nodeId => {
+                removedNodes.add(nodeId)
                 const prefix = `${nodeId}:`
                 const map = new Map(get().progress)
                 let changed = false
@@ -84,18 +188,28 @@ export const useEngineProgressStore = create<EngineProgressState>((set, get) => 
             })
         )
         try {
-            const initial = initialSnapshot ?? (await window.pairApi.engines.getInitialState())
+            const initial = await (initialSnapshot ?? window.pairApi.engines.getInitialState())
             if (currentGeneration !== generation) return
-            const map = new Map<string, EngineProgress>()
-            for (const p of initial.activeProgress) {
-                const key = engineProgressKey(p)
-                if (!pushed.has(key)) map.set(key, p)
-            }
-            for (const key of pushed) {
-                const progress = get().progress.get(key)
-                if (progress) map.set(key, progress)
-            }
+            // activeProgress may omit terminal lifecycle entries. Keep their
+            // revision fence until canonical model observations supersede it.
+            const map = new Map(
+                Array.from(get().progress).filter(([key, p]) => p.downloadState || pushed.has(key))
+            )
             set({ progress: map })
+            for (const models of initial.models) {
+                if (!removedNodes.has(models.nodeId))
+                    observeModels(
+                        models,
+                        (initialSnapshot !== undefined && !(initialSnapshot instanceof Promise)) ||
+                            pushedModels.has(`${models.nodeId}:${models.engineType}`)
+                    )
+            }
+            for (const p of initial.activeProgress) {
+                if (removedNodes.has(p.nodeId)) continue
+                const key = engineProgressKey(p)
+                if (!pushed.has(key))
+                    apply(p, initialSnapshot !== undefined && !(initialSnapshot instanceof Promise))
+            }
         } catch {
             console.error('Failed to initialize engine progress store')
         } finally {
@@ -108,6 +222,14 @@ export const useEngineProgressStore = create<EngineProgressState>((set, get) => 
         generation++
         unsubs.forEach(u => u())
         unsubs = []
+        set({
+            progress: new Map(
+                Array.from(get().progress, ([key, progress]) => [
+                    key,
+                    progress.downloadState ? { ...progress, downloadStateCurrent: false } : progress
+                ])
+            )
+        })
     },
 
     getProgress: (nodeId, engineType, operation, model) => {
