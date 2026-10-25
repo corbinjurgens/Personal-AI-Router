@@ -1049,9 +1049,10 @@ empty. Complete keys sort numerically by their decimal ID strings (`9` before
 current local proxy's private `routing/cancel` or `routing/active` method.
 One forward across both methods is allowed per broker instance; overlap,
 unavailable proxy, malformed result or a five-second call timeout returns a
-bounded control error (`-32000`). There is no queue, registry or routing history
-in the broker. The proxy independently bounds snapshot copy/encoding to one
-operation. Live registry entries and snapshot copies plus overlapping JSON
+bounded control error (`-32000`). This control relay has no request registry or
+queue and does not read the separate history below. The proxy independently
+bounds snapshot copy/encoding to one operation. Live registry entries and
+snapshot copies plus overlapping JSON
 result/envelope encoding are charged to its existing byte root, including the
 caller ID and newline until response I/O finishes. Snapshot capacity exhaustion
 or a reply exceeding the existing 1 MiB IPC capability returns a bounded control
@@ -1064,6 +1065,44 @@ discarded and is reused by insertions; empty workload-index backing is released
 independently of live canonical owners. There is no separate live-entry count cap.
 The desktop service bridge validates and relays `routing:cancel` and
 `routing:active` through their existing typed IPC API contracts.
+
+#### Origin-local routing history
+
+The service-facing public methods are `routing:subscribe {}`,
+`routing:unsubscribe {}` and `routing:get-initial {}`, each replying with
+`{requests: RoutingHistoryRecord[]}`. Subscription is independent of workload,
+discovery and engine subscriptions. `routing:changed` carries one full accepted
+record. Subscribe before fetching initial state and merge by full
+origin/run/request key and sequence, never replace newer pushes with a delayed
+baseline. `nvpair-service` owns this broker subscription and relays history to
+its independently subscribed local clients.
+
+The broker's process-lifetime history owner accepts only the bound current
+proxy's private `routing/history-window`, `routing/request` and
+`routing/history-window-end` cycle. Binding comes from verified policy activation,
+not a record. A complete matching generation commits atomically after the source
+fence; `routing/history-accepted` acknowledges only that exact source. Private
+frames are intercepted before generic forwarding and never reach clients,
+peers, managers or scheduler. No client can inject them or invoke a peer history
+route.
+
+History is memory-only: newest 256 requests, newest 32 attempts per request with
+original indexes and `droppedAttempts`. Broker restart clears it; proxy death
+preserves accepted rows, loses possible unsent/partial windows and retires only
+that departed run's open presentation rows. It cannot manufacture delivery or
+charges. A model-less local attempt retains its node/engine and null model,
+labelled `model not specified`. Waits, workload associations, nullable fields,
+exact nano-USD amounts and rank/sequence rules follow the
+[proxy history contract](../nvpair-proxy/spec.md#1252-origin-local-routing-history).
+Completed delivery stays completed when accounting fails.
+
+Only one initial writer borrows the frozen baseline at a time; contention uses
+the fixed `-32096`/`routing history busy; retry` error. Desktop/TUI remain loading
+with validated rows and one bounded retry timer. The service has eight writer
+leases without a subscriber cap. The documented packed-bank/frame capacities are application
+representation bounds, not process RSS. Consumer banks are wired in desktop
+and TUI; original Tasks 4/5 still own Settings/card and Routing-tab presentation.
+History adds neither a cancel action nor SC-b/public-provider activation.
 
 #### `discovery:get-node-info`
 

@@ -19,6 +19,47 @@ Stopping the service is an explicit action (`Q`, or `--stop-service`).
 This file is the component reference. For task-oriented usage instructions, see
 [Using the PAIR terminal interface](../../docs/terminal-interface.mdx).
 
+## Routing history consumer
+
+`connectService` constructs `ui.NewRoutingHistoryClient` with one bounded wire
+consumer and enables subscription before `Run`. The reconnecting history client
+uses `routing:subscribe {}` to register before committing its baseline reply;
+`routing:get-initial {}` refetches while already subscribed. Both replies use
+`{requests: RoutingHistoryRecord[]}`, and `routing:changed` carries a full
+accepted record. `routing:unsubscribe {}` ends history subscription and has the
+same reply shape. Other subscriptions and
+live `routing:active`/`routing:cancel` controls remain independent.
+
+The wire synchronously validates and packs known fields into current, pending
+and baseline banks; the client exposes coalesced scalar `HistoryReady` tokens,
+not queued record DTOs. Presentation has no Bubble Tea history event consumer
+yet. Merge uses full origin/run/request identity and increasing seq, rejecting
+stale/terminal-regressing updates. Keep newest 256 requests and newest 32 attempts
+with original indexes and `droppedAttempts`; delayed baselines cannot resurrect
+trimmed rows. Busy initial loads keep validated rows and remain loading with one
+250/500/1000 ms retry timer, then one-second retries. Disconnect clears banks
+and retires the generation; reconnect resubscribes/refetches.
+
+History is private to this origin machine and memory-only. Broker restart clears
+it. Proxy death preserves accepted rows but may lose unsent/partial windows;
+departed open rows are presentation failures, not inferred delivery or charges.
+Private `routing/history-window`, `routing/request`, `routing/history-window-end`
+and `routing/history-accepted` never reach TUI clients, peers, managers or the
+scheduler. A local destination may retain real node/engine with a null model;
+the helper labels it `model not specified`. API models remain required.
+
+Money remains exact decimal nano-USD strings or null; held liability is distinct
+from known charged spend, and completed delivery can have failed accounting.
+Admission/first-body waits and detached workload associations retain the
+[shared history semantics](../nvpair-proxy/spec.md#1252-origin-local-routing-history).
+History capacities bound owned representations, not RSS; TUI's allowance is
+`3W+H+M+P+C` = 117,710,848 bytes. The service has eight concurrent writers and
+no subscriber cap, so a waiting TUI does not block ordinary calls or inference.
+
+This activates consumer banks only. Original Task 5 owns the Routing tab and
+original Task 4 owns desktop Settings/card presentation; neither view is claimed
+here. History adds no cancel action, SC-b continuation or public-provider activation.
+
 ## What it does
 
 On Nodes, `p` invites a standalone target or offers **Ask to join** for a row

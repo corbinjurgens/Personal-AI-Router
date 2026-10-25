@@ -33,6 +33,45 @@ its sender-validated pull/ack lease (see [Architecture](architecture.md)). Busy
 history initial loads retry with one bounded timer and remain loading. Routing
 diagnostics never alter inference, cancellation or accounting ownership.
 
+The origin-local public contract is `routing:subscribe {}`,
+`routing:unsubscribe {}`, `routing:get-initial {}` (initial shape
+`{requests: RoutingHistoryRecord[]}`), and full-record `routing:changed`.
+The service owns one broker subscription/cache and each client has independent
+scalar demand/cursor state. Electron main subscribes on renderer demand, then
+uses its own ready/pull/consumed IPC leases; these are not service methods.
+Private `routing/history-window`, `routing/request`, `routing/history-window-end`
+and `routing/history-accepted` remain source-bound proxy/broker traffic, never
+client, peer, manager or scheduler messages. Existing typed
+`pairApi.routing.active`/`cancel` controls are integrated and remain independent.
+
+History is memory-only, newest 256 requests and newest 32 attempts per row with
+original indexes and `droppedAttempts`. Broker restart clears it; proxy death
+may lose unsent/partial windows but preserves accepted rows. Disconnect clears
+the client's generation; reconnect subscribes before baseline and merges pushes.
+Local model-less attempts keep their actual node/engine with null model
+(`model not specified`), while API models remain required. Exact decimal money,
+measured waits and full workload association semantics follow the
+[proxy contract](../../services/nvpair-proxy/spec.md#1252-origin-local-routing-history).
+Accounting failure does not rewrite successful delivery.
+
+The service has eight concurrent writer leases, including at most one global
+initial transfer, with no subscriber cap or per-client data bank. Busy
+(`-32096`, `routing history busy; retry`) leaves desktop/TUI loading with
+validated rows and one 250/500/1000 ms then one-second retry timer. History
+capacity figures bound admitted banks/frames, not RSS, native producer metadata
+or ordinary connection queues. Original Tasks 4/5 still own desktop Settings/card
+and terminal Routing-tab presentation; consumer-bank activation does not claim
+those views, SC-b continuation or provider activation.
+
+The generated method inventory is a source-text cross-check, not a permission
+map. A bridge reference can be a wrong-direction rejection guard; private
+history methods appearing as referenced are not client calls. Preencoded window
+and acknowledgement frames also bypass ordinary Notify extraction, and switch
+cases can appear under the generator's generic request label. The private
+protocol above and its Go dispatch/source fences define the actual directions.
+No new history exception is needed for the current extraction; public history
+and active/cancel consumers stay checked without an ignored-method entry.
+
 ## Runtime ownership
 
 `nvpair-service` is the only backend process Electron ever starts, and only when
@@ -58,8 +97,8 @@ broker supervises every worker and relays its control plane.
 
 The runtime inventory and ownership flags live in
 `src/shared/constants/modular-binaries.ts`. Product and component versions live
-only in `services/versions.json` and are rendered into `docs/services-api.md` by
-`service-contracts:write` — do not restate version numbers in this document.
+only in `services/versions.json`; `docs/services-api.md` renders the method
+inventory without version numbers. Do not restate versions in this document.
 
 ```mermaid
 flowchart TB

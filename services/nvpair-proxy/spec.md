@@ -382,7 +382,8 @@ usually at 200. Client cancellation or failed delivery is `cancelled` (§5.4).
 native Ollama chat/generate NDJSON under §5.2's stream rules. Other protocols and
 explicit non-streaming responses retain raw forwarding; a copy abort fails
 their workload but receives no synthetic protocol repair. Qualified same-model
-continuation, private attempt history and its UI belong to pending SC-b.
+continuation belongs to pending SC-b. Origin-local attempt history is projected
+independently under §12.5.2; desktop and terminal presentation remain separate.
 
 **A non-streaming request is the weakest case.** Its headers arrive only when
 the response is complete, so "queued inside the engine" and "generating right
@@ -1371,6 +1372,7 @@ state in force. The broker re-sends policy state whenever the proxy starts; unti
 | `workload/cancel` | `{originatedFrom, runId, engine, workloadId, regenerate?}` | §12.5; answers `{found}` |
 | `routing/cancel` | `{request: {originNodeId, proxyRunId, requestId}, regenerate}` | §12.5.1; answers `{status}`; private parent IPC |
 | `routing/active` | `{}` | §12.5.1; answers `{requests: RoutingRequestKey[]}`; private parent IPC |
+| `routing/history-accepted` | `{schema:1, generation}` | §12.5.2; private broker acknowledgement notification, never a client call |
 
 Unknown fields and engine IDs that are not `engines.ValidRoutingID` are errors. A
 valid descriptor engine ID with no facade here is accepted state.
@@ -1827,7 +1829,8 @@ identity mutex; sorting and encoding run outside it. One snapshot copy through
 response encoding is allowed per proxy instance; an overlapping snapshot is
 refused with bounded control error `-32000` before copying. The broker similarly
 allows one forward across both methods, using the existing five-second proxy
-call bound and releasing its gate on every error. No routing history is added.
+call bound and releasing its gate on every error. These controls do not read
+or mutate the separate history in §12.5.2.
 
 Every live registry entry reserves 512 bytes of metadata representation
 headroom (linkage, key headers, lease and closure), plus the actual origin,
@@ -1873,6 +1876,158 @@ releases it before the instance gate. Snapshot strings are independently
 owned clones, so concurrent entry removal cannot release their storage early.
 Snapshots are observations, not reservations: an owner may end before a
 subsequent cancellation arrives.
+
+#### 12.5.2 Origin-local routing history
+
+History is a read-only projection of the existing request, attempt, response
+sink, account and workload-association owners. Every successfully registered
+origin request captures typed facts before body preparation or attempt work,
+including registered early failures; pre-registration refusals create no row.
+Capture performs bounded scalar updates and immutable descriptor publication.
+The process-lifetime copier reads coherent revisions outside inference locks;
+copying, encoding and diagnostic I/O never run under those locks or make an
+inference hook wait for diagnostics. This creates no second routing, ledger,
+cancellation or delivery authority.
+
+Private worker IPC is a complete-window protocol:
+
+| Notification | Direction | Params |
+| --- | --- | --- |
+| `routing/history-window` | Proxy → broker | `{schema:1, generation, cutoff, keys}`; keys contain `{request, createdAt, seq}`, cutoff is null or `{request, createdAt}` |
+| `routing/request` | Proxy → broker | One complete schema-1 `RoutingHistoryRecord` |
+| `routing/history-window-end` | Proxy → broker | `{schema:1, generation}` |
+| `routing/history-accepted` | Broker → exact proxy | `{schema:1, generation}` |
+
+`generation` is a canonical positive uint128 decimal string. The broker binds
+history to the current process/origin/run established by valid policy activation,
+never by a history frame. Begin stages a window; only a matching end with all
+manifest records can commit it after rechecking the source at the acceptance
+fence. A later begin replaces an incomplete stage. Equal-generation replay must
+have the same manifest. The proxy pins its frozen generation through each
+write cycle; after completion a newer coherent dirty window may supersede an
+unacknowledged one. One five-second timer retries the latest unacknowledged
+window, including pre-bind loss. Unchanged replay keeps the same generation.
+History has no proxy subscription RPC or history `Peer.Call` waiter and never
+uses a history-only active-write
+timeout to kill the shared parent transport. Failed gate acquisition retries;
+an actual write retains its backing until its borrower completes.
+
+None of these private methods reaches local clients, peers, managers or the
+scheduler. The broker exposes only the origin-local public history methods:
+
+| Public method | Contract |
+| --- | --- |
+| `routing:subscribe` | Empty-object params; enable this connection's independent history subscription; reply shape `{requests: RoutingHistoryRecord[]}` |
+| `routing:unsubscribe` | Empty-object params; disable that subscription; reply uses the same initial shape |
+| `routing:get-initial` | Empty-object params; read the initial shape without changing subscription |
+| `routing:changed` | Notification carrying one accepted full record to subscribed clients |
+
+Subscribe before fetching initial state and merge overlapping pushes, rather
+than replacing them with a delayed baseline. Through `nvpair-service`, the
+service owns the broker subscription and a shared bounded relay cache, with
+independent scalar subscription/cursor state for each local client. The service
+does not send private worker frames to a client. These methods do not add a
+history cancel action; §12.5.1 remains the live-control surface.
+
+The shared `nodepolicy.RoutingHistoryRecord` defines schema 1. Every nullable
+member remains present as null when unavailable; arrays are non-null. Full key
+is `{originNodeId, proxyRunId, requestId}`. Sequences are safe positive integers
+through 9007199254740991. Consumers ignore older/equal revisions and reject
+changes to creation time and terminal-to-active regressions for an existing key.
+Rows sort by `createdAt` descending, origin/run lexically ascending, then
+numeric request ID descending. Every bank keeps the newest 256 rows and a
+retained rank floor, so delayed old snapshots cannot resurrect evicted rows.
+Each row keeps the newest 32 attempts with their original increasing indexes;
+`droppedAttempts` counts the trimmed prefix. `continuationOf` refers only to an
+actual interrupted predecessor, including a verified predecessor in that prefix.
+No continuation is inferred from an interrupted outcome alone.
+
+Local destinations retain actual node/engine and null API IDs. A local attempt
+without a model has `destination.model=null` and the label `model not specified`;
+non-null models are nonempty validated identifiers, and API models are required.
+API destinations have deployment/account IDs and null node/engine; local
+attempts have null account data. `served` stays null until successful delivery.
+`completed` requires delivered success; accounting failure never changes that
+delivery into failure. A recoverable interruption requires the owner's explicit
+recovery fact; this projection does not activate SC-b or public providers.
+
+Timestamps are Unix milliseconds; durations are nonnegative milliseconds.
+`waits.admissionMs` records measured admission delay, and `firstByteMs` remains
+null until the successful raw-body event. That event does not prove downstream
+delivery. Nullable HTTP status is separate from disposition: committed status
+200 alone cannot prove successful completion.
+
+Spend fields are exact canonical nonnegative signed-64-bit decimal nano-USD
+strings (`currency: "USD"`), never floating-point values. Null means unavailable
+or inapplicable; `"0"` is known zero. `ceilingNanoUsd` is the tightest paid
+ceiling, including refused candidates; `grantedNanoUsd` is cumulative granted
+liability upper bounds and is not reduced by settlement; `heldNanoUsd` includes
+outstanding uncertain/retained holds; `chargedNanoUsd` is known settled charge.
+Attempt amounts describe that attempt. `accounting` independently describes
+uncertainty/failure. Use immutable owner snapshots, never totals reconstructed
+from trimmed attempts, repeated-update addition or inferred refunds.
+
+`workload` is null before a representable owner-established local association
+and for API-only work. When present it carries the full origin/run/engine/id
+tuple, explicit local `attemptIndex` and `attached` flag. Detached references
+remain historical and never authorize cancellation or imply later API liveness.
+If prefix trimming removes the associated attempt, wire `attached` becomes
+false and no associated card summary may be inferred. Matching only workload ID
+or substituting a different attempt's engine is invalid.
+
+History is memory-only. Proxy death can lose unsent facts and incomplete
+windows; the broker discards incomplete staging, preserves previously accepted
+rows and retires only departed open presentation rows as failed/proxy-exited.
+It never infers delivery, refunds or charges from death. Broker restart clears
+history. Client disconnect retires the connection generation and clears client
+banks; reconnect resubscribes and merges a fresh baseline. Eventual writer
+progress with stable retained membership converges to the latest complete
+window; permanent reader stoppage has no delivery-time guarantee.
+
+History value limits are 128 KiB per record/private value and 32 MiB per
+initial. Raw guards reject recursive duplicate keys, malformed/null required
+members and limit overflow before generic materialization or logging; well-formed
+unknown fields are stripped at each known nested projection. The physical frame
+limit includes envelope/newline, while ordinary logical caps stay 1 MiB on
+worker links and 8 MiB on service/TUI/session links. No generic cap is widened.
+
+For capacity accounting define `R=131072`, `M=33554432`, `S=65536`,
+`W=256S=16777216`, `E=4096`, `P=R+E=135168`, `H=M+E=33558528`,
+`C=131072` bytes. S is a packed known-field cell, not a retained DTO graph.
+
+| Data owner | Maximum admitted representation capacity |
+| --- | --- |
+| Proxy | `2W+S+2P+R+C` = 34,152,448 bytes |
+| Broker | `4W+S+2P+3R+2H+C` = 135,086,080 bytes |
+| Service | `3W+8P+2H+M+S+C` = 152,281,088 bytes |
+| Each TUI | `3W+H+M+P+C` = 117,710,848 bytes |
+| Desktop main | `3W+2H+M+P+C` = 151,269,376 bytes |
+| Each subscribed renderer | `3W+H+P+C` = 84,156,416 bytes |
+
+These are application-owned capacities, not RSS measurements or a heap ceiling.
+Demand-owned native fact graphs have a separate 32 KiB per-graph allowance,
+with detached graphs bounded by the source directory/scan/current-read lifetime;
+do not preallocate the maximum registered-owner allowance. Baseline runtime,
+allocator/GC overhead, ordinary queues and connection multiplicity are separate.
+Each existing service-client/renderer registration adds at most 32 bytes of
+history scalar state. There is no subscriber cap. Service history has eight
+concurrent writer leases total, including at most one globally pinned initial
+transfer. Other clients advance fairly by cursor through the existing registry;
+there is no per-client data bank or history waiter goroutine/list.
+
+Unavailable initial capacity returns fixed `-32096`/`routing history busy; retry`.
+Desktop and TUI keep validated rows and remain loading, retrying with one timer at
+250/500/1000 ms, then a single one-second timer until progress or generation
+change/disconnect/unsubscribe. Malformed history follows validation recovery,
+not busy retry. Ordinary RPC and inference continue while clients wait. Backing
+remains owned through queued/partial/blocked/failed writes and IPC callbacks;
+logical timeout alone never permits reuse.
+
+Desktop main converts public history into sender-aware ready/pull/consumed IPC
+leases; those are Electron controls, not service JSON-RPC methods. Desktop and
+TUI consumer banks are constructed by their production lifetimes. Original
+Tasks 4/5 still own Settings/card presentation and the terminal Routing tab;
+consumer delivery alone does not claim those views or native/process acceptance.
 
 ### 12.6 Routing listener
 
