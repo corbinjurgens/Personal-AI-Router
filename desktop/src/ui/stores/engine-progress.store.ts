@@ -20,6 +20,7 @@ import type {
 import {
     emptyEngineProgress,
     engineProgressKey,
+    isEngineCopyInProgress,
     shouldApplyEngineProgress
 } from '@/shared/utils/engine-progress'
 
@@ -178,7 +179,22 @@ export const useEngineProgressStore = create<EngineProgressState>((set, get) => 
                 const prefix = `${nodeId}:`
                 const map = new Map(get().progress)
                 let changed = false
-                for (const key of Array.from(map.keys())) {
+                for (const [key, progress] of map) {
+                    if (
+                        progress.operation === 'copy' &&
+                        (progress.sourceNodeId === nodeId || progress.destinationNodeId === nodeId)
+                    ) {
+                        if (isEngineCopyInProgress(progress)) {
+                            map.set(key, {
+                                ...progress,
+                                status: 'unknown',
+                                message:
+                                    'Copy outcome unknown after device disconnection. Reconnect and verify with an identity-bound retry when available.'
+                            })
+                            changed = true
+                        }
+                        continue
+                    }
                     if (key.startsWith(prefix)) {
                         map.delete(key)
                         changed = true
@@ -193,7 +209,9 @@ export const useEngineProgressStore = create<EngineProgressState>((set, get) => 
             // activeProgress may omit terminal lifecycle entries. Keep their
             // revision fence until canonical model observations supersede it.
             const map = new Map(
-                Array.from(get().progress).filter(([key, p]) => p.downloadState || pushed.has(key))
+                Array.from(get().progress).filter(
+                    ([key, p]) => p.downloadState || p.operation === 'copy' || pushed.has(key)
+                )
             )
             set({ progress: map })
             for (const models of initial.models) {
@@ -210,6 +228,23 @@ export const useEngineProgressStore = create<EngineProgressState>((set, get) => 
                 if (!pushed.has(key))
                     apply(p, initialSnapshot !== undefined && !(initialSnapshot instanceof Promise))
             }
+            const observedCopies = new Set(initial.activeProgress.map(engineProgressKey))
+            const reconciled = new Map(get().progress)
+            for (const [key, progress] of reconciled) {
+                if (
+                    isEngineCopyInProgress(progress) &&
+                    !pushed.has(key) &&
+                    !observedCopies.has(key)
+                ) {
+                    reconciled.set(key, {
+                        ...progress,
+                        status: 'unknown',
+                        message:
+                            'Copy outcome unknown after reconnect. Retry with the export identity when available.'
+                    })
+                }
+            }
+            set({ progress: reconciled })
         } catch {
             console.error('Failed to initialize engine progress store')
         } finally {

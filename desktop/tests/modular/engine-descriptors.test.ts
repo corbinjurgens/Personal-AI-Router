@@ -287,7 +287,7 @@ describe('unsupported operations are not offered', () => {
                 model: downloadedModel('demo'),
                 isRunning: true,
                 capabilities,
-                canCopyToThisPc: false,
+                canCopy: false,
                 displayName: (name: string) => name,
                 onAction: () => {},
                 onExpiryChange: () => {}

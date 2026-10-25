@@ -16,6 +16,18 @@ history.
 
 ## Status summary
 
+Desktop peer COPY now exposes an editable source, its actual installed-model
+inventory, and an independent mandatory destination in **Copy model**. Local
+and remote ready rows offer **Copy to device…** independently of upstream pull
+support. Existing destination-local Copy to this PC callers share the canonical
+coordinator. Progress/cancel/retry use complete tuples and operation IDs; the
+controller receives no model bytes or presets. Ordinary success refreshes the
+destination; custom success retains setup-required and durability qualification
+without fabricating native inventory. Unknown outcomes require verification.
+Component/bridge checks do not establish installed builds or native transfer
+acceptance. Keyboard/focus, narrow-window layout, actual peers, direct/reverse
+transfer and destination serving setup remain external acceptance work.
+
 Desktop node settings expose **Switch engine**, **From**, **To**, **Switch** and
 **Refresh readback**; TUI node detail uses `w` / **switch engine**. Both expose
 existing E3 invoke/status methods and sequence notifications. The target broker

@@ -105,12 +105,10 @@ afterEach(() => {
 })
 
 describe('copy wire boundary', () => {
-    it('retains the public Copy-to-this-PC label and measured percent formatting', () => {
-        expect(formatCopyProgressLabel({ status: 'starting' })).toBe(
-            'Copying to this PC · starting'
-        )
+    it('formats copy phase and measured percent independently of the destination', () => {
+        expect(formatCopyProgressLabel({ status: 'starting' })).toBe('Copy · starting')
         expect(formatCopyProgressLabel({ status: 'downloading', percent: 41.6 })).toBe(
-            'Copying to this PC · downloading · 42%'
+            'Copy · downloading · 42%'
         )
     })
     it('accepts fractional progress and caps measured percentages without inventing unknown percent', () => {
@@ -408,6 +406,58 @@ describe('copy state', () => {
 })
 
 describe('copy supervisor and typed API', () => {
+    it('refreshes ordinary-layout inventory on the actual destination without adding setup claims', async () => {
+        state.setSelfId('Mac')
+        const ordinary = {
+            engine: request.engine,
+            model: request.model,
+            files: 1,
+            filesSkipped: 0,
+            bytesTotal: 19,
+            bytesCopied: 19
+        }
+        const call = vi
+            .spyOn(supervisor, 'callProcess')
+            .mockImplementation(async (_name, method): Promise<JsonValue> => {
+                if (method === 'engine:copy-model') return { opId: request.opId, result: ordinary }
+                if (method === 'engine:remote-get-installed') return { engines: [] }
+                if (method === 'discovery:get-nodes')
+                    return {
+                        nodes: [
+                            {
+                                hostUuid: 'Joes',
+                                name: 'Joes',
+                                models: ['ordinary-native-model'],
+                                modelsByEngine: { llamacpp: ['ordinary-native-model'] }
+                            }
+                        ]
+                    }
+                throw new Error(`Unexpected controller operation ${method}`)
+            })
+        await supervisor.copyModel(request)
+        expect(call).toHaveBeenCalledWith('broker', 'engine:remote-get-installed', { node: 'Joes' })
+        expect(
+            state
+                .getEngineInitialState()
+                .models.find(row => row.nodeId === 'Joes' && row.engineType === 'llama-cpp')
+                ?.models.map(row => row.name)
+        ).toEqual(['ordinary-native-model'])
+        const outcome = state
+            .getEngineInitialState()
+            .activeProgress.find(row => row.opId === request.opId)
+        expect(outcome).toMatchObject({ status: 'done', copyResult: ordinary })
+        expect(outcome?.message).not.toContain('serving configuration')
+        expect(
+            call.mock.calls.some(
+                ([, method, params]) =>
+                    method === 'engine:status' ||
+                    (params &&
+                        typeof params === 'object' &&
+                        !Array.isArray(params) &&
+                        params.node === 'Mac')
+            )
+        ).toBe(false)
+    })
     it('refreshes the destination after a verified retried copy and completes artifact progress at its byte total', async () => {
         state.setSelfId('Mac')
         const retried = { ...result, bytesTotal: 100, bytesCopied: 150 }

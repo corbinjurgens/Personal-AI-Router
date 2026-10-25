@@ -12,6 +12,26 @@ lifecycle and exposes a typed preload bridge to the UI.
 
 ## Process model
 
+ModelManager's **Copy to device…** opens one **Copy model** modal for local or
+paired-device inventory. Source and destination are independent stable device
+IDs; the engine stays fixed and changing source clears the selected model.
+The renderer checks both devices' current copy capabilities and repeats the
+check on submission. Only the destination Go manager authorizes and admits
+the write. Controller → source trust never grants destination → source access.
+
+The destination fetches artifact bytes directly from the source through pinned
+engine control. The controller carries typed selections, status and results,
+with no artifact storage or serving configuration. Progress is correlated by
+operation ID and the complete source/destination/engine/model tuple. Close
+detaches the modal; **Cancel copy** cancels that operation. Source and destination
+lists retain copy status, and reconnect hydrates active operations. A missing
+operation after disconnection has an unknown outcome, never inferred success.
+
+Custom artifact completion is separate from native inventory: it retains the
+accepted model name and requires destination serving setup before loading.
+Uncertain receipt durability remains visible after completion. Copy neither
+starts an engine nor loads, deletes or overwrites a model.
+
 ```mermaid
 flowchart LR
     subgraph Electron

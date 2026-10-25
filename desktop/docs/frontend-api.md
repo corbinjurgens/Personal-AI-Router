@@ -35,6 +35,33 @@ They do not imply a WebSocket connection. Browser clients are not supported.
 
 ## Renderer API
 
+### Model copy
+
+Use a ready model's **Copy to device…** action, choose **Source device**,
+**Model**, and an explicit **Destination device**, then review the source
+preservation/direct-transfer summary. Changing the source resets the model and
+reads that device's installed inventory; Add model still searches upstream.
+Device labels are separate from exact device and model IDs.
+
+`pairApi.engines.modelCopyCapabilities({nodeId, engine})` reads versioned
+export/import support, installation, caller write availability, retry identity
+and durability support. Offline, unknown, old unsupported peers, missing
+installation and denied permission block submission with an explanation.
+`copyModel({opId, sourceNodeId, destinationNodeId, engine, model,
+expectedExportId?})` waits for the verified terminal reply. No fixed download
+timeout implies success. `cancelModelCopy(opId)` targets exactly one operation;
+`activeModelCopies()` hydrates via the bridge's existing reconnect owner.
+
+The progress store keeps exact tuples and verified completion qualifications.
+Closing the modal does not cancel. Return through **View copy** on either
+device's engine list. A custom result says destination serving configuration
+is required; `durability: uncertain` retains its publication warning. It does
+not synthesize a loaded/routable row. Retry with a learned export ID constrains
+the content and can confirm a verified committed receipt with source offline;
+without one, retry is explicitly a fresh name resolution with unknown prior
+outcome. The existing `copyModelToThisPc` convenience method uses this same
+bridge coordinator, status and completion messages.
+
 ### `pairApi.routing`
 
 `subscribe()` and `getInitial()` share one initial-load promise, resolving void

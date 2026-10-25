@@ -25,10 +25,8 @@ export interface ModelRowProps {
      * store on the superseding push / timeout.
      */
     pendingAction?: EngineCommandType
-    /** Offer "Copy to this PC": the model is on a paired node and no copy from it is running. */
-    canCopyToThisPc?: boolean
-    /** Progress of a copy of this model to this PC, when one is running. */
-    copyProgress?: EngineProgress
+    /** Copy support is independent of upstream download support. */
+    canCopy?: boolean
     displayName: (name: string) => string
     onAction: (modelName: string, action: string) => void
     onExpiryChange: (modelName: string, value: ModelExpiry) => void

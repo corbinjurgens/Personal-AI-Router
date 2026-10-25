@@ -241,7 +241,7 @@ describe('rendered target download readiness', () => {
         expect(progress?.getAttribute('aria-label')).toBe(`Downloading ${MODEL}`)
         expect(progress?.getAttribute('aria-valuenow')).toBe('21')
         await openActions()
-        for (const label of ['Load', 'Copy to this PC', 'Delete', 'Eject']) expectDisabled(label)
+        for (const label of ['Load', 'Copy to device…', 'Delete', 'Eject']) expectDisabled(label)
         expect(commands()).toEqual([])
     })
 
@@ -274,7 +274,7 @@ describe('rendered target download readiness', () => {
         expect(container.querySelectorAll('button[aria-label^="Open "]')).toHaveLength(2)
         await openActions('owner/second:Q8')
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
     })
 
@@ -285,7 +285,7 @@ describe('rendered target download readiness', () => {
         expect(container.querySelector('[role="progressbar"]')).toBeNull()
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
     })
 
@@ -298,7 +298,7 @@ describe('rendered target download readiness', () => {
         expect(container.textContent).not.toContain('Loaded')
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         act(() => {
             report([complete], [MODEL])
             publish()
@@ -316,7 +316,7 @@ describe('rendered target download readiness', () => {
         expect(container.textContent).toContain('Downloading')
         expect(container.textContent).not.toContain('Download complete')
         await openActions()
-        for (const label of ['Load', 'Copy to this PC', 'Eject', 'Delete']) expectDisabled(label)
+        for (const label of ['Load', 'Copy to device…', 'Eject', 'Delete']) expectDisabled(label)
         expect(commands()).toEqual([])
     })
 
@@ -355,7 +355,7 @@ describe('rendered target download readiness', () => {
         expect(container.textContent).not.toContain('Download complete')
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
     })
 
@@ -366,7 +366,7 @@ describe('rendered target download readiness', () => {
         expect(container.querySelector('[role="progressbar"]')).toBeNull()
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
     })
 
@@ -424,7 +424,7 @@ describe('rendered target download readiness', () => {
         await act(async () => item('Load').click())
         expect(commands()).toEqual([])
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(container.textContent).toContain('Downloading')
         expect(commands()).toEqual([])
     })
@@ -440,7 +440,7 @@ describe('rendered target download readiness', () => {
         })
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(container.textContent).toContain('Downloading')
         expect(commands()).toEqual([])
     })
@@ -459,7 +459,7 @@ describe('rendered target download readiness', () => {
         })
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(container.textContent).toContain('Disconnected or download status unavailable')
         expect(commands()).toEqual([])
     })
@@ -478,7 +478,7 @@ describe('rendered target download readiness', () => {
         })
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(
             useEngineModelsStore.getState().getModels(nodeId, 'llama-cpp').downloadState?.sourceId
         ).toBe(acceptedSource)
@@ -508,7 +508,7 @@ describe('rendered target download readiness', () => {
         await act(async () => useEngineProgressStore.getState().initialize(delayed))
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
         act(() => {
             report([completed], [MODEL], [], '2')
@@ -538,7 +538,7 @@ describe('rendered target download readiness', () => {
         await act(async () => root.render(<ModelManager backend={backend()} nodeId={nodeId} />))
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(container.textContent).toContain('Downloading')
         expect(commands()).toEqual([])
     })
@@ -559,7 +559,7 @@ describe('rendered target download readiness', () => {
         })
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(container.textContent).toContain('Downloading')
         expect(
             useEngineModelsStore.getState().getModels(nodeId, 'llama-cpp').downloadState?.sourceId
@@ -587,7 +587,7 @@ describe('rendered target download readiness', () => {
         })
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(stateListeners.size).toBe(3)
         expect(commands()).toEqual([])
     })
@@ -606,7 +606,7 @@ describe('rendered target download readiness', () => {
         })
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
         vi.spyOn(window.pairApi.engines, 'getInitialState').mockResolvedValue(delayed)
         await act(async () => {
@@ -664,7 +664,7 @@ describe('rendered target download readiness', () => {
         expect(container.querySelector('[role="progressbar"]')).toBeNull()
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
     })
 
@@ -681,7 +681,7 @@ describe('rendered target download readiness', () => {
         expect(container.textContent).toContain('Download status unknown')
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
     })
 
@@ -745,7 +745,7 @@ describe('rendered target download readiness', () => {
         )
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
     })
 
@@ -809,7 +809,7 @@ describe('rendered target download readiness', () => {
         expect(container.textContent).toContain('Downloading')
         await openActions()
         expectDisabled('Load')
-        expectDisabled('Copy to this PC')
+        expectDisabled('Copy to device…')
         expect(commands()).toEqual([])
     })
 

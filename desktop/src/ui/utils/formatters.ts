@@ -97,12 +97,12 @@ function formatPullProgressDetail(p: PullProgressFields): string {
 /**
  * Status line plus percentage when available (avoids duplicating if `status` already contains a %).
  */
-/** Label for a copy to this PC in flight: its stage and, when known, the percent. */
+/** Copy phase and measured percentage; endpoint names belong to the operation tuple. */
 export function formatCopyProgressLabel(p: { status: string; percent?: number }): string {
     const stage = p.status.trim() || 'working'
     return p.percent === undefined
-        ? `Copying to this PC · ${stage}`
-        : `Copying to this PC · ${stage} · ${Math.round(p.percent)}%`
+        ? `Copy · ${stage}`
+        : `Copy · ${stage} · ${Math.round(p.percent)}%`
 }
 
 export function formatPullProgressLabel(p: PullProgressFields): string {

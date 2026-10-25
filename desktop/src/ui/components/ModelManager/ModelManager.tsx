@@ -8,11 +8,11 @@ import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import { useEngineDescriptor } from '@/ui/stores/engine-status.store'
 import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
 import { ModelExpiry, type ModelItem } from '@/shared/types/engines'
-import { engineManagerName } from '@/shared/utils/engines'
+import { emptyEngineModels, engineManagerName } from '@/shared/utils/engines'
 
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import { ModelHubModal } from '@/ui/components/ModelHub/ModelHubModal'
-import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
@@ -21,11 +21,32 @@ import { isEnginePullInProgress } from '@/shared/utils/engine-progress'
 import ModelRow from './ModelRow'
 import { TransientModelStatusRow } from './TransientModelStatusRow'
 import type { ModelEntry } from '@/ui/types/model-hub'
+import { ModelCopyModal } from './ModelCopyModal'
+import { formatCopyProgressLabel } from '@/ui/utils/formatters'
 
 export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId: string }) {
     const [openModelHubModal, setOpenModelHubModal] = useState(false)
     const [modelPendingDelete, setModelPendingDelete] = useState<string | null>(null)
-    const observation = useEngineModelsStore(state => state.getModels(nodeId, backend.type))
+    const [copySelection, setCopySelection] = useState<{
+        source: string
+        model: string
+        opId?: string
+    } | null>(null)
+    const nodes = useNodesStore(state => state.nodes)
+    const progress = useEngineProgressStore(state => state.progress)
+    const copies = Array.from(progress.values()).filter(
+        p =>
+            p.operation === 'copy' &&
+            p.engineType === backend.type &&
+            (p.sourceNodeId === nodeId || p.destinationNodeId === nodeId)
+    )
+    const observedModels = useEngineModelsStore(state =>
+        state.models.get(`${nodeId}:${backend.type}`)
+    )
+    const observation = useMemo(
+        () => observedModels ?? emptyEngineModels(nodeId, backend.type),
+        [observedModels, nodeId, backend.type]
+    )
     const caps = engineCapabilities(backend.type, useEngineDescriptor(backend.type))
 
     const backendType = backend.type
@@ -44,24 +65,6 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
         }
         return parts.join('|')
     })
-
-    /** Same for copies to this PC, which are keyed `...:copy:<model>`. */
-    const copyProgressFingerprint = useEngineProgressStore(state => {
-        const prefix = `${nodeId}:${backend.type}:copy`
-        const parts: string[] = []
-        for (const [key, p] of state.progress) {
-            if (key.startsWith(prefix)) {
-                parts.push(`${p.model ?? ''}:${p.status}:${p.percent ?? ''}`)
-            }
-        }
-        return parts.join('|')
-    })
-    void copyProgressFingerprint
-
-    // A model on a paired node can be copied here; one copy per node and engine at a time.
-    const selfId = useConnectionStore(state => state.selfId)
-    const isRemoteNode = selfId !== null && nodeId !== selfId
-    const copyInFlight = copyProgressFingerprint !== ''
 
     /**
      * Re-render when an optimistic model action for this engine begins/clears;
@@ -198,7 +201,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                         backend.processStatus === 'running'
                     )
                 case 'copy':
-                    return caps.hasModelCopy && ready && isRemoteNode && !copyInFlight
+                    return caps.hasModelCopy && ready
                 case 'eject':
                     return (
                         caps.hasEject &&
@@ -211,7 +214,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                     return false
             }
         },
-        [nodeId, backendType, caps, backend.processStatus, isRemoteNode, copyInFlight]
+        [nodeId, backendType, caps, backend.processStatus]
     )
 
     const handleAction = useCallback(
@@ -225,7 +228,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                     window.pairApi.engines.unloadModel(backendType, nodeId, modelName)
                     break
                 case 'copy':
-                    window.pairApi.engines.copyModelToThisPc(backendType, nodeId, modelName)
+                    setCopySelection({ source: nodeId, model: modelName })
                     break
                 case 'delete':
                     if (confirmBeforeDelete) {
@@ -326,8 +329,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                                 pendingAction={usePendingActionsStore
                                     .getState()
                                     .getModelPending(nodeId, backendType, model.name)}
-                                canCopyToThisPc={isRemoteNode && !copyInFlight && caps.hasModelCopy}
-                                copyProgress={getProgress(nodeId, backend.type, 'copy', model.name)}
+                                canCopy={caps.hasModelCopy}
                                 displayName={displayName}
                                 onAction={handleAction}
                                 onExpiryChange={handleExpiryChange}
@@ -335,6 +337,44 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                         ))}
                 </Stack>
             )}
+
+            {copies.map(copy => (
+                <Stack key={copy.opId} gap="1">
+                    <Text kind="body/regular/sm">
+                        {copy.model} ·{' '}
+                        {nodes.get(copy.sourceNodeId ?? '')?.name ?? copy.sourceNodeId}
+                        {' → '}
+                        {nodes.get(copy.destinationNodeId ?? '')?.name ?? copy.destinationNodeId}
+                        {' · '}
+                        {formatCopyProgressLabel(copy)}
+                    </Text>
+                    {copy.message && <Text kind="body/regular/sm">{copy.message}</Text>}
+                    <Button
+                        kind="tertiary"
+                        size="small"
+                        onClick={() =>
+                            setCopySelection({
+                                source: copy.sourceNodeId ?? '',
+                                model: copy.model ?? '',
+                                opId: copy.opId
+                            })
+                        }
+                    >
+                        View copy
+                    </Button>
+                </Stack>
+            ))}
+            <ModelCopyModal
+                key={`${backendType}:${copySelection?.source ?? ''}:${copySelection?.model ?? ''}:${copySelection?.opId ?? ''}`}
+                open={copySelection !== null}
+                onOpenChange={open => {
+                    if (!open) setCopySelection(null)
+                }}
+                engineType={backendType}
+                initialSource={copySelection?.source ?? nodeId}
+                initialModel={copySelection?.model ?? ''}
+                initialOpId={copySelection?.opId}
+            />
 
             <ConfirmModal
                 open={modelPendingDelete !== null}
