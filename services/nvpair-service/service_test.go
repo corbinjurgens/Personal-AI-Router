@@ -415,6 +415,36 @@ func TestSlowClientIsDisconnectedNotBlocking(t *testing.T) {
 	h := newHarness(t)
 	h.broker()
 	fast := h.dial()
+	fast.notification("app:ready")
+
+	// Keep draining the test client's bounded inbox. Acknowledge each small
+	// batch so the flood cannot outrun this reader on a slower machine, while
+	// the unread client's queue continues to accumulate the entire flood.
+	const batchFrames = 64
+	const floodFrames = clientQueueFrames + batchFrames
+	drained := make(chan struct{}, 1)
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		defer close(drained)
+		received := 0
+		for m := range fast.msgs {
+			if m.Method != "custom:flood" {
+				continue
+			}
+			received++
+			if received%batchFrames == 0 {
+				drained <- struct{}{}
+			}
+			if received == floodFrames {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		_ = fast.conn.Close()
+		<-drainDone
+	})
 
 	// A client that never reads: its connection is opened raw and ignored.
 	ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
@@ -427,9 +457,20 @@ func TestSlowClientIsDisconnectedNotBlocking(t *testing.T) {
 	waitUntil(t, "slow client attached", func() bool { return h.svc.status().Clients == 2 })
 
 	big := strings.Repeat("x", 4096)
-	for i := 0; i < clientQueueFrames+64; i++ {
-		h.svc.broadcast("custom:flood", map[string]string{"pad": big})
+	for sent := 0; sent < floodFrames; sent += batchFrames {
+		for i := 0; i < batchFrames; i++ {
+			h.svc.broadcast("custom:flood", map[string]string{"pad": big})
+		}
+		select {
+		case _, ok := <-drained:
+			if !ok {
+				t.Fatal("fast client disconnected during flood")
+			}
+		case <-time.After(waitTimeout):
+			t.Fatal("fast client stopped receiving during flood")
+		}
 	}
+	<-drainDone // Only the main test goroutine reads responses from here on.
 	waitUntil(t, "slow client dropped", func() bool { return h.svc.status().Clients == 1 })
 	if r := fast.call("1", "echo", `{}`); r.Error != nil {
 		t.Fatalf("fast client blocked: %v", r.Error)
