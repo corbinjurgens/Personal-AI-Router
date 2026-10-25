@@ -18,6 +18,7 @@ import (
 
 	"nvpair-shared/servicectl"
 	"nvpair-tui/rpc"
+	"nvpair-tui/ui"
 )
 
 // serviceName is the binary the TUI attaches to. It is resolved next to our
@@ -97,9 +98,13 @@ func connectService(ctx context.Context, servicePath string) (*serviceLink, erro
 		_ = conn.Close()
 		return nil, err
 	}
-	client := rpc.NewReconnectingClient(conn, func(ctx context.Context) (io.ReadWriteCloser, error) {
+	client, err := ui.NewRoutingHistoryClient(conn, func(ctx context.Context) (io.ReadWriteCloser, error) {
 		return servicectl.DialEndpoint(ctx, endpoint)
 	})
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 	return startServiceLink(ctx, client), nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"reflect"
@@ -407,6 +408,95 @@ func TestRoutingHistoryWireModelNotSpecified(t *testing.T) {
 	model := "synthetic-model"
 	if routingHistoryModel(&model) != model {
 		t.Fatal("known model label changed")
+	}
+}
+
+func TestRoutingHistoryWireClientFactoryAppliesBeforeReady(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	if err := b.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewRoutingHistoryClient(a, func(context.Context) (io.ReadWriteCloser, error) {
+		t.Error("unexpected reconnect")
+		return nil, io.EOF
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
+	if state := client.HistoryState(); !state.Loading || state.Generation != 1 || state.Pending {
+		t.Fatalf("factory did not enable subscription before Run: %+v", state)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
+	server := rpc.NewCodec(b, b)
+	request, err := server.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Method != nodepolicy.MethodRoutingSubscribe || request.ID == nil || string(*request.ID) != `"jh:1"` {
+		t.Fatalf("first request = %+v", request)
+	}
+	row := routingWireCorpus(t)[0]
+	row.Requested.Model = ""
+	row.Served.Model = nil
+	for i := range row.Attempts {
+		row.Attempts[i].Destination.Model = nil
+	}
+	initial, err := json.Marshal(nodepolicy.RoutingHistoryInitial{Requests: []nodepolicy.RoutingHistoryRecord{row}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Write(&rpc.Message{JSONRPC: "2.0", ID: request.ID, Result: initial}); err != nil {
+		t.Fatal(err)
+	}
+	barrier := func() {
+		t.Helper()
+		if err := server.Write(&rpc.Message{JSONRPC: "2.0", Method: "ordinary-barrier"}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case event := <-client.Events():
+			if event.Generation != 1 || event.Message == nil || event.Message.Method != "ordinary-barrier" {
+				t.Fatalf("history leaked onto ordinary events: %+v", event)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("ordinary input stalled")
+		}
+	}
+	barrier()
+	if state := client.HistoryState(); state.Loading || state.Pending || state.Quarantined {
+		t.Fatalf("factory baseline not applied: %+v", state)
+	}
+	// Each record is independently valid. Only the real consumer bank can
+	// reject a later snapshot that changes the immutable creation time.
+	row.Seq++
+	row.CreatedAt--
+	if err := row.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Write(&rpc.Message{JSONRPC: "2.0", Method: nodepolicy.NotifyRoutingChanged, Params: changed}); err != nil {
+		t.Fatal(err)
+	}
+	barrier()
+	if state := client.HistoryState(); !state.Loading || state.Pending || !state.Retry {
+		t.Fatalf("factory did not synchronously enforce its bank merge: %+v", state)
+	}
+	if len(client.HistoryReady()) != 1 {
+		t.Fatalf("ready tokens = %d, want one coalesced scalar", len(client.HistoryReady()))
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("factory client did not detach")
 	}
 }
 

@@ -5,14 +5,17 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"sync"
 
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
+	"nvpair-tui/rpc"
 )
 
 const (
@@ -44,9 +47,21 @@ func newRoutingHistoryWire() *routingHistoryWire {
 	return &routingHistoryWire{current: new(routingHistoryBank), pending: new(routingHistoryBank), baseline: new(routingHistoryBank)}
 }
 
+// NewRoutingHistoryClient attaches one bounded history consumer to the service
+// connection. The caller owns conn if construction fails; otherwise Client
+// owns it and later dial results. Subscription is enabled before Run starts.
+func NewRoutingHistoryClient(conn io.ReadWriteCloser, dial func(context.Context) (io.ReadWriteCloser, error)) (*rpc.Client, error) {
+	wire := newRoutingHistoryWire()
+	client, err := rpc.NewReconnectingHistoryClient(conn, dial, wire.consume, wire.reset)
+	if err != nil {
+		return nil, err
+	}
+	client.SetHistorySubscription(true)
+	return client, nil
+}
+
 // reset and consume are the synchronous history-client factory callbacks. They
-// share one generation/commit fence. No view or production subscription is
-// mounted here; Task318 owns construction and Task5 owns presentation.
+// share one generation/commit fence. Task5 owns presentation.
 func (w *routingHistoryWire) reset(generation uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

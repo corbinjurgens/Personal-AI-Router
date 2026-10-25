@@ -387,7 +387,11 @@ describe('production preload and bounded renderer API', () => {
     })
 
     it('consumes staged records but does not acknowledge scalar end before coherent rAF commit', async () => {
-        replies([fixture()])
+        const row = fixture()
+        row.spend.ceilingNanoUsd = '9223372036854775807'
+        row.spend.grantedNanoUsd = '9007199254740993'
+        row.spend.heldNanoUsd = '0'
+        replies([row])
         const history = createRoutingHistory(serviceTransport(pairTransport))
         const changed = vi.fn<(token: RoutingHistoryCommit) => undefined>(() => undefined)
         history.onChanged(changed)
@@ -409,6 +413,13 @@ describe('production preload and bounded renderer API', () => {
             'routing-history:consumed',
             { generation: 1, lease: 2 }
         ])
+        expect(history.loading).toBe(false)
+        expect(
+            history.consumeCurrent(0, value => {
+                expect(value).toEqual(row)
+                return undefined
+            })
+        ).toBe(true)
         history.destroy()
     })
 

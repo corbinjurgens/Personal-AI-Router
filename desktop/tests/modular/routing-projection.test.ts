@@ -146,11 +146,21 @@ describe('routing history schema parity', () => {
         const record = modelLessLocalRecord(),
             main = new RoutingHistoryBank(),
             renderer = new RoutingHistoryBank()
+        record.spend.ceilingNanoUsd = '9223372036854775807'
+        record.spend.grantedNanoUsd = '9007199254740993'
+        record.spend.heldNanoUsd = '0'
+        record.spend.chargedNanoUsd = null
         expect(main.apply(new TextEncoder().encode(JSON.stringify(record)))).toBe(true)
         expect(renderer.applyPacked(main.at(0).slice())).toBe(true)
         expect(
             renderer.consume(0, value => {
                 expect(value).toEqual(record)
+                expect(value.spend).toMatchObject({
+                    ceilingNanoUsd: '9223372036854775807',
+                    grantedNanoUsd: '9007199254740993',
+                    heldNanoUsd: '0',
+                    chargedNanoUsd: null
+                })
                 return undefined
             })
         ).toBe(true)

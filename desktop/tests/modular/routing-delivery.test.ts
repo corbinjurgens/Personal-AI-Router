@@ -703,6 +703,9 @@ describe('production history sender IPC and broadcaster', () => {
         row.requested.model = ''
         for (const attempt of row.attempts) attempt.destination.model = null
         if (row.served) row.served.model = null
+        row.spend.ceilingNanoUsd = '9223372036854775807'
+        row.spend.grantedNanoUsd = '9007199254740993'
+        row.spend.heldNanoUsd = '0'
         getRoutingDelivery().initialResult(
             new TextEncoder().encode(JSON.stringify({ requests: [row] }))
         )
@@ -720,6 +723,8 @@ describe('production history sender IPC and broadcaster', () => {
             })
         ).toBe(true)
         row.seq++
+        row.spend.chargedNanoUsd = '9007199254740993'
+        row.spend.accounting = 'failed'
         applyRoutingHistoryChanged(new TextEncoder().encode(JSON.stringify(row)))
         await receiveReady(a)
         runFrame()
@@ -727,6 +732,8 @@ describe('production history sender IPC and broadcaster', () => {
         expect(
             history.consumeCurrent(0, value => {
                 expect(value).toEqual(row)
+                expect(value.state).toBe('completed')
+                expect(value.spend.accounting).toBe('failed')
                 return undefined
             })
         ).toBe(true)
@@ -1059,10 +1066,20 @@ describe('production history sender IPC and broadcaster', () => {
             await settle()
         }
         expect(historyA.size).toBe(256)
-        historyA.consumeCurrent(0, row => {
-            expect(row.request.requestId).toBe('300')
-            return undefined
-        })
+        for (const history of [historyA, historyB]) {
+            expect(
+                history.consumeCurrent(0, row => {
+                    expect(row.request.requestId).toBe('300')
+                    return undefined
+                })
+            ).toBe(true)
+            expect(
+                history.consumeCurrent(255, row => {
+                    expect(row.request.requestId).toBe('45')
+                    return undefined
+                })
+            ).toBe(true)
+        }
         historyA.destroy()
         historyB.destroy()
         await settle()

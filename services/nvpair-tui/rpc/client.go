@@ -445,6 +445,7 @@ type historySession struct {
 	refusalN                                        int
 	refusalActive, writeActive                      bool
 	wanted, subscribed, pending, loading, exhausted bool
+	waitingReady                                    bool
 	unsubscribeNeeded                               bool
 	pendingMethod                                   string
 	retryAt                                         time.Time
@@ -594,6 +595,7 @@ func (h *historySession) bindLocked(t *transport, r io.Reader) {
 		return
 	}
 	h.subscribed = false
+	h.waitingReady = false
 	h.unsubscribeNeeded = false
 	h.pending = false
 	h.pendingMethod = ""
@@ -680,7 +682,7 @@ func (h *historySession) failed(err error) {
 		h.exhausted = true
 		h.retryAt = time.Time{}
 		h.loading = false
-	} else if h.wanted && h.t.connected() && !h.exhausted {
+	} else if h.wanted && h.t.connected() && !h.exhausted && !h.waitingReady {
 		h.loading = true
 		if h.retryAt.IsZero() {
 			h.retryAt = time.Now().Add(historyRetryDelay(h.attempt))
@@ -712,7 +714,7 @@ func (h *historySession) run(ctx context.Context, c *Client) {
 				frame = h.refusal[:h.refusalN]
 				h.refusalActive = true
 				refusal = true
-			} else if !h.pending && !h.exhausted && (h.retryAt.IsZero() || !time.Now().Before(h.retryAt)) {
+			} else if !h.waitingReady && !h.pending && !h.exhausted && (h.retryAt.IsZero() || !time.Now().Before(h.retryAt)) {
 				method := ""
 				if h.wanted {
 					method = nodepolicy.MethodRoutingSubscribe
@@ -858,11 +860,33 @@ func (c *Client) readMessage(t *transport) (*Message, error) {
 		return nil, nil
 	}
 	switch msg.Method {
+	case "service/broker-restarted":
+		if msg.IsNotification() {
+			// The service socket survives its broker. Retire only the logical
+			// call: issued IDs and active control/refusal writes still belong
+			// to this transport until their actual completion.
+			h.correlation.Retire()
+			h.pending = false
+			h.pendingMethod = ""
+			h.subscribed = false
+			h.waitingReady = true
+			h.loading = h.wanted && !h.exhausted
+			h.retryAt = time.Time{}
+			h.attempt = 0
+			h.reset(t.generation)
+			h.changed()
+			h.signal()
+		}
+	case "app:ready":
+		if msg.IsNotification() && h.waitingReady {
+			h.waitingReady = false
+			h.signal()
+		}
 	case nodepolicy.NotifyRoutingChanged:
 		// Guarded pushes must reach the bounded merge even during quarantine:
 		// a delayed refetch baseline may be older. Only a successful initial
 		// completes correlation and clears quarantine/loading above.
-		if msg.IsNotification() && h.wanted {
+		if msg.IsNotification() && h.wanted && !h.waitingReady {
 			if err := h.consume(t.generation, false, msg.Params); err != nil {
 				h.failed(jsonrpc.ErrHistoryInvalid)
 			} else {

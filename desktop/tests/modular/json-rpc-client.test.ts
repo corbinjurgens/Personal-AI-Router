@@ -395,12 +395,35 @@ describe('JsonRpcSocketClient history ingress', () => {
         try {
             client.start()
             await vi.advanceTimersByTimeAsync(0)
+            const initial = client.callHistory('routing:get-initial', () => true)
+            const initialFailed = expect(initial).rejects.toThrow('history-invalid')
+            expect(first.received[0]?.id).toBe('jh:1')
+            trace.mockClear()
             first.push(Buffer.alloc(33558528, 120))
             await vi.advanceTimersByTimeAsync(1)
+            await initialFailed
             expect(lost).toHaveBeenCalledOnce()
             expect(connect).toHaveBeenCalledTimes(2)
             expect(client.running).toBe(true)
             expect(trace).not.toHaveBeenCalled()
+            const applied = vi.fn<(raw: Uint8Array) => boolean>(() => true)
+            const replacement = client.callHistory('routing:get-initial', applied)
+            expect(second.received[0]?.id).toBe('jh:1')
+            // An already retired socket cannot settle a replacement call even
+            // though the generated ordinal restarts in its new generation.
+            first.emit(
+                'data',
+                Buffer.from('{"jsonrpc":"2.0","id":"jh:1","result":{"requests":[]}}\n')
+            )
+            expect(applied).not.toHaveBeenCalled()
+            second.reply('jh:1', { requests: [] })
+            await replacement
+            expect(applied).toHaveBeenCalledOnce()
+            const ordinary = client.call('echo', {})
+            await Promise.resolve()
+            second.reply(1, { ok: true })
+            await expect(ordinary).resolves.toEqual({ ok: true })
+            expect(connect).toHaveBeenCalledTimes(2)
         } finally {
             await client.detach()
             vi.useRealTimers()

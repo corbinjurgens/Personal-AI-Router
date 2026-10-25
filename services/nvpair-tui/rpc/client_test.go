@@ -392,6 +392,163 @@ func TestHistoryBusyUsesOneLoadingRetry(t *testing.T) {
 	}
 }
 
+func TestHistoryBrokerRestartClearsRowsAndRetiresPendingInitial(t *testing.T) {
+	a, b := sessionPipe(t)
+	rows, resets, logs := 0, 0, 0
+	c, err := NewHistoryClient(a, a, func(_ uint64, initial bool, raw []byte) error {
+		if initial {
+			var value nodepolicy.RoutingHistoryInitial
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return err
+			}
+			rows = len(value.Requests)
+		} else {
+			rows++
+		}
+		return nil
+	}, func(uint64) { rows = 0; resets++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetNotificationFilter(func(m *Message) bool {
+		if m.Method != "service/log" {
+			return false
+		}
+		logs++
+		return true
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = c.Run(ctx) }()
+	s := NewCodec(b, b)
+	request := historyRequest(t, c, s)
+	row := nodepolicy.RoutingHistoryRecord{
+		Schema: 1, Request: nodepolicy.RoutingRequestKey{OriginNodeID: "synthetic-origin", ProxyRunID: "synthetic-run", RequestID: "1"},
+		Seq: 1, Requested: nodepolicy.RoutingHistoryRequested{Mode: "other"}, State: "routing",
+		Spend: nodepolicy.RoutingHistorySpend{Currency: "USD", Accounting: "none"}, Attempts: []nodepolicy.RoutingHistoryAttempt{},
+	}
+	baseline, err := json.Marshal(nodepolicy.RoutingHistoryInitial{Requests: []nodepolicy.RoutingHistoryRecord{row}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write(&Message{JSONRPC: "2.0", ID: request.ID, Result: baseline}); err != nil {
+		t.Fatal(err)
+	}
+	historyBarrier(t, c, s)
+	if rows != 1 || c.HistoryState().Loading {
+		t.Fatal("nonempty baseline was not loaded")
+	}
+	if _, err := b.Write([]byte("{bad\n")); err != nil {
+		t.Fatal(err)
+	}
+	old := historyReadMessage(t, s)
+	if old.ID == nil || string(*old.ID) != `"jh:2"` {
+		t.Fatalf("pending refetch = %+v", old)
+	}
+	sessionPush(t, s, "service/broker-restarted")
+	sessionEvent(t, c.Events(), EventNotification, 1, "service/broker-restarted")
+	if state := c.HistoryState(); state.Generation != 1 || !state.Connected || !state.Loading || state.Pending || state.Retry || rows != 0 || resets != 2 {
+		t.Fatalf("same-socket reset = %+v, rows=%d resets=%d", state, rows, resets)
+	}
+	if err := s.Write(&Message{JSONRPC: "2.0", ID: old.ID, Result: baseline}); err != nil {
+		t.Fatal(err)
+	}
+	push, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Write(&Message{JSONRPC: "2.0", Method: nodepolicy.NotifyRoutingChanged, Params: push}); err != nil {
+		t.Fatal(err)
+	}
+	sessionPush(t, s, "service/log")
+	historyBarrier(t, c, s) // No history control may overtake this before ready.
+	if rows != 0 || logs != 1 || c.HistoryState().Pending {
+		t.Fatal("old source changed the cleared bank or blocked ordinary traffic")
+	}
+	sessionPush(t, s, "app:ready")
+	sessionEvent(t, c.Events(), EventNotification, 1, "app:ready")
+	fresh := historyReadMessage(t, s)
+	if fresh.Method != nodepolicy.MethodRoutingSubscribe || fresh.ID == nil || string(*fresh.ID) != `"jh:3"` {
+		t.Fatalf("new broker reused the same-connection ID frontier: %+v", fresh)
+	}
+	if err := s.Write(&Message{JSONRPC: "2.0", ID: old.ID, Result: baseline}); err != nil {
+		t.Fatal(err)
+	}
+	historyBarrier(t, c, s)
+	if !c.HistoryState().Pending || rows != 0 {
+		t.Fatal("old response settled the new initial")
+	}
+	if err := s.Write(&Message{JSONRPC: "2.0", ID: fresh.ID, Result: json.RawMessage(`{"requests":[]}`)}); err != nil {
+		t.Fatal(err)
+	}
+	sessionPush(t, s, "service/log")
+	historyBarrier(t, c, s)
+	if state := c.HistoryState(); state.Loading || state.Pending || state.Retry || state.Quarantined || rows != 0 || logs != 2 {
+		t.Fatalf("replacement baseline = %+v, rows=%d logs=%d", state, rows, logs)
+	}
+}
+
+func TestHistoryBrokerRestartKeepsActiveControlUntilWriteReturns(t *testing.T) {
+	a, b := sessionPipe(t)
+	w := &historyBlockedControl{Conn: a, entered: make(chan struct{}), release: make(chan struct{})}
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(w.release) }) })
+	c := historyTestClient(t, w, w, func(uint64, bool, []byte) error { return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = c.Run(ctx) }()
+	s := NewCodec(b, b)
+	ordinary := make(chan error, 1)
+	go func() { _, err := c.Call(ctx, "ordinary-before-restart", nil); ordinary <- err }()
+	o := historyReadMessage(t, s)
+	w.armed.Store(true)
+	c.SetHistorySubscription(true)
+	select {
+	case <-w.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("control Write not entered")
+	}
+	c.history.mu.Lock()
+	before := string(c.history.control[:])
+	c.history.mu.Unlock()
+	sessionPush(t, s, "service/broker-restarted")
+	sessionEvent(t, c.Events(), EventNotification, 1, "service/broker-restarted")
+	sessionPush(t, s, "app:ready")
+	sessionEvent(t, c.Events(), EventNotification, 1, "app:ready")
+	if err := s.Write(&Message{JSONRPC: "2.0", ID: o.ID, Result: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessionResult(t, ordinary); err != nil {
+		t.Fatal(err)
+	}
+	c.history.mu.Lock()
+	active, pending, unchanged := c.history.writeActive, c.history.pending, string(c.history.control[:]) == before
+	c.history.mu.Unlock()
+	if !active || pending || !unchanged {
+		t.Fatal("broker reset released or overwrote the actual control writer")
+	}
+	once.Do(func() { close(w.release) })
+	old := historyReadMessage(t, s)
+	if old.ID == nil || string(*old.ID) != `"jh:1"` {
+		t.Fatalf("blocked control changed: %+v", old)
+	}
+	fresh := historyReadMessage(t, s)
+	if fresh.ID == nil || string(*fresh.ID) != `"jh:2"` || fresh.Method != nodepolicy.MethodRoutingSubscribe {
+		t.Fatalf("replacement control = %+v", fresh)
+	}
+	if err := s.Write(&Message{JSONRPC: "2.0", ID: old.ID, Result: json.RawMessage(`{"requests":[]}`)}); err != nil {
+		t.Fatal(err)
+	}
+	historyBarrier(t, c, s)
+	if state := c.HistoryState(); !state.Pending || !state.Loading {
+		t.Fatalf("old actual write settled the replacement: %+v", state)
+	}
+	if err := s.Write(&Message{JSONRPC: "2.0", ID: fresh.ID, Result: json.RawMessage(`{"requests":[]}`)}); err != nil {
+		t.Fatal(err)
+	}
+	historyBarrier(t, c, s)
+}
+
 func TestHistoryQuarantinePreservesPushBeforeDelayedInitial(t *testing.T) {
 	a, b := sessionPipe(t)
 	var newest int64
