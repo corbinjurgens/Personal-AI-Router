@@ -26,6 +26,25 @@ import (
 // lookup that hung would wedge StopAll (and the whole app shutdown).
 const portLookupTimeout = 2 * time.Second
 
+func managedInstallPath(binAbs, dirAbs string) bool {
+	// Resolve existing paths together so canonical image aliases cannot turn
+	// a symlink escaping the managed directory into install ownership.
+	if resolvedBin, err := filepath.EvalSymlinks(binAbs); err == nil {
+		resolvedDir, err := filepath.EvalSymlinks(dirAbs)
+		if err != nil {
+			return false
+		}
+		binAbs, dirAbs = resolvedBin, resolvedDir
+	} else if !os.IsNotExist(err) {
+		return false
+	}
+	rel, err := filepath.Rel(dirAbs, binAbs)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
 // configureSysProcAttr puts the child in its own process group so a
 // terminate signals the whole group — engines that fork helper
 // processes (model runners, etc.) get cleaned up too.

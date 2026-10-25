@@ -7,7 +7,9 @@ package main
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -20,6 +22,67 @@ import (
 // wedge StopAll (and the whole app shutdown) now that the broker no longer
 // force-kills engine-manager on a timeout.
 const taskkillTimeout = 5 * time.Second
+
+func managedInstallPath(binAbs, dirAbs string) bool {
+	binPath, binInfo, err := windowsFinalPath(binAbs)
+	if err != nil || !binInfo.Mode().IsRegular() {
+		return false
+	}
+	_, dirInfo, err := windowsFinalPath(dirAbs)
+	if err != nil || !dirInfo.IsDir() {
+		return false
+	}
+	// EvalSymlinks only walks ModeSymlink; Windows junctions can instead be
+	// ModeIrregular. Walk the kernel-resolved executable's actual ancestors,
+	// matching directory file IDs rather than trusting a lexical path prefix.
+	// This also rejects a junction inside the install that escapes outside it.
+	for parent := filepath.Dir(binPath); ; {
+		info, err := os.Stat(parent)
+		if err != nil || !info.IsDir() {
+			return false
+		}
+		if os.SameFile(info, dirInfo) {
+			return true
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			return false
+		}
+		parent = next
+	}
+}
+
+// windowsFinalPath follows all name-surrogate reparse points using a metadata
+// handle, returning both its normalized final path and the same handle's file
+// identity. It requires no content access and never falls back to the spelling
+// supplied by the caller when resolution is unavailable.
+func windowsFinalPath(path string) (string, os.FileInfo, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", nil, err
+	}
+	h, err := windows.CreateFile(name, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return "", nil, err
+	}
+	file := os.NewFile(uintptr(h), path)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", nil, err
+	}
+	buf := make([]uint16, 32768)
+	// Flags zero requests FILE_NAME_NORMALIZED and VOLUME_NAME_DOS, including
+	// UNC paths. The extended-path prefix is kept for subsequent OS lookups.
+	n, err := windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), 0)
+	if err != nil {
+		return "", nil, err
+	}
+	if n == 0 || n >= uint32(len(buf)) {
+		return "", nil, windows.ERROR_INSUFFICIENT_BUFFER
+	}
+	return windows.UTF16ToString(buf[:n]), info, nil
+}
 
 // configureSysProcAttr hides the child's console window
 // (HideWindow + CREATE_NO_WINDOW), matching every other NVPAIR subprocess.
