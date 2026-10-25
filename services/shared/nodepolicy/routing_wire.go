@@ -305,7 +305,7 @@ func historyError(category string) error {
 
 type RoutingHistoryDestination struct {
 	Kind         string  `json:"kind"`
-	Model        string  `json:"model"`
+	Model        *string `json:"model"`
 	NodeID       *string `json:"nodeId"`
 	Engine       *string `json:"engine"`
 	DeploymentID *string `json:"deploymentId"`
@@ -751,14 +751,14 @@ func historyMoney(values ...*NanoUSD) bool {
 }
 
 func (d RoutingHistoryDestination) valid() bool {
-	if !historyModel(d.Model, false) {
+	if d.Model != nil && ValidateModelIdentifier(*d.Model) != nil {
 		return false
 	}
 	switch d.Kind {
 	case "local":
 		return historyID(d.NodeID) && historyID(d.Engine) && d.DeploymentID == nil && d.AccountID == nil
 	case "api":
-		return historyID(d.DeploymentID) && historyID(d.AccountID) && d.NodeID == nil && d.Engine == nil
+		return d.Model != nil && historyID(d.DeploymentID) && historyID(d.AccountID) && d.NodeID == nil && d.Engine == nil
 	default:
 		return false
 	}
@@ -800,13 +800,13 @@ type RoutingHistoryRecordHeader struct {
 
 func validateHistoryRecord(r RoutingHistoryRecordHeader, attemptsPresent bool, count int, attempt func(int, *RoutingHistoryAttempt) error) error {
 	invalid := func() error { return historyError("invalid-value") }
-	// Retained lifecycle facts establish that I already validated a model,
-	// even when all attempts have since left the presentation window.
+	// Retained lifecycle facts require a model unless a retained local attempt
+	// explicitly records that its model is unknown.
 	modelValidated := count > 0 || r.DroppedAttempts > 0 || r.Workload != nil || r.Served != nil ||
 		r.State == "completed" || r.State == "streaming"
 	if r.Schema != 1 || r.Request.Validate() != nil || !historyNumber(r.Seq) || r.Seq == 0 ||
 		!historyNumber(r.CreatedAt) || !historyNullableNumber(r.EndedAt) || (r.EndedAt != nil && *r.EndedAt < r.CreatedAt) ||
-		!historyStatus(r.Status) || !historyNumber(r.DroppedAttempts) || !historyModel(r.Requested.Model, !modelValidated) ||
+		!historyStatus(r.Status) || !historyNumber(r.DroppedAttempts) || !historyModel(r.Requested.Model, true) ||
 		!historyEnum(r.Requested.Tier, "|weak|medium|strong") || !historyEnum(r.Requested.Mode, "chat|completion|embedding|other") ||
 		!historyEnum(r.State, "routing|streaming|completed|failed|cancelled") || !historyEnum(r.Reason, historyReasons) ||
 		r.Spend.Currency != "USD" || !historyEnum(r.Spend.Accounting, historyAccounting) ||
@@ -829,7 +829,7 @@ func validateHistoryRecord(r RoutingHistoryRecordHeader, attemptsPresent bool, c
 	if r.Served != nil && !r.Served.valid() {
 		return invalid()
 	}
-	served, awaiting := false, false
+	served, awaiting, modelUnknown := false, false, false
 	var current, related RoutingHistoryAttempt
 	for i := 0; i < count; i++ {
 		if err := attempt(i, &current); err != nil {
@@ -852,6 +852,7 @@ func validateHistoryRecord(r RoutingHistoryRecordHeader, attemptsPresent bool, c
 			return invalid()
 		}
 		if a.Destination.Kind == "local" {
+			modelUnknown = modelUnknown || a.Destination.Model == nil
 			if a.Account != nil {
 				return invalid()
 			}
@@ -902,6 +903,9 @@ func validateHistoryRecord(r RoutingHistoryRecordHeader, attemptsPresent bool, c
 			served = true
 		}
 		current = RoutingHistoryAttempt{}
+	}
+	if r.Requested.Model == "" && modelValidated && !modelUnknown {
+		return invalid()
 	}
 	if r.Served != nil && !served {
 		return invalid()

@@ -315,7 +315,7 @@ func loadRoutingHistoryFixtures(t *testing.T) []routingHistoryFixture {
 	if err := json.Unmarshal(data, &corpus); err != nil {
 		t.Fatal(err)
 	}
-	wantNames := []string{"rejected then served local", "terminal interrupted API retained accounting", "cancelled with dropped prefix", "recoverable interruption", "actual linked successor"}
+	wantNames := []string{"rejected then served local", "terminal interrupted API retained accounting", "cancelled with dropped prefix", "recoverable interruption", "actual linked successor", "model-less local completion"}
 	if corpus.Schema != 1 || len(corpus.Cases) != len(wantNames) {
 		t.Fatal("unexpected corpus schema/cases")
 	}
@@ -464,6 +464,30 @@ func TestRoutingHistoryContract(t *testing.T) {
 		}
 	})
 
+	t.Run("semantic corpus invalid destinations", func(t *testing.T) {
+		data, err := os.ReadFile("testdata/routing-request.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var corpus struct {
+			InvalidCases []struct {
+				Name    string `json:"name"`
+				Fixture int    `json:"fixture"`
+				Path    string `json:"path"`
+				Value   any    `json:"value"`
+			} `json:"invalidCases"`
+		}
+		if err := json.Unmarshal(data, &corpus); err != nil {
+			t.Fatal(err)
+		}
+		if len(corpus.InvalidCases) == 0 {
+			t.Fatal("missing invalid destination cases")
+		}
+		for _, fixture := range corpus.InvalidCases {
+			bad(fixture.Name, fixture.Fixture, fixture.Path, fixture.Value)
+		}
+	})
+
 	t.Run("every required member and nonnullable position", func(t *testing.T) {
 		// Literal contract inventory, independent of the production struct tags.
 		objects := []struct {
@@ -475,11 +499,11 @@ func TestRoutingHistoryContract(t *testing.T) {
 			{0, "request.", "originNodeId proxyRunId requestId", ""},
 			{0, "workload.", "originNodeId proxyRunId engine id attemptIndex attached", ""},
 			{0, "requested.", "model tier mode", ""},
-			{0, "served.", "kind model nodeId engine deploymentId accountId", "nodeId engine deploymentId accountId"},
+			{0, "served.", "kind model nodeId engine deploymentId accountId", "model nodeId engine deploymentId accountId"},
 			{0, "spend.", "currency ceilingNanoUsd grantedNanoUsd heldNanoUsd chargedNanoUsd accounting", "ceilingNanoUsd grantedNanoUsd heldNanoUsd chargedNanoUsd"},
 			{0, "attempts.0.", "index startedAt endedAt destination outcome reason status waits continuationOf account", "endedAt status continuationOf account"},
-			{0, "attempts.0.destination.", "kind model nodeId engine deploymentId accountId", "nodeId engine deploymentId accountId"},
-			{1, "attempts.0.destination.", "kind model nodeId engine deploymentId accountId", "nodeId engine deploymentId accountId"},
+			{0, "attempts.0.destination.", "kind model nodeId engine deploymentId accountId", "model nodeId engine deploymentId accountId"},
+			{1, "attempts.0.destination.", "kind model nodeId engine deploymentId accountId", "model nodeId engine deploymentId accountId"},
 			{0, "attempts.0.waits.", "admissionMs firstByteMs", "firstByteMs"},
 			{1, "attempts.0.account.", "state heldNanoUsd chargedNanoUsd accounting", "heldNanoUsd chargedNanoUsd"},
 		}
