@@ -20,10 +20,13 @@
  * makes no network requests of its own.
  */
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { detectLicenseType } from '@/shared/utils/detect-license'
+import { goLicenseFileHashes } from './go-license-file-hashes'
+import { licenseSupplements } from './license-supplements'
 
 const execFileAsync = promisify(execFile)
 
@@ -36,6 +39,7 @@ export interface LicenseEntry {
     repository: string | null
     homepage: string | null
     licenseText: string
+    licenseSource?: string
 }
 
 /** Release targets the service build scripts support. */
@@ -80,7 +84,16 @@ async function listModulesForTarget(
     try {
         const result = await execFileAsync('go', ['list', '-deps', '-f', template, '.'], {
             cwd: componentDir,
-            env: { ...process.env, GOOS: goos, GOARCH: goarch, CGO_ENABLED: '0' },
+            env: {
+                ...process.env,
+                GOOS: goos,
+                GOARCH: goarch,
+                CGO_ENABLED: '0',
+                GOPROXY: 'off',
+                GONOPROXY: 'none',
+                GOSUMDB: 'off',
+                GOTOOLCHAIN: 'local'
+            },
             maxBuffer: 32 * 1024 * 1024
         })
         stdout = result.stdout
@@ -109,20 +122,20 @@ async function readLicenseText(moduleDir: string): Promise<string> {
         return ''
     }
 
-    // Prefer a plain LICENSE over NOTICE when a module ships both.
+    // Retain every grant and attribution; NOTICE may add copyright holders to
+    // LICENSE, and COPYING may contain an additional or differently scoped grant.
+    const rank = (name: string): number =>
+        /^notice/i.test(name) ? 2 : /^copying/i.test(name) ? 1 : 0
     const candidates = names
         .filter(name => LICENSE_FILE_PATTERN.test(name))
-        .sort((a, b) => Number(/^notice/i.test(a)) - Number(/^notice/i.test(b)))
+        .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
 
+    const texts = new Set<string>()
     for (const name of candidates) {
-        try {
-            const text = (await readFile(join(moduleDir, name), 'utf8')).trim()
-            if (text) return text
-        } catch {
-            /* try the next candidate */
-        }
+        const text = (await readFile(join(moduleDir, name), 'utf8')).trim()
+        if (text) texts.add(text)
     }
-    return ''
+    return [...texts].join('\n\n')
 }
 
 function repositoryUrl(modulePath: string): string {
@@ -147,16 +160,28 @@ export async function collectGoModuleEntries(
 
     const entries: LicenseEntry[] = []
     for (const module of byKey.values()) {
-        const licenseText = await readLicenseText(module.dir)
+        const key = `${module.path}@${module.version}`
+        const supplement = licenseSupplements[key]
+        const licenseText = supplement?.text ?? (await readLicenseText(module.dir))
+        if (
+            !licenseText ||
+            createHash('sha256').update(licenseText).digest('hex') !==
+                (supplement?.sha256 ?? goLicenseFileHashes[key])
+        ) {
+            throw new Error(`Missing, incomplete or unreviewed version-bound Go license for ${key}`)
+        }
         entries.push({
             name: module.path,
             version: module.version,
-            license: licenseText ? detectLicenseType(licenseText) : 'Unknown',
+            license: supplement?.license ?? detectLicenseType(licenseText),
             author: null,
             email: null,
             repository: repositoryUrl(module.path),
             homepage: null,
-            licenseText: licenseText || '(no license file found in module)'
+            licenseText: licenseText.trim(),
+            ...(supplement
+                ? { licenseSource: `${supplement.association}; ${supplement.source}` }
+                : {})
         })
     }
 

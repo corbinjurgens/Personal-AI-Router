@@ -243,13 +243,13 @@ const config: Configuration = {
     // layered on by internal-build/electron-builder.config.ts.
     publish: null,
     /**
-     * Positive whitelist. The main/preload bundles inline every npm dep they
-     * touch (electron.vite.config.ts does not externalize anything), so the
-     * packaged app needs **zero** entries from `node_modules/`. The modular Go
-     * binaries are shipped via `extraResources`, not asar, so `cli-bin/**` is
-     * not needed here. Everything else on disk (source, configs, caches, release
-     * artefacts, node_modules, tsconfigs, build scripts, docs, docker) is
-     * auto-excluded because it is not listed.
+     * Positive whitelist for application files. Main/preload bundles inline
+     * their npm imports, while electron-builder separately collects the locked
+     * production dependency closure into the packaged `node_modules/` tree.
+     * This whitelist does not disable that collection. The modular Go binaries
+     * ship via `extraResources`, not asar, so `cli-bin/**` is not needed here.
+     * Other application files (source, configs, caches, release artefacts,
+     * tsconfigs, build scripts, docs, docker) are excluded unless listed.
      *
      * Top-level `resources/icons/**` is included because `tray.ts` resolves
      * icons via `__dirname/../../resources/icons` (walks from out/main back
