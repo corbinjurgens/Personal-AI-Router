@@ -41,8 +41,10 @@ const (
 	methodStatus          = "service/status"
 	methodStop            = "service/stop"
 	notifyBrokerRestarted = "service/broker-restarted"
-	notifyLog             = "service/log"
-	servicePrefix         = "service/"
+	// Private broker-to-service notification, never broadcast to clients.
+	notifyEngineNotificationsReset = "service/engine-notifications-reset"
+	notifyLog                      = "service/log"
+	servicePrefix                  = "service/"
 
 	methodShutdown = "shutdown"
 	methodAppReady = "app:ready"
@@ -488,9 +490,13 @@ func (s *Service) callBroker(run *brokerRun, method string) <-chan *jsonrpc.Mess
 	s.mu.Unlock()
 	if err := run.writeMessage(&jsonrpc.Message{JSONRPC: "2.0", ID: rawID(id), Method: method}); err != nil {
 		s.mu.Lock()
+		p := s.pending[id]
 		delete(s.pending, id)
 		s.mu.Unlock()
-		ch <- nil
+		// Reset/exit may already have taken and completed this pending owner.
+		if p != nil {
+			ch <- nil
+		}
 	}
 	return ch
 }
@@ -510,7 +516,11 @@ func (s *Service) routeResponse(msg *jsonrpc.Message) {
 		return
 	}
 	var replay [][]byte
-	if strings.HasSuffix(p.method, subscribeSuffix) && msg.Error == nil {
+	_, attached := s.clients[p.client]
+	// Reset withdraws attachments before closing them. A reader that was
+	// already dispatching cannot restore shared subscription ownership later.
+	engineCurrent := p.method != "engine:subscribe" || (p.run == s.broker && (p.client == nil || attached))
+	if strings.HasSuffix(p.method, subscribeSuffix) && msg.Error == nil && engineCurrent {
 		// The broker pushes a baseline only on a fresh subscription. A client
 		// subscribing to a stream another client already opened gets the
 		// cached copy instead, after its own acknowledgement as the broker
@@ -559,6 +569,10 @@ func isBaseline(method string) bool {
 // handleBrokerNotification caches what late clients need and broadcasts the
 // frame to every client.
 func (s *Service) handleBrokerNotification(run *brokerRun, method string, frame []byte) {
+	if method == notifyEngineNotificationsReset {
+		s.resetEngineNotifications(run)
+		return
+	}
 	var resubscribe []string
 	s.mu.Lock()
 	switch {
@@ -582,6 +596,54 @@ func (s *Service) handleBrokerNotification(run *brokerRun, method string, frame 
 				slog.Warn("could not restore subscription after broker restart", "method", method)
 			}
 		}(m)
+	}
+}
+
+// Engine events are broadcast to every attached client, so every attachment
+// can have missed state. Withdraw those lifetimes atomically before closing
+// their connections through detach. New attachments retain this run's real
+// app:ready and recover by the existing reconnect/initial-state path.
+func (s *Service) resetEngineNotifications(run *brokerRun) {
+	s.mu.Lock()
+	if run == nil || s.broker != run || s.stopping {
+		s.mu.Unlock()
+		return
+	}
+	select {
+	case <-run.exited:
+		s.mu.Unlock()
+		return
+	default:
+	}
+	delete(s.subscribed, "engine:subscribe")
+	delete(s.baselines, "engine:ready")
+	kept := s.resubscribe[:0]
+	for _, method := range s.resubscribe {
+		if method != "engine:subscribe" {
+			kept = append(kept, method)
+		}
+	}
+	s.resubscribe = kept
+	var internal []*pendingRequest
+	for id, p := range s.pending {
+		if p.run == run && p.method == "engine:subscribe" {
+			delete(s.pending, id)
+			if p.internal != nil {
+				internal = append(internal, p)
+			}
+		}
+	}
+	clients := make([]*client, 0, len(s.clients))
+	for c := range s.clients {
+		clients = append(clients, c)
+		delete(s.clients, c)
+	}
+	s.mu.Unlock()
+	for _, c := range clients {
+		s.detach(c, false)
+	}
+	for _, p := range internal {
+		p.internal(nil)
 	}
 }
 

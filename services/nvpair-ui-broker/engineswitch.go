@@ -1322,7 +1322,7 @@ func (b *Broker) handleSwitchEngineNotification(source *engineManagerSource, met
 	case settings.SwitchChangedNotification:
 		var changed settings.SwitchChanged
 		if json.Unmarshal(raw, &changed) == nil && changed.NodeID != "" && changed.RequestID != "" && changed.Sequence > 0 {
-			b.notifyClients(method, raw)
+			b.queueEngineNotification(source, method, raw)
 		}
 		return true
 	case "engine:switch-cancel":

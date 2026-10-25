@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -993,14 +994,24 @@ projectionWait:
 
 func TestSwitchManagerProgressNotificationKeepsRemoteIdentity(t *testing.T) {
 	h := newSwitchHarness(t)
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+	if err := client.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	h.b.codec = NewCodec(server)
+	startTestEngineNotifications(t, h.b, func() { _ = server.Close() })
 	want := settings.SwitchChanged{NodeID: "remote-target", RequestID: "remote-operation", Sequence: 9}
 	h.b.forwardEngineNotificationFrom(h.b.activateEngineManagerSource(), settings.SwitchChangedNotification, settingsJSON(want))
-	frames := h.output.frames()
-	if len(frames) != 1 || frames[0].Method != settings.SwitchChangedNotification {
-		t.Fatalf("forwarded frames = %+v", frames)
+	frame, err := NewCodec(client).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Method != settings.SwitchChangedNotification {
+		t.Fatalf("forwarded frame = %+v", frame)
 	}
 	var got settings.SwitchChanged
-	if err := json.Unmarshal(frames[0].Params, &got); err != nil {
+	if err := json.Unmarshal(frame.Params, &got); err != nil {
 		t.Fatal(err)
 	}
 	if got != want {

@@ -429,23 +429,36 @@ func (p *notificationPublisher) notify(method string, params any) error {
 
 type notificationForwardOutput struct {
 	net.Conn
-	entered chan struct{}
-	once    sync.Once
+	entered      chan struct{}
+	once         sync.Once
+	resetEntered chan struct{}
+	resetOnce    sync.Once
 }
 
 func (w *notificationForwardOutput) Write(data []byte) (int, error) {
 	w.once.Do(func() { close(w.entered) })
+	if w.resetEntered != nil {
+		var msg Message
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return 0, err
+		}
+		if msg.Method == notifyEngineNotificationsReset {
+			w.resetOnce.Do(func() { close(w.resetEntered) })
+		}
+	}
 	return w.Conn.Write(data)
 }
 
 type notificationForwardFixture struct {
-	b         *Broker
-	source    *engineManagerSource
-	publisher *notificationPublisher
-	client    *Codec
-	output    *notificationForwardOutput
-	pump      chan struct{}
-	handled   chan string
+	b            *Broker
+	source       *engineManagerSource
+	publisher    *notificationPublisher
+	client       *Codec
+	output       *notificationForwardOutput
+	pump         chan struct{}
+	handled      chan string
+	disconnected chan struct{}
+	cancelled    chan struct{}
 }
 
 func newNotificationForwardFixture(t *testing.T, budget time.Duration) *notificationForwardFixture {
@@ -453,9 +466,13 @@ func newNotificationForwardFixture(t *testing.T, budget time.Duration) *notifica
 	engine, reader := net.Pipe()
 	downstream, client := net.Pipe()
 	f := &notificationForwardFixture{publisher: newNotificationPublisher(engine, budget), client: NewCodecMaxFrame(client, workerFrameBytes),
-		output: &notificationForwardOutput{Conn: downstream, entered: make(chan struct{})}, pump: make(chan struct{}), handled: make(chan string, 8)}
-	f.b = &Broker{codec: NewCodec(f.output), engineSubscribed: true}
+		output: &notificationForwardOutput{Conn: downstream, entered: make(chan struct{}), resetEntered: make(chan struct{})}, pump: make(chan struct{}), handled: make(chan string, engineNotificationQueueFrames+16), disconnected: make(chan struct{}), cancelled: make(chan struct{})}
+	f.b = &Broker{codec: NewCodec(f.output), engineSubscribed: true, cancel: func() { close(f.cancelled) }}
 	f.source = f.b.activateEngineManagerSource()
+	startTestEngineNotifications(t, f.b, func() { _ = downstream.Close(); close(f.disconnected) })
+	if err := client.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	peer := NewPeer(NewCodecMaxFrame(reader, workerFrameBytes))
 	go func() {
 		defer close(f.pump)
@@ -498,29 +515,18 @@ func (f *notificationForwardFixture) drain(t *testing.T) <-chan error {
 	return result
 }
 
-func TestNotificationLifetimeForwardBackpressureRecovery(t *testing.T) {
+func TestEngineNotificationRelayDrainsBlockedClient(t *testing.T) {
 	f := newNotificationForwardFixture(t, 2*time.Second)
 	state, identity := make(chan error, 1), make(chan error, 1)
 	go func() {
 		state <- f.publisher.notify(engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":true}`))
 	}()
 	go func() { identity <- f.publisher.notify(engineModelIdentityMethod, engineManagerSnapshot("ollama")) }()
-	// The broker is still blocked in the actual forwarder, so neither frame
-	// can be read. Both share the engine publisher's serialized write gate.
-	select {
-	case err := <-state:
-		t.Fatalf("state escaped paused reader: %v", err)
-	case <-time.After(30 * time.Millisecond):
-	}
-	drained := f.drain(t)
 	if err := notificationError(t, state); err != nil {
-		t.Fatalf("state recovery: %v", err)
+		t.Fatalf("state blocked behind the service reader: %v", err)
 	}
 	if err := notificationError(t, identity); err != nil {
-		t.Fatalf("identity recovery: %v", err)
-	}
-	if err := notificationError(t, drained); err != nil {
-		t.Fatal(err)
+		t.Fatalf("identity blocked behind the service reader: %v", err)
 	}
 	for range 3 {
 		select {
@@ -534,7 +540,12 @@ func TestNotificationLifetimeForwardBackpressureRecovery(t *testing.T) {
 	run := r.engineIdentity["ollama"].EngineRunID
 	r.mu.Unlock()
 	if run != "run-ollama" {
-		t.Fatalf("identity after recovery=%s", run)
+		t.Fatalf("identity before service reader resumed=%s", run)
+	}
+	// Only resume the service reader after both later engine frames have been
+	// written and handled. The first client Write is still physically blocked.
+	if err := notificationError(t, f.drain(t)); err != nil {
+		t.Fatal(err)
 	}
 	if f.publisher.interrupts.Load() != 0 {
 		t.Fatal("short pause interrupted publisher")
@@ -542,51 +553,50 @@ func TestNotificationLifetimeForwardBackpressureRecovery(t *testing.T) {
 	requireGateShutNow(t, f.publisher.terminal, "short pause preserves session")
 }
 
-func TestNotificationLifetimeForwardBackpressureTerminal(t *testing.T) {
-	t.Run("active default deadline", func(t *testing.T) {
-		f := newNotificationForwardFixture(t, 100*time.Millisecond)
-		state, identity := make(chan error, 1), make(chan error, 1)
-		go func() {
-			state <- f.publisher.notify(engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":true}`))
-		}()
-		go func() { identity <- f.publisher.notify(engineModelIdentityMethod, engineManagerSnapshot("ollama")) }()
-		if err := notificationError(t, state); err == nil {
-			t.Fatal("stalled state publication succeeded")
+func TestEngineNotificationRelayOverflowDropsOnlyClientSubscription(t *testing.T) {
+	f := newNotificationForwardFixture(t, 2*time.Second)
+	for range engineNotificationQueueFrames + 2 {
+		if err := f.publisher.notify("engine:pull-progress", json.RawMessage(`{"percent":1}`)); err != nil {
+			t.Fatalf("slow client overflow reached engine publisher: %v", err)
 		}
-		if err := notificationError(t, identity); err == nil {
-			t.Fatal("stalled identity publication succeeded")
+	}
+	// Engine-internal observations keep draining after the subscription drops.
+	if err := f.publisher.notify(engineModelIdentityMethod, engineManagerSnapshot("ollama")); err != nil {
+		t.Fatalf("engine publisher after subscription overflow: %v", err)
+	}
+	for range engineNotificationQueueFrames + 4 {
+		select {
+		case <-f.handled:
+		case <-time.After(2 * time.Second):
+			t.Fatal("engine reader stopped draining after client overflow")
 		}
-		requireGateOpenNow(t, f.publisher.terminal, "default failure terminates session")
-		if f.publisher.interrupts.Load() != 1 {
-			t.Fatalf("active hook calls=%d", f.publisher.interrupts.Load())
-		}
-		if err := f.publisher.notify("later", nil); !errors.Is(err, errPeerClosed) {
-			t.Fatalf("retired publication: %v", err)
-		}
-		requireGateShutNow(t, f.pump, "service-facing relay remains synchronous until downstream released")
-	})
-	t.Run("queued default deadline terminates separately", func(t *testing.T) {
-		f := newNotificationForwardFixture(t, 100*time.Millisecond)
-		active := make(chan error, 1)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		// The explicit send owns the gate, proven by the test transport's Write
-		// barrier; the shorter default publication must time out while queued.
-		probe := &notificationForwardOutput{Conn: f.publisher.conn, entered: make(chan struct{})}
-		f.publisher.codec = jsonrpc.NewCodecMaxFrameWithWriteInterrupt(probe, workerFrameBytes, func() { f.publisher.interrupts.Add(1); _ = f.publisher.conn.Close() })
-		go func() {
-			active <- f.publisher.codec.NotifyContext(ctx, engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":true}`))
-		}()
-		requireGateOpens(t, probe.entered, "explicit active engine write")
-		if err := f.publisher.notify(engineModelIdentityMethod, engineManagerSnapshot("ollama")); !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("queued default: %v", err)
-		}
-		if err := notificationError(t, active); err == nil {
-			t.Fatal("terminal owner did not interrupt active frame")
-		}
-		requireGateOpenNow(t, f.publisher.terminal, "queued default failure policy")
-		if f.publisher.interrupts.Load() != 1 {
-			t.Fatalf("hook calls=%d, want active failed write only", f.publisher.interrupts.Load())
-		}
-	})
+	}
+	f.b.engineMu.Lock()
+	subscribed := f.b.engineSubscribed
+	f.b.engineMu.Unlock()
+	if subscribed || f.b.engineNotifications.ctx.Err() != nil {
+		t.Fatal("overflow did not isolate the slow subscription from the session lifetime")
+	}
+	requireGateShutNow(t, f.cancelled, "overflow must not cancel broker or engine-manager")
+	requireGateShutNow(t, f.disconnected, "overflow must not fail the ordinary transport")
+	// Resume the service reader. Only the already-admitted frame may finish;
+	// waiting engine events were dropped, and ordinary traffic still works.
+	if _, err := f.client.Read(); err != nil {
+		t.Fatal(err)
+	}
+	readEngineNotificationReset(t, f.client)
+	ordinary := make(chan error, 1)
+	go func() { ordinary <- f.b.codec.Notify("ordinary:probe", nil) }()
+	msg, err := f.client.Read()
+	if err != nil || msg.Method != "ordinary:probe" {
+		t.Fatalf("ordinary traffic after overflow: message=%+v error=%v", msg, err)
+	}
+	if err := notificationError(t, ordinary); err != nil {
+		t.Fatal(err)
+	}
+	if f.publisher.interrupts.Load() != 0 {
+		t.Fatal("slow service-facing client interrupted engine publisher")
+	}
+	requireGateShutNow(t, f.publisher.terminal, "client overflow preserves engine transport")
+	requireGateShutNow(t, f.pump, "client overflow preserves engine read pump")
 }

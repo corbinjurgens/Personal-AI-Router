@@ -23,6 +23,7 @@ import (
 // otherwise hand them to engine-manager, which serves several of them as its
 // own broker-side surface. One list so a new internal method is added once.
 var internalClientMethods = map[string]struct{}{
+	notifyEngineNotificationsReset: {},
 	// Peer relay notifications: only engine-manager relays these, with a
 	// verified caller.
 	policyRelayRequestMethod:       {},
@@ -308,9 +309,7 @@ func (b *Broker) handleMessage(msg *Message) {
 		b.relayToManualNodes(msg)
 
 	case "engine:subscribe":
-		b.engineMu.Lock()
-		b.engineSubscribed = true
-		b.engineMu.Unlock()
+		b.resumeEngineNotifications()
 		if err := b.codec.Respond(msg.ID, SubscriptionResult{Subscribed: true}); err != nil {
 			log.Printf("failed to respond to engine:subscribe: %v", err)
 		}
