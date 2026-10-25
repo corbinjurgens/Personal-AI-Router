@@ -1388,11 +1388,11 @@ func TestHistoryMaximumInitialAndExactRawID(t *testing.T) {
 		}
 		record := historyTestRecord(strconv.Itoa(i+1), 1)
 		record.Requested.Model = strings.Repeat(`"`, 512)
-		node, engine := strings.Repeat("n", 128), strings.Repeat("e", 128)
+		node, engine, model := strings.Repeat("n", 128), strings.Repeat("e", 128), record.Requested.Model
 		for index := 0; index < 32; index++ {
 			record.Attempts = append(record.Attempts, nodepolicy.RoutingHistoryAttempt{
 				Index: int64(index), StartedAt: 1, Outcome: "pending",
-				Destination: nodepolicy.RoutingHistoryDestination{Kind: "local", Model: record.Requested.Model, NodeID: &node, Engine: &engine},
+				Destination: nodepolicy.RoutingHistoryDestination{Kind: "local", Model: &model, NodeID: &node, Engine: &engine},
 			})
 		}
 		if err := record.Validate(); err != nil {
