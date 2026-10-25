@@ -278,6 +278,56 @@ func TestOrphanReclaimFenceClearsAfterVerifiedChildExit(t *testing.T) {
 	}
 }
 
+func TestOrphanReclaimFenceClearsAfterColdStartWithoutStop(t *testing.T) {
+	m, dir, port := restoreOrphanManifest(t)
+	child := spawnFakeListener(t, m.Platforms[hostKey()].Runtime.Bin, port)
+	ex := restoreOrphanExecutor(t, m, dir)
+	st, err := ex.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.confirmOrphanStopped("fake", child.Process.Pid, port, Runtime{}); err == nil {
+		t.Fatal("live child did not establish failed reclaim")
+	}
+	// The orphan exits independently of the manager. No Stop or restore reclaim
+	// may clear the fence before the explicit cold Start commits readiness.
+	if err := child.Process.Kill(); err != nil {
+		t.Fatalf("kill fixture orphan: %v", err)
+	}
+	waitFor(t, 3*time.Second, func() bool { return orphanPIDExited(child.Process.Pid) })
+	status, err := ex.Status("fake")
+	if err != nil || status.Running || status.Healthy {
+		t.Fatalf("status after independent orphan exit: %+v err=%v", status, err)
+	}
+	st.mu.Lock()
+	fenced, recordedPID := st.reclaimFailed, st.reclaimPID
+	st.mu.Unlock()
+	if !fenced || recordedPID != child.Process.Pid {
+		t.Fatalf("passive status cleared fence before start: fenced=%v pid=%d", fenced, recordedPID)
+	}
+	if err := ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatalf("cold start after independent orphan exit: %v", err)
+	}
+	st.mu.Lock()
+	fenced, recordedPID, proc, adopted := st.reclaimFailed, st.reclaimPID, st.proc, st.adopted
+	st.mu.Unlock()
+	if fenced || recordedPID != 0 || proc == nil || adopted {
+		t.Fatalf("cold start retained fence or adopted: fenced=%v pid=%d owned=%v adopted=%v", fenced, recordedPID, proc != nil, adopted)
+	}
+	if proc.cmd.Process.Pid == child.Process.Pid {
+		t.Fatal("cold start reused the orphan PID")
+	}
+	status, err = ex.Status("fake")
+	if err != nil || !status.Running || !status.Healthy {
+		t.Fatalf("cold start remains blocked: %+v err=%v", status, err)
+	}
+	for _, report := range ex.Errors() {
+		if report.ID == startFailedID("fake") {
+			t.Errorf("cold start retained reclaim failure: %+v", report)
+		}
+	}
+}
+
 func TestCancelledSwitchRecoveryPreservesStatusAdoptedPendingOrphan(t *testing.T) {
 	m, dir, port := restoreOrphanManifest(t)
 	ex, p := switchFixture(t)
