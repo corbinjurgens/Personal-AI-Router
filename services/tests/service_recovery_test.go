@@ -21,7 +21,44 @@ func serviceRecoveryInventory(t *testing.T) (*serviceProcessInventory, servicePr
 	return &serviceProcessInventory{
 		paths: []string{identity.Path},
 		known: map[int32]serviceProcessIdentity{identity.PID: identity},
+		recoveryIdentity: func(context.Context, int32) (serviceProcessIdentity, error) {
+			return identity, nil
+		},
 	}, identity
+}
+
+func TestServiceRecoveryOmitsReusedPID(t *testing.T) {
+	test := func(name string, change func(*serviceProcessIdentity)) {
+		t.Run(name, func(t *testing.T) {
+			in, recorded := serviceRecoveryInventory(t)
+			current := recorded
+			change(&current)
+			in.recoveryProbe = func(context.Context, int32) (bool, error) { return false, nil }
+			in.recoveryIdentity = func(context.Context, int32) (serviceProcessIdentity, error) { return current, nil }
+			owned, err := in.recoveryContext(context.Background(), nil)
+			if err != nil || len(owned) != 0 {
+				t.Fatalf("reused PID recovery=%+v error=%v, want no owned survivor or cleanup error", owned, err)
+			}
+			if in.known[recorded.PID] != recorded {
+				t.Fatal("recovery rewrote the departed process's recorded identity")
+			}
+		})
+	}
+	test("different executable", func(current *serviceProcessIdentity) { current.Path += "-replacement" })
+	test("same executable with a new creation time", func(current *serviceProcessIdentity) { current.Created++ })
+}
+
+func TestServiceRecoveryIdentityReadFailureIsNotAnOwnedSurvivor(t *testing.T) {
+	in, _ := serviceRecoveryInventory(t)
+	inspectionErr := errors.New("identity unavailable")
+	in.recoveryProbe = func(context.Context, int32) (bool, error) { return false, nil }
+	in.recoveryIdentity = func(context.Context, int32) (serviceProcessIdentity, error) {
+		return serviceProcessIdentity{}, inspectionErr
+	}
+	owned, err := in.recoveryContext(context.Background(), nil)
+	if len(owned) != 0 || !errors.Is(err, inspectionErr) {
+		t.Fatalf("unverified identity recovery=%+v error=%v, want no target and retained inspection failure", owned, err)
+	}
 }
 
 func TestServiceRecoveryIncludesRecordedLiveDescendant(t *testing.T) {
