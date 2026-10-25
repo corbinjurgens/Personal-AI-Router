@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -208,6 +209,10 @@ func waitBeforeRetry(ctx context.Context, d time.Duration) bool {
 // headers but produced no content within the budget.
 var errFirstBodyTimeout = stderrors.New("upstream sent no response body within the first-byte budget")
 
+// A failed join ends this request rather than overlapping another dispatch
+// with an upstream that still owns request storage or local admission.
+var errFirstBodyJoinTimeout = fmt.Errorf("%w: response cleanup is still pending", errFirstBodyTimeout)
+
 // errTargetGone is the reason an attempt was abandoned because its target left
 // discovery. It replaces the bare "context canceled" the transport reports,
 // which in a log is indistinguishable from the client hanging up.
@@ -258,20 +263,19 @@ func (b *bodyWithPeek) Read(p []byte) (int, error) {
 // A read that ends in EOF with no bytes is an empty body, which is a complete
 // (if unusual) response and commits. A genuine read error before any content
 // is retryable, like any other pre-commit upstream failure.
-func awaitFirstBody(body io.ReadCloser, budget time.Duration) (io.ReadCloser, error) {
+func awaitFirstBody(resp *http.Response, budget time.Duration, observed *routingSpend, buffers *ownedInferenceBuffers) (io.ReadCloser, error) {
 	type peeked struct {
 		b   []byte
 		err error
 	}
+	body := resp.Body
 	raw, _ := body.(*routingResponseBody)
-	var observed *routingSpend
-	if raw != nil {
-		observed = raw.attempt.request
-	}
-	if strict, ok := body.(*routingStrictFactBody); ok {
-		observed = strict.attempt.request
-	}
 	var borrower *bufferLease
+	// The sink already retains the admitted bootstrap grant. Its holder can
+	// remain live after the original parser holder becomes unborrowable; the
+	// later stream-reader construction owns that separate refusal. Strict and
+	// prepared direct-dispatch callers retain their existing buffer ownership
+	// without making a parser handle a new condition of raw commitment.
 	if observed != nil && observed.sink != nil && observed.sink.bootstrap != nil {
 		var err error
 		borrower, err = observed.sink.bootstrap.borrow()
@@ -316,16 +320,50 @@ func awaitFirstBody(body io.ReadCloser, budget time.Duration) (io.ReadCloser, er
 	case <-timer.C:
 		close(discard)
 		committed := raw != nil && raw.attempt.expireFirstBody()
-		_ = body.Close()
-		if !committed {
-			// The timeout won at the request owner. Close and join the
-			// real raw read before another attempt can borrow its resources.
-			<-done
+		// ReverseProxy closes Body itself when ModifyResponse returns an
+		// error. Transfer that close here exactly once, before returning either
+		// an error or an accepted synthetic ending to the outer copy owner.
+		resp.Body = http.NoBody
+		closed, joined := make(chan struct{}), make(chan struct{})
+		if observed != nil {
+			observed.mu.Lock()
+			observed.firstBodyDone = joined
+			observed.mu.Unlock()
 		}
-		// Commitment proves the underlying Read already returned. Only its
-		// timer-stop callback can remain; its byte charge and registry entry
-		// stay live until done, without another reader or upstream body.
-		return nil, errFirstBodyTimeout
+		go func() {
+			_ = body.Close()
+			close(closed)
+			<-done
+			close(joined)
+		}()
+		// The handler still owns its buffer account throughout this wait. If
+		// it must return before joined, pendingBody transfers that same account
+		// and its retained bootstrap/preparation releases to actual completion.
+		// Reuse HTTP teardown's grace for the entire Close/read join, not a
+		// fresh first-content budget. A custom body need not obey Transport's
+		// cancellation contract; its live ownership survives this bound.
+		timer.Reset(routingShutdownGrace)
+		select {
+		case <-closed:
+			if committed {
+				// Raw IO is over; only the committing callback can remain.
+				return nil, errFirstBodyTimeout
+			}
+		case <-timer.C:
+			if buffers != nil {
+				buffers.pendingBody = joined
+			}
+			return nil, errFirstBodyJoinTimeout
+		}
+		select {
+		case <-joined:
+			return nil, errFirstBodyTimeout
+		case <-timer.C:
+			if buffers != nil {
+				buffers.pendingBody = joined
+			}
+			return nil, errFirstBodyJoinTimeout
+		}
 	}
 }
 
@@ -631,14 +669,17 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 				select {
 				case <-pending:
 				default:
-					// The committed peek has finished raw IO but its pure stop
-					// callback still owns charged scratch. End this same owner
-					// and detach its workload while retaining registry discovery.
+					// End HTTP/workload delivery, keeping this canonical owner
+					// discoverable until the real read AND Close have joined.
 					ctl.finish()
 					p.unregisterWorkload(requestOwner)
-					buffers.close()
+					if buffers.pendingBody == nil {
+						// A committed callback alone only retains peek scratch.
+						buffers.close()
+					}
 					go func() {
 						<-pending
+						buffers.close()
 						p.unregisterRoutingRequest(requestOwner)
 					}()
 					return

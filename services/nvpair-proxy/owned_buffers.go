@@ -95,13 +95,17 @@ func writeInferenceErrorFields(w http.ResponseWriter, status int, fields ...infe
 }
 
 // ownedInferenceBuffers is a storage account, not an inference lifecycle owner.
-// The handler retains it until all synchronous transport borrowers have joined.
+// The handler retains it until transport borrowers join, including bounded
+// precommit cleanup which can outlive HTTP delivery.
 type ownedInferenceBuffers struct {
 	scope    *bufferScope
 	mu       sync.Mutex
 	leases   []*bufferLease
 	releases []func()
 	parser   *bufferLease
+	// Set by the handler only when bounded precommit cleanup did not join.
+	// No subsequent attempt may borrow this account before actual completion.
+	pendingBody <-chan struct{}
 }
 
 func (p *Proxy) ownInferenceBuffers(r *http.Request) (*http.Request, *ownedInferenceBuffers) {
@@ -158,13 +162,37 @@ func (o *ownedInferenceBuffers) close() {
 	o.parser = nil
 	releases := o.releases
 	o.releases = nil
+	pending := o.pendingBody
 	o.mu.Unlock()
-	for _, lease := range leases {
-		lease.close()
+	closeOwned := func() {
+		for _, lease := range leases {
+			lease.close()
+		}
+		for _, release := range releases {
+			release()
+		}
 	}
-	for _, release := range releases {
-		release()
+	if pending != nil {
+		select {
+		case <-pending:
+		default:
+			// Terminal strict ingress has no origin registry. This same
+			// storage owner retains its grants and ticket until actual join.
+			go func() { <-pending; closeOwned() }()
+			return
+		}
 	}
+	closeOwned()
+}
+
+// Preparation and admission release at the last real body borrower, even when
+// HTTP has already returned. The pending fence is fixed before handler unwind.
+func (o *ownedInferenceBuffers) releaseAfterPendingBody(release func()) {
+	if o != nil && o.pendingBody != nil {
+		o.retainRelease(release)
+		return
+	}
+	release()
 }
 
 func (o *ownedInferenceBuffers) retainRelease(release func()) {

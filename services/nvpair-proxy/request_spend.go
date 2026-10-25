@@ -28,7 +28,7 @@ type routingSpend struct {
 	deadline       time.Time
 	body           []byte // Borrows the request's owned body lease until dispatch returns.
 	sink           *responseSink
-	firstBodyDone  <-chan struct{} // The peek's actual byte borrower, including post-read callbacks.
+	firstBodyDone  <-chan struct{} // Actual peek and timeout Close join, including post-read callbacks.
 	ordinal        uint64
 	reason         string
 	lastNode       string
