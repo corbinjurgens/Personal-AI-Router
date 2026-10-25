@@ -45,7 +45,6 @@ type bufferBudget struct {
 	live     int
 	wait     time.Duration
 	waiters  list.List
-	streams  *bufferScope
 	// Clock functions are fixed before use; tests can supply controlled timers.
 	now      func() time.Time
 	newTimer func(time.Duration) *time.Timer
@@ -57,7 +56,6 @@ type bufferBudget struct {
 type bufferScope struct {
 	budget *bufferBudget
 	parent *bufferScope
-	shared *bufferScope
 	limit  int64
 	used   int64
 }
@@ -149,10 +147,6 @@ func (b *bufferBudget) acquireLocked(ctx context.Context, n int64, scope *buffer
 			b.mu.Unlock()
 			return nil, &bufferLimitError{}
 		}
-		if s.shared != nil && (n > math.MaxInt64-s.shared.used || n > s.shared.limit-s.shared.used) {
-			b.mu.Unlock()
-			return nil, &bufferBusyError{}
-		}
 	}
 	if err := ctx.Err(); err != nil {
 		b.mu.Unlock()
@@ -224,9 +218,6 @@ func (b *bufferBudget) acquireLocked(ctx context.Context, n int64, scope *buffer
 func reserveBufferScope(scope *bufferScope, n int64) {
 	for s := scope; s != nil; s = s.parent {
 		s.used += n
-		if s.shared != nil {
-			s.shared.used += n
-		}
 	}
 }
 

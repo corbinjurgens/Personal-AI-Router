@@ -35,8 +35,9 @@ const (
 	// is not an inference event this proxy is willing to buffer.
 	streamFrameMaxBytes int64 = 1 << 20
 
-	// streamFrameBudgetBytes is a subordinate category of the inference root.
-	streamFrameBudgetBytes int64 = 64 << 20
+	// streamFrameRequestLimitBytes bounds each request's frame scope. Aggregate
+	// frame storage competes with other inference storage for the same root.
+	streamFrameRequestLimitBytes int64 = 64 << 20
 
 	// streamFrameReadChunk is the fixed read size for one upstream pull. It is
 	// a read scratch, not a frame buffer, and does not grow with a frame.
@@ -50,7 +51,7 @@ const (
 	streamFrameNumericBytes  = 96 << 10
 	// Even the smallest reader (syntax-only NDJSON) needs this storage in
 	// addition to its choice bitmap. Larger counts cannot fit any reader.
-	streamFrameMaxChoices = streamFrameBudgetBytes - streamFrameMetadataBytes - streamFrameSyntaxBytes - 2*streamFrameReadChunk
+	streamFrameMaxChoices = streamFrameRequestLimitBytes - streamFrameMetadataBytes - streamFrameSyntaxBytes - 2*streamFrameReadChunk
 
 	// defaultStreamFrameIdle bounds the wait for the next complete upstream
 	// event after the first body byte committed the attempt.
@@ -74,12 +75,14 @@ type frameBudget struct {
 	}
 }
 
-// Prepay replacement overlap as well as useful storage. At most two raw
-// arrays and (for SSE) two joined payload arrays coexist during growth.
+// Prepay replacement overlap as well as useful storage. Growth is synchronous
+// under reader.mu: either two raw arrays coexist with one retained SSE payload,
+// or two payload arrays coexist with one raw array. Each is at most 1 MiB; the
+// two replacement pairs never coexist. No parser or extractor retains slices.
 func streamFrameAllowance(protocol streamProtocol, choices, parserBytes int64) int64 {
 	n := streamFrameMetadataBytes + choices + streamFrameReadChunk + parserBytes + 2*streamFrameMaxBytes
 	if protocol == streamProtocolSSE {
-		n += 2 * streamFrameMaxBytes
+		n += streamFrameMaxBytes
 	}
 	return n
 }
@@ -140,17 +143,9 @@ func ownedFrameBudget(ctx context.Context) *frameBudget {
 	if bootstrap == nil {
 		return nil
 	}
-	defer bootstrap.close() // Covers fixed wrapper/category bookkeeping below.
-	b := owner.scope.budget
-	b.mu.Lock()
-	if b.streams == nil {
-		b.streams = &bufferScope{budget: b, limit: streamFrameBudgetBytes}
-	}
-	shared := b.streams
-	b.mu.Unlock()
-	scope, _ := owner.scope.category(streamFrameBudgetBytes)
-	scope.shared = shared
-	return &frameBudget{limit: streamFrameBudgetBytes, scope: scope}
+	defer bootstrap.close() // Covers fixed wrapper/scope bookkeeping below.
+	scope, _ := owner.scope.category(streamFrameRequestLimitBytes)
+	return &frameBudget{limit: streamFrameRequestLimitBytes, scope: scope}
 }
 
 // reserve records n bytes against the budget. It reports false when the
@@ -489,7 +484,7 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 		}
 	}
 	// A production request retains its 96 KiB parser allowance through the
-	// joined transport. If the subordinate SC category is saturated, that
+	// joined transport. If the frame scope or inference root is saturated, that
 	// preadmitted envelope owns this fixed <=8 KiB interruption-only reader.
 	reader := &streamFrameReader{
 		protocol:       config.Protocol,

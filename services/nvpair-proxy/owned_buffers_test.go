@@ -386,7 +386,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 		borrower.close()
 		bufferAssertTotals(t, budget, 50, 1, 0)
 	})
-	t.Run("stream frame category cannot bypass inference root", func(t *testing.T) {
+	t.Run("stream frame storage cannot bypass inference root", func(t *testing.T) {
 		budget := bufferTestBudget(t, 128<<10, 0)
 		p := &Proxy{buffers: budget}
 		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"m"}`)))
@@ -432,10 +432,11 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 		}
 		bufferAssertTotals(t, budget, 16<<10, 1, 0)
 	})
-	t.Run("request accounts share one stream category per configured root", func(t *testing.T) {
+	t.Run("request frame scopes share the root and retain individual limits", func(t *testing.T) {
 		budget := bufferTestBudget(t, 192<<20, 0)
 		p := &Proxy{buffers: budget}
 		newAccount := func(p *Proxy) (*ownedInferenceBuffers, *frameBudget) {
+			t.Helper()
 			r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", nil))
 			r.Body = nil
 			if _, _, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20); err != nil {
@@ -451,15 +452,26 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 			t.Fatal("first stream reservation refused")
 		}
 		defer a.release(40 << 20)
-		if b.reserve(30 << 20) {
-			b.release(30 << 20)
-			t.Fatal("second account bypassed shared 64 MiB category")
+		if !b.reserve(30 << 20) {
+			t.Fatal("independent request refused despite spare root capacity")
 		}
-		if !b.reserve(24 << 20) {
-			t.Fatal("shared category exact boundary refused")
+		defer b.release(30 << 20)
+		if !b.reserve(34 << 20) {
+			t.Fatal("individual frame scope exact boundary refused")
 		}
-		defer b.release(24 << 20)
-		bufferAssertTotals(t, budget, (64<<20)+(192<<10), 4, 0)
+		defer b.release(34 << 20)
+		if b.reserve(1) {
+			b.release(1)
+			t.Fatal("request frame scope exceeded 64 MiB despite spare root capacity")
+		}
+		bufferAssertTotals(t, budget, (104<<20)+(192<<10), 5, 0)
+		hold := bufferMustAcquire(t, budget, (88<<20)-(192<<10))
+		defer hold.close()
+		bufferAssertTotals(t, budget, 192<<20, 6, 0)
+		if a.reserve(1) {
+			a.release(1)
+			t.Fatal("stream grant bypassed saturated root")
+		}
 		otherRoot := bufferTestBudget(t, 192<<20, 0)
 		third, c := newAccount(&Proxy{buffers: otherRoot})
 		defer third.close()

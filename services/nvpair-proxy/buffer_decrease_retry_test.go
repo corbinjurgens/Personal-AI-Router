@@ -107,16 +107,12 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 			}
 			root.mu.Lock()
 			firstUsed := root.used
-			var firstResponseBytes int64
-			if root.streams != nil {
-				firstResponseBytes = root.streams.used
-			}
 			root.mu.Unlock()
 			// Manual peers forward NDJSON without local numeric extraction or
 			// the decoded-payload scratch used only by SSE.
 			wantResponseBytes := int64(streamFrameMetadataBytes + 1 + streamFrameSyntaxBytes + streamFrameReadChunk + 2*streamFrameMaxBytes)
-			if firstResponseBytes != wantResponseBytes {
-				t.Fatalf("first response preparation = %d bytes, want %d", firstResponseBytes, wantResponseBytes)
+			if firstUsed < wantResponseBytes {
+				t.Fatalf("first root charge = %d bytes, want at least %d response bytes", firstUsed, wantResponseBytes)
 			}
 			var blocker *bufferLease
 			if insufficient {
@@ -155,10 +151,11 @@ func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 				waitChan(t, queued, "replacement preparation FIFO entry")
 				root.mu.Lock()
 				used, pending := root.used, root.waiters.Len()
-				responseBytes := root.streams.used
 				root.mu.Unlock()
-				if pending != 1 || responseBytes != 0 || used-wantResponseBytes-(128<<10) > firstUsed-firstResponseBytes {
-					t.Fatalf("old preparation retained during rebuild: queued=%d response=%d used=%d first=%d preparation=%d", pending, responseBytes, used, firstUsed, firstResponseBytes)
+				// Apart from the independent blocker, the root must shed at least
+				// the old response envelope before waiting on new preparation.
+				if pending != 1 || used-wantResponseBytes-(128<<10) > firstUsed-wantResponseBytes {
+					t.Fatalf("old preparation retained during rebuild: queued=%d used=%d first=%d preparation=%d", pending, used, firstUsed, wantResponseBytes)
 				}
 				fx.p.priorityMu.Lock()
 				claims := len(fx.p.priorityReservations)
