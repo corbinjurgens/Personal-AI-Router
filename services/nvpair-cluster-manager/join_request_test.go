@@ -1206,23 +1206,6 @@ func TestJoinRequestTriesResolvedAlternateWithoutChangingID(t *testing.T) {
 	}
 }
 
-func TestJoinRequestOrdinaryInviteRedirectBehaviorIsUnchanged(t *testing.T) {
-	var contacted atomic.Int32
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { contacted.Add(1); respondPairing(w, nil) }))
-	defer target.Close()
-	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
-	}))
-	defer redirect.Close()
-	_, err := postPairingBlob(&http.Client{Timeout: time.Second}, strings.TrimPrefix(redirect.URL, "http://"), "ordinary-invite", "initial", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if contacted.Load() != 1 {
-		t.Fatal("ordinary Invite redirect behavior changed")
-	}
-}
-
 func TestJoinRequestCorrelatedCancellationNeverFollowsRedirect(t *testing.T) {
 	m := joinTestManager(t)
 	r := joinTestRecord(t, m, "incoming")

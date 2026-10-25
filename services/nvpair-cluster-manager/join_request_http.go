@@ -20,8 +20,6 @@ import (
 const joinRequestPath = "/v1/cluster/join-requests"
 const joinRequestBodyLimit = 4096
 
-var errJoinRequestRedirect = errors.New("join request handoff refused an HTTP redirect")
-
 type joinRequestWire struct {
 	Version   int            `json:"version"`
 	Operation string         `json:"operation"`
@@ -337,10 +335,6 @@ func (m *Manager) lockJoinRequestOperation(ctx context.Context) (func(), bool) {
 	}
 }
 
-func joinRequestHTTPClient() *http.Client {
-	return &http.Client{Timeout: pairingHTTPTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-}
-
 func callJoinRequest(ctx context.Context, target string, wire joinRequestWire) (joinRequestReply, int, error) {
 	var reply joinRequestReply
 	data, err := json.Marshal(wire)
@@ -352,7 +346,7 @@ func callJoinRequest(ctx context.Context, target string, wire joinRequestWire) (
 		return reply, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := joinRequestHTTPClient().Do(req)
+	resp, err := pairingHTTPClient().Do(req)
 	if err != nil {
 		return reply, 0, err
 	}
@@ -364,7 +358,7 @@ func callJoinRequest(ctx context.Context, target string, wire joinRequestWire) (
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			reply.Reason = "redirect-refused"
-			return reply, resp.StatusCode, errJoinRequestRedirect
+			return reply, resp.StatusCode, errPairingRedirect
 		}
 		var rejection struct {
 			Version int    `json:"version"`

@@ -6,7 +6,6 @@ package main
 import (
 	"encoding/json"
 	"log"
-	"net/http"
 )
 
 type cancelInviteParams struct {
@@ -95,10 +94,7 @@ func (m *Manager) notifyJoinerCanceled(joinerAddr, inviteID string) {
 	if joinerAddr == "" {
 		return
 	}
-	client := &http.Client{Timeout: pairingHTTPTimeout}
-	if m.isJoinRequestInvite(inviteID) {
-		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	}
+	client := pairingHTTPClient()
 	if _, err := postPairingBlob(client, joinerAddr, inviteID, "cancel", nil); err != nil {
 		log.Printf("invite %s: notify joiner cancel: %v", inviteID, err)
 	}

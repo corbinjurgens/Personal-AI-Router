@@ -26,6 +26,14 @@ import (
 // pairingHTTPTimeout bounds each inter-node pairing round trip.
 const pairingHTTPTimeout = 10 * time.Second
 
+var errPairingRedirect = errors.New("pairing refused an HTTP redirect")
+
+// pairingHTTPClient keeps every pairing phase on its selected endpoint. Return
+// the response so callers also reject 3xx statuses without a usable Location.
+func pairingHTTPClient() *http.Client {
+	return &http.Client{Timeout: pairingHTTPTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
 // pairingRejectedError signals the peer explicitly refused the pairing (rather
 // than it failing on transport/protocol). The inviter maps it to an invite
 // result of state:"rejected" instead of "failed". reason is the peer-supplied
@@ -169,7 +177,7 @@ func (m *Manager) completeInitialInvite(inviteID string, endpoints []string, cid
 		rejected := errors.As(err, &rej)
 		state := inviteStateFailed
 		reason := inviteFailureReason(err)
-		if errors.Is(err, errJoinRequestRedirect) {
+		if errors.Is(err, errPairingRedirect) {
 			reason = "redirect-refused"
 		}
 		if rejected {
@@ -300,10 +308,7 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 		return sess, "", errPairingClusterGone
 	}
 
-	client := &http.Client{Timeout: pairingHTTPTimeout}
-	if localInfo.JoinRequestID != "" {
-		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	}
+	client := pairingHTTPClient()
 	post := func(blob []byte) ([]byte, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, errPairingAbandoned
@@ -338,7 +343,9 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 		if out.Done {
 			if len(blob) > 0 {
 				// Deliver the final EAP-Failure so the joiner also reaches Waiting.
-				_, _ = post(blob)
+				if _, err := post(blob); err != nil {
+					return sess, "", err
+				}
 			}
 			break
 		}
@@ -400,8 +407,8 @@ func postPairingBlobContext(ctx context.Context, client *http.Client, target, in
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if client.CheckRedirect != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return nil, errJoinRequestRedirect
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, errPairingRedirect
 	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode == http.StatusConflict {
@@ -415,10 +422,7 @@ func postPairingBlobContext(ctx context.Context, client *http.Client, target, in
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
-		if client.CheckRedirect != nil {
-			return nil, fmt.Errorf("pairing %s: status %d", phase, resp.StatusCode)
-		}
-		return nil, fmt.Errorf("pairing %s: status %d: %s", phase, resp.StatusCode, string(rb))
+		return nil, fmt.Errorf("pairing %s: status %d", phase, resp.StatusCode)
 	}
 	var out pairingEnvelope
 	if err := decodePairingEnvelope(rb, &out); err != nil {
@@ -451,6 +455,9 @@ func postPairingSignalScheme(client *http.Client, scheme, target, inviteID, phas
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return errPairingRedirect
+	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("pairing %s: status %d", phase, resp.StatusCode)
