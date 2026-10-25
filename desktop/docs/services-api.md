@@ -360,6 +360,10 @@
 | `nodes:changed` | request (we call) | ✅ yes |
 | `performance:changed` | request (we call) | ✅ yes |
 | `policy:changed` | request (we call) | ✅ yes |
+| `routing:changed` | request (we call) | ✅ yes |
+| `routing:get-initial` | request (we call) | ✅ yes |
+| `routing:subscribe` | request (we call) | ✅ yes |
+| `routing:unsubscribe` | request (we call) | ✅ yes |
 | `service/broker-restarted` | request (we call) | ✅ yes |
 | `workloads:remove` | request (we call) | ✅ yes |
 | `workloads:upsert` | request (we call) | ✅ yes |
