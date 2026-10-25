@@ -96,6 +96,19 @@ inventory or admission evidence is evaluated on the next wake without waiting
 for the deadline. Each retry is a new operation subject to the same
 eligibility, inventory and hold checks.
 
+Process fixtures can set `--test-resident-retry-interval=1s` and
+`--test-advertise-interval=250ms` on each broker launch, including replacement
+launches. Both flags accept positive Go durations; explicit zero or negative
+values fail before logging setup, identity creation, transport setup or worker
+resolution. Omitting them retains the production 30-second resident retry and
+5-second local engine advertisement cadence. Programmatic `workerPaths` and bare
+broker fixtures use zero to retain those same defaults. Values are copied per
+broker at construction and are not changed while it runs. The advertisement
+override covers Ollama, LM Studio, the other built-in engines and descriptor
+engines. These fixture overrides leave the 30-second idle ticker, 60-second
+resident observation window, operation budgets, cancellation and capacity holds
+unchanged. They add no environment-variable configuration.
+
 A definite terminal manager `failed` result reports `unknown` with `load-failed`,
 including finish/recovery failures and readbacks while its terminal hold is
 retained. This reason does not prove that the model is unloaded or capacity is
