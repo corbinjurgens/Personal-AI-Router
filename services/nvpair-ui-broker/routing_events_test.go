@@ -26,6 +26,7 @@ import (
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/pipeio"
 )
 
 func historyFixture(t *testing.T) (*Broker, *proxyProcess, *syncBuffer) {
@@ -2060,9 +2061,13 @@ func TestRoutingHistoryProxyPipeReadRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create actual stdout pipe: %v", err)
 	}
-	t.Cleanup(func() { _ = input.Close(); _ = output.Close() })
+	t.Cleanup(func() { _ = output.Close(); _ = input.Close() })
 	b, p, _ := historyFixture(t)
-	observed := &historyObservedReadCloser{ReadCloser: input, entered: make(chan struct{})}
+	owned, err := pipeio.NewReader(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := &historyObservedReadCloser{ReadCloser: owned, entered: make(chan struct{})}
 	p.stdin = historyDiscardCloser{}
 	if err := p.attachRoutingHistoryProxyPipe(b, observed); err != nil {
 		t.Fatalf("attach actual stdout owner: %v", err)
@@ -2689,14 +2694,14 @@ func TestRoutingHistoryLocalTransportReadOwners(t *testing.T) {
 			}
 		})
 		b, _, _ := historyFixture(t)
-		observed := &historyObservedReadCloser{ReadCloser: input, entered: make(chan struct{})}
+		owned, err := pipeio.NewReader(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed := &historyObservedReadCloser{ReadCloser: owned, entered: make(chan struct{})}
 		transport := &stdioTransport{Reader: observed, Writer: io.Discard}
-		// The seam captures the actual stdin descriptor at construction. Restore
-		// the test process's stdin before reading or running the interrupt.
-		original := os.Stdin
-		os.Stdin = input
+		// The seam closes the same captured reader that the codec reads through.
 		codec, err := newRoutingHistoryLocalCodec(b, transport, false)
-		os.Stdin = original
 		if err != nil {
 			t.Fatal(err)
 		}

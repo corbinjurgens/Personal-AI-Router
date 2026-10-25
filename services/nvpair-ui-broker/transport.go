@@ -6,6 +6,8 @@ package main
 import (
 	"io"
 	"os"
+
+	"nvpair-shared/pipeio"
 )
 
 type stdioTransport struct {
@@ -13,11 +15,15 @@ type stdioTransport struct {
 	io.Writer
 }
 
-func newStdioTransport() io.ReadWriteCloser {
-	return &stdioTransport{
-		Reader: os.Stdin,
-		Writer: os.Stdout,
+func newStdioTransport() (io.ReadWriteCloser, error) {
+	input, err := pipeio.NewReader(os.Stdin)
+	if err != nil {
+		return nil, err
 	}
+	return &stdioTransport{
+		Reader: input,
+		Writer: os.Stdout,
+	}, nil
 }
 
 func (s *stdioTransport) Close() error {
