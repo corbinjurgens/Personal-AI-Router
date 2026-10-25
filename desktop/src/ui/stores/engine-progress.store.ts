@@ -12,7 +12,11 @@
 import { create } from 'zustand'
 import type { EngineInitialState } from '@/shared/types/engine-api'
 import type { EngineOperationType, EngineProgress, EngineType } from '@/shared/types/engines'
-import { emptyEngineProgress, engineProgressKey } from '@/shared/utils/engine-progress'
+import {
+    emptyEngineProgress,
+    engineProgressKey,
+    shouldApplyEngineProgress
+} from '@/shared/utils/engine-progress'
 
 interface EngineProgressState {
     progress: Map<string, EngineProgress>
@@ -31,6 +35,7 @@ interface EngineProgressState {
 }
 
 let unsubs: Array<() => void> = []
+let generation = 0
 
 export const useEngineProgressStore = create<EngineProgressState>((set, get) => ({
     progress: new Map(),
@@ -40,27 +45,23 @@ export const useEngineProgressStore = create<EngineProgressState>((set, get) => 
         // state:request-refresh (which re-runs initialize) never stacks handlers.
         unsubs.forEach(u => u())
         unsubs = []
-        try {
-            const initial = initialSnapshot ?? (await window.pairApi.engines.getInitialState())
-            const map = new Map<string, EngineProgress>()
-            for (const p of initial.activeProgress) {
-                map.set(engineProgressKey(p), p)
-            }
-            set({ progress: map })
-        } catch {
-            console.error('Failed to initialize engine progress store')
-        }
+        const currentGeneration = ++generation
+        const pushed = new Set<string>()
+        let hydrating = true
 
         if (!window.pairApi) return
 
         unsubs.push(
             window.pairApi.engines.onProgress(progress => {
                 const key = engineProgressKey(progress)
+                if (hydrating) pushed.add(key)
+                if (!shouldApplyEngineProgress(progress, get().progress.get(key))) return
                 const map = new Map(get().progress)
                 map.set(key, progress)
                 set({ progress: map })
             }),
             window.pairApi.engines.onProgressRemove(key => {
+                if (hydrating) pushed.add(key)
                 const map = new Map(get().progress)
                 if (map.delete(key)) {
                     set({ progress: map })
@@ -82,9 +83,29 @@ export const useEngineProgressStore = create<EngineProgressState>((set, get) => 
                 if (changed) set({ progress: map })
             })
         )
+        try {
+            const initial = initialSnapshot ?? (await window.pairApi.engines.getInitialState())
+            if (currentGeneration !== generation) return
+            const map = new Map<string, EngineProgress>()
+            for (const p of initial.activeProgress) {
+                const key = engineProgressKey(p)
+                if (!pushed.has(key)) map.set(key, p)
+            }
+            for (const key of pushed) {
+                const progress = get().progress.get(key)
+                if (progress) map.set(key, progress)
+            }
+            set({ progress: map })
+        } catch {
+            console.error('Failed to initialize engine progress store')
+        } finally {
+            hydrating = false
+            pushed.clear()
+        }
     },
 
     cleanup: () => {
+        generation++
         unsubs.forEach(u => u())
         unsubs = []
     },

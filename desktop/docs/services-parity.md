@@ -428,6 +428,18 @@ block; even a complete operation waits for a current inventory read. Loaded
 observations remain independent, including a loaded model whose content is
 currently unsafe.
 
+Desktop retains the per-engine list and Add model catalog. Exact target/engine/model
+rows show queued, downloading, failed, complete, or unknown download status, with
+an accessible small determinate bar only for a measured current percentage and an
+indeterminate bar otherwise. Stale observations explain disconnected/unavailable
+status and never show completed progress. Load and Copy require authoritative
+current readiness; active pulls additionally disable Eject and Delete. Both menu
+flags and selection handlers enforce those conditions, including open-menu races
+and delete confirmation. The Go admission gate remains the final authority.
+Pending pull optimism hands off only to a matching new active download ID and
+never treats a listed name as completion. Failed partial models stay in the
+catalog for an explicit download retry; no automatic retry or engine start occurs.
+
 The model catalogue is owned by the backend: `engine:catalog` on
 `nvpair-engine-manager` serves the curated Ollama, LM Studio, and llama.cpp
 lists, and searches Hugging Face for llama.cpp, and both the desktop app and

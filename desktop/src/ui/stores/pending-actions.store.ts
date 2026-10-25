@@ -32,8 +32,11 @@ import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import type { EngineCommandPayload, EngineCommandType } from '@/shared/types/engine-api'
 import type { EngineProcessStatus, EngineStatusData, EngineType } from '@/shared/types/engines'
 import type { ServiceStatus } from '@/shared/types/ipc-channels'
-import { engineTypeFromManagerName, isEngineType } from '@/shared/utils/engines'
+import { engineManagerName, engineTypeFromManagerName, isEngineType } from '@/shared/utils/engines'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
+import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
+import type { EngineProgress } from '@/shared/types/engines'
 
 /** Re-enable a control after this long if no superseding push ever arrives. */
 const PENDING_TIMEOUT_MS = 60_000
@@ -98,6 +101,9 @@ interface PendingAction {
     action: PendingOperation
     model?: string
     requestId?: string
+    baselineDownloadId?: string
+    baselineDownloadSource?: string
+    baselineDownloadRevision?: string
     /**
      * Engine process status captured when a lifecycle command fired. The entry
      * clears on the first `engines:state-changed` whose status differs from
@@ -152,6 +158,24 @@ function lifecycleKey(nodeId: string, engineType: EngineType): string {
 
 function modelKey(nodeId: string, engineType: EngineType, model: string): string {
     return `${nodeId}:${engineType}:model:${model}`
+}
+
+function pullSupersedes(entry: PendingAction, progress: EngineProgress): boolean {
+    const download = progress.downloadState
+    return (
+        entry.action === 'pullModel' &&
+        progress.operation === 'pull' &&
+        progress.downloadStateCurrent === true &&
+        download !== undefined &&
+        download.model === entry.model &&
+        download.engine === engineManagerName(entry.engineType) &&
+        (download.phase === 'queued' || download.phase === 'in_progress') &&
+        download.id !== entry.baselineDownloadId &&
+        (progress.downloadSourceId !== entry.baselineDownloadSource ||
+            !entry.baselineDownloadRevision ||
+            (!!progress.downloadRevision &&
+                BigInt(progress.downloadRevision) > BigInt(entry.baselineDownloadRevision)))
+    )
 }
 
 function settingsKey(nodeId: string, engineType: EngineType): string {
@@ -245,12 +269,28 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
         }
 
         if (MODEL_COMMANDS.has(command) && model) {
+            const progress = useEngineProgressStore
+                .getState()
+                .getProgress(nodeId, engineType, 'pull', model)
+            const observation = useEngineModelsStore.getState().getModels(nodeId, engineType)
+            const previous = observation.models.find(row => row.name === model)?.downloadState
+            const snapshot = observation.downloadState
+            const useSnapshot =
+                snapshot &&
+                (snapshot.sourceId !== progress.downloadSourceId ||
+                    !progress.downloadRevision ||
+                    BigInt(snapshot.revision) >= BigInt(progress.downloadRevision))
             const next = new Map(get().pending)
             next.set(modelKey(nodeId, engineType, model), {
                 nodeId,
                 engineType,
                 action: command,
                 model,
+                baselineDownloadId: useSnapshot ? previous?.id : progress.downloadState?.id,
+                baselineDownloadSource: useSnapshot ? snapshot.sourceId : progress.downloadSourceId,
+                baselineDownloadRevision: useSnapshot
+                    ? snapshot.revision
+                    : progress.downloadRevision,
                 expiresAt
             })
             set({ pending: next })
@@ -316,8 +356,7 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
                             clearKeys([key])
                         }
                     }
-                    // Model patches resolve delete (model gone), pull (model now
-                    // present), and — since the backend stamps `ModelItem.status`
+                    // Model patches resolve delete (model gone) and, since the backend stamps `ModelItem.status`,
                     // — load (now `'loaded'`) and eject (present but no longer
                     // `'loaded'`), so the optimistic entry clears on real backend
                     // truth instead of the safety-net timeout.
@@ -331,8 +370,24 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
                             const loaded = statuses.get(p.model) === 'loaded'
                             if (p.action === 'deleteModel' && !present) {
                                 toClear.push(key)
-                            } else if (p.action === 'pullModel' && present) {
-                                toClear.push(key)
+                            } else if (p.action === 'pullModel') {
+                                const model = patch.models.models.find(row => row.name === p.model)
+                                if (
+                                    model?.downloadState &&
+                                    pullSupersedes(p, {
+                                        nodeId: patch.nodeId,
+                                        nodeName: '',
+                                        engineType: patch.engineType,
+                                        operation: 'pull',
+                                        model: p.model,
+                                        status: model.downloadState.phase,
+                                        downloadState: model.downloadState,
+                                        downloadStateCurrent: patch.models.downloadStateCurrent,
+                                        downloadSourceId: patch.models.downloadState?.sourceId,
+                                        downloadRevision: patch.models.downloadState?.revision
+                                    })
+                                )
+                                    toClear.push(key)
                             } else if (p.action === 'loadModel' && loaded) {
                                 toClear.push(key)
                             } else if (p.action === 'unloadModel' && present && !loaded) {
@@ -343,10 +398,15 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
                     }
                 }),
                 window.pairApi.engines.onProgress(progress => {
-                    // Any real progress event for a model supersedes the optimistic
-                    // entry -- the progress store now owns the visual.
                     if (!progress.model) return
-                    clearKeys([modelKey(progress.nodeId, progress.engineType, progress.model)])
+                    const key = modelKey(progress.nodeId, progress.engineType, progress.model)
+                    const entry = get().pending.get(key)
+                    if (!entry) return
+                    if (entry.action === 'pullModel') {
+                        if (pullSupersedes(entry, progress)) clearKeys([key])
+                    } else if (progress.operation !== 'pull') {
+                        clearKeys([key])
+                    }
                 }),
                 window.pairApi.engines.onSettingsChanged(snapshot => {
                     // The snapshot's own phase takes over from here.
@@ -359,6 +419,14 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
                     const toClear: string[] = []
                     for (const e of errors) {
                         if (!e.nodeId || !isEngineType(e.engineType)) continue
+                        // Errors have no target download ID. An old RPC error
+                        // cannot settle a newer same-key pull's visual cover.
+                        if (
+                            e.modelName &&
+                            get().pending.get(modelKey(e.nodeId, e.engineType, e.modelName))
+                                ?.action === 'pullModel'
+                        )
+                            continue
                         toClear.push(
                             e.modelName
                                 ? modelKey(e.nodeId, e.engineType, e.modelName)

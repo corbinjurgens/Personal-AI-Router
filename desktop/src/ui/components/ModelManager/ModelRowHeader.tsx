@@ -11,6 +11,7 @@ export function ModelRowHeader({
     modelName,
     formattedName,
     isLoaded,
+    isDownloaded,
     actionItems,
     actionDd,
     onAction
@@ -18,6 +19,7 @@ export function ModelRowHeader({
     modelName: string
     formattedName: string
     isLoaded: boolean
+    isDownloaded: boolean
     actionItems: { id: string; children: string; disabled?: boolean; danger?: boolean }[]
     actionDd: ModelRowDropdownControl
     onAction: (modelName: string, action: string) => void
@@ -28,7 +30,9 @@ export function ModelRowHeader({
                 children: item.children,
                 disabled: item.disabled,
                 danger: item.danger,
-                onSelect: () => onAction(modelName, item.id)
+                onSelect: () => {
+                    if (!item.disabled) onAction(modelName, item.id)
+                }
             })),
         [actionItems, modelName, onAction]
     )
@@ -42,12 +46,17 @@ export function ModelRowHeader({
                         height: 8,
                         borderRadius: '50%',
                         flexShrink: 0,
-                        background: isLoaded ? DOT_LOADED : DOT_DOWNLOADED
+                        background: isLoaded
+                            ? DOT_LOADED
+                            : isDownloaded
+                              ? DOT_DOWNLOADED
+                              : 'var(--color-text-subtle)'
                     }}
                 />
                 <Text kind="body/bold/sm" className="truncate min-w-0" title={modelName}>
                     {formattedName}
                 </Text>
+                {isLoaded && <Text kind="body/regular/sm">Loaded</Text>}
             </Flex>
 
             {actionItems.length > 0 && (

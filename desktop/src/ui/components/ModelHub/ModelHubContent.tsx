@@ -21,7 +21,7 @@ type ModelHubContentProps = {
     engine: EngineType | null
     multiple: boolean
     onSubmit: (models: ModelEntry[]) => void
-    /** Already-installed models for this engine; matching hub results are hidden. */
+    /** Current ready models are hidden; failed or unavailable content remains available for explicit retry. */
     downloadedModels?: readonly ModelItem[]
 }
 

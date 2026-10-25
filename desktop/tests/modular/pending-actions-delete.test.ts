@@ -4,10 +4,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ServiceError } from '@/shared/types/errors'
 import type { EngineStatePatch } from '@/shared/types/engine-api'
-import type { ModelItem } from '@/shared/types/engines'
+import type { EngineProgress, ModelItem } from '@/shared/types/engines'
 import type { ServiceStatus } from '@/shared/types/ipc-channels'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
+import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
+import { engineProgressKey } from '@/shared/utils/engine-progress'
 
 /**
  * Two ways the "Deleting…" spinner used to outlive the operation:
@@ -26,6 +29,7 @@ import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 
 let errorsCb: ((errors: ServiceError[]) => void) | null = null
 let stateCb: ((patch: EngineStatePatch) => void) | null = null
+let progressCb: ((progress: EngineProgress) => void) | null = null
 
 function loadedModel(name: string): ModelItem {
     return {
@@ -53,7 +57,10 @@ function makeFakeWindow() {
                     stateCb = cb
                     return noopUnsub
                 },
-                onProgress: () => noopUnsub,
+                onProgress: (cb: (progress: EngineProgress) => void) => {
+                    progressCb = cb
+                    return noopUnsub
+                },
                 onSettingsChanged: () => noopUnsub
             },
             errors: {
@@ -81,6 +88,9 @@ describe('pending-actions store: model actions', () => {
         vi.useFakeTimers()
         errorsCb = null
         stateCb = null
+        progressCb = null
+        useEngineProgressStore.setState({ progress: new Map() })
+        useEngineModelsStore.setState({ models: new Map() })
         vi.stubGlobal('window', makeFakeWindow())
         usePendingActionsStore.getState().initialize()
     })
@@ -278,5 +288,81 @@ describe('pending-actions store: model actions', () => {
                 .getState()
                 .getModelPending('local-node', 'lm-studio', 'publisher/demo')
         ).toBeUndefined()
+    })
+
+    it('does not settle a pull because inventory contains the name', () => {
+        const store = usePendingActionsStore.getState()
+        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'ollama', model: 'demo' })
+        stateCb?.({
+            nodeId: 'node-1',
+            engineType: 'ollama',
+            models: {
+                nodeId: 'node-1',
+                engineType: 'ollama',
+                models: [loadedModel('demo')]
+            }
+        })
+        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+    })
+
+    it('hands off only the matching new active download and keeps a newer pending request safe from an old ID', () => {
+        const old: EngineProgress = {
+            nodeId: 'node-1',
+            nodeName: '',
+            engineType: 'ollama',
+            operation: 'pull',
+            model: 'demo',
+            status: 'failed',
+            downloadSourceId: 'a'.repeat(32),
+            downloadRevision: '2',
+            downloadStateCurrent: true,
+            downloadState: {
+                id: '1'.repeat(32),
+                engine: 'ollama',
+                model: 'demo',
+                phase: 'failed',
+                blocksReadiness: true
+            }
+        }
+        useEngineProgressStore.setState({ progress: new Map([[engineProgressKey(old), old]]) })
+        const store = usePendingActionsStore.getState()
+        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'ollama', model: 'demo' })
+        store.begin({
+            command: 'pullModel',
+            nodeId: 'node-1',
+            engineType: 'ollama',
+            model: 'other'
+        })
+        progressCb?.({
+            ...old,
+            status: 'complete',
+            downloadState: {
+                id: '1'.repeat(32),
+                engine: 'ollama',
+                model: 'demo',
+                phase: 'complete',
+                blocksReadiness: false
+            }
+        })
+        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+        const queued: EngineProgress = {
+            ...old,
+            status: 'queued',
+            downloadRevision: '3',
+            downloadState: {
+                id: '2'.repeat(32),
+                engine: 'ollama',
+                model: 'demo',
+                phase: 'queued',
+                blocksReadiness: true
+            }
+        }
+        progressCb?.({ ...queued, nodeId: 'another-target' })
+        progressCb?.({ ...queued, operation: 'copy' })
+        progressCb?.({ ...queued, downloadStateCurrent: false })
+        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+        progressCb?.(queued)
+        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBeUndefined()
+        expect(store.getModelPending('node-1', 'ollama', 'other')).toBe('pullModel')
     })
 })

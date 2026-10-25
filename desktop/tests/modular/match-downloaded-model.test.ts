@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { isHubEntryDownloaded } from '@/ui/utils/match-downloaded-model'
-import type { ModelItem } from '@/ui/types/engine-info'
+import type { ModelItem } from '@/shared/types/engines'
 import type { ModelEntry } from '@/ui/types/model-hub'
 
 function modelEntry(id: string): ModelEntry {
@@ -21,6 +21,7 @@ function modelItem(name: string, downloaded = true): ModelItem {
         name,
         size: 0,
         downloaded,
+        downloadStateCurrent: true,
         status: 'idle',
         parameterSize: '',
         quantization: '',
@@ -43,5 +44,30 @@ describe('downloaded model matching', () => {
             isHubEntryDownloaded('llama-cpp', entry, [modelItem(id.slice(0, id.lastIndexOf(':')))])
         ).toBe(false)
         expect(isHubEntryDownloaded('llama-cpp', entry, [modelItem(id, false)])).toBe(false)
+    })
+
+    it('keeps failed partial and stale content available for explicit catalog retry', () => {
+        const name = 'owner/model:Q4_K_M'
+        const partial: ModelItem = {
+            ...modelItem(name),
+            downloadState: {
+                id: '1'.repeat(32),
+                engine: 'llamacpp',
+                model: name,
+                phase: 'failed',
+                blocksReadiness: true
+            }
+        }
+        expect(isHubEntryDownloaded('llama-cpp', modelEntry(name), [partial])).toBe(false)
+        expect(
+            isHubEntryDownloaded('llama-cpp', modelEntry(name), [
+                { ...modelItem(name), downloadStateCurrent: false }
+            ])
+        ).toBe(false)
+        expect(
+            isHubEntryDownloaded('llama-cpp', modelEntry(name), [
+                { ...modelItem(name), downloadStateCurrent: undefined }
+            ])
+        ).toBe(false)
     })
 })
