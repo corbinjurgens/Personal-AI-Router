@@ -5,6 +5,7 @@ package tests
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -121,7 +122,7 @@ func (r *downloadProcessRouter) serve(w http.ResponseWriter, req *http.Request) 
 	var body struct {
 		Model string `json:"model"`
 	}
-	if err := json.NewDecoder(io.LimitReader(req.Body, 4096)).Decode(&body); err != nil || !strings.HasPrefix(body.Model, "fixture/") {
+	if err := json.NewDecoder(io.LimitReader(req.Body, 4096)).Decode(&body); err != nil || !(strings.HasPrefix(body.Model, "fixture/") || strings.HasPrefix(body.Model, "fixture-")) {
 		r.t.Errorf("unexpected native request %s: model=%q error=%v", req.URL.Path, body.Model, err)
 		http.Error(w, "invalid synthetic model", http.StatusBadRequest)
 		return
@@ -1619,5 +1620,419 @@ func TestModelDownloadStateProcess(t *testing.T) {
 		if posts, unloads, loads := f.router.counts(refused); posts != 0 || unloads != 0 || loads != 0 {
 			t.Fatalf("capacity refusal effects: posts=%d unloads=%d loads=%d", posts, unloads, loads)
 		}
+	})
+}
+
+// Reuse the accepted COPY fixture's exact source/destination identities and
+// listeners. Only one fixture-owned manager is restarted to adopt a synthetic
+// router; no engine start, intent change, journal injection or receipt is made.
+func downloadTransferAttachRouter(t *testing.T, f *controllerCopyFixture, node *task1Node) (*task1Process, *downloadProcessRouter) {
+	t.Helper()
+	router := newDownloadProcessRouter(t)
+	router.root = f.stores[node.uuid]
+	f.ports = append(f.ports, portOfURL(t, router.server.URL))
+	clusterDir := filepath.Join(node.base, "cluster")
+	switch node {
+	case f.source:
+		f.sourceEM.stop()
+	case f.target:
+		f.targetEM.stop()
+		clusterDir = f.copyCluster
+	default:
+		t.Fatal("download/COPY join cannot attach a router to the controller")
+	}
+	f.writeManifestWithRouter(t, node, portOfURL(t, router.server.URL))
+	manager := startTask1Process(t, node.base, engineMgrBin, "--cluster-dir", clusterDir, "--control-host", "127.0.0.1", "--control-port", strconv.Itoa(node.ports[noderec.ServiceEngineControl]), "--http-port", "0", "--loaded-poll-interval", "0")
+	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message { return manager.call(t, method, params) })
+	policy := nodepolicy.Default()
+	manager.send(t, "engine:node-projection", map[string]any{"policy": policy.Advertisement(), "pausedLocally": false, "managementBlocked": false}, false)
+	var status struct {
+		Running bool  `json:"running"`
+		Port    int   `json:"port"`
+		Locked  *bool `json:"locked"`
+	}
+	task2Decode(t, manager.call(t, "engine:status", map[string]string{"engine": "llamacpp"}).Result, &status)
+	if !status.Running || status.Port != portOfURL(t, router.server.URL) || status.Locked == nil || !*status.Locked {
+		t.Fatalf("private router adoption/lock=%+v", status)
+	}
+	if node == f.source {
+		f.sourceEM = manager
+	} else {
+		f.targetEM = manager
+	}
+	f.directoryToManagers(t, false)
+	f.assertControlBind(t, node.ports[noderec.ServiceEngineControl])
+	return manager, router
+}
+
+func downloadTransferModels(t *testing.T, manager *task1Process) downloadProcessModels {
+	t.Helper()
+	return downloadProcessDecode(t, manager.call(t, "engine:models", nil).Result)
+}
+
+func downloadTransferPhase(t *testing.T, manager *task1Process, model, phase string) (downloadProcessModels, modeldownload.Entry) {
+	t.Helper()
+	var models downloadProcessModels
+	var entry modeldownload.Entry
+	task1Eventually(t, "joined catalog phase "+phase, serviceCallTimeout, func() bool {
+		models = downloadTransferModels(t, manager)
+		for _, candidate := range models.DownloadState.Entries {
+			if candidate.Engine == "llamacpp" && candidate.Model == model {
+				entry = candidate
+				return candidate.Phase == phase
+			}
+		}
+		return false
+	})
+	return models, entry
+}
+
+func downloadTransferPull(t *testing.T, manager *task1Process, model string) int {
+	t.Helper()
+	return manager.send(t, "engine:action", map[string]any{"engine": "llamacpp", "action": "pull_model", "params": map[string]string{"model": model}}, true)
+}
+
+func downloadTransferReader(t *testing.T, caller, source *task1Node) *http.Client {
+	t.Helper()
+	cfg, ok := caller.mesh.ClientTLSConfig(source.uuid)
+	if !ok {
+		t.Fatal("joined source read requires its actual destination/source certificate pin")
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg, Proxy: nil}, Timeout: serviceCallTimeout}
+	t.Cleanup(client.CloseIdleConnections)
+	return client
+}
+
+func downloadTransferGET(t *testing.T, client *http.Client, observer *controllerCopyObserver, model, path string, query url.Values) (int, http.Header, []byte) {
+	t.Helper()
+	query.Set("engine", "llamacpp")
+	query.Set("model", model)
+	response, err := client.Get(fmt.Sprintf("https://127.0.0.1:%d%s?%s", observer.port, path, query.Encode()))
+	if err != nil {
+		t.Fatalf("joined source %s: %v", path, err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || len(data) > 1<<20 {
+		t.Fatalf("joined source response read=%v close=%v bytes=%d", readErr, closeErr, len(data))
+	}
+	return response.StatusCode, response.Header, data
+}
+
+// Listing and full GETs must really succeed before their refusals can establish
+// a readiness fence. An unsupported layout or missing alias cannot pass this.
+func downloadTransferExport(t *testing.T, client *http.Client, observer *controllerCopyObserver, model controllerCopyModel) {
+	t.Helper()
+	status, header, data := downloadTransferGET(t, client, observer, model.manifest.Model, "/v1/models/files", url.Values{})
+	if status != http.StatusOK || header.Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("positive source list HTTP=%d type=%q body=%s", status, header.Get("Content-Type"), data)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	results := 0
+	for frames := 0; ; frames++ {
+		if frames >= 16 {
+			t.Fatal("synthetic source listing exceeded its frame bound")
+		}
+		var frame struct {
+			Type   string          `json:"type"`
+			Result json.RawMessage `json:"result"`
+		}
+		err := decoder.Decode(&frame)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if results != 0 {
+			t.Fatal("source listing emitted a frame after its result")
+		}
+		switch frame.Type {
+		case "progress":
+		case "result":
+			var manifest controllerCopyManifest
+			task2Decode(t, frame.Result, &manifest)
+			if !reflect.DeepEqual(manifest, model.manifest) {
+				t.Fatalf("real source export differs from independently hashed inputs: got=%+v want=%+v", manifest, model.manifest)
+			}
+			results++
+		default:
+			t.Fatalf("source listing failed its positive control: %s", data)
+		}
+	}
+	if results != 1 {
+		t.Fatalf("positive source listing results=%d, want 1", results)
+	}
+	for _, artifact := range model.manifest.Files {
+		status, header, data := downloadTransferGET(t, client, observer, model.manifest.Model, "/v1/models/file", url.Values{"path": {artifact.Path}, "exportId": {model.manifest.ExportID}})
+		if status != http.StatusOK || header.Get("Content-Type") != "application/octet-stream" || int64(len(data)) != artifact.Size || phase04SHA(data) != artifact.SHA256 || !bytes.Equal(data, model.data[artifact.Path]) {
+			t.Fatalf("positive full artifact GET %s: HTTP=%d bytes=%d hash=%s", artifact.Path, status, len(data), phase04SHA(data))
+		}
+	}
+}
+
+func downloadTransferBlockedExport(t *testing.T, client *http.Client, observer *controllerCopyObserver, model controllerCopyModel) {
+	t.Helper()
+	check := func(path string, query url.Values) {
+		t.Helper()
+		status, header, data := downloadTransferGET(t, client, observer, model.manifest.Model, path, query)
+		if status != http.StatusConflict || header.Get("Content-Type") == "application/octet-stream" || strings.TrimSpace(string(data)) != "model content unavailable" {
+			t.Fatalf("source content fence %s: HTTP=%d type=%q body=%q", path, status, header.Get("Content-Type"), data)
+		}
+	}
+	check("/v1/models/files", url.Values{})
+	for _, artifact := range model.manifest.Files {
+		check("/v1/models/file", url.Values{"path": {artifact.Path}, "exportId": {model.manifest.ExportID}})
+	}
+}
+
+func downloadTransferMutations(manager *task1Process) int {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	count := 0
+	for _, frame := range manager.frames {
+		if frame.Method == nodepolicy.MethodModelMutationRequest {
+			count++
+		}
+	}
+	return count
+}
+
+func downloadTransferController(t *testing.T, f *controllerCopyFixture) {
+	t.Helper()
+	for _, path := range []string{f.stores[f.controller.uuid], filepath.Join(f.controller.base, "absent-models")} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("joined controller created a model store: %s error=%v", path, err)
+		}
+	}
+	for _, node := range []*task1Node{f.source, f.target} {
+		caller := f.target.uuid
+		if node == f.target {
+			caller = f.source.uuid
+		}
+		for _, request := range f.files[node.uuid].requests() {
+			if strings.HasPrefix(request.path, "/v1/models/file") && request.peer != caller {
+				t.Fatalf("joined artifact transport used another certificate: %+v", request)
+			}
+		}
+	}
+	for _, request := range f.files[f.controller.uuid].requests() {
+		if strings.HasPrefix(request.path, "/v1/models/file") {
+			t.Fatalf("joined controller served artifacts: %+v", request)
+		}
+	}
+	if f.egress.Load() != 0 {
+		t.Fatal("joined fixture attempted non-loopback catalog/engine egress")
+	}
+	var installed struct {
+		Engines []struct {
+			Engine  string `json:"engine"`
+			Running bool   `json:"running"`
+		} `json:"engines"`
+	}
+	task2Decode(t, f.broker.call(t, "engine:get-installed", nil).Result, &installed)
+	if len(installed.Engines) == 0 {
+		t.Fatal("joined controller omitted its isolated engine inventory")
+	}
+	for _, engine := range installed.Engines {
+		if engine.Running {
+			t.Fatalf("joined controller activated %s", engine.Engine)
+		}
+	}
+	for _, node := range []*task1Node{f.controller, f.source, f.target} {
+		var intent struct {
+			Engines map[string]bool `json:"engines"`
+			Locked  map[string]bool `json:"locked"`
+		}
+		task2Decode(t, readLiveDurableFile(t, filepath.Join(jointAppDir(node.base), "engine-bin", "engine-state.json")), &intent)
+		if on, known := intent.Engines["llamacpp"]; !known || on || !intent.Locked["llamacpp"] {
+			t.Fatalf("joined COPY/download changed private Off/lock intent for %s", node.uuid)
+		}
+	}
+}
+
+func TestModelDownloadStateTransferJoinProcess(t *testing.T) {
+	t.Run("active and failed catalog pull fences reachable source export and destination copy", func(t *testing.T) {
+		f := newControllerCopyFixture(t)
+		model := f.seedSized(t, "fixture-joined-source", 41, 128)
+		manager, router := downloadTransferAttachRouter(t, f, f.source)
+		reader := downloadTransferReader(t, f.target, f.source)
+		router.setStatus(model.manifest.Model, "unloaded")
+		ready := downloadTransferModels(t, manager)
+		if !slices.Contains(ready.ByEngine["llamacpp"], model.manifest.Model) {
+			t.Fatal("source positive control was not canonically ready")
+		}
+		downloadTransferExport(t, reader, f.files[f.source.uuid], model)
+		beforeStore := strataContractArtifacts(t, f.stores[f.target.uuid])
+		beforeMutations := downloadTransferMutations(f.targetEM)
+		pull := downloadTransferPull(t, manager, model.manifest.Model)
+		router.waitStarted(t, model.manifest.Model)
+		// A stable raw row alone cannot bypass the active writer or marker.
+		router.setStatus(model.manifest.Model, "unloaded")
+		blockedCopy := func(phase string) modeldownload.Entry {
+			t.Helper()
+			models, entry := downloadTransferPhase(t, manager, model.manifest.Model, phase)
+			if !entry.BlocksReadiness || slices.Contains(models.ByEngine["llamacpp"], model.manifest.Model) {
+				t.Fatalf("joined source published unsafe content: %+v", models)
+			}
+			downloadTransferBlockedExport(t, reader, f.files[f.source.uuid], model)
+			before := len(f.files[f.source.uuid].requests())
+			request := f.request(model.manifest.Model, "")
+			id := f.broker.send(t, "engine:copy-model", request, true)
+			response := controllerCopyResponse(t, f.broker, id)
+			if response.Error == nil || !strings.Contains(response.Error.Message, "model content unavailable") {
+				t.Fatalf("joined blocked-source COPY refused at another boundary: %+v", response.Error)
+			}
+			controllerCopyTerminal(t, f.broker, request, "error")
+			listed := false
+			for _, seen := range f.files[f.source.uuid].requests()[before:] {
+				if seen.model != model.manifest.Model {
+					continue
+				}
+				if seen.peer != f.target.uuid {
+					t.Fatalf("blocked COPY source reader=%s", seen.peer)
+				}
+				if seen.path == "/v1/models/files" {
+					listed = true
+				}
+				if seen.path == "/v1/models/file" {
+					t.Fatal("blocked-source COPY dispatched an artifact body GET")
+				}
+			}
+			if !listed {
+				t.Fatal("blocked COPY never reached the real source listing fence")
+			}
+			if !reflect.DeepEqual(strataContractArtifacts(t, f.stores[f.target.uuid]), beforeStore) || downloadTransferMutations(f.targetEM) != beforeMutations {
+				t.Fatal("blocked source caused destination artifact/receipt/withdrawal effects")
+			}
+			f.assertNoReceipt(t, model)
+			f.idle(t)
+			return entry
+		}
+		active := blockedCopy(modeldownload.PhaseInProgress)
+		router.event(t, model.manifest.Model, "download_failed")
+		if response := task2Response(t, manager, pull); response.Error == nil {
+			t.Fatal("native catalog failure succeeded")
+		}
+		failed := blockedCopy(modeldownload.PhaseFailed)
+		if failed.ID != active.ID || failed.Reason != modeldownload.ReasonDownloadFailed {
+			t.Fatalf("joined catalog failure identity/outcome=%+v", failed)
+		}
+		if posts, unloads, loads := router.counts(model.manifest.Model); posts != 1 || unloads != 0 || loads != 0 {
+			t.Fatalf("blocked-copy native effects: posts=%d unloads=%d loads=%d", posts, unloads, loads)
+		}
+		retry := downloadTransferPull(t, manager, model.manifest.Model)
+		router.waitStarted(t, model.manifest.Model)
+		router.setStatus(model.manifest.Model, "unloaded")
+		router.event(t, model.manifest.Model, "download_finished")
+		if response := task2Response(t, manager, retry); response.Error != nil {
+			t.Fatalf("explicit same-key catalog retry: %+v", response.Error)
+		}
+		restored, complete := downloadTransferPhase(t, manager, model.manifest.Model, modeldownload.PhaseComplete)
+		if complete.ID == failed.ID || complete.BlocksReadiness || !slices.Contains(restored.ByEngine["llamacpp"], model.manifest.Model) {
+			t.Fatalf("explicit catalog success did not restore same-key readiness: %+v", restored)
+		}
+		downloadTransferExport(t, reader, f.files[f.source.uuid], model)
+		request := f.request(model.manifest.Model, model.manifest.ExportID)
+		id := f.broker.send(t, "engine:copy-model", request, true)
+		f.assertCopiedArtifacts(t, model, controllerCopyResponse(t, f.broker, id))
+		controllerCopyTerminal(t, f.broker, request, "done")
+		if posts, unloads, loads := router.counts(model.manifest.Model); posts != 2 || unloads != 0 || loads != 0 {
+			t.Fatalf("restored-source COPY native effects: posts=%d unloads=%d loads=%d", posts, unloads, loads)
+		}
+		f.idle(t)
+		downloadTransferController(t, f)
+	})
+
+	t.Run("verified custom COPY retry preserves failed catalog marker and readiness fence", func(t *testing.T) {
+		f := newControllerCopyFixture(t)
+		model := f.seedSized(t, "fixture-joined-receipt", 43, 128)
+		initial := f.request(model.manifest.Model, "")
+		id := f.broker.send(t, "engine:copy-model", initial, true)
+		f.assertCopied(t, model, controllerCopyResponse(t, f.broker, id))
+		controllerCopyTerminal(t, f.broker, initial, "done")
+		f.idle(t)
+		manager, router := downloadTransferAttachRouter(t, f, f.target)
+		reader := downloadTransferReader(t, f.source, f.target)
+		router.setStatus(model.manifest.Model, "unloaded")
+		downloadTransferExport(t, reader, f.files[f.target.uuid], model)
+		pull := downloadTransferPull(t, manager, model.manifest.Model)
+		router.waitStarted(t, model.manifest.Model)
+		router.event(t, model.manifest.Model, "download_failed")
+		if response := task2Response(t, manager, pull); response.Error == nil {
+			t.Fatal("catalog failure after real COPY succeeded")
+		}
+		router.setStatus(model.manifest.Model, "unloaded")
+		before, failed := downloadTransferPhase(t, manager, model.manifest.Model, modeldownload.PhaseFailed)
+		if !failed.BlocksReadiness || failed.Reason != modeldownload.ReasonDownloadFailed || slices.Contains(before.ByEngine["llamacpp"], model.manifest.Model) {
+			t.Fatalf("failed catalog marker was not established: %+v", before)
+		}
+		downloadTransferBlockedExport(t, reader, f.files[f.target.uuid], model)
+		journalPath := filepath.Join(jointAppDir(f.target.base), "engine-bin", "model-download-state.json")
+		journal := readLiveDurableFile(t, journalPath)
+		var persisted struct {
+			Version int `json:"version"`
+			Entries []struct {
+				ID         string `json:"id"`
+				Engine     string `json:"engine"`
+				Model      string `json:"model"`
+				ContentKey string `json:"contentKey"`
+				Naming     string `json:"naming"`
+			} `json:"entries"`
+		}
+		if len(journal) > modeldownload.MaxJournalBytes {
+			t.Fatal("joined catalog journal exceeded its bound")
+		}
+		task2Decode(t, journal, &persisted)
+		if persisted.Version != 1 || len(persisted.Entries) != 1 {
+			t.Fatalf("joined journal did not retain its real failed attempt: %+v", persisted)
+		}
+		marker := persisted.Entries[0]
+		if marker.ID != failed.ID || marker.Engine != "llamacpp" || marker.Model != model.manifest.Model || marker.ContentKey != model.manifest.Model || marker.Naming != "exact" {
+			t.Fatalf("journal marker lost the exact failed catalog content key: %+v", marker)
+		}
+		receiptPath := filepath.Join(controllerCopyAliasDir(f.stores[f.target.uuid], model.manifest.Model), "copy.json")
+		receipt := readLiveDurableFile(t, receiptPath)
+		store := strataContractArtifacts(t, f.stores[f.target.uuid])
+		sourceRequests := len(f.files[f.source.uuid].requests())
+		destinationRequests := len(f.files[f.target.uuid].requests())
+		mutations := downloadTransferMutations(manager)
+		request := f.request(model.manifest.Model, model.manifest.ExportID)
+		id = f.broker.send(t, "engine:copy-model", request, true)
+		response := controllerCopyResponse(t, f.broker, id)
+		f.assertCopiedArtifacts(t, model, response)
+		controllerCopyTerminal(t, f.broker, request, "done")
+		posts := 0
+		for _, seen := range f.files[f.target.uuid].requests()[destinationRequests:] {
+			if seen.method == http.MethodPost && seen.path == "/v1/models/copy" && seen.peer == f.controller.uuid {
+				posts++
+			}
+		}
+		if posts != 1 || downloadTransferMutations(manager) != mutations {
+			t.Fatalf("receipt retry dispatch/withdrawal: control POSTs=%d", posts)
+		}
+		var result struct {
+			Result struct {
+				FilesSkipped int   `json:"filesSkipped"`
+				BytesCopied  int64 `json:"bytesCopied"`
+			} `json:"result"`
+		}
+		task2Decode(t, response.Result, &result)
+		if result.Result.FilesSkipped != len(model.manifest.Files) || result.Result.BytesCopied != 0 || len(f.files[f.source.uuid].requests()) != sourceRequests {
+			t.Fatalf("identity-bound COPY retry did not revalidate its existing receipt locally: %+v", result)
+		}
+		after := downloadTransferModels(t, manager)
+		if !after.DownloadState.Equal(*before.DownloadState) || slices.Contains(after.ByEngine["llamacpp"], model.manifest.Model) {
+			t.Fatalf("verified COPY cleared or superseded failed catalog lifecycle: before=%+v after=%+v", before, after)
+		}
+		if !bytes.Equal(journal, readLiveDurableFile(t, journalPath)) || !bytes.Equal(receipt, readLiveDurableFile(t, receiptPath)) || !reflect.DeepEqual(store, strataContractArtifacts(t, f.stores[f.target.uuid])) {
+			t.Fatal("verified receipt retry changed catalog journal, receipt or artifacts")
+		}
+		downloadTransferBlockedExport(t, reader, f.files[f.target.uuid], model)
+		if posts, unloads, loads := router.counts(model.manifest.Model); posts != 1 || unloads != 0 || loads != 0 {
+			t.Fatalf("receipt retry dispatched native effects: posts=%d unloads=%d loads=%d", posts, unloads, loads)
+		}
+		f.idle(t)
+		downloadTransferController(t, f)
 	})
 }
