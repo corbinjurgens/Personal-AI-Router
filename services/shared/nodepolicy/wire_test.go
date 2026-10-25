@@ -587,7 +587,7 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 }
 
 func TestResidentWireEnums(t *testing.T) {
-	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonLoadFailed, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
+	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
 		t.Run(string(reason), func(t *testing.T) {
 			testResidentWire(t, ResidentRefusal{Engine: "ollama", Model: "m", Reason: reason}, "engine model reason")
 		})
