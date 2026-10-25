@@ -68,6 +68,7 @@ type subscriptionResult struct {
 func startBroker(t *testing.T) (stdin io.WriteCloser, msgs <-chan jsonrpc.Message, cleanup func()) {
 	t.Helper()
 	cmd := exec.Command(brokerBin, "--scanner-path", scannerBin, "--cluster-dir", t.TempDir())
+	cmd.Env = privateEngineEnv(t, t.TempDir())
 	cmd.Stderr = os.Stderr
 
 	stdinPipe, err := cmd.StdinPipe()

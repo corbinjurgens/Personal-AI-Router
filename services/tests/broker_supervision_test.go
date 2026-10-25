@@ -86,12 +86,7 @@ func startBrokerWithPorts(t *testing.T, configDir, clusterDir string, extraEnv [
 	// Every supervised worker must use disposable per-test config. In
 	// particular, managed-port startup can persist an Ollama backend port; a
 	// cross-process test must never read or rewrite the developer's real file.
-	cmd.Env = append(os.Environ(),
-		"HOME="+configDir,
-		"XDG_CONFIG_HOME="+configDir,
-		"APPDATA="+configDir,
-		"LOCALAPPDATA="+configDir,
-	)
+	cmd.Env = privateEngineEnv(t, configDir)
 	cmd.Env = append(cmd.Env, extraEnv...)
 
 	stdinPipe, err := cmd.StdinPipe()
@@ -351,6 +346,7 @@ func TestBrokerShutsDownOnSignal(t *testing.T) {
 	}, reserveFixtureServicePorts(t).args()...)
 	cmd := exec.Command(brokerBin, args...)
 	configureBrokerSignalTarget(cmd)
+	cmd.Env = privateEngineEnv(t, t.TempDir())
 	cmd.Stderr = os.Stderr
 	// Keep stdin OPEN for the lifetime of the test so shutdown is driven
 	// purely by the signal, not by stdin EOF (closing stdin would shut the
@@ -534,12 +530,7 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 	cmd := exec.Command(brokerBin, args...)
 	// Isolate per-user state (proxy-port.json, any engine override) to a
 	// temp dir so the test leaves the real config untouched.
-	cmd.Env = append(os.Environ(),
-		"HOME="+cfg,
-		"XDG_CONFIG_HOME="+cfg,
-		"APPDATA="+cfg,
-		"LOCALAPPDATA="+cfg,
-	)
+	cmd.Env = privateEngineEnv(t, cfg)
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
