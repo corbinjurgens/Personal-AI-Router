@@ -69,7 +69,7 @@ func privateEngineEnv(t *testing.T, root string) []string {
 // writePrivateBrokerEngineSettings isolates the broker's health route as well
 // as the selected facades. Manager manifest overrides alone do not replace the
 // broker's default backend. Configure only the caller's fixture engines, before
-// startup; retain any intentional journal entries and their component stores.
+// startup; retain intentional journal entries and reuse saved private facades.
 func writePrivateBrokerEngineSettings(t *testing.T, configDir, clusterDir string, facadePorts map[string]int) {
 	t.Helper()
 	path := filepath.Join(filepath.Dir(clusterDir), "engine-settings-operations.json")
@@ -91,6 +91,19 @@ func writePrivateBrokerEngineSettings(t *testing.T, configDir, clusterDir string
 		if !ok {
 			t.Fatalf("unknown fixture engine %q", name)
 		}
+		portPath := filepath.Join(jointAppDir(configDir), engine.PortFile)
+		portData, portErr := os.ReadFile(portPath)
+		if portErr == nil {
+			var saved struct {
+				Port int `json:"port"`
+			}
+			if err := json.Unmarshal(portData, &saved); err != nil {
+				t.Fatalf("decode fixture facade port: %v", err)
+			}
+			facadePort = saved.Port
+		} else if !os.IsNotExist(portErr) {
+			t.Fatal(portErr)
+		}
 		if err := validateFixturePort(facadePort); err != nil {
 			t.Fatal(err)
 		}
@@ -109,9 +122,11 @@ func writePrivateBrokerEngineSettings(t *testing.T, configDir, clusterDir string
 			Engine: name, Revision: 1, AppliedRevision: 1, Phase: "idle", Format: "pair-arguments-v1",
 			Settings: settings.Config{ServerPort: portOfURL(t, unavailable.URL), ProxyPort: facadePort},
 		}})
-		jointWriteJSON(t, filepath.Join(jointAppDir(configDir), engine.PortFile), struct {
-			Port int `json:"port"`
-		}{Port: facadePort})
+		if os.IsNotExist(portErr) {
+			jointWriteJSON(t, portPath, struct {
+				Port int `json:"port"`
+			}{Port: facadePort})
+		}
 	}
 	if unavailable != nil {
 		jointWriteJSON(t, path, journal)
@@ -175,6 +190,40 @@ func TestPrivateBrokerEngineSettings(t *testing.T) {
 			if resp.StatusCode != http.StatusServiceUnavailable {
 				t.Fatalf("private %s health = %d, want unavailable", name, resp.StatusCode)
 			}
+		}
+	})
+
+	t.Run("preserves a saved private facade when adding health isolation", func(t *testing.T) {
+		configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
+		savedPort := freePort(t)
+		portPath := filepath.Join(jointAppDir(configDir), "llamacpp-proxy-port.json")
+		jointWriteJSON(t, portPath, map[string]int{"port": savedPort})
+		before, err := os.ReadFile(portPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"llamacpp": freePort(t)})
+		data, err := os.ReadFile(filepath.Join(filepath.Dir(clusterDir), "engine-settings-operations.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var journal map[string]struct {
+			Explicit bool              `json:"explicit"`
+			Snapshot settings.Snapshot `json:"snapshot"`
+		}
+		if err := json.Unmarshal(data, &journal); err != nil {
+			t.Fatal(err)
+		}
+		record := journal["llamacpp"]
+		if !record.Explicit || record.Snapshot.Settings.ProxyPort != savedPort {
+			t.Fatalf("saved facade was not retained in explicit settings: %+v", record)
+		}
+		if err := validateFixturePort(record.Snapshot.Settings.ServerPort); err != nil {
+			t.Fatalf("saved facade has no private health target: %v", err)
+		}
+		after, err := os.ReadFile(portPath)
+		if err != nil || !bytes.Equal(after, before) {
+			t.Fatalf("saved facade file changed: %q, %v", after, err)
 		}
 	})
 
