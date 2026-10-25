@@ -795,6 +795,41 @@ in `ModelsResult` or native `list_models`. Dedicated bridge/UI presentation of
 the setup requirement and durability qualification is separate work; these Go
 fields do not establish that presentation or serving readiness.
 
+### Controller COPY process verification
+
+The isolated `services/tests` selector `^TestModelCopyControllerProcess$` drives
+the typed broker RPC with separate synthetic controller/source/destination
+identities and real engine-manager handlers. Its test source covers custom and
+canonical layouts, authenticated direct/reverse transfer, positive-byte
+interruption and explicit Range retry, controller cancellation, target permission
+and pin failures, changed source content, destination conflicts, failed mutation
+acknowledgement and lost-response no-replay behavior. See the
+[fixture prerequisites and native checklist](../readme.md#controller-selected-model-copy).
+
+On Windows at base `44e76c6b` (2026-10-26), the complete focused parent passed
+plain and race with 14 named terminals, no failures or skips. Review then
+strengthened the lost-acknowledgement fault to drop the downstream connection
+before response headers; that changed leaf and its parent passed plain and race
+(two terminals each). Module vet exited zero. Commands used the registered
+fixed-path wrapper, private profiles and offline Go, from `services/tests`:
+
+```sh
+go test -p 1 -parallel 1 -count=1 -json -timeout=30m -run '^TestModelCopyControllerProcess$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=30m -run '^TestModelCopyControllerProcess$' .
+go test -p 1 -parallel 1 -count=1 -json -timeout=15m -run '^TestModelCopyControllerProcess$/^dispatched_POST_is_not_replayed_on_alternate_reverse_route$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=15m -run '^TestModelCopyControllerProcess$/^dispatched_POST_is_not_replayed_on_alternate_reverse_route$' .
+```
+
+Raw output remains in the machine's temporary
+`download-transfer-process-checks-20261026` directory. The combined whole-suite
+run is separate from these focused results.
+The fixture records/refuses controller artifact transport and checks that its
+model store stays absent. Production artifact filesystem calls have no
+process-level attempt observer, so these checks alone do not prove zero attempted
+controller filesystem IO. Installed builds, actual source bindings, native UI
+behavior, strict controller artifact IO instrumentation and destination serving
+setup require separate acceptance.
+
 ## CLI flags
 
 | Flag | Default | Description |

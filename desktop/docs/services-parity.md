@@ -28,6 +28,16 @@ Component/bridge checks do not establish installed builds or native transfer
 acceptance. Keyboard/focus, narrow-window layout, actual peers, direct/reverse
 transfer and destination serving setup remain external acceptance work.
 
+The synthetic controller COPY process fixture is implemented under
+`services/tests/model_copy_controller_test.go`; Windows plain/race runs passed
+on 2026-10-26 at base `44e76c6b` (14 named terminals each, no failures or skips).
+The review-hardened transport-drop leaf then passed plain/race (two terminals
+each), and module vet exited zero. It checks destination-owned transfer, receipts, authenticated
+reader identity, interruption/retry/cancel and refusal paths. Its controller
+transport/store assertions do not instrument every attempted local artifact
+filesystem operation. See the [process fixture limits and native checklist](../../services/readme.md#controller-selected-model-copy)
+before using its eventual results as acceptance evidence.
+
 Desktop node settings expose **Switch engine**, **From**, **To**, **Switch** and
 **Refresh readback**; TUI node detail uses `w` / **switch engine**. Both expose
 existing E3 invoke/status methods and sequence notifications. The target broker
