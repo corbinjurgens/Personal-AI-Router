@@ -298,6 +298,7 @@ Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other
 | `--engine-manager-path <path>` | `./nvpair-engine-manager[.exe]` in the CWD | Explicit path to the `nvpair-engine-manager` binary the broker spawns for engine management. Same optional semantics as `--node-info-path` |
 | `--engine-manager-http-port <port>` | `14322` | Model-list HTTP listener (`em`) passed to engine-manager and registered with discovery |
 | `--engine-manager-control-port <port>` | `14323` | Remote-control listener (`ec`) passed to engine-manager and registered with discovery when a cluster dir is configured |
+| `--engine-manager-control-host <ip>` | `0.0.0.0` | Literal IPv4 or IPv6 bind address passed as engine-manager's `--control-host`; affects `ec` only, preserving mTLS and authorization |
 | `--node-info-port <port>` | `14318` | Node-info HTTP listener (`ni`) passed to `nvpair-node-info` as `--port` and registered with discovery |
 | `--errors-port <port>` | `14319` | Errors peer-sync listener (`er`) passed to `nvpair-errors` as `--port` and registered with discovery |
 | `--workload-manager-port <port>` | `14320` | Workload relay listener (`wl`) passed to `nvpair-workload-manager` as `--port` and registered with discovery |
@@ -310,7 +311,17 @@ Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other
 | `--log-level <lvl>` | _(env `NVPAIR_LOG_LEVEL` or `info`)_ | `debug` \| `info` \| `warn` \| `error` |
 | `--version` | | Print version and exit |
 
-The `--*-port` flags above form one immutable startup plan. Before any worker starts, the broker rejects a plan in which a port is outside 1 to 65535, two services share a port, or a service takes an engine's compatibility facade port or managed backend base port from the engine table (reserved even for an engine left out of `--proxy-engines`). Each worker receives, registers and replays exactly its planned port, including across supervised restarts and scanner respawns; a port at its default is left to the worker's identical flag default, so the default plan spawns workers with their historical argv. The planned ports stay reserved against engine settings and the inherited `OLLAMA_HOST` alias, and a default port that the plan moved elsewhere is released. These flags separate listeners only: a second instance on one host still needs its own app data, cluster identity, IPC endpoint and engine facades.
+The `--*-port` flags above form one immutable startup plan. Before any worker starts, the broker rejects a plan in which a port is outside 1 to 65535, two services share a port, or a service takes an engine's compatibility facade port or managed backend base port from the engine table (reserved even for an engine left out of `--proxy-engines`). Each worker receives, registers and replays exactly its planned port, including across supervised restarts and scanner respawns; a port at its default is left to the worker's identical flag default, preserving historical port arguments and default listener behavior. The planned ports stay reserved against engine settings and the inherited `OLLAMA_HOST` alias, and a default port that the plan moved elsewhere is released. These flags separate listeners only: a second instance on one host still needs its own app data, cluster identity, IPC endpoint and engine facades.
+
+`--engine-manager-control-host` rejects empty, DNS, malformed, bracketed and
+zone-qualified values before product startup; there is no fallback for invalid
+input. Programmatic `workerPaths.engineMgrControlHost` uses a nil pointer for
+the unchanged default and validates any explicit value, including empty, before
+serving or spawning the manager. The selected address is retained across worker
+restarts. A fixture's `127.0.0.1` confines only the `ec` listener: engine-manager's
+`em` HTTP surface still binds `0.0.0.0`, and other workers have their own listeners.
+Whole-process isolation requires disabling or independently isolating each of
+those surfaces.
 
 Logs go to **stderr** (shared `applog` format, same as every other NVPAIR binary). stdout is reserved for JSON-RPC frames in stdio mode, so logging there would corrupt the protocol. Every spawned worker's stderr is forwarded to the broker's stderr unmodified, so `[nvpair-node-scanner]`, `[nvpair-node-info]`, `[nvpair-proxy]`, `[nvpair-workload-manager]`, and `[nvpair-cluster-manager]` lines interleave with the broker's `[nvpair-ui-broker]` lines on a single stream. The proxy logs under the process name because that is what it is; a line about one engine's facade carries an `engine` field instead of a distinct prefix.
 

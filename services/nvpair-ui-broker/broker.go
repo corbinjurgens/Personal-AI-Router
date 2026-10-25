@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -204,6 +205,7 @@ type Broker struct {
 	engineMgrPath        string
 	engineMgrHTTPPort    int
 	engineMgrControlPort int
+	engineMgrControlHost string
 	nodeInfoPort         int
 	errorsPort           int
 	workloadMgrPort      int
@@ -466,6 +468,8 @@ type workerPaths struct {
 	// Zero ports retain the product defaults for programmatic callers.
 	engineMgrHTTPPort    int
 	engineMgrControlPort int
+	// Nil retains the production default; an explicitly empty host is invalid.
+	engineMgrControlHost *string
 	nodeInfoPort         int
 	errorsPort           int
 	workloadMgrPort      int
@@ -490,6 +494,10 @@ type workerPaths struct {
 // are dropped, as before); without the cluster-manager, no cluster pairing
 // and membership (cluster:* / nodes:*). Discovery still works in every case.
 func NewBroker(codec *Codec, paths workerPaths) *Broker {
+	controlHost := defaultEngineManagerControlHost
+	if paths.engineMgrControlHost != nil {
+		controlHost = *paths.engineMgrControlHost
+	}
 	// Resolve the local node id once, as the stable per-host UUID (the same
 	// value the node-scanner advertises as hostUuid and the cluster-manager
 	// uses as nodeUuid). It's stamped onto every local-origin workload
@@ -497,7 +505,10 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 	// this node by an identity that survives a PC rename — hostname is display
 	// only. The same value is passed to nvpair-errors via --node-id so
 	// its localNodeID stays in lockstep with what the broker stamps.
-	nodeID := resolveLocalNodeID(paths.clusterDir)
+	nodeID := ""
+	if validateEngineManagerControlHost(controlHost) == nil {
+		nodeID = resolveLocalNodeID(paths.clusterDir)
+	}
 	return &Broker{
 		codec:                codec,
 		startedAt:            time.Now(),
@@ -511,6 +522,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		engineMgrPath:        paths.engineMgr,
 		engineMgrHTTPPort:    paths.engineMgrHTTPPort,
 		engineMgrControlPort: paths.engineMgrControlPort,
+		engineMgrControlHost: controlHost,
 		nodeInfoPort:         paths.nodeInfoPort,
 		errorsPort:           paths.errorsPort,
 		workloadMgrPort:      paths.workloadMgrPort,
@@ -530,6 +542,15 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		ollamaPortReady:      make(chan struct{}),
 		lmstudioPortReady:    make(chan struct{}),
 	}
+}
+
+const defaultEngineManagerControlHost = "0.0.0.0"
+
+func validateEngineManagerControlHost(host string) error {
+	if net.ParseIP(host) == nil {
+		return fmt.Errorf("--engine-manager-control-host must be a literal IP address (got %q)", host)
+	}
+	return nil
 }
 
 // registerService records a local service in the discovery registration cache
@@ -1732,6 +1753,9 @@ func (b *Broker) newServeContext(parent context.Context, lifetime *brokerMainLif
 func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error {
 	if err := validateServicePorts(b.servicePorts()); err != nil {
 		return fmt.Errorf("service ports: %w", err)
+	}
+	if err := validateEngineManagerControlHost(b.engineMgrControlHost); err != nil {
+		return err
 	}
 	ctx, cancel, err := b.newServeContext(ctx, lifetime)
 	if err != nil {

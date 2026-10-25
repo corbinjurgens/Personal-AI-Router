@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/appdir"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -44,6 +45,107 @@ func TestEngineManagerPortsConfiguration(t *testing.T) {
 			}
 			if err := validateServicePorts(b.servicePorts()); err != nil {
 				t.Fatalf("valid configuration rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestEngineManagerControlHostConfiguration(t *testing.T) {
+	t.Run("omitted host keeps production default", func(t *testing.T) {
+		b := NewBroker(nil, workerPaths{})
+		if err := validateEngineManagerControlHost(b.engineMgrControlHost); err != nil || b.engineMgrControlHost != "0.0.0.0" {
+			t.Fatalf("control host = %q, %v, want 0.0.0.0", b.engineMgrControlHost, err)
+		}
+	})
+	for _, host := range []string{"0.0.0.0", "127.0.0.1", "192.0.2.1", "::", "::1", "2001:db8::1"} {
+		t.Run("preserves "+host, func(t *testing.T) {
+			b := NewBroker(nil, workerPaths{engineMgrControlHost: &host})
+			if err := validateEngineManagerControlHost(b.engineMgrControlHost); err != nil || b.engineMgrControlHost != host {
+				t.Fatalf("control host = %q, %v, want %q", b.engineMgrControlHost, err, host)
+			}
+		})
+	}
+}
+
+func TestEngineManagerControlHostInvalidProgrammaticConfigurationDoesNotSpawn(t *testing.T) {
+	for _, host := range []string{"", "localhost", "example.invalid", "127.0.0.1:14323", "[::1]", "::1%lo0", " 127.0.0.1", "127.0.0.1 ", "256.0.0.1"} {
+		t.Run("rejects "+host, func(t *testing.T) {
+			b := NewBroker(nil, workerPaths{engineMgrControlHost: &host})
+			if err := b.Serve(context.Background()); err == nil || !strings.Contains(err.Error(), "--engine-manager-control-host") {
+				t.Fatalf("Serve error = %v, want control host failure", err)
+			}
+			if handle, err := b.spawnEngineMgr(); err == nil || handle != nil || !strings.Contains(err.Error(), "--engine-manager-control-host") {
+				t.Fatalf("spawn = %v, %v, want control host failure without a handle", handle, err)
+			}
+			if b.getScanner() != nil || b.getEngineMgr() != nil || len(b.regCache.Snapshot()) != 0 {
+				t.Fatal("invalid control host spawned or registered a worker")
+			}
+		})
+	}
+}
+
+func TestEngineManagerControlHostInvalidConstructionDoesNotCreateIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, host      string
+		explicitCluster bool
+	}{
+		{name: "empty host with default identity directory", host: ""},
+		{name: "DNS host with explicit identity directory", host: "localhost", explicitCluster: true},
+		{name: "malformed host with explicit identity directory", host: "256.0.0.1", explicitCluster: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateOllamaHostTestConfig(t)
+			defaultRoot, err := appdir.Dir()
+			if err != nil {
+				t.Fatalf("resolve private app directory: %v", err)
+			}
+			identityRoot := defaultRoot
+			paths := workerPaths{engineMgrControlHost: &tc.host}
+			if tc.explicitCluster {
+				identityRoot = filepath.Join(t.TempDir(), "identity")
+				paths.clusterDir = filepath.Join(identityRoot, "cluster")
+			}
+			assertNoIdentity := func() {
+				t.Helper()
+				for _, path := range []string{defaultRoot, identityRoot, filepath.Join(identityRoot, "node-id.json"), filepath.Join(identityRoot, "cluster")} {
+					if _, err := os.Stat(path); !os.IsNotExist(err) {
+						t.Fatalf("invalid control host created identity path %q or stat failed: %v", path, err)
+					}
+				}
+			}
+			assertNoIdentity()
+			b := NewBroker(nil, paths)
+			assertNoIdentity()
+			if b.nodeID != "" || b.engineMgrControlHost != tc.host {
+				t.Fatalf("invalid configuration resolved node ID %q or changed host to %q", b.nodeID, b.engineMgrControlHost)
+			}
+			if err := b.Serve(context.Background()); err == nil || !strings.Contains(err.Error(), "--engine-manager-control-host") {
+				t.Fatalf("Serve error = %v, want control host failure", err)
+			}
+			assertNoIdentity()
+			if handle, err := b.spawnEngineMgr(); err == nil || handle != nil || !strings.Contains(err.Error(), "--engine-manager-control-host") {
+				t.Fatalf("spawn = %v, %v, want control host failure without a handle", handle, err)
+			}
+			assertNoIdentity()
+		})
+	}
+}
+
+func TestEngineManagerControlHostCLIRejectsBeforeWorkerResolution(t *testing.T) {
+	isolateOllamaHostTestConfig(t)
+	binary := buildEngineManagerPortTestBinary(t, "ports-cli", "nvpair-ui-broker", ".", ".")
+	for _, host := range []string{"", "localhost", "127.0.0.1:14323", "[::1]", "256.0.0.1"} {
+		t.Run("rejects "+host, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			output, err := exec.CommandContext(ctx, binary,
+				"--engine-manager-control-host", host,
+				"--scanner-path", filepath.Join(t.TempDir(), "missing-scanner")).CombinedOutput()
+			if ctx.Err() != nil || err == nil {
+				t.Fatalf("invalid CLI host did not fail promptly: %v, %v, %s", ctx.Err(), err, output)
+			}
+			if !strings.Contains(string(output), "--engine-manager-control-host must be a literal IP address") || strings.Contains(string(output), "scanner binary:") {
+				t.Fatalf("diagnostic = %q, want host rejection before worker resolution", output)
 			}
 		})
 	}
@@ -140,10 +242,12 @@ func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 			t.Fatalf("allocator returned product default %d; test requires isolated ports", ports[i])
 		}
 	}
+	controlHost := "127.0.0.1"
 	b := NewBroker(nil, workerPaths{
 		scanner: scannerBinary, engineMgr: engineBinary,
 		engineMgrHTTPPort: ports[0], engineMgrControlPort: ports[1],
-		clusterDir: filepath.Join(t.TempDir(), "cluster"),
+		engineMgrControlHost: &controlHost,
+		clusterDir:           filepath.Join(t.TempDir(), "cluster"),
 	})
 	for _, listener := range listeners {
 		if err := listener.Close(); err != nil {
@@ -172,20 +276,21 @@ func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 		t.Fatalf("listener fixture loaded engine manifests: %s", raw)
 	}
 	for _, flag := range []struct {
-		name string
-		port int
+		name  string
+		value string
 	}{
-		{name: "--http-port", port: ports[0]},
-		{name: "--control-port", port: ports[1]},
+		{name: "--http-port", value: strconv.Itoa(ports[0])},
+		{name: "--control-port", value: strconv.Itoa(ports[1])},
+		{name: "--control-host", value: "127.0.0.1"},
 	} {
 		found := false
 		for i, arg := range worker.cmd.Args {
 			if arg == flag.name && i+1 < len(worker.cmd.Args) {
-				found = worker.cmd.Args[i+1] == strconv.Itoa(flag.port)
+				found = worker.cmd.Args[i+1] == flag.value
 			}
 		}
 		if !found {
-			t.Fatalf("spawn args = %v, want %s %d", worker.cmd.Args, flag.name, flag.port)
+			t.Fatalf("spawn args = %v, want %s %s", worker.cmd.Args, flag.name, flag.value)
 		}
 	}
 	client := &http.Client{Timeout: time.Second}

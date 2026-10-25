@@ -33,6 +33,7 @@ func main() {
 	engineMgrPath := flag.String("engine-manager-path", "", "path to nvpair-engine-manager binary (default: ./nvpair-engine-manager in the current working directory)")
 	engineMgrHTTPPort := flag.Int("engine-manager-http-port", engineManagerHTTPPort, "engine-manager model HTTP service port (1..65535; must differ from the control port)")
 	engineMgrControlPort := flag.Int("engine-manager-control-port", engineControlPort, "engine-manager remote-control service port (1..65535; must differ from the HTTP port)")
+	engineMgrControlHost := flag.String("engine-manager-control-host", defaultEngineManagerControlHost, "literal IP address passed to engine-manager --control-host for the ec listener only")
 	nodeInfoPort := flag.Int("node-info-port", nodeInfoHTTPPort, "node-info HTTP service port (ni) passed to nvpair-node-info and registered with discovery (1..65535; unique among the local service ports)")
 	errorsPort := flag.Int("errors-port", errorsHTTPPort, "errors peer-sync service port (er) passed to nvpair-errors and registered with discovery (1..65535; unique among the local service ports)")
 	workloadMgrPort := flag.Int("workload-manager-port", workloadHTTPPort, "workload-manager service port (wl) passed to nvpair-workload-manager and registered with discovery (1..65535; unique among the local service ports)")
@@ -45,6 +46,9 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
+	if err := validateEngineManagerControlHost(*engineMgrControlHost); err != nil {
+		log.Fatal(err)
+	}
 
 	if *showVersion {
 		fmt.Println(Version)
@@ -274,6 +278,7 @@ func main() {
 		engineMgr:            resolvedEngineMgr,
 		engineMgrHTTPPort:    *engineMgrHTTPPort,
 		engineMgrControlPort: *engineMgrControlPort,
+		engineMgrControlHost: engineMgrControlHost,
 		nodeInfoPort:         *nodeInfoPort,
 		errorsPort:           *errorsPort,
 		workloadMgrPort:      *workloadMgrPort,

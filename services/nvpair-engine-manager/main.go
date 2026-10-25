@@ -35,6 +35,7 @@ func main() {
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
 	httpPort := flag.Int("http-port", 0, "if >0, serve the LAN HTTP surface (/v1/models) on this port so peers can enrich this node's model list; 0 disables it")
 	controlPort := flag.Int("control-port", 0, "if >0 and this node is clustered, serve the cluster-scoped mTLS remote-control surface (ec: /v1/engines + remote install/pull/start/stop) on this port")
+	controlHost := flag.String("control-host", defaultControlHost, "literal IP address to bind the ec remote-control surface; does not affect the em model-list listener")
 	reservedPort := flag.Int("reserved-port", 0, "local engine port reserved by the parent proxy; 0 disables the reservation")
 	clusterDir := flag.String("cluster-dir", "", "cluster identity/pin directory; when set and this node holds a cluster identity, the ec remote-control surface (--control-port) turns on with pin-based mTLS")
 	loadedPollSec := flag.Int("loaded-poll-interval", defaultLoadedPollSeconds, "seconds between loaded-model polls that drive engine:models-changed pushes; 0 disables the watcher")
@@ -42,6 +43,9 @@ func main() {
 	uninstallManaged := flag.Bool("uninstall-managed", false, "remove every engine PAIR installed, preserving downloaded models, then exit; for the platform uninstallers")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
+	if err := validateControlHost(*controlHost); err != nil {
+		log.Fatalf("invalid --control-host: %v", err)
+	}
 
 	if *showVersion {
 		fmt.Println(Version)
@@ -145,7 +149,7 @@ func main() {
 	// the process on a node that joins a cluster after engine-manager started —
 	// exactly the window in which the broker mints the identity.
 	if *controlPort > 0 {
-		go serveControl(ctx, *controlPort, exec, mesh, mgr.copyFromPeer)
+		go serveControl(ctx, *controlHost, *controlPort, exec, mesh, mgr.copyFromPeer)
 	}
 
 	if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
