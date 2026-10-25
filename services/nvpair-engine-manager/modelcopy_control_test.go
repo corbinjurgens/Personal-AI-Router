@@ -223,6 +223,126 @@ func TestModelCopyControlDestinationOwnsBytes(t *testing.T) {
 	}
 }
 
+func TestModelCopyControlInboundNotifiesDestinationAndController(t *testing.T) {
+	controllerSawProgress := make(chan struct{})
+	f := newCopyControlSourceFixture(t, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == controlModelFilePath {
+				select {
+				case <-controllerSawProgress:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	destinationOutput, controllerOutput := &syncBuffer{}, &syncBuffer{}
+	f.destination.codec, f.controller.codec = NewCodec(destinationOutput), NewCodec(controllerOutput)
+	p := controlCopyRequest()
+	params, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := json.RawMessage(`1`)
+	ctx := remoteFixtureContext(t)
+	finished := make(chan struct{})
+	go func() {
+		f.controller.runCopy(ctx, &Message{JSONRPC: "2.0", ID: &id, Method: "engine:copy-model", Params: params})
+		close(finished)
+	}()
+	// Hold source bytes until an actual controller worker-codec notification
+	// arrives. Both endpoint streams must expose nonterminal work, even when
+	// no GUI subscriber is attached to either worker's broker.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		seen := false
+		for _, frame := range controllerOutput.frames() {
+			if frame.Method == "engine:remote-progress" {
+				seen = true
+				break
+			}
+		}
+		if seen {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("controller received no copy notification")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(controllerSawProgress)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("copy did not finish after progress observation")
+	}
+	var result struct {
+		OpID   string          `json:"opId"`
+		Result copyModelResult `json:"result"`
+	}
+	responses := 0
+	for _, frame := range controllerOutput.frames() {
+		if frame.ID == nil {
+			continue
+		}
+		responses++
+		if frame.Error != nil {
+			t.Fatalf("controller copy failed: %+v", frame.Error)
+		}
+		if err := json.Unmarshal(frame.Result, &result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if responses != 1 || result.OpID != p.OpID || result.Result.BytesTotal <= 0 || result.Result.BytesCopied != result.Result.BytesTotal || f.reads.Load() == 0 {
+		t.Fatalf("result=%+v responses=%d source reads=%d", result, responses, f.reads.Load())
+	}
+	check := func(name string, output *syncBuffer) {
+		t.Run(name, func(t *testing.T) {
+			nonterminal, terminal := 0, 0
+			for _, frame := range output.frames() {
+				if frame.Method != "engine:remote-progress" {
+					continue
+				}
+				var cp copyProgress
+				if err := json.Unmarshal(frame.Params, &cp); err != nil {
+					t.Fatal(err)
+				}
+				if cp.OpID != p.OpID || cp.Node != p.SourceNodeID || cp.SourceNodeID != p.SourceNodeID || cp.DestinationNodeID != p.DestinationNodeID || cp.Engine != p.Engine || cp.Model != p.Model || cp.Op != "copy" {
+					t.Fatalf("notification lost tuple: %+v", cp)
+				}
+				if cp.Stage == "done" || cp.Stage == "error" || cp.Stage == "cancelled" {
+					terminal++
+					if cp.Stage != "done" || cp.BytesDone != result.Result.BytesTotal || cp.BytesTotal != result.Result.BytesTotal {
+						t.Fatalf("terminal=%+v", cp)
+					}
+				} else {
+					nonterminal++
+				}
+			}
+			if nonterminal == 0 || terminal != 1 {
+				t.Fatalf("nonterminal=%d terminal=%d", nonterminal, terminal)
+			}
+		})
+	}
+	check("destination worker notifications", destinationOutput)
+	check("controller worker notifications", controllerOutput)
+}
+
+func TestModelCopyControlDestinationWorkerFailureCancelsCopy(t *testing.T) {
+	f := newCopyControlFixture(t)
+	f.destination.codec = NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{strings.NewReader(""), &copyFailWriter{}})
+	if _, err := f.controller.executeCopy(remoteFixtureContext(t), controlCopyRequest(), false, nil, nil); err == nil {
+		t.Fatal("copy survived destination worker transport failure")
+	}
+	if f.reads.Load() != 0 || len(f.controller.activeCopies()) != 0 || len(f.destination.activeCopies()) != 0 {
+		t.Fatalf("failed worker retained work or read artifacts: reads=%d", f.reads.Load())
+	}
+}
+
 func TestModelCopyControlLegacyUsesCanonicalExecutor(t *testing.T) {
 	f := newCopyControlFixture(t)
 	output := &syncBuffer{}

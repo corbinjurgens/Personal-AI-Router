@@ -424,6 +424,12 @@ func (m *Manager) executeCopy(parent context.Context, p copyRequest, inbound boo
 			entry.Progress = &snapshot
 		}
 		m.copyMu.Unlock()
+		// Every Manager publishes its own accepted work, including incoming
+		// destination copies. The optional observer carries the same operation
+		// over HTTP; GUI subscription lifetime belongs to the broker.
+		if err := m.codec.Notify("engine:remote-progress", cp); err != nil {
+			m.cancelCopy(p.OpID)
+		}
 		if onProgress != nil {
 			onProgress(cp)
 		}
@@ -506,11 +512,7 @@ func (m *Manager) runCopy(ctx context.Context, msg *Message) {
 		m.codec.RespondError(msg.ID, -32602, err.Error())
 		return
 	}
-	res, err := m.executeCopy(ctx, p, false, nil, func(cp copyProgress) {
-		if err := m.codec.Notify("engine:remote-progress", cp); err != nil {
-			m.cancelCopy(p.OpID)
-		}
-	})
+	res, err := m.executeCopy(ctx, p, false, nil, nil)
 	m.respondOrErr(msg, map[string]any{"opId": p.OpID, "result": res}, err)
 }
 
