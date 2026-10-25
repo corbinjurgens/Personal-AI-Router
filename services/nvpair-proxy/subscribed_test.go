@@ -4,17 +4,204 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
+
+func TestCapacityDropClearsSelectedNode(t *testing.T) {
+	profile := anyProfile(t)
+	recorder := &recordingWriter{}
+	p := newTestProxy(profile, NewCodec(recorder), NewDiscovery(), 11435)
+	f := p.soleFacade()
+	var nodes []noderec.DirectoryNode
+	for i := range maxInventoryNodes {
+		nodes = append(nodes, noderec.DirectoryNode{
+			HostUUID: fmt.Sprintf("node-%03d", i), IP: "192.0.2.1",
+			Services: map[noderec.ServiceKey]noderec.ServiceStatus{profile.DiscoveryService: {Port: 11434}},
+		})
+	}
+	replace := func(nodes []noderec.DirectoryNode) {
+		t.Helper()
+		raw, err := json.Marshal(noderec.GetNodesResult{Nodes: nodes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.replaceSubscribed(raw)
+	}
+	replace(nodes)
+	selected := nodes[len(nodes)-1].HostUUID
+	f.SetSelected(selected)
+	extra := nodes[0]
+	extra.HostUUID = "earlier"
+	replace(append([]noderec.DirectoryNode{extra}, nodes...))
+	if f.SelectedID() != "" || f.discovery.Has(selected) {
+		t.Fatal("capacity-dropped node retained its route selection")
+	}
+	removed, cleared := false, false
+	for _, line := range recorder.lines() {
+		var msg Message
+		if err := json.Unmarshal(line, &msg); err != nil {
+			t.Fatal(err)
+		}
+		switch msg.Method {
+		case engines.AddressMethod(profile.Name, "node/removed"):
+			var node Node
+			if err := json.Unmarshal(msg.Params, &node); err != nil {
+				t.Fatal(err)
+			}
+			removed = removed || node.ID == selected
+		case engines.AddressMethod(profile.Name, "node/selection-changed"):
+			var result SelectedResult
+			if err := json.Unmarshal(msg.Params, &result); err != nil {
+				t.Fatal(err)
+			}
+			cleared = cleared || result.ID == ""
+		}
+	}
+	if !removed || !cleared {
+		t.Fatalf("removal notification=%v selection clear=%v", removed, cleared)
+	}
+	replace(nodes)
+	if f.SelectedID() != "" || !f.discovery.Has(selected) {
+		t.Fatal("readmission restored a stale selection")
+	}
+}
+
+func TestUnknownTierDeclarationPreventsRouterFallback(t *testing.T) {
+	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "m"}},
+	})
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"peer": {"m"}}, nil)
+	fx.declare(t, "peer", map[string]nodepolicy.AdvertisedRole{"future": ollamaRole("m")})
+	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); len(got) != 0 {
+		t.Fatalf("unknown tier declaration enabled router fallback: %+v", got)
+	}
+}
+
+func TestDiscoveryInventoryNodeLimit(t *testing.T) {
+	d := NewDiscovery()
+	d.AddManual(Node{ID: "manual"})
+	nodes := []Node{{ID: "manual"}}
+	for i := range maxInventoryNodes + 10 {
+		nodes = append(nodes, Node{ID: fmt.Sprintf("node-%03d", i)})
+	}
+	discovered, _, _ := d.SetSubscribed(nodes)
+	if len(d.Nodes()) != maxInventoryNodes || len(discovered) != maxInventoryNodes {
+		t.Fatalf("merged=%d discovered=%d, want %d", len(d.Nodes()), len(discovered), maxInventoryNodes)
+	}
+	if !d.Has("node-254") || d.Has("node-255") || d.AddManual(Node{ID: "overflow"}) {
+		t.Fatal("did not retain the first admitted IDs or reject excess manual nodes")
+	}
+	if d.AddManual(Node{ID: "manual", Host: "updated"}) {
+		t.Fatal("an existing manual entry was reported new")
+	}
+	added, updated, removed := d.SetSubscribed(nodes)
+	if len(added)+len(updated)+len(removed) != 0 {
+		t.Fatal("identical over-bound snapshot changed admission")
+	}
+	d.SetSubscribed(nil)
+	if len(d.Nodes()) != 1 || !d.AddManual(Node{ID: "replacement"}) {
+		t.Fatal("removing subscribed inventory did not release capacity")
+	}
+}
+
+func TestDiscoveryDuplicateIDsDoNotGrowDiff(t *testing.T) {
+	d := NewDiscovery()
+	nodes := make([]Node, maxInventoryNodes*2)
+	for i := range nodes {
+		nodes[i] = Node{ID: "same"}
+	}
+	discovered, _, _ := d.SetSubscribed(nodes)
+	if len(discovered) != 1 || len(d.Nodes()) != 1 {
+		t.Fatal("duplicate IDs grew the admitted set or its diff")
+	}
+}
+
+func TestDiscoveryInventoryModelLimit(t *testing.T) {
+	models := make([]string, maxInventoryModels+10)
+	served := make(nodepolicy.ServedModels, len(models))
+	for i := range models {
+		models[i] = fmt.Sprintf("model-%04d", i)
+		served[i] = nodepolicy.Role{Engine: "ollama", Model: models[i]}
+	}
+	for _, source := range []string{"subscribed", "manual"} {
+		t.Run(source, func(t *testing.T) {
+			d := NewDiscovery()
+			node := Node{ID: "node", Models: models, Loaded: models, ServedModels: served}
+			if source == "manual" {
+				d.AddManual(node)
+			} else {
+				d.SetSubscribed([]Node{node})
+			}
+			got := d.Nodes()[0]
+			if len(got.Models) != maxInventoryModels || len(got.Loaded) != maxInventoryModels || len(got.ServedModels) != maxInventoryModels {
+				t.Fatalf("models=%d loaded=%d served=%d", len(got.Models), len(got.Loaded), len(got.ServedModels))
+			}
+			if !reflect.DeepEqual(got.Models, models[:maxInventoryModels]) {
+				t.Fatal("admission changed retained model order")
+			}
+			if cap(got.Models) > maxInventoryModels || cap(got.Loaded) > maxInventoryModels || cap(got.ServedModels) > maxInventoryModels {
+				t.Fatal("retained over-bound backing storage")
+			}
+		})
+	}
+}
+
+func TestSubscribedJSONModelLimit(t *testing.T) {
+	profile := anyProfile(t)
+	p := testProxy(profile, NewDiscovery(), 11435)
+	models := make([]string, maxInventoryModels+1)
+	for i := range models {
+		models[i] = fmt.Sprintf("model-%04d", i)
+	}
+	raw, err := json.Marshal(noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{{
+		HostUUID: "peer", IP: "192.0.2.1", Models: models,
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{profile.DiscoveryService: {Port: 11434}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.handleMessage(&Message{JSONRPC: "2.0", Method: engines.AddressMethod(profile.Name, noderec.NotifyNodes), Params: raw})
+	nodes := p.soleFacade().discovery.Nodes()
+	if len(nodes) != 1 || !reflect.DeepEqual(nodes[0].Models, models[:maxInventoryModels]) {
+		t.Fatal("JSON discovery intake did not bound the ordinary model inventory")
+	}
+}
+
+func TestInventoryWarningRateLimit(t *testing.T) {
+	previous := slog.Default()
+	var output bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	inventoryWarning.Lock()
+	inventoryWarning.last = time.Time{}
+	inventoryWarning.Unlock()
+	warnInventoryLimit()
+	warnInventoryLimit()
+	if got := strings.Count(output.String(), "level=WARN"); got != 1 {
+		t.Fatalf("warnings=%d, want 1", got)
+	}
+	inventoryWarning.Lock()
+	inventoryWarning.last = time.Now().Add(-time.Minute)
+	inventoryWarning.Unlock()
+	warnInventoryLimit()
+	if got := strings.Count(output.String(), "level=WARN"); got != 2 {
+		t.Fatalf("warnings after interval=%d, want 2", got)
+	}
+}
 
 // TestSubscribedOverlayMerge covers the relay-sourced routing overlay: the broker
 // pushes the full filtered set, SetSubscribed replaces the overlay wholesale, and

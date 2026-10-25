@@ -27,6 +27,33 @@ invalid model entries and their dependent references in memory, preserving
 valid siblings and explicit deny-all permissions without rewriting the file or
 advancing its revision. These rules add no routing method or payload field.
 
+### Routing inventory count limits
+
+The proxy discovery owner admits at most 256 distinct routing node IDs per
+facade across its subscribed and manual overlays. Existing manual entries keep
+their slots; a subscribed snapshot admits the first distinct IDs in input order
+that fit, with matching manual IDs sharing a slot. New manual IDs are dropped
+when the merged inventory is full; existing entries can still be updated or
+removed. Duplicate snapshot IDs retain their last value and produce one diff.
+Scanner snapshots already arrive sorted by stable host UUID. Admission is done
+on updates, before any request builds its routing snapshot.
+
+Each admitted node retains the first 1,024 valid entries of its model, loaded
+and served lists, with independent bounded storage. Roles retain known tiers,
+or one unknown-tier declaration marker to keep legacy fallback closed. Supported
+strict capabilities already have a 1,024-entry wire limit and served lists a
+256-entry wire limit; invalid JSON inventories retain the prior overlay. Typed
+over-bound strict capabilities are withdrawn rather than repaired into valid
+capabilities. The scheduler baseline likewise keeps at most 256 IDs
+and 256 ranks in producer order at intake, including not-yet-discovered IDs.
+These fixed ceilings allow far more than the handful of machines and tens of
+models expected in a personal cluster; 1,024 also matches the existing strict
+capability ceiling. There is no configuration knob. All excess-admission paths
+share one process-wide warning per minute containing only the fixed limits.
+Control-plane frame byte limits continue to bound decoding; these count limits
+bound retained routing state and its per-request copies even for a misbehaving
+scanner. They do not impose a scanner-wide discovery or pairing limit.
+
 ### Local execution observations (T2)
 
 Each actual engine-facing inference attempt may emit one `performance:sample`

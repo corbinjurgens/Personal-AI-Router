@@ -383,13 +383,13 @@ func (f *facade) clearSelectionOf(id string) bool {
 // clearSelectionIfNotPresent resets the user-selected node (and notifies the
 // client) when it's neither in the relay-fed set nor a manual node, so a stale
 // selection can't pin routing to a departed target.
-func (f *facade) clearSelectionIfNotPresent(present map[string]bool) {
+func (f *facade) clearSelectionIfNotPresent() {
 	sel := f.SelectedID()
-	if sel == "" || present[sel] || f.discovery.IsManual(sel) {
+	if sel == "" || f.discovery.Has(sel) {
 		return
 	}
 	// Re-checked under the lock rather than cleared outright: the selection can
-	// change while IsManual runs, and clearing a newer pin would drop a choice
+	// change while Has runs, and clearing a newer pin would drop a choice
 	// the user just made.
 	if f.clearSelectionOf(sel) {
 		_ = f.notify("node/selection-changed", SelectedResult{ID: ""})
@@ -425,14 +425,12 @@ func (f *facade) replaceSubscribed(params json.RawMessage) {
 		return
 	}
 	nodes := make([]Node, 0, len(res.Nodes))
-	present := make(map[string]bool, len(res.Nodes))
 	for _, dn := range res.Nodes {
 		n, ok := subscribedToNode(f.profile, dn)
 		if !ok {
 			continue
 		}
 		nodes = append(nodes, n)
-		present[n.ID] = true
 	}
 	f.noteSelfFromSnapshot(nodes)
 	discovered, updated, removed := f.discovery.SetSubscribed(nodes)
@@ -465,7 +463,7 @@ func (f *facade) replaceSubscribed(params json.RawMessage) {
 			slog.Debug("failed to send errors:report", "node", n.ID, "err", err)
 		}
 	}
-	f.clearSelectionIfNotPresent(present)
+	f.clearSelectionIfNotPresent()
 }
 
 // notify emits a facade-scoped notification, addressed to this engine.

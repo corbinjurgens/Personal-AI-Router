@@ -19,13 +19,40 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
+	"time"
 
 	"nvpair-shared/discovery"
 	"nvpair-shared/netpick"
 	"nvpair-shared/nodepolicy"
 )
+
+// Personal clusters are normally a handful of machines with tens of models.
+// Admit ample headroom at the routing inventory owner, before request snapshots
+// are built. The model ceiling also matches strict-admission's existing 1024
+// entry ceiling. These are fixed resource limits, not routing preferences.
+const (
+	maxInventoryNodes  = 256
+	maxInventoryModels = 1024
+)
+
+var inventoryWarning struct {
+	sync.Mutex
+	last time.Time
+}
+
+// One process-wide warning per minute across discovery and scheduler ingress.
+// Never include inventory strings or control-plane bodies in this diagnostic.
+func warnInventoryLimit() {
+	inventoryWarning.Lock()
+	defer inventoryWarning.Unlock()
+	if now := time.Now(); now.Sub(inventoryWarning.last) >= time.Minute {
+		inventoryWarning.last = now
+		slog.Warn("routing inventory limit exceeded; excess entries dropped", "maxNodes", maxInventoryNodes, "maxModelsPerNode", maxInventoryModels)
+	}
+}
 
 // uuidFromTXT extracts a node's stable uuid= from its TXT records. Kept as a
 // thin re-export of the shared helper (it was triplicated across the two proxies
@@ -103,9 +130,13 @@ func filterModelNames(models []string) []string {
 	if models == nil {
 		return nil
 	}
-	clean := make([]string, 0, len(models))
+	clean := make([]string, 0, min(len(models), maxInventoryModels))
 	for _, model := range models {
 		if nodepolicy.ValidateModelIdentifier(model) == nil {
+			if len(clean) == maxInventoryModels {
+				warnInventoryLimit()
+				break
+			}
 			clean = append(clean, model)
 		}
 	}
@@ -116,18 +147,40 @@ func (n Node) filteredModels() Node {
 	n.Models = filterModelNames(n.Models)
 	n.Loaded = filterModelNames(n.Loaded)
 	if n.Roles != nil {
-		roles := make(map[string]nodepolicy.AdvertisedRole, len(n.Roles))
-		for tier, role := range n.Roles {
+		roles := make(map[string]nodepolicy.AdvertisedRole)
+		for _, tier := range nodepolicy.TierOrder {
+			role, exists := n.Roles[tier]
+			if !exists {
+				continue
+			}
 			if nodepolicy.ValidateModelIdentifier(role.Model) == nil {
 				roles[tier] = role
+			}
+		}
+		if len(roles) == 0 {
+			// A valid declaration of an unknown tier is still authoritative:
+			// dropping its presence would enable the router's legacy fallback.
+			// Retain one deterministic marker; only known tiers are consulted.
+			marker, found := "", false
+			for tier, role := range n.Roles {
+				if nodepolicy.ValidateModelIdentifier(role.Model) == nil && (!found || tier < marker) {
+					marker, found = tier, true
+				}
+			}
+			if found {
+				roles[marker] = n.Roles[marker]
 			}
 		}
 		n.Roles = roles
 	}
 	if n.ServedModels != nil {
-		served := make(nodepolicy.ServedModels, 0, len(n.ServedModels))
+		served := make(nodepolicy.ServedModels, 0, min(len(n.ServedModels), maxInventoryModels))
 		for _, ref := range n.ServedModels {
 			if nodepolicy.ValidateModelIdentifier(ref.Model) == nil {
+				if len(served) == maxInventoryModels {
+					warnInventoryLimit()
+					break
+				}
 				served = append(served, ref)
 			}
 		}
@@ -135,6 +188,12 @@ func (n Node) filteredModels() Node {
 	}
 	if n.StrictAdmission != nil && n.StrictAdmission.Version == nodepolicy.StrictAdmissionVersion {
 		models := n.StrictAdmission.Models
+		if len(models) > maxInventoryModels {
+			// Invalid capabilities must not become valid by truncation.
+			n.StrictAdmission = nil
+			warnInventoryLimit()
+			return n
+		}
 		for i, entry := range models {
 			if nodepolicy.ValidateModelIdentifier(entry.Model) == nil {
 				continue
@@ -365,11 +424,25 @@ func (d *Discovery) Has(id string) bool {
 func (d *Discovery) SetSubscribed(nodes []Node) (discovered, updated, removed []Node) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	next := make(map[string]Node, len(nodes))
+	next := make(map[string]Node, min(len(nodes), maxInventoryNodes))
+	// Existing manual entries retain their slots. Subscribed records sharing a
+	// manual ID consume no extra slot and still win in the merged view.
+	count := len(d.manualNodes)
 	for _, n := range nodes {
+		if _, exists := next[n.ID]; !exists {
+			if _, manual := d.manualNodes[n.ID]; !manual {
+				if count == maxInventoryNodes {
+					warnInventoryLimit()
+					continue
+				}
+				count++
+			}
+		}
 		n = n.filteredModels()
 		next[n.ID] = n
-		switch prev, ok := d.subscribedNodes[n.ID]; {
+	}
+	for id, n := range next {
+		switch prev, ok := d.subscribedNodes[id]; {
 		case !ok:
 			discovered = append(discovered, n)
 		case !nodeEqual(prev, n):
@@ -396,10 +469,24 @@ func nodeEqual(a, b Node) bool {
 }
 
 func (d *Discovery) AddManual(node Node) (added bool) {
-	node = node.filteredModels()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, exists := d.manualNodes[node.ID]
+	if !exists {
+		if _, subscribed := d.subscribedNodes[node.ID]; !subscribed {
+			count := len(d.subscribedNodes)
+			for id := range d.manualNodes {
+				if _, duplicate := d.subscribedNodes[id]; !duplicate {
+					count++
+				}
+			}
+			if count == maxInventoryNodes {
+				warnInventoryLimit()
+				return false
+			}
+		}
+	}
+	node = node.filteredModels()
 	d.manualNodes[node.ID] = node
 	return !exists
 }

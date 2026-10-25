@@ -1284,6 +1284,18 @@ func (p *Proxy) SetPrioritySnapshot(priority schedulerwire.Priority) int {
 // that has to mint a generation can do so in the same critical section that
 // applies it. Caller holds priorityMu.
 func (p *Proxy) setPriorityLocked(priority schedulerwire.Priority) int {
+	// Ignore replayed, superseded and zero generations before allocating or
+	// clearing reservations taken since the last applied snapshot.
+	if priority.Generation <= p.appliedPriorityGeneration {
+		return len(p.priority)
+	}
+	// Bound the authoritative baseline at intake, including ranks for IDs the
+	// discovery relay has not reported yet. Request-time copies need no caps.
+	if len(priority.Nodes) > maxInventoryNodes || len(priority.Ranks) > maxInventoryNodes {
+		warnInventoryLimit()
+	}
+	priority.Nodes = priority.Nodes[:min(len(priority.Nodes), maxInventoryNodes)]
+	priority.Ranks = priority.Ranks[:min(len(priority.Ranks), maxInventoryNodes)]
 	cleaned := append([]string(nil), priority.Nodes...)
 	pending := make(map[string]int, len(priority.Ranks))
 	gpuPressure := make(map[string]int, len(priority.Ranks))
@@ -1303,17 +1315,6 @@ func (p *Proxy) setPriorityLocked(priority schedulerwire.Priority) int {
 		gpuPressure[rank.ID] = rank.GPUPressure
 	}
 
-	// Unconditional, with no escape hatch for an unversioned snapshot. One used
-	// to apply while leaving the epoch untouched, which reintroduced exactly
-	// the undercount the stamp prevents: clear the map at epoch N, reserve
-	// again, and a reservation from before the clear still matches N and
-	// releases the new one. A generation of 0 now fails this comparison and is
-	// ignored; both callers stamp, so it cannot arrive.
-	if priority.Generation <= p.appliedPriorityGeneration {
-		// Already applied, or superseded. Leave the baseline and the
-		// reservations exactly as they are.
-		return len(p.priority)
-	}
 	p.appliedPriorityGeneration = priority.Generation
 	p.priority = cleaned
 	p.priorityPending = pending
@@ -1639,6 +1640,9 @@ func (p *Proxy) handleMessage(msg *Message) {
 		added := f.discovery.AddManual(node)
 		if err := p.codec.Respond(msg.ID, map[string]bool{"added": added}); err != nil {
 			log.Printf("failed to respond to node/add-manual: %v", err)
+		}
+		if !f.discovery.IsManual(node.ID) {
+			return // Inventory admission dropped this new manual entry.
 		}
 		if added {
 			log.Printf("manual node added: %s (%s:%d)", node.ID, node.Addresses[0], node.Port)

@@ -15,7 +15,6 @@ does not change the engine's reachability. Malformed documents yield unavailable
 model inventory. Names are never trimmed, truncated or synthesized to pass
 validation; ordinary Unicode, spaces, tags and slashes retain their meaning.
 
-These model checks do not change manual-node identity or persistence contracts.
 New node-policy writes are strict. Only the broker's disk-policy loader removes
 old invalid model entries and dependent references in memory, preserving valid
 siblings and explicit empty served permission without rewriting the file or
@@ -98,9 +97,20 @@ Emitted so the supervising broker can forward them into the `nvpair-errors` pipe
 
 ### `node/add`
 
-Add a node by address. The manager immediately probes it and emits a `node/discovered` event, and saves the entry to the state file. Adding an entry whose node id (its `name`, or `manual:<address>`) is already tracked replaces it.
+Add a node by address. The manager immediately probes it and emits a `node/discovered` event, and saves the entry to the state file. Adding an entry whose node id (`manual:name:<name>`, or `manual:<address>` without a name) is already tracked replaces it. Names cannot claim discovered UUIDs or address-based manual keys. Consumers use the returned ID for removal.
 
-A hostname is preferred over an IP literal: probe clients disable keep-alives specifically so every probe re-resolves the name, which lets a node that gets a new address recover on its own. An IP-literal entry is dead once the device is renumbered. Supply the address on its own — a `host:port` string is not parsed, because ports are appended to it, so such an entry reads permanently down.
+Before probes or persistence, entries must have a bare IP address (including
+IPv6 without a zone) or ASCII DNS hostname, a TLS port in 0–65535, and a
+nonzero TLS port when `mtls` is true. URLs, paths, credentials, host:port strings,
+invalid UTF-8, control and format characters are rejected. Address, name and
+the generated ID are each at most 256 UTF-8 bytes; the ID's prefix counts toward
+the existing broker node-reference ceiling. Invalid string encodings are
+checked before JSON decoding can repair them. Rejections use the existing
+invalid-params error. Legacy named entries are validated on replay and acquire
+the same manual namespace; invalid saved entries are skipped while valid
+siblings are retained, without rewriting the file during loading.
+
+A hostname is preferred over an IP literal: probe clients disable keep-alives specifically so every probe re-resolves the name, which lets a node that gets a new address recover on its own. An IP-literal entry is dead once the device is renumbered. Supply the address on its own; a `host:port` string is rejected.
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"node/add","params":{"address":"10.0.1.50","name":"my-server"}}
@@ -109,7 +119,7 @@ A hostname is preferred over an IP literal: probe clients disable keep-alives sp
 | Param | Required | Description |
 |---|---|---|
 | `address` | Yes | IP address or hostname of the node, with no port |
-| `name` | No | Friendly name (used as node ID; defaults to `manual:<address>`) |
+| `name` | No | Friendly name (ID is `manual:name:<name>`; without it, `manual:<address>`) |
 | `tls_port` | No | Probe node-info over HTTPS on this port instead of plain HTTP on `14318`. Echoed back as `tls_enabled` |
 | `mtls` | No | Stored and echoed back as `mtls_required`. The probe transport itself is chosen by `tls_port` and live cluster membership, so this field records intent rather than driving it |
 
@@ -120,7 +130,7 @@ Response: the initial node status object.
 Remove a previously added manual node, and delete it from the state file.
 
 ```json
-{"jsonrpc":"2.0","id":2,"method":"node/remove","params":{"id":"my-server"}}
+{"jsonrpc":"2.0","id":2,"method":"node/remove","params":{"id":"manual:name:my-server"}}
 ```
 
 ### `nodes/list`

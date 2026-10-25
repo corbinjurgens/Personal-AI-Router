@@ -5,11 +5,36 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"testing"
 
 	"nvpair-shared/schedulerwire"
 )
+
+func TestPriorityInventoryLimit(t *testing.T) {
+	p := prProxy(t)
+	snapshot := schedulerwire.Priority{Generation: 1}
+	for i := range maxInventoryNodes + 10 {
+		id := fmt.Sprintf("node-%03d", i)
+		snapshot.Nodes = append(snapshot.Nodes, id)
+		snapshot.Ranks = append(snapshot.Ranks, schedulerwire.NodeRank{ID: id, Pending: i})
+	}
+	if got := p.SetPrioritySnapshot(snapshot); got != maxInventoryNodes {
+		t.Fatalf("admitted priority=%d, want %d", got, maxInventoryNodes)
+	}
+	if len(p.PriorityList()) != maxInventoryNodes || len(p.priorityPending) != maxInventoryNodes || len(p.priorityGPUPressure) != maxInventoryNodes {
+		t.Fatal("scheduler inventory grew beyond the owner limit")
+	}
+	if got := p.PriorityList(); got[0] != "node-000" || got[len(got)-1] != "node-255" {
+		t.Fatalf("priority order was not retained: %v", got)
+	}
+	p.priorityReservations["node-000"] = 1
+	p.SetPrioritySnapshot(snapshot)
+	if p.priorityReservations["node-000"] != 1 {
+		t.Fatal("over-bound replay cleared reservations")
+	}
+}
 
 // prNode builds a discovery Node with a single non-local address so
 // resolveCandidates resolves it deterministically (single candidate → no TCP
