@@ -20,6 +20,7 @@
 package tests
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -52,11 +53,12 @@ const nodeRecordService = "_nvpair-node._tcp"
 
 // This test-only stdio adapter supplies the real worker's peer directory through
 // discovery:nodes. It preserves the broker's --port argument, so the worker's
-// listener agrees with the broker's discovery registration. All other input and
-// all worker output pass through unchanged; it never synthesizes a service
-// response or a workload. Dispatch before TestMain so broker worker arguments
-// are not parsed as testing flags and the adapter does not build another binary
-// bundle.
+// listener agrees with the broker's discovery registration. Worker output is
+// forwarded byte-for-byte. The privacy case additionally injects test-only
+// worker notifications upstream of the broker's projection, after observing a
+// real measured terminal on the existing input seam. Dispatch before TestMain
+// so broker worker arguments are not parsed as testing flags and the adapter
+// does not build another binary bundle.
 func init() {
 	if bridge := os.Getenv("NVPAIR_TEST_WORKLOAD_BRIDGE"); bridge != "" && bridge == os.Args[0] {
 		if err := runWorkloadInteropBridge(); err != nil {
@@ -69,7 +71,11 @@ func init() {
 
 func runWorkloadInteropBridge() error {
 	cmd := exec.Command(os.Getenv("NVPAIR_TEST_WORKLOAD_BINARY"), os.Args[1:]...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -78,8 +84,39 @@ func runWorkloadInteropBridge() error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "fixture_worker_started pid=%d\n", cmd.Process.Pid)
+	var outputMu sync.Mutex
+	emit := func(raw []byte) error {
+		outputMu.Lock()
+		defer outputMu.Unlock()
+		line := append(append([]byte(nil), raw...), '\n')
+		n, err := os.Stdout.Write(line)
+		if err == nil && n != len(line) {
+			return io.ErrShortWrite
+		}
+		return err
+	}
+	outputDone := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 64*1024), jsonrpc.WorkerFrameBytes)
+		for scanner.Scan() {
+			if err := emit(scanner.Bytes()); err != nil {
+				outputDone <- err
+				return
+			}
+		}
+		outputDone <- scanner.Err()
+	}()
 	wait := make(chan error, 1)
-	go func() { wait <- cmd.Wait() }()
+	go func() {
+		outputErr := <-outputDone
+		waitErr := cmd.Wait()
+		if outputErr != nil {
+			wait <- outputErr
+		} else {
+			wait <- waitErr
+		}
+	}()
 	forward := make(chan error, 1)
 	go func() {
 		encoder := json.NewEncoder(stdin)
@@ -93,6 +130,7 @@ func runWorkloadInteropBridge() error {
 			return
 		}
 		decoder := json.NewDecoder(os.Stdin)
+		injected := false
 		for {
 			var frame jsonrpc.Message
 			if err := decoder.Decode(&frame); err != nil {
@@ -105,6 +143,32 @@ func runWorkloadInteropBridge() error {
 			if err := encoder.Encode(frame); err != nil {
 				forward <- err
 				return
+			}
+			if !injected && os.Getenv("NVPAIR_TEST_WORKLOAD_PRIVACY") == "1" && frame.Method == "workload:completed" {
+				var completed workloadBroadcastFrame
+				if err := json.Unmarshal(frame.Params, &completed.Params); err != nil {
+					forward <- err
+					return
+				}
+				if completed.Params.WorkloadInfo.Model != workloadBroadcastModel {
+					continue
+				}
+				frames, err := workloadPrivacyInjectionFrames(completed)
+				if err != nil {
+					forward <- err
+					return
+				}
+				for _, injectedFrame := range frames {
+					raw, err := json.Marshal(injectedFrame)
+					if err == nil {
+						err = emit(raw)
+					}
+					if err != nil {
+						forward <- err
+						return
+					}
+				}
+				injected = true
 			}
 		}
 	}()
@@ -590,7 +654,38 @@ type workloadBroadcastFrame struct {
 
 func TestWorkloadBroadcastCarriesNoRoutingFields(t *testing.T) {
 	frames := captureWorkloadBroadcast(t)
+	privateValues := workloadBroadcastPrivateValues()
+	privateValues["message"] = workloadBroadcastMessage
+	privateValues["response"] = workloadBroadcastResponse
+	// Search decoded string values, including substrings in otherwise approved
+	// fields such as requesterId/error. These exact synthetic markers are private;
+	// the legitimate model and node identifiers remain unrestricted.
+	var checkStrings func(any, int)
+	checkStrings = func(value any, frameIndex int) {
+		t.Helper()
+		switch value := value.(type) {
+		case string:
+			for name, marker := range privateValues {
+				if strings.Contains(value, marker) {
+					t.Fatalf("peer frame %d leaks the private %s marker in a decoded string", frameIndex, name)
+				}
+			}
+		case []any:
+			for _, element := range value {
+				checkStrings(element, frameIndex)
+			}
+		case map[string]any:
+			for _, element := range value {
+				checkStrings(element, frameIndex)
+			}
+		}
+	}
 	for i, raw := range frames {
+		var decoded any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("decode peer frame %d for private-value checks: %v", i, err)
+		}
+		checkStrings(decoded, i)
 		var frame workloadBroadcastFrame
 		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.DisallowUnknownFields()
@@ -603,6 +698,9 @@ func TestWorkloadBroadcastCarriesNoRoutingFields(t *testing.T) {
 		if frame.JSONRPC != "2.0" {
 			t.Fatalf("peer frame %d jsonrpc=%q, want 2.0", i, frame.JSONRPC)
 		}
+		if frame.Params.WorkloadInfo.ID == workloadBroadcastMalformedID {
+			t.Fatalf("peer frame %d carries the malformed injection", i)
+		}
 		switch frame.Method {
 		case "workload:submitted", "workload:started", "workload:completed", "workload:errored":
 		default:
@@ -613,11 +711,62 @@ func TestWorkloadBroadcastCarriesNoRoutingFields(t *testing.T) {
 }
 
 const (
-	workloadBroadcastModel      = "privacy-routing-request-model"
-	workloadBroadcastReadyModel = "privacy-readiness-model"
-	workloadBroadcastNode       = "privacy-upstream-node"
-	workloadBroadcastMessage    = "privacy-synthetic-message"
+	workloadBroadcastModel        = "privacy-routing-request-model"
+	workloadBroadcastReadyModel   = "privacy-readiness-model"
+	workloadBroadcastNode         = "privacy-upstream-node"
+	workloadBroadcastMessage      = "privacy-synthetic-message"
+	workloadBroadcastResponse     = "private-response-marker-7c24"
+	workloadBroadcastControlID    = "privacy-projection-control"
+	workloadBroadcastControlModel = "privacy-projection-model"
+	workloadBroadcastMalformedID  = "privacy-malformed-control"
 )
+
+func workloadBroadcastPrivateValues() map[string]string {
+	return map[string]string{
+		"error": "private-error-marker-83b1", "credential": "private-credential-marker-a729",
+		"pin": "private-pin-marker-4902", "key": "private-key-marker-d6e8", "unknown": "private-unknown-marker-f315",
+	}
+}
+
+// Inject only on the test worker's stdout, before the broker's real projection.
+// The accepted control has the measured origin/run and a distinct workload ID;
+// its replay proves that these inputs were consumed and stored by the broker.
+func workloadPrivacyInjectionFrames(completed workloadBroadcastFrame) ([]jsonrpc.Message, error) {
+	info := completed.Params.WorkloadInfo
+	info.ID, info.Model = workloadBroadcastControlID, workloadBroadcastControlModel
+	raw, err := json.Marshal(info)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	private, err := json.Marshal(workloadBroadcastPrivateValues())
+	if err != nil {
+		return nil, err
+	}
+	fields["privateRoutingHistory"] = private
+	accepted, err := json.Marshal(map[string]any{"workloadInfo": fields, "privateEnvelope": private})
+	if err != nil {
+		return nil, err
+	}
+	fields["id"], err = json.Marshal(workloadBroadcastMalformedID)
+	if err != nil {
+		return nil, err
+	}
+	fields["state"] = private // A required scalar with the wrong type must be rejected.
+	malformed, err := json.Marshal(map[string]any{"workloadInfo": fields})
+	if err != nil {
+		return nil, err
+	}
+	return []jsonrpc.Message{
+		{JSONRPC: "2.0", Method: "routing/request", Params: private},
+		{JSONRPC: "2.0", Method: "privacy:unknown-worker-method", Params: private},
+		{JSONRPC: "2.0", Method: "workloads:upsert", Params: malformed},
+		{JSONRPC: "2.0", Method: "workloads:upsert", Params: accepted},
+	}, nil
+}
 
 // captureWorkloadBroadcast keeps the original real proxy -> broker -> manager
 // fixture, but first proves peer readiness with a distinct model. The measured
@@ -631,7 +780,8 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			return
 		}
 		var request struct {
-			Model    string `json:"model"`
+			Model    string            `json:"model"`
+			Private  map[string]string `json:"private"`
 			Messages []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
@@ -648,12 +798,22 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			http.Error(w, "unexpected fixture request", http.StatusBadRequest)
 			return
 		}
+		for name, marker := range workloadBroadcastPrivateValues() {
+			if request.Private[name] != marker {
+				t.Errorf("fake Ollama did not receive the private %s input marker", name)
+				http.Error(w, "missing private fixture input", http.StatusBadRequest)
+				return
+			}
+		}
 		if request.Model == workloadBroadcastModel {
 			measuredRequests.Add(1)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write([]byte(`{"done":true}`)); err != nil {
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"done": true, "message": map[string]string{"role": "assistant", "content": workloadBroadcastResponse},
+			"private": workloadBroadcastPrivateValues(),
+		}); err != nil {
 			t.Errorf("write fake Ollama completion: %v", err)
 		}
 	}))
@@ -669,7 +829,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	// never dialed at all. The fixture feeds the public worker discovery seam,
 	// avoiding installed peers and multicast registration/teardown dependencies.
 	fx := newInterNodeCluster(t)
-	received, peerPort, stopPeer := startWorkloadBroadcastPeer(t, fx)
+	received, peerPort, restartPeer, stopPeer := startWorkloadBroadcastPeer(t, fx)
 	base := t.TempDir()
 	executable, err := os.Executable()
 	if err != nil {
@@ -721,6 +881,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 		"NVPAIR_TEST_WORKLOAD_BRIDGE=" + bridge,
 		"NVPAIR_TEST_WORKLOAD_BINARY=" + workloadMgrBin,
 		"NVPAIR_TEST_WORKLOAD_NODES=" + string(mustMarshal(t, directory)),
+		"NVPAIR_TEST_WORKLOAD_PRIVACY=1",
 	}, args...)
 	p.paths = append(p.paths, scanner, proxyBin, bridge, workloadMgrBin)
 	for i, path := range p.paths {
@@ -747,13 +908,21 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	if err != nil || len(owned) != len(p.paths) {
 		t.Fatalf("fixture process inventory: owned=%+v err=%v want paths=%v", owned, err, p.paths)
 	}
+	var originalWorker, originalBridge, originalProxy serviceProcessIdentity
 	for _, child := range owned {
 		if child.Path == p.paths[len(p.paths)-1] {
 			p.workerPID = child.PID
+			originalWorker = child
+		}
+		if child.Path == p.paths[len(p.paths)-2] {
+			originalBridge = child
+		}
+		if child.Path == p.paths[len(p.paths)-3] {
+			originalProxy = child
 		}
 	}
-	if p.workerPID == 0 {
-		t.Fatal("real workload worker missing from fixture inventory")
+	if originalWorker.PID == 0 || originalBridge.PID == 0 || originalProxy.PID == 0 {
+		t.Fatal("real workload worker, bridge or proxy missing from fixture inventory")
 	}
 	t.Logf("fixture_inventory owned=%+v", owned)
 	t.Logf("proxy ready on port %d", proxyPort)
@@ -776,15 +945,19 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	t.Cleanup(client.CloseIdleConnections)
 	fire := func(model string) {
 		t.Helper()
+		body := mustMarshal(t, map[string]any{
+			"model": model, "messages": []map[string]string{{"role": "user", "content": workloadBroadcastMessage}},
+			"private": workloadBroadcastPrivateValues(),
+		})
 		resp, err := client.Post(
 			fmt.Sprintf("http://127.0.0.1:%d/api/chat", proxyPort),
 			"application/json",
-			strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":%q}]}`, model, workloadBroadcastMessage)),
+			bytes.NewReader(body),
 		)
 		if err != nil {
 			t.Fatalf("inference through real proxy: %v", err)
 		}
-		body, readErr := io.ReadAll(resp.Body)
+		responseBody, readErr := io.ReadAll(resp.Body)
 		closeErr := resp.Body.Close()
 		if readErr != nil || closeErr != nil {
 			t.Fatalf("read inference response: read=%v close=%v", readErr, closeErr)
@@ -793,10 +966,23 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			t.Fatalf("inference status=%d want=200", resp.StatusCode)
 		}
 		var completion struct {
-			Done bool `json:"done"`
+			Done    bool `json:"done"`
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+			Private map[string]string `json:"private"`
 		}
-		if err := json.Unmarshal(body, &completion); err != nil || !completion.Done {
+		if err := json.Unmarshal(responseBody, &completion); err != nil || !completion.Done {
 			t.Fatalf("inference completion done=%t err=%v", completion.Done, err)
+		}
+		if completion.Message.Role != "assistant" || completion.Message.Content != workloadBroadcastResponse {
+			t.Fatal("client did not receive the synthetic private response marker")
+		}
+		for name, marker := range workloadBroadcastPrivateValues() {
+			if completion.Private[name] != marker {
+				t.Fatalf("client did not receive the private %s output marker", name)
+			}
 		}
 	}
 	var capture []json.RawMessage
@@ -832,11 +1018,18 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 		}
 	}
 	waitReady()
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":52,"method":"workloads:subscribe"}`)
+	ack := waitForResponse(t, msgs, 5*time.Second)
+	var subscribed subscriptionResult
+	if err := json.Unmarshal(ack.Result, &subscribed); err != nil || ack.Error != nil || !subscribed.Subscribed {
+		t.Fatalf("subscribe to injection positive control: subscribed=%t decode=%v rpc=%v", subscribed.Subscribed, err, ack.Error)
+	}
 	fire(workloadBroadcastModel)
 	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
 	var id, runID string
 	var submittedSeq int64
+	var terminalSeq int64
 	terminal := false
 	for !terminal {
 		select {
@@ -866,14 +1059,128 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 					t.Fatalf("terminal broadcast state=%q seq=%d scheduledOn=%q error=%v", info.State, info.Seq, info.ScheduledOn, info.Error)
 				}
 				terminal = true
+				terminalSeq = info.Seq
 			}
 		case <-deadline.C:
 			t.Fatalf("timed out draining measured workload: submitted=%t terminal=%t", id != "", terminal)
 		}
 	}
+	// This accepted notification follows the malformed and unknown injections
+	// on the same serialized worker stdout. Its presence is the consumption
+	// barrier; its later peer replay proves the broker retained the projection.
+	injectionDeadline := time.NewTimer(10 * time.Second)
+	defer injectionDeadline.Stop()
+	injected := false
+	for !injected {
+		select {
+		case msg, ok := <-msgs:
+			if !ok {
+				t.Fatal("broker stream closed before injection control")
+			}
+			if msg.Method != "workloads:upsert" {
+				continue
+			}
+			var control workloadBroadcastFrame
+			if err := json.Unmarshal(msg.Params, &control.Params); err != nil {
+				t.Fatalf("decode injection control: %v", err)
+			}
+			info := control.Params.WorkloadInfo
+			if info.ID == workloadBroadcastMalformedID {
+				t.Fatal("broker accepted malformed worker injection")
+			}
+			if info.ID == workloadBroadcastControlID {
+				if info.OriginatedFrom != fx.nodeUUID || info.RunID != runID || info.Engine != "ollama" || info.Model != workloadBroadcastControlModel || info.State != "completed" {
+					t.Fatal("accepted injection control has the wrong origin/run/engine/model/state")
+				}
+				injected = true
+			}
+		case raw := <-received:
+			read(raw)
+		case <-injectionDeadline.C:
+			t.Fatal("broker did not accept the projected worker injection control")
+		}
+	}
+
+	// Revalidate path/PID/creation time at the signal edge. The broker must
+	// replace the killed real worker and its bridge while retaining this proxy.
+	if err := p.inventory.kill(originalWorker); err != nil {
+		t.Fatalf("restart exact owned workload worker: %v", err)
+	}
+	awaitReplacement := func() {
+		t.Helper()
+		limit := time.NewTimer(30 * time.Second)
+		defer limit.Stop()
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			current, err := p.inventory.scan()
+			if err != nil {
+				t.Fatalf("inventory during worker restart: %v", err)
+			}
+			var worker, bridge serviceProcessIdentity
+			proxyUnchanged, oldPresent := false, false
+			for _, child := range current {
+				if child == originalWorker || child == originalBridge {
+					oldPresent = true
+				}
+				if child.Path == originalWorker.Path {
+					worker = child
+				}
+				if child.Path == originalBridge.Path {
+					bridge = child
+				}
+				if child == originalProxy {
+					proxyUnchanged = true
+				}
+			}
+			if !proxyUnchanged {
+				t.Fatal("proxy identity changed during workload-worker restart")
+			}
+			if !oldPresent && worker.PID != 0 && bridge.PID != 0 {
+				p.workerPID = worker.PID
+				t.Logf("fixture_restart old_worker=%+v new_worker=%+v old_bridge=%+v new_bridge=%+v unchanged_proxy=%+v", originalWorker, worker, originalBridge, bridge, originalProxy)
+				return
+			}
+			select {
+			case <-tick.C:
+			case <-limit.C:
+				t.Fatal("owned workload worker/bridge did not respawn")
+			}
+		}
+	}
+	awaitReplacement()
+	// Close/join the old peer connections, preserve their frames, and reopen
+	// the same checked port. No buffered old-worker POST can satisfy replay.
+	for _, raw := range restartPeer() {
+		read(raw)
+	}
+	replayDeadline := time.NewTimer(75 * time.Second)
+	defer replayDeadline.Stop()
+	measuredReplay, controlReplay := false, false
+	for !measuredReplay || !controlReplay {
+		select {
+		case raw := <-received:
+			frame := read(raw)
+			info := frame.Params.WorkloadInfo
+			if info.ID != id && info.ID != workloadBroadcastControlID {
+				continue
+			}
+			if info.OriginatedFrom != fx.nodeUUID || info.RunID != runID || info.Engine != "ollama" || frame.Method != "workload:completed" || info.State != "completed" || info.Seq != terminalSeq || frame.Params.Resync == nil || !*frame.Params.Resync {
+				t.Fatal("restarted manager reasserted the wrong workload identity/state/sequence")
+			}
+			if info.ID == id && info.Model == workloadBroadcastModel {
+				measuredReplay = true
+			}
+			if info.ID == workloadBroadcastControlID && info.Model == workloadBroadcastControlModel {
+				controlReplay = true
+			}
+		case <-replayDeadline.C:
+			t.Fatalf("restarted manager replay missing: measured=%t injected=%t", measuredReplay, controlReplay)
+		}
+	}
 	// Join the producing processes and peer handlers before inspecting the
-	// remaining capture. This is a finite observation window, not a sleep used
-	// as evidence of absence; terminal delivery is its positive end barrier.
+	// remaining capture. The restarted manager's measured/control reassertions
+	// are the positive end barrier; no timing-only absence assertion is used.
 	p.cleanup()
 	stopPeer()
 	for raw := range received {
@@ -882,18 +1189,18 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	if measuredRequests.Load() != 1 || len(capture) == 0 {
 		t.Fatalf("measured upstream requests=%d peer frames=%d, want one request and nonempty capture", measuredRequests.Load(), len(capture))
 	}
-	t.Logf("outbound controls: origin=%q engine=ollama run=%q workload=%q submitted/terminal delivered", fx.nodeUUID, runID, id)
+	t.Logf("outbound controls: origin=%q engine=ollama run=%q workload=%q submitted/terminal delivered, private input/output observed, projected injection and restart replay observed", fx.nodeUUID, runID, id)
 	return capture
 }
 
 // Preserve the entire wire body: jsonrpc.Message alone would discard unknown
 // envelope members before the privacy assertion could inspect them.
-func startWorkloadBroadcastPeer(t *testing.T, fx *interNodeCluster) (<-chan json.RawMessage, int, func()) {
+func startWorkloadBroadcastPeer(t *testing.T, fx *interNodeCluster) (<-chan json.RawMessage, int, func() []json.RawMessage, func()) {
 	t.Helper()
 	received := make(chan json.RawMessage, 128)
 	listener := listenFixtureLoopback(t)
 	port := listener.Addr().(*net.TCPAddr).Port
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := fx.peer.VerifyClientPin(r); !ok {
 			http.Error(w, "not a pinned cluster peer", http.StatusForbidden)
 			return
@@ -916,35 +1223,74 @@ func startWorkloadBroadcastPeer(t *testing.T, fx *interNodeCluster) (<-chan json
 			t.Error("peer capture exceeded its frame budget")
 			http.Error(w, "capture full", http.StatusServiceUnavailable)
 		}
-	})}
-	done := make(chan error, 1)
-	go func() { done <- server.Serve(tls.NewListener(listener, fx.peer.ServerTLSConfig())) }()
+	})
+	var server *http.Server
+	var done chan error
+	start := func(listener net.Listener) {
+		running := &http.Server{Handler: handler}
+		exited := make(chan error, 1)
+		server, done = running, exited
+		go func() { exited <- running.Serve(tls.NewListener(listener, fx.peer.ServerTLSConfig())) }()
+	}
+	stopServing := func() {
+		t.Helper()
+		if server == nil {
+			return
+		}
+		running := server
+		server = nil
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := running.Shutdown(ctx); err != nil {
+			if closeErr := running.Close(); closeErr != nil {
+				t.Errorf("close peer: %v", closeErr)
+			}
+			t.Fatalf("join peer handlers before freezing capture: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != http.ErrServerClosed {
+				t.Errorf("peer server exit: %v", err)
+			}
+		case <-ctx.Done():
+			t.Fatal("peer server did not exit before freezing capture")
+		}
+	}
+	start(listener)
+	restart := func() []json.RawMessage {
+		t.Helper()
+		stopServing()
+		var prior []json.RawMessage
+	drain:
+		for {
+			select {
+			case raw := <-received:
+				prior = append(prior, raw)
+			default:
+				break drain
+			}
+		}
+		if err := validateFixturePort(port); err != nil {
+			t.Fatal(err)
+		}
+		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			t.Fatalf("reopen checked peer port %d: %v", port, err)
+		}
+		start(listener)
+		return prior
+	}
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			if err := server.Shutdown(ctx); err != nil {
-				if closeErr := server.Close(); closeErr != nil {
-					t.Errorf("close peer: %v", closeErr)
-				}
-				t.Fatalf("join peer handlers before freezing capture: %v", err)
-			}
-			select {
-			case err := <-done:
-				if err != http.ErrServerClosed {
-					t.Errorf("peer server exit: %v", err)
-				}
-			case <-ctx.Done():
-				t.Fatal("peer server did not exit before freezing capture")
-			}
+			stopServing()
 			close(received)
 			assertInteropListenerClosed(t, port)
 		})
 	}
 	t.Cleanup(stop)
 	t.Logf("fixture_listener peer_port=%d", port)
-	return received, port, stop
+	return received, port, restart, stop
 }
 
 // postPeerEvent POSTs a peer workload frame to the manager's inter-node endpoint
