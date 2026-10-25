@@ -15,6 +15,7 @@ import {
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 import { emitBridgePush } from '@/electron/service-bridge/broadcaster'
+import { publishPush, subscribePush } from '@/electron/service-bridge/push-bus'
 import { handleServiceBridgeInvoke } from '@/electron/service-bridge/empty-handlers'
 import {
     JsonRpcResponseError,
@@ -27,8 +28,10 @@ import type { ModelCopyRequest } from '@/shared/types/model-copy'
 import type { EngineCommandPayload } from '@/shared/types/engine-api'
 import type { createOverviewWindow } from '@/electron/window'
 import { createEngineApi } from '@/ui/api/engine-api'
+import { createPairApi } from '@/ui/api/pair-api'
+import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
 import { serviceTransport } from '@/ui/api/service-transport'
-import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
+import type { PreloadServiceTransport, ServiceTransport } from '@/shared/types/service-bridge'
 import { formatCopyProgressLabel } from '@/ui/utils/formatters'
 
 vi.mock('electron', () => ({ app: { isPackaged: false, getAppPath: () => process.cwd() } }))
@@ -402,6 +405,109 @@ describe('copy state', () => {
             state.getEngineInitialState().activeProgress.some(p => engineProgressKey(p) === key)
         ).toBe(true)
         state.finishRemoteModelPull('Joes', 'ollama', 'qwen:4b')
+    })
+})
+
+describe('bridge copy outcomes in the renderer', () => {
+    beforeEach(async () => {
+        const api = createPairApi({
+            connected: true,
+            invoke: vi.fn<ServiceTransport['invoke']>(),
+            subscribePush: () => () => {},
+            onConnect: () => () => {},
+            onDisconnect: () => () => {},
+            onAuthFailure: () => () => {},
+            destroy: () => {}
+        })
+        api.engines.onProgress = listener =>
+            subscribePush(event => {
+                if (event.channel === 'engines:progress-changed') listener(event.payload)
+            })
+        vi.stubGlobal('window', { pairApi: api })
+        vi.mocked(emitBridgePush).mockImplementation(publishPush)
+        useEngineProgressStore.setState({ progress: new Map() })
+        await useEngineProgressStore.getState().initialize({
+            descriptors: [],
+            statuses: [],
+            models: [],
+            activeProgress: [],
+            updateAvailable: []
+        })
+    })
+    afterEach(() => {
+        useEngineProgressStore.getState().cleanup()
+        vi.unstubAllGlobals()
+    })
+
+    it.each(['hydrated', 'live observed'])(
+        '%s completion publishes only an unknown outcome without its verified reply',
+        origin => {
+            if (origin === 'hydrated') state.reconcileModelCopies([{ ...request }])
+            state.applyRemoteEngineProgress(frame())
+            vi.mocked(emitBridgePush).mockClear()
+            state.applyRemoteEngineProgress(frame({ stage: 'done', bytesDone: 19 }))
+            const bridge = state
+                .getEngineInitialState()
+                .activeProgress.find(p => p.opId === request.opId)
+            if (!bridge) throw new Error('Missing bridge copy outcome')
+            expect(bridge).toMatchObject({ status: 'unknown', exportId, completed: 19, total: 19 })
+            expect(bridge.copyResult).toBeUndefined()
+            expect(bridge.message).toContain('did not receive its verified result')
+            expect(
+                useEngineProgressStore.getState().progress.get(engineProgressKey(bridge))
+            ).toEqual(bridge)
+            expect(
+                vi
+                    .mocked(emitBridgePush)
+                    .mock.calls.filter(([channel]) => channel === 'engines:progress-changed')
+            ).toEqual([['engines:progress-changed', bridge]])
+        }
+    )
+
+    it('keeps a verified awaited completion immutable across late progress and renderer hydration', async () => {
+        const pending = deferred<JsonValue>()
+        vi.spyOn(supervisor, 'callProcess').mockImplementation(async (_name, method) => {
+            if (method === 'engine:copy-model') return pending.promise
+            if (method === 'engine:remote-get-installed') return { engines: [] }
+            if (method === 'discovery:get-nodes') return { nodes: [] }
+            throw new Error(`Unexpected call ${method}`)
+        })
+        const copying = supervisor.copyModel(request)
+        state.applyRemoteEngineProgress(frame({ stage: 'done', bytesDone: 19 }))
+        expect(
+            Array.from(useEngineProgressStore.getState().progress.values()).find(
+                p => p.opId === request.opId
+            )?.status
+        ).toBe('awaiting-result')
+        pending.resolve({ opId: request.opId, result })
+        await copying
+        const bridge = state
+            .getEngineInitialState()
+            .activeProgress.find(p => p.opId === request.opId)
+        if (!bridge) throw new Error('Missing verified copy outcome')
+        expect(bridge).toMatchObject({ status: 'done', copyResult: result })
+        expect(bridge.message).toContain('serving configuration')
+        expect(bridge.message).toContain('durability could not be confirmed')
+        state.applyRemoteEngineProgress(frame({ stage: 'unknown' }))
+        state.applyRemoteEngineProgress(frame({ bytesDone: 1 }))
+        publishPush('engines:progress-changed', {
+            ...bridge,
+            status: 'unknown',
+            copyResult: undefined
+        })
+        await useEngineProgressStore.getState().initialize({
+            descriptors: [],
+            statuses: [],
+            models: [],
+            activeProgress: [{ ...bridge, status: 'downloading', copyResult: undefined }],
+            updateAvailable: []
+        })
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)
+        ).toEqual(bridge)
+        expect(useEngineProgressStore.getState().progress.get(engineProgressKey(bridge))).toEqual(
+            bridge
+        )
     })
 })
 

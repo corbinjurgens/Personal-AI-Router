@@ -1200,7 +1200,10 @@ class ModularBridgeState {
             copy.terminal = frame.stage
         if (isModelCopyTerminal(frame.stage)) {
             if (!copy.awaitingResponse || frame.stage === 'unknown') {
-                this.publishModelCopy({
+                // Retain terminal measurements for finishModelCopy, but publish
+                // only its qualified outcome. A raw done would fence out the
+                // unknown correction in renderers without a verified response.
+                this.activePulls.set(engineProgressKey(progress), {
                     ...progress,
                     exportId: progress.exportId ?? previous?.exportId
                 })

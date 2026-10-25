@@ -15,7 +15,7 @@ import {
     Stack,
     Text
 } from '@nvidia/foundations-react-core'
-import type { EngineModels, EngineType } from '@/shared/types/engines'
+import type { EngineModels, EngineProgress, EngineType } from '@/shared/types/engines'
 import type { ModelCopyCapabilities, ModelCopyRequest } from '@/shared/types/model-copy'
 import { engineManagerName } from '@/shared/utils/engines'
 import { isEngineCopyInProgress } from '@/shared/utils/engine-progress'
@@ -60,6 +60,50 @@ function capabilityReason(
     if ((destination ? cap.importLayouts : cap.exportLayouts).length === 0)
         return 'This device has no supported copy layout.'
     return ''
+}
+
+function isCopySourceReady(
+    inventory: EngineModels | undefined,
+    model: string,
+    progress: Iterable<EngineProgress>
+): boolean {
+    const snapshot = inventory?.downloadState
+    if (!inventory?.downloadStateCurrent || !snapshot || snapshot.recoveryRequired) return false
+    const row = inventory.models.find(row => row.name === model)
+    const entry = snapshot.entries.find(
+        entry => entry.engine === engineManagerName(inventory.engineType) && entry.model === model
+    )
+    if (
+        !row?.downloaded ||
+        row.downloadState?.blocksReadiness ||
+        row.downloadState?.phase === 'queued' ||
+        row.downloadState?.phase === 'in_progress' ||
+        entry?.blocksReadiness ||
+        entry?.phase === 'queued' ||
+        entry?.phase === 'in_progress'
+    )
+        return false
+    for (const p of progress) {
+        if (
+            p.nodeId !== inventory.nodeId ||
+            p.engineType !== inventory.engineType ||
+            p.model !== model ||
+            p.operation !== 'pull' ||
+            !p.downloadState
+        )
+            continue
+        if (p.downloadSourceId !== snapshot.sourceId || !p.downloadRevision) return false
+        if (BigInt(p.downloadRevision) < BigInt(snapshot.revision)) continue
+        if (
+            p.downloadRevision !== snapshot.revision ||
+            p.downloadStateCurrent !== true ||
+            p.downloadState.blocksReadiness ||
+            p.downloadState.phase === 'queued' ||
+            p.downloadState.phase === 'in_progress'
+        )
+            return false
+    }
+    return true
 }
 
 /** A draft selection only; operation state and terminal qualifications live in the progress store. */
@@ -161,17 +205,9 @@ export function ModelCopyModal({
     const observed = models.get(`${source}:${engineType}`)
     const sourceInventory = observed ?? (inventory?.source === source ? inventory.value : undefined)
     const readyModels =
-        sourceInventory?.downloadStateCurrent === true &&
-        sourceInventory.downloadState &&
-        !sourceInventory.downloadState.recoveryRequired
-            ? sourceInventory.models.filter(
-                  row =>
-                      row.downloaded &&
-                      !row.downloadState?.blocksReadiness &&
-                      row.downloadState?.phase !== 'queued' &&
-                      row.downloadState?.phase !== 'in_progress'
-              )
-            : []
+        sourceInventory?.models.filter(row =>
+            isCopySourceReady(sourceInventory, row.name, progress.values())
+        ) ?? []
 
     const readCapabilities = useCallback(async (): Promise<{
         source?: ModelCopyCapabilities
@@ -277,18 +313,22 @@ export function ModelCopyModal({
                 const current = snapshot.models.find(
                     row => row.nodeId === source && row.engineType === engineType
                 )
+                // A read can resolve after a newer canonical push or lifecycle
+                // observation. Recheck live stores synchronously before dispatch.
+                const canonical = useEngineModelsStore
+                    .getState()
+                    .models.get(`${source}:${engineType}`)
                 if (
-                    !current?.downloadStateCurrent ||
-                    !current.downloadState ||
-                    current.downloadState.recoveryRequired ||
-                    !current.models.some(
-                        row =>
-                            row.name === model &&
-                            row.downloaded &&
-                            !row.downloadState?.blocksReadiness &&
-                            row.downloadState?.phase !== 'queued' &&
-                            row.downloadState?.phase !== 'in_progress'
-                    )
+                    !isCopySourceReady(current, model, snapshot.activeProgress) ||
+                    !isCopySourceReady(
+                        canonical ?? current,
+                        model,
+                        useEngineProgressStore.getState().progress.values()
+                    ) ||
+                    (canonical?.downloadState &&
+                        (current?.downloadState?.sourceId !== canonical.downloadState.sourceId ||
+                            BigInt(current.downloadState.revision) <
+                                BigInt(canonical.downloadState.revision)))
                 ) {
                     setError(
                         'This model is no longer ready in the source inventory. Refresh the selection.'

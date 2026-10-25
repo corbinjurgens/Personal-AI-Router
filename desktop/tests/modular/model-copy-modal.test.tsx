@@ -34,6 +34,7 @@ let root: Root
 let container: HTMLDivElement
 let onProgress: Parameters<IEngineApi['onProgress']>[0] | undefined
 let onRemove: Parameters<IEngineApi['onProgressRemove']>[0] | undefined
+let onStateChanged: Parameters<IEngineApi['onStateChanged']>[0] | undefined
 
 function deferred<T>() {
     let resolve: (value: T) => void = () => {
@@ -216,6 +217,12 @@ beforeEach(() => {
             onRemove = undefined
         }
     }
+    api.engines.onStateChanged = listener => {
+        onStateChanged = listener
+        return () => {
+            onStateChanged = undefined
+        }
+    }
     Object.defineProperty(window, 'pairApi', { configurable: true, value: api })
     useConnectionStore.setState({ selfId: 'mac-id', connected: true })
     useNodesStore.setState({
@@ -235,6 +242,7 @@ beforeEach(() => {
 afterEach(async () => {
     await act(async () => root.unmount())
     useEngineProgressStore.getState().cleanup()
+    useEngineModelsStore.getState().cleanup()
     useEngineProgressStore.setState({ progress: new Map() })
     container.remove()
     vi.unstubAllGlobals()
@@ -420,6 +428,157 @@ describe('capability and authority checks', () => {
         expect(container.textContent).toContain('no longer ready in the source inventory')
         expect(start).not.toHaveBeenCalled()
     })
+    it('refuses an older ready submission snapshot after a canonical source invalidation', async () => {
+        await useEngineModelsStore.getState().initialize(initial())
+        await mount()
+        await chooseDestination()
+        const old = deferred<EngineInitialState>()
+        snapshot.mockReturnValueOnce(old.promise)
+        await act(async () => button('Copy model').click())
+        expect(snapshot).toHaveBeenCalledTimes(2)
+        await act(async () =>
+            onStateChanged?.({
+                nodeId: 'msi-id',
+                engineType: 'llama-cpp',
+                models: { ...inventory('msi-id'), downloadStateCurrent: false }
+            })
+        )
+        await act(async () => old.resolve(initial()))
+        expect(
+            useEngineModelsStore.getState().getModels('msi-id', 'llama-cpp').downloadStateCurrent
+        ).toBe(false)
+        expect(start).not.toHaveBeenCalled()
+        expect(container.textContent).toContain('no longer ready in the source inventory')
+    })
+    it.each([
+        ['newer revision', 'a'.repeat(32), '2'],
+        ['new manager incarnation', 'b'.repeat(32), '1']
+    ])('refuses a submission snapshot superseded by a %s', async (_label, sourceId, revision) => {
+        await useEngineModelsStore.getState().initialize(initial())
+        await mount()
+        await chooseDestination()
+        const old = deferred<EngineInitialState>()
+        snapshot.mockReturnValueOnce(old.promise)
+        await act(async () => button('Copy model').click())
+        await act(async () =>
+            onStateChanged?.({
+                nodeId: 'msi-id',
+                engineType: 'llama-cpp',
+                models: {
+                    ...inventory('msi-id'),
+                    downloadState: {
+                        version: 1,
+                        sourceId,
+                        revision,
+                        recoveryRequired: false,
+                        entries: []
+                    }
+                }
+            })
+        )
+        await act(async () => old.resolve(initial()))
+        expect(start).not.toHaveBeenCalled()
+    })
+    it.each([
+        ['newer revision', 'c'.repeat(32), 'c'.repeat(32), '2'],
+        ['new manager incarnation', 'd'.repeat(32), 'e'.repeat(32), '1'],
+        ['same revision blocking readiness', 'f'.repeat(32), 'f'.repeat(32), '1']
+    ])(
+        'refuses live source lifecycle progress with %s while its inventory read is pending',
+        async (_label, baselineSourceId, sourceId, revision) => {
+            const current = inventory('msi-id')
+            if (!current.downloadState) throw new Error('Missing source snapshot')
+            current.downloadState.sourceId = baselineSourceId
+            const ready = { ...initial(), models: [current] }
+            snapshot.mockResolvedValue(ready)
+            useEngineModelsStore.setState({ models: new Map([['msi-id:llama-cpp', current]]) })
+            await useEngineProgressStore.getState().initialize(ready)
+            await mount()
+            await chooseDestination()
+            const old = deferred<EngineInitialState>()
+            snapshot.mockReturnValueOnce(old.promise)
+            await act(async () => button('Copy model').click())
+            const lifecycle: EngineProgress = {
+                nodeId: 'msi-id',
+                nodeName: 'MSI',
+                engineType: 'llama-cpp',
+                operation: 'pull',
+                model: alias,
+                status: 'downloading',
+                downloadSourceId: sourceId,
+                downloadRevision: revision,
+                downloadStateCurrent: true,
+                downloadState: {
+                    id: 'download-op',
+                    engine: 'llamacpp',
+                    model: alias,
+                    phase: 'in_progress',
+                    blocksReadiness: true
+                }
+            }
+            await act(async () => onProgress?.(lifecycle))
+            expect(
+                useEngineProgressStore.getState().progress.get(engineProgressKey(lifecycle))
+            ).toEqual(lifecycle)
+            await act(async () => old.resolve(ready))
+            expect(useEngineModelsStore.getState().models.get('msi-id:llama-cpp')).toBe(current)
+            expect(start).not.toHaveBeenCalled()
+        }
+    )
+    const unrelatedLifecycle: [string, Partial<EngineProgress>][] = [
+        ['another model', { model: 'another-model' }],
+        ['another engine', { engineType: 'ollama' }],
+        ['another device', { nodeId: 'joes-id' }],
+        ['an older lifecycle revision', { downloadRevision: '1' }]
+    ]
+    it.each(unrelatedLifecycle)(
+        'dispatches the exact selection when only %s changes during the inventory read',
+        async (_label, changes) => {
+            const current = inventory('msi-id')
+            if (!current.downloadState) throw new Error('Missing source snapshot')
+            current.downloadState.sourceId = '7'.repeat(32)
+            current.downloadState.revision = '2'
+            const ready = { ...initial(), models: [current] }
+            snapshot.mockResolvedValue(ready)
+            useEngineModelsStore.setState({ models: new Map([['msi-id:llama-cpp', current]]) })
+            await useEngineProgressStore.getState().initialize(ready)
+            await mount()
+            await chooseDestination()
+            const old = deferred<EngineInitialState>()
+            snapshot.mockReturnValueOnce(old.promise)
+            await act(async () => button('Copy model').click())
+            await act(async () =>
+                onProgress?.({
+                    nodeId: 'msi-id',
+                    nodeName: 'MSI',
+                    engineType: 'llama-cpp',
+                    operation: 'pull',
+                    model: alias,
+                    status: 'downloading',
+                    downloadSourceId: current.downloadState?.sourceId,
+                    downloadRevision: '3',
+                    downloadStateCurrent: true,
+                    downloadState: {
+                        id: 'download-op',
+                        engine: 'llamacpp',
+                        model: alias,
+                        phase: 'in_progress',
+                        blocksReadiness: true
+                    },
+                    ...changes
+                })
+            )
+            await act(async () => old.resolve(ready))
+            expect(start).toHaveBeenCalledTimes(1)
+            expect(start.mock.calls[0][0]).toEqual({
+                opId: expect.stringMatching(/^[a-f0-9]{32}$/),
+                sourceNodeId: 'msi-id',
+                destinationNodeId: 'joes-id',
+                engine: 'llamacpp',
+                model: alias
+            })
+        }
+    )
 })
 
 describe('copy operation lifecycle', () => {
