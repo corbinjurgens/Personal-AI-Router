@@ -1009,7 +1009,7 @@ func TestOwnedInferenceBuffersStrictIdentifierStorage(t *testing.T) {
 
 // Each fixture requests one choice. Keep response grants distinct from the
 // fingerprint scanner/storage and the request's retained parser allowance.
-const bufferFixtureResponseBytes int64 = streamFrameMetadataBytes + 1 + streamFrameReadChunk + streamFrameNumericBytes + 4*streamFrameMaxBytes
+const bufferFixtureResponseBytes int64 = streamFrameMetadataBytes + 1 + streamFrameReadChunk + streamFrameNumericBytes + 3*streamFrameMaxBytes
 
 func bufferFixtureRemotePreparationBytes(t *testing.T, body string) int64 {
 	t.Helper()

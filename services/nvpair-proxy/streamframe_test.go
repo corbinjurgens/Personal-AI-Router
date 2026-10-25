@@ -1101,7 +1101,7 @@ func TestStreamFrameDefaults(t *testing.T) {
 		t.Fatalf("idle default = %s, want 60s", reader.idleTimeout)
 	}
 	if reader.budget != budget || budget.limit != 64<<20 {
-		t.Fatal("reader does not use the supplied 64 MiB category")
+		t.Fatal("reader does not use the supplied 64 MiB frame budget")
 	}
 	if streamFrameMaxBytes != 1<<20 {
 		t.Fatalf("frame limit = %d, want 1 MiB", streamFrameMaxBytes)
