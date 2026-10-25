@@ -1884,6 +1884,80 @@ func TestModelConfigDefiniteLoadFailureRetainedReason(t *testing.T) {
 	}
 }
 
+func TestModelConfigUncertainReadbackSurvivesInventoryWithdrawal(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.proxy.mu.Lock()
+	answer := f.proxy.answer
+	f.proxy.mu.Unlock()
+	f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodFinishResident {
+			return nodepolicy.FinishResidentResult{ReservationID: "fixture-reservation", Outcome: nodepolicy.ResidentUnknown, RecoveryID: "fixture-recovery"}, ""
+		}
+		return answer(method, raw)
+	})
+	done := f.startResidentAttempt(t, nodepolicy.ResidentUnknown)
+	f.awaitGrant(t)
+	f.engine.mu.Lock()
+	engineAnswer := f.engine.answer
+	f.engine.mu.Unlock()
+	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == "engine:models" {
+			return nil, "private fixture inventory unavailable"
+		}
+		return engineAnswer(method, raw)
+	})
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	r := f.b.nodePolicyRuntime()
+	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	r.mu.Lock()
+	hold, held := r.models.unsettled[ref]
+	r.mu.Unlock()
+	if !held || !hold.terminal || !hold.op.granted || hold.finish.Outcome != nodepolicy.ResidentUnknown {
+		t.Fatal("fixture did not retain its dispatched uncertain operation")
+	}
+	// The watcher now withdraws failed inventory instead of retaining its old
+	// loaded set. That must not erase the dispatched operation's uncertainty.
+	f.b.handlePolicyEngineNotification(f.source, engineModelsChangedMethod, json.RawMessage(`{"models":{"models":[]}}`))
+	assertReadback := func() {
+		t.Helper()
+		e := f.b.captureModelConfig()
+		for _, status := range []nodepolicy.ModelConfiguration{
+			f.b.modelConfiguration(e), f.b.localPolicy().ModelConfiguration,
+			f.b.peerPolicy().ModelConfiguration, f.b.modelConfigurationFor(e.Policy),
+		} {
+			if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateUnknown || status.Models[0].Reason != nodepolicy.ModelReasonOperationTimeout || status.Models[0].ObservedLoaded != nil {
+				t.Errorf("withdrawn inventory lost uncertain operation: %+v", status)
+			}
+		}
+	}
+	assertReadback()
+	f.b.reconcileModelConfig(context.Background())
+	assertReadback()
+	r.mu.Lock()
+	after, retained := r.models.unsettled[ref]
+	r.mu.Unlock()
+	if !retained || after.op != hold.op || !after.expires.Equal(hold.expires) || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+		t.Fatal("inventory withdrawal changed the retained hold or dispatched another load")
+	}
+	checkVeto := func(name string, set func(bool), reason nodepolicy.ModelConfigurationReason) {
+		t.Helper()
+		r.mu.Lock()
+		set(true)
+		r.mu.Unlock()
+		status := f.b.modelConfiguration(f.b.captureModelConfig())
+		if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateBlocked || status.Models[0].Reason != reason {
+			t.Errorf("%s was hidden by uncertain operation: %+v", name, status)
+		}
+		r.mu.Lock()
+		set(false)
+		r.mu.Unlock()
+		assertReadback()
+	}
+	checkVeto("local pause", func(on bool) { r.localPauseRequested = on }, nodepolicy.ModelReasonPaused)
+	checkVeto("engine Off", func(on bool) { r.intent["llamacpp"] = !on }, nodepolicy.ModelReasonEngineOff)
+}
+
 func TestModelConfigRetainedFailureReadbackTracksInventory(t *testing.T) {
 	for _, inventory := range []string{"changed inventory", "unknown inventory"} {
 		t.Run(inventory, func(t *testing.T) {
