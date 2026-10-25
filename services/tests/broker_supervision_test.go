@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,12 +76,17 @@ func startBrokerWithDirsAndEnv(t *testing.T, configDir, clusterDir string, extra
 // startBrokerWithPorts is the common broker fixture. Every fixture broker gets
 // its own nondefault service ports, so its workers neither collide with nor
 // impersonate an installed PAIR's listeners. A caller that dials a worker
-// reserves the plan itself and passes it here.
+// reserves the plan itself and passes it here. Selected llama.cpp facades also
+// get a private backend health target; Ollama and LM Studio retain their
+// intentional managed-port fixtures.
 func startBrokerWithPorts(t *testing.T, configDir, clusterDir string, extraEnv []string, ports fixtureServicePorts, extraArgs ...string) (stdin io.WriteCloser, msgs <-chan jsonrpc.Message, stderrLines <-chan string, cleanup func()) {
 	t.Helper()
 	args, err := ports.brokerArgs(clusterDir, extraArgs...)
 	if err != nil {
 		t.Fatalf("broker fixture plan: %v", err)
+	}
+	if fixtureBrokerFrontsLlamaCPP(args) {
+		writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"llamacpp": freePort(t)})
 	}
 	cmd := exec.Command(brokerBin, args...)
 	// Every supervised worker must use disposable per-test config. In
@@ -120,6 +126,58 @@ func startBrokerWithPorts(t *testing.T, configDir, clusterDir string, extraEnv [
 			<-done
 		}
 	}
+}
+
+// Resolve the last selector in the launch arguments, including Go flag's inline
+// and single-hyphen forms. An omitted selector uses the product's shared set.
+// Only llama.cpp uses prepareDefaultEngineFacade's fixed backend health route;
+// seeding the other engines would bypass their managed-port and alias tests.
+func fixtureBrokerFrontsLlamaCPP(args []string) bool {
+	selected := strings.Join(engines.Names(), ",")
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			break
+		}
+		name, value, inline := strings.Cut(args[i], "=")
+		if name != "--proxy-engines" && name != "-proxy-engines" {
+			continue
+		}
+		if !inline {
+			i++
+			if i == len(args) {
+				return false // The broker will reject the missing flag value.
+			}
+			value = args[i]
+		}
+		selected = value
+	}
+	for _, name := range strings.Split(selected, ",") {
+		if strings.TrimSpace(name) == engines.NameLlamaCPP {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFixtureBrokerLlamaCPPSelection(t *testing.T) {
+	check := func(name string, args []string, want bool) {
+		t.Run(name, func(t *testing.T) {
+			if got := fixtureBrokerFrontsLlamaCPP(args); got != want {
+				t.Fatalf("llama.cpp selection for %q = %t, want %t", args, got, want)
+			}
+		})
+	}
+	check("default engine set", []string{"--proxy-path", "private-proxy"}, true)
+	check("explicit llama.cpp", []string{"--proxy-engines", "llamacpp"}, true)
+	check("inline mixed selection", []string{"--proxy-engines=ollama, llamacpp"}, true)
+	check("single hyphen selector", []string{"-proxy-engines", "llamacpp"}, true)
+	check("single hyphen inline selector", []string{"-proxy-engines=llamacpp"}, true)
+	check("managed engines only", []string{"--proxy-engines", "ollama,lmstudio"}, false)
+	check("empty selector", []string{"--proxy-engines="}, false)
+	check("last selector disables llama.cpp", []string{"--proxy-engines=llamacpp", "--proxy-engines", "ollama"}, false)
+	check("last selector enables llama.cpp", []string{"--proxy-engines=", "--proxy-engines", "llamacpp"}, true)
+	check("flag terminator preserves selection", []string{"--proxy-engines=ollama", "--", "--proxy-engines=llamacpp"}, false)
+	check("missing selector value", []string{"--proxy-engines"}, false)
 }
 
 // startLineReader streams a reader's lines onto a channel (broker stderr —
@@ -279,8 +337,9 @@ func mustPid(t *testing.T, line string) int {
 // an implementation detail and "one OS process serving every engine" is the
 // thing that actually makes the reservation map whole.
 func TestAllDefaultEnginesAreServedByOneProxyProcess(t *testing.T) {
-	// The complete default facade set starts on the engines' product ports.
-	for _, port := range []int{11434, 11435, 1234, 8080} {
+	// Ollama and LM Studio still exercise their managed product ports;
+	// the common fixture isolates llama.cpp's facade and health endpoint.
+	for _, port := range []int{11434, 11435, 1234} {
 		skipIfDefaultPortOccupied(t, port, "the default engine facade set")
 	}
 
@@ -308,6 +367,9 @@ func TestAllDefaultEnginesAreServedByOneProxyProcess(t *testing.T) {
 	ollamaPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
 	lmstudioPort := waitLMStudioProxyReady(t, stdin, msgs, 15*time.Second)
 	llamacppPort := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
+	if err := validateFixturePort(llamacppPort); err != nil {
+		t.Fatalf("default-set llama.cpp facade is not private: %v", err)
+	}
 	if len(map[int]bool{ollamaPort: true, lmstudioPort: true, llamacppPort: true}) != 3 {
 		t.Fatalf("facade ports must be distinct: ollama=%d lmstudio=%d llamacpp=%d",
 			ollamaPort, lmstudioPort, llamacppPort)
