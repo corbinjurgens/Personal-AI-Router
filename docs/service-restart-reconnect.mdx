@@ -46,9 +46,104 @@ and rejects a still-listening private service endpoint.
 This process test joins the production RPC transport to private service
 processes. Separate headless TUI tests cover view rebootstrap and stale-result
 fencing. It does not establish installed-service, packaged desktop, terminal
-rendering, real-engine, GPU or multi-machine acceptance. Desktop real-process
-bridge proof remains deferred; desktop deterministic transport/state tests are
-separate evidence.
+rendering, real-engine, GPU or multi-machine acceptance. Desktop deterministic
+transport/state tests remain separate evidence.
+
+### Opt-in desktop bridge process proof
+
+`TestServiceRestartReconnectDesktop` owns another private service fixture and
+runs `desktop/tests/service-restart-reconnect/bridge.test.ts` through its separate
+Vitest config. This location is excluded from the ordinary desktop unit project.
+The test retains the actual supervisor and socket client, uses the actual bridge
+state, startup dialer, subscriptions and hydration, and observes the real push
+bus. Only Electron window/log/path boundaries and detached launch are stubbed.
+The binary path boundary resolves existence checks to the real fixed product
+bundle; the UI's nominal executable paths are never launched.
+
+Before starting any fixture process, the Go owner replaces the scanner at its
+existing ruled path with the existing empty-directory test scanner, removing
+mDNS and discovered peers. It installs the private custom HTTP manifest and
+bundled-engine overrides described above. The service, broker, proxy, engine
+manager and cluster manager are real processes. Cluster identity is private and
+has no paired peers. No engine executable starts. The scanner's control listener
+and fake HTTP listeners use loopback; the product HTTP listeners use the fixture's
+reserved ports. Node only dials the explicitly supplied private IPC endpoint.
+Vitest's HTTP API, UI, watch mode and WebSocket server are disabled.
+
+Bounded stdin/stdout coordination covers attachment, a held tokenized action,
+exact service death, observed disconnect/pending failure, exhausted finite
+startup retries, replacement, completed hydration, a fresh policy push and actual
+detach. A worker-thread BroadcastChannel carries only these coordination tokens
+between the Vitest CLI's stdio owner and its worker. Recovery must continue after
+the finite startup attempts using the production dial-only retry. Availability
+stays available: this adopted HTTP fixture is not an engine process the manager
+owns and can stop for physical pause recovery. The persisted admission change
+must appear in a fresh read. Separately, the real bridge's canonical model
+projection must replace the old model row with the new row in an observed
+renderer-refresh snapshot with current inventory, before the test issues a
+replacement read. Initial and replacement waits require these qualifying
+snapshots; an earlier self-identity refresh is insufficient. The retained
+desktop handle registers the new private upstream with the replacement proxy,
+and Go asserts a fresh HTTP request actually reaches it. The interrupted action
+must reach its HTTP barrier only once. Socket detach, Node exit/stdio joins and
+the fixture's identity-checked process cleanup are required.
+
+The test is **UNTESTED** when its opt-in is absent. An explicit opt-in fails on
+missing prerequisites. It never installs dependencies or searches PATH for Node.
+Before the serialized Windows lane, the parent must provide:
+
+| Input | Requirement |
+| --- | --- |
+| `PAIR_TEST_DESKTOP_RECONNECT` | Exactly `1` |
+| `PAIR_TEST_NODE` | Absolute installed Node 25.9.0 executable path |
+| `desktop/node_modules` | Already installed dependencies matching this checkout's `package-lock.json`; an explicitly arranged local junction is acceptable |
+| `NVPAIR_TEST_BIN_DIR`, `GOFLAGS` | Approved absolute fixed binary root and `nvpair-test-exec` wrapper, with exact-program firewall coverage |
+
+Run from this checkout's `services/tests`, preserving the approved wrapper:
+
+```powershell
+go test -json -run '^TestServiceRestartReconnectDesktop$' -count=10 -timeout=20m
+```
+
+This focused selector is the Windows desktop process gate. It does not authorize
+a full `services/tests` run or replay of the TUI removal proofs. TestMain still
+builds its existing product inventory. The package image must be
+`$env:NVPAIR_TEST_BIN_DIR/go-test/tests/tests.test.exe`; the opted-in Windows case
+rejects a temporary test image. Other existing image paths are rooted at
+`$env:NVPAIR_TEST_BIN_DIR`: `tests/products/` entries in
+`services/shared/testbin/programs/tests.txt`, and
+`tests/service-bundle-1/{nvpair-service,nvpair-ui-broker,nvpair-node-scanner,nvpair-proxy,nvpair-engine-manager,nvpair-cluster-manager}`
+with the Windows `.exe` suffix. The scanner role contains the intercepted test
+binary. Node uses its explicit installed path and local Vitest/Vite dependencies
+(including their local esbuild stdio helper); no new Go test image role is added.
+Stop runtime validation if required image coverage is missing.
+
+Before invoking Go, refuse inherited fixture-dispatch selectors: `NVPAIR_TEST_*`
+except `NVPAIR_TEST_BIN_DIR`, plus `NVPAIR_SR_*`, `NVPAIR_OBSERVATION_*`,
+`NVPAIR_NE_SERVING_EXECUTABLE` and `NVPAIR_STRATA_CONTRACT_EXECUTABLE`. Package init
+dispatch runs before the selected test can guard its own environment; do not
+clear a selector and treat the altered environment as the original run.
+The fixture also removes inherited `NVPAIR_TEST_*` selectors from its children
+before adding its own scanner path/control port. Node additionally removes
+inherited `NODE_*`, `ESBUILD_*`, `VITEST*`, `TINYPOOL*` and `PAIR_DESKTOP_*`, then receives
+fixture-owned endpoint, appdir, user-data, product-path and coordination values.
+The appdir variables (`HOME`, `XDG_CONFIG_HOME`, `APPDATA`, `LOCALAPPDATA`,
+`USERPROFILE`) and empty `OLLAMA_HOST` apply before startup. Clear the external
+opt-in and Node selector after the lane.
+
+For the single desktop retry removal control, preserve the exact bytes of
+`desktop/src/electron/service-bridge/json-rpc-client.ts`. In `reconnect`, change
+only the dial-only loop condition from `this.epoch === epoch && !this.closed` to
+`this.epoch !== epoch && !this.closed`. Run the same exact Go selector with
+`-count=1 -timeout=5m`. The post-replacement hydration-count assertion must fail
+inside the named Vitest case after the finite startup attempts; a compilation,
+prerequisite or coordination failure is not the removal proof. Restore and
+byte-compare the original production file before proceeding. This is a temporary
+parent-run mutation, with no shipped fault hook.
+
+This headless bridge test does not establish packaged Electron or installed
+service acceptance. Execution results and removal-control results must be
+recorded by the runtime owner; source authoring alone establishes neither.
 
 ## Owner-run Windows installed-service acceptance: NOT RUN
 
