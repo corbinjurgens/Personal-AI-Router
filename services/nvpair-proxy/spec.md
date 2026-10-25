@@ -85,6 +85,9 @@ capacity, change routing or alter workload reconciliation.
 An unobserved response counts as completed only when that attempt's response
 was accepted, its body reached upstream EOF and delivery had no write error.
 Discarded attempts and body read errors remain failed.
+Requester cancellation records `cancelled`. Expiry of the routing owner's
+pre-output deadline records `failed`, preserving the deadline cancellation cause
+on the dispatch context and the existing HTTP 503 response.
 
 The bounded FIFO has capacity 128, shared across facades. Its single sender
 performs codec IO outside the lock; producers never await codec writes or queue

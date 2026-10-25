@@ -337,7 +337,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			"no local inference backend is available on this node")
 		return
 	}
-	attemptCtx, cancelAttempt := context.WithCancel(ctx)
+	attemptCtx, cancelAttempt := owner.attemptContext(ctx)
 	defer cancelAttempt()
 	attempt, err := owner.newDispatchAttempt(attemptCtx, cancelAttempt, "")
 	if err != nil {

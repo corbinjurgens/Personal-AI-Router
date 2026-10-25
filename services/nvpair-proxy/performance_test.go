@@ -1327,6 +1327,115 @@ func TestPerformanceSenderCancelsAtWriteGate(t *testing.T) {
 	}
 }
 
+func TestPerformanceRequestCancellationOutcome(t *testing.T) {
+	test := func(name string, requesterCancel, flushHeaders bool) {
+		t.Run(name, func(t *testing.T) {
+			p := performanceProxy(t, "llamacpp")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			upstreamDone := make(chan struct{})
+			u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(upstreamDone)
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					t.Error(err)
+					return
+				}
+				if flushHeaders {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					if err := http.NewResponseController(w).Flush(); err != nil {
+						t.Error(err)
+					}
+				}
+				if requesterCancel {
+					cancel()
+				}
+				<-r.Context().Done()
+			}))
+			defer u.Close()
+			setBackend(t, p.soleFacade(), u.URL, true)
+			start := time.Now()
+			policy := concreteDispatchPolicy(start)
+			if !requesterCancel {
+				policy.deadline = start.Add(100 * time.Millisecond)
+			}
+			req := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":true}`)).WithContext(ctx)
+			w := httptest.NewRecorder()
+			p.soleFacade().serveInference(w, req, start, "performance-cancel", 0, policy)
+			waitChan(t, upstreamDone, "cancelled upstream handler")
+			sample := performanceOne(t, p)
+			wantOutcome := performancewire.OutcomeCancelled
+			if !requesterCancel {
+				wantOutcome = performancewire.OutcomeFailed
+				if w.Code != http.StatusServiceUnavailable {
+					t.Errorf("deadline status=%d, want %d", w.Code, http.StatusServiceUnavailable)
+				}
+				if ctx.Err() != nil {
+					t.Errorf("routing deadline cancelled requester: %v", ctx.Err())
+				}
+			}
+			if sample.Outcome != wantOutcome {
+				t.Errorf("measurement=%+v, want outcome %s", sample.Measurement, wantOutcome)
+			}
+		})
+	}
+	test("requester cancellation before headers", true, false)
+	test("requester cancellation after headers", true, true)
+	test("routing deadline before headers", false, false)
+	test("routing deadline after headers", false, true)
+}
+
+func TestPerformanceStreamCancellationOutcome(t *testing.T) {
+	test := func(name string, expire bool, want performancewire.Outcome, wantCause error) {
+		t.Run(name, func(t *testing.T) {
+			p := performanceProxy(t, "llamacpp")
+			owner := newRoutingRequest(nil)
+			ctx, cancel := owner.attemptContext(t.Context())
+			defer cancel()
+			if _, err := owner.newDispatchAttempt(ctx, cancel, "destination"); err != nil {
+				t.Fatal(err)
+			}
+			a := p.soleFacade().newPerformanceAttempt(ctx, "m", routeChatCompletions, []byte(`{"model":"m","stream":true}`), 0)
+			if a == nil {
+				t.Fatal("valid local identity did not create an attempt")
+			}
+			a.start = time.Now()
+			reader, err := newStreamFrameReader(streamFrameConfig{Budget: newFrameBudget(64 << 20), Protocol: streamProtocolSSE, Parent: ctx, Upstream: io.NopCloser(strings.NewReader(""))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			a.reader = reader
+			if expire {
+				if !owner.expireBeforeOutput() {
+					t.Fatal("deadline expiry did not win")
+				}
+			} else if !owner.cancel(false) {
+				t.Fatal("requester cancellation did not win")
+			}
+			if ctx.Err() != context.Canceled || !errors.Is(context.Cause(ctx), wantCause) {
+				t.Fatalf("attempt err=%v cause=%v, want cancelled with cause %v", ctx.Err(), context.Cause(ctx), wantCause)
+			}
+			if n, err := io.Copy(io.Discard, reader); err != nil || n != 0 {
+				t.Fatalf("cancelled stream read=%d err=%v, want empty EOF", n, err)
+			}
+			if err := reader.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if result := reader.Result(); result.Outcome != streamOutcomeCancelled {
+				t.Fatalf("stream outcome=%s, want cancelled", result.Outcome)
+			}
+			a.finish(&statusCapture{ResponseWriter: httptest.NewRecorder()}, true)
+			sample := performanceOne(t, p)
+			if sample.Outcome != want || sample.ProtocolComplete == nil || *sample.ProtocolComplete {
+				t.Fatalf("measurement=%+v, want %s with incomplete protocol", sample.Measurement, want)
+			}
+		})
+	}
+	test("requester cancellation", false, performancewire.OutcomeCancelled, context.Canceled)
+	test("routing deadline", true, performancewire.OutcomeFailed, context.DeadlineExceeded)
+}
+
 func TestPerformanceUnobservedCopyOutcome(t *testing.T) {
 	for _, scenario := range []string{"headers then stall", "body read error", "normal body"} {
 		t.Run(scenario, func(t *testing.T) {
