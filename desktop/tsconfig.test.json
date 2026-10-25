@@ -5,6 +5,7 @@
         "src/shared/**/*.ts",
         "tests/modular/**/*.test.ts",
         "tests/modular/**/*.test.tsx",
+        "tests/service-restart-reconnect/*.ts",
         "vitest.config.ts",
         "scripts/test-clean.ts"
     ],
