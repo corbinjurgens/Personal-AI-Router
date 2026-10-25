@@ -116,7 +116,12 @@ func (p *historyTestPeer) send(t *testing.T, raw string) {
 
 func (p *historyTestPeer) next(t *testing.T) jsonrpc.Message {
 	t.Helper()
-	if err := p.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+	return p.nextWithTimeout(t, 10*time.Second)
+}
+
+func (p *historyTestPeer) nextWithTimeout(t *testing.T, timeout time.Duration) jsonrpc.Message {
+	t.Helper()
+	if err := p.conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		t.Fatal(err)
 	}
 	var err error
@@ -1117,6 +1122,39 @@ func TestHistoryClientMethodAmbiguityBeforeDispatch(t *testing.T) {
 	test("history last", "service/status", "routing:subscribe")
 }
 
+func TestHistoryPhysicalEOFKeepsFramingClassification(t *testing.T) {
+	test := func(name, raw string, want error) {
+		t.Run(name, func(t *testing.T) {
+			_, err := readHistoryPhysical(bufio.NewReader(strings.NewReader(raw)), nil, jsonrpc.WorkerFrameBytes)
+			if err != want {
+				t.Fatalf("error = %v, want %v", err, want)
+			}
+		})
+	}
+	test("empty stream", "", io.EOF)
+	test("truncated frame", "{", jsonrpc.ErrHistoryFraming)
+}
+
+func TestHistoryPhysicalReadTimeoutPreservesCause(t *testing.T) {
+	server, peer := net.Pipe()
+	defer server.Close()
+	defer peer.Close()
+	if err := peer.SetReadDeadline(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readHistoryPhysical(bufio.NewReader(peer), nil, jsonrpc.WorkerFrameBytes)
+	if !errors.Is(err, jsonrpc.ErrHistoryFraming) {
+		t.Fatalf("error = %v, want history framing failure", err)
+	}
+	var timeout net.Error
+	if !errors.As(err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("error = %v, want wrapped read timeout", err)
+	}
+	if !strings.Contains(err.Error(), "i/o timeout") {
+		t.Fatalf("error = %v, want visible read timeout", err)
+	}
+}
+
 func TestHistoryPhysicalOverflowStopsOnlyAtH(t *testing.T) {
 	test := func(name string, size int, want error) {
 		t.Run(name, func(t *testing.T) {
@@ -1421,7 +1459,9 @@ func TestHistoryMaximumInitialAndExactRawID(t *testing.T) {
 	frame = append(frame, initial...)
 	frame = append(frame, '}')
 	h.emit(t, frame)
-	msg := p.next(t)
+	// Projecting and transferring the maximum payload can exceed the ordinary
+	// peer deadline under the Windows race detector.
+	msg := p.nextWithTimeout(t, 60*time.Second)
 	if msg.Error != nil || msg.ID == nil || string(*msg.ID) != `"\u0061<>&"` {
 		t.Fatalf("maximum initial refused or ID changed: %+v", msg.Error)
 	}

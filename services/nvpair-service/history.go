@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strconv"
@@ -607,10 +608,13 @@ func readHistoryPhysicalWithSpill(reader *bufio.Reader, dst []byte, retain int, 
 		if err == bufio.ErrBufferFull {
 			continue
 		}
-		if err == io.EOF && total == 0 {
-			return nil, io.EOF
+		if err == io.EOF {
+			if total == 0 {
+				return nil, io.EOF
+			}
+			return nil, jsonrpc.ErrHistoryFraming
 		}
-		return nil, jsonrpc.ErrHistoryFraming
+		return nil, fmt.Errorf("%w: %w", jsonrpc.ErrHistoryFraming, err)
 	}
 }
 
