@@ -24,6 +24,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -263,12 +264,28 @@ func (s *controlServer) handleEngines(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"engines": s.exec.GetInstalled()})
 }
 
-// serveControl runs the ec mTLS control surface on 0.0.0.0:port until ctx is
+const defaultControlHost = "0.0.0.0"
+
+func validateControlHost(host string) error {
+	if net.ParseIP(host) == nil {
+		return fmt.Errorf("must be a literal IP address (got %q)", host)
+	}
+	return nil
+}
+
+func listenControl(host string, port int) (net.Listener, error) {
+	if err := validateControlHost(host); err != nil {
+		return nil, err
+	}
+	return net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+}
+
+// serveControl runs the ec mTLS control surface on host:port until ctx is
 // cancelled. A bind failure is non-fatal: stdio engine management (and local
 // peers' remote calls being unavailable) must not take the process down.
-func serveControl(ctx context.Context, port int, exec *Executor, mesh *clustertrust.Mesh, copyFromPeer func(context.Context, copyRequest, func() error, func(copyProgress)) (copyModelResult, error)) {
-	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
-	ln, err := net.Listen("tcp", addr)
+func serveControl(ctx context.Context, host string, port int, exec *Executor, mesh *clustertrust.Mesh, copyFromPeer func(context.Context, copyRequest, func() error, func(copyProgress)) (copyModelResult, error)) {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	ln, err := listenControl(host, port)
 	if err != nil {
 		slog.Warn("engine-manager control endpoint disabled (bind failed)", "addr", addr, "err", err)
 		return

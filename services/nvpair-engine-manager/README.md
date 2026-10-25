@@ -471,6 +471,16 @@ bound for the life of the process rather than only when clustered at startup —
 node joins and leaves a cluster while engine-manager runs, and a surface chosen
 at bind time would stay dark until the process was restarted.
 
+`--control-host` selects the literal IPv4 or IPv6 bind address for `ec` only;
+its default remains `0.0.0.0`. Isolated fixtures can pass `127.0.0.1` (or `::1`
+where available). Empty values, DNS names, bracketed addresses, zone suffixes
+and host/port pairs are rejected before startup, without a fallback address.
+The broker forwards `--engine-manager-control-host` to this flag. This does
+not isolate the whole process: `em` (`--http-port`) still binds independently
+on `0.0.0.0`, and fixtures must disable or independently isolate it and all
+other listeners. Control mTLS, membership, pin and management checks apply
+unchanged on loopback.
+
 Pinning authenticates the caller; it does not authorize changes. The `ec`
 registry explicitly classifies every route as read or mutation, including POST
 reads such as policy get and settings get/preview. Before dispatching any
@@ -772,6 +782,7 @@ fields do not establish that presentation or serving readiness.
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
 | `--http-port <port>` | `0` (off) | Serve the plain LAN model-list surface (`GET /v1/models`, the `em` service) on this port; the broker passes `:14322` |
 | `--control-port <port>` | `0` (off) | Serve the cluster-scoped mTLS remote-control surface (the `ec` service) on this port; callers are admitted only while this node is a cluster member. The broker passes `:14323` |
+| `--control-host <ip>` | `0.0.0.0` | Literal IPv4 or IPv6 bind address for `ec` only; `127.0.0.1` confines that listener to loopback. Does not change the `em` listener or authentication |
 | `--reserved-port <port>` | `0` (off) | Refuse local or remote engine starts and persisted port changes on a parent-owned proxy alias; the broker configures this from `OLLAMA_HOST` |
 | `--cluster-dir <dir>` | _(none)_ | Cluster identity/pin directory; gates the `ec` surface on and supplies the leaf/pins used to serve it and to dial peers |
 | `--loaded-poll-interval <sec>` | `5` | Seconds between loaded-model polls that drive `engine:models-changed`; `0` disables the watcher |

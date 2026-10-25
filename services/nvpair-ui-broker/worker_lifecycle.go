@@ -489,6 +489,9 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	if err := validateServicePorts(ports); err != nil {
 		return nil, fmt.Errorf("service ports: %w", err)
 	}
+	if err := validateEngineManagerControlHost(b.engineMgrControlHost); err != nil {
+		return nil, err
+	}
 	httpPort, controlPort := ports.engineManagerHTTP, ports.engineControl
 	// Tell engine-manager to serve its LAN HTTP surface on the configured em port so
 	// peers can fetch this node's model list at /v1/models, and its cluster-scoped
@@ -499,7 +502,8 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	// leave needs no restart here.
 	args := append(b.logLevelArgs(),
 		"--http-port", fmt.Sprintf("%d", httpPort),
-		"--control-port", fmt.Sprintf("%d", controlPort))
+		"--control-port", fmt.Sprintf("%d", controlPort),
+		"--control-host", b.engineMgrControlHost)
 	if aliasPort := b.currentOllamaHostAlias().Port; aliasPort > 0 {
 		args = append(args, "--reserved-port", fmt.Sprintf("%d", aliasPort))
 	}
