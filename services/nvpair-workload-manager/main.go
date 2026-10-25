@@ -39,6 +39,9 @@ func main() {
 	}
 
 	applog.Init("nvpair-workload-manager", resolveLevel())
+	if err := validateListenerPort(*port); err != nil {
+		log.Fatal(err)
+	}
 
 	// Resolve this node's stable per-host UUID so the relay self-filter drops
 	// our own _nvpair-node record by UUID, not by hostname — otherwise a peer
@@ -89,4 +92,11 @@ func main() {
 		log.Fatalf("workload-manager error: %v", err)
 	}
 	log.Print("shutdown complete")
+}
+
+func validateListenerPort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("--port must be between 1 and 65535 (got %d)", port)
+	}
+	return nil
 }

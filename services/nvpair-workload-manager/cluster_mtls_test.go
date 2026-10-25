@@ -301,7 +301,7 @@ func TestBroadcast_UnclusteredNodeSendsNothing(t *testing.T) {
 	defer peer.Close()
 
 	host := strings.TrimPrefix(peer.URL, "http://")
-	peers := newPeerSet(14320)
+	peers := newPeerSet()
 	peers.Replace([]PeerNode{{ID: "peer-1", Host: host, Addresses: []string{host}}})
 
 	dir := t.TempDir()

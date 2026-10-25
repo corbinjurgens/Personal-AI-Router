@@ -133,7 +133,7 @@ func TestManager_SnapshotCannotResurrectRemovedWorkload(t *testing.T) {
 	m := &Manager{
 		activeLocal: make(map[workloadKey]workloadEvent),
 		broadcastCh: make(chan []byte, 2),
-		peers:       newPeerSet(0),
+		peers:       newPeerSet(),
 	}
 	workload := &Workload{
 		ID: "7", Model: "m", Engine: "ollama", RunID: "r1",

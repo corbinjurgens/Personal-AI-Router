@@ -29,7 +29,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -67,7 +66,14 @@ type subscriptionResult struct {
 
 func startBroker(t *testing.T) (stdin io.WriteCloser, msgs <-chan jsonrpc.Message, cleanup func()) {
 	t.Helper()
-	cmd := exec.Command(brokerBin, "--scanner-path", scannerBin, "--cluster-dir", t.TempDir())
+	args, err := reserveFixtureServicePorts(t).brokerArgs(t.TempDir(), "--scanner-mdns=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := fixtureBrokerCommand(brokerBin, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cmd.Env = privateEngineEnv(t, t.TempDir())
 	cmd.Stderr = os.Stderr
 

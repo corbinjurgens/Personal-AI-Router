@@ -259,6 +259,23 @@ go test ./...
 Expect this to take a few minutes. Run it before opening a pull request, and
 after any change to a JSON-RPC method, payload, or notification.
 
+Fixture broker launches, including custom service/broker argument lists, must
+pass the complete `fixtureServicePorts` plan. `fixtureBrokerCommand` and
+`fixtureServiceCommand` reject missing, zero, repeated or installed-default
+service ports before constructing a command. The service plan covers listener
+arguments and registrations; remote workload destinations retain their peer's
+explicit advertised `wl` port. Manual probe fixtures use private HTTP servers
+and startup probe overrides; unused legs are disabled with zero. Ordinary
+broker fixtures forward `--scanner-mdns=false` before scanner startup.
+
+Tests that assert real multicast discovery explicitly retain mDNS. The real
+scanner currently uses the production discovery service and hostname, so those
+cases are not isolated from installed PAIR and need a separate discovery
+namespace change before beside-installed execution. This includes broker
+advertisement, ghost-node eviction, model enrichment/refresh, mDNS node-loss,
+workload peer discovery/rehydration, and reverse node-info/control discovery.
+Port isolation and TLS refusal alone do not establish zero ambient contact.
+
 #### Remote configuration acceptance (XA)
 
 `tests/remote_configuration_test.go` is the acceptance suite for remote
@@ -298,12 +315,16 @@ Some tests need something the machine may not have, and skip rather than fail:
 - Broker fixtures reserve their own ephemeral ports for the six broker-owned
   services and pass them through the broker's port flags, so they do not use
   an installed PAIR's `14318`–`14323`. Tests that still need a product default
-  port, such as the fixed manual-node probe ports or the default engine facade
+  port, such as the default engine facade
   ports (`11434`, `1234`, `8080`), skip when that port is held on IPv4 or IPv6,
   so quit PAIR before running them, or expect gaps.
-- Every fixture scanner still browses and advertises `_nvpair-node` over mDNS.
-  Beside an installed PAIR, it discovers that node and contacts its advertised
-  ports, so run the broker tests on a machine where PAIR is stopped.
+- Ordinary fixture scanners disable mDNS. Cases explicitly testing multicast
+  still browse and advertise `_nvpair-node`; they can contact installed peers
+  and require independent discovery isolation before beside-installed runs.
+- A broker with a ready facade can still probe a stock engine port when
+  engine-manager is absent or an engine status RPC fails. Private manual
+  probe targets do not isolate this broker advertiser path. Review engine
+  targets independently before beside-installed execution.
 - Tests needing a real mDNS responder skip when one is unavailable.
 - Live engine tests only run when you opt in:
 

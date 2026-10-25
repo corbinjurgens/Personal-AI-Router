@@ -31,6 +31,9 @@ Uses bidirectional newline-delimited JSON-RPC 2.0. By default, communication is 
 | Flag | Default | Description |
 |---|---|---|
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
+| `--ollama-port <n>` | `11434` | Ollama health/model probe target on each manual address; `0` disables this leg |
+| `--lmstudio-port <n>` | `1234` | LM Studio model probe target on each manual address; `0` disables this leg |
+| `--node-info-port <n>` | `14318` | Plain node-info probe target; `0` disables this leg. An entry's explicit `tls_port` still selects its HTTPS target |
 | `--client-cert <path>` | _(none)_ | PEM client certificate to present when probing TLS-enabled manual nodes (requires `--client-key`) |
 | `--client-key <path>` | _(none)_ | PEM client private key matching `--client-cert` |
 | `--ca-bundle <path>` | _(none)_ | PEM bundle of CAs to trust when verifying server certificates (additive to the system trust store) |
@@ -194,7 +197,13 @@ Each manual node is probed every 10 seconds, with a 3-second timeout per leg, fo
 
 A node can have any combination of these, or none if the target is unreachable. Status changes trigger `node/updated` events. Because change detection compares CPU, memory, and GPU values, a node running node-info emits a `node/updated` on most probe cycles as utilization moves.
 
-The three engine ports are compiled in: only the node-info leg's port can be moved, via `tls_port`. A remote engine on a non-default port is not discovered.
+Startup probe-port flags override these defaults for every entry, including
+restored entries and periodic probes. They accept 0 to 65535; zero disables the
+leg without a request or a default-port fallback. Status and `node/add` replies
+report the configured ports so the broker bridges the same inference targets
+into its proxies. An entry's `tls_port` still overrides the plain node-info
+setting and retains the existing TLS or pinned cluster client. These flags do
+not change saved entries, RPC shapes or trust checks.
 
 Addresses may be hostnames, such as Tailscale MagicDNS names. Every probe client disables keep-alives, so every probe opens a new connection and resolves the name again (Go's resolver keeps no cache of its own; any caching is the operating system's), and a machine that changed address is followed on the next probe.
 

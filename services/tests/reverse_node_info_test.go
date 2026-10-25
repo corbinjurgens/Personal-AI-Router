@@ -229,7 +229,7 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 
 	local := newServiceFixture(t)
 	local.clusterDir = filepath.Join(f.a.base, "cluster")
-	local.start()
+	local.service = local.startChild(append(local.args(), "--scanner-mdns=true")...)
 	client := local.readyClient()
 	second := local.dial()
 	nextID := 200

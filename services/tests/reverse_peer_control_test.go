@@ -63,6 +63,13 @@ type task1Process struct {
 func startTask1Process(t *testing.T, base, binary string, args ...string) *task1Process {
 	t.Helper()
 	p := &task1Process{t: t, cmd: exec.Command(binary, args...), done: make(chan struct{}), readDone: make(chan struct{}), nextID: 1}
+	if binary == brokerBin {
+		var err error
+		p.cmd, err = fixtureBrokerCommand(binary, args...)
+		if err != nil {
+			t.Fatalf("broker fixture launch: %v", err)
+		}
+	}
 	p.cmd.Env = append(os.Environ(), "HOME="+base, "XDG_CONFIG_HOME="+base, "APPDATA="+base, "LOCALAPPDATA="+base, "USERPROFILE="+base)
 	if binary == brokerBin || binary == engineMgrBin {
 		p.cmd.Env = privateEngineEnv(t, base)

@@ -33,7 +33,7 @@ func (b *Broker) spawnScanner() (supervisedHandle, error) {
 		func(telemetry noderec.NodeTelemetry) { b.ingestTelemetry(sourceScanner, telemetry) },
 		func(hostUUID string) { b.removeTelemetry(sourceScanner, hostUUID) },
 		b.dispatchScannerErrorsNotif,
-		b.clusterDirArgs()...,
+		b.scannerArgs()...,
 	)
 	if err != nil {
 		return nil, err
@@ -620,7 +620,7 @@ func (b *Broker) notifyEngineSwitchRecoveryReady(ctx context.Context, w *rpcWork
 }
 
 func (b *Broker) spawnManualNodes() (supervisedHandle, error) {
-	w, err := startRPCWorker("manual-nodes", b.manualNodesPath, append(b.logLevelArgs(), b.clusterDirArgs()...), b.forwardManualNodesNotification)
+	w, err := startRPCWorker("manual-nodes", b.manualNodesPath, b.manualNodesArgs(), b.forwardManualNodesNotification)
 	if err != nil {
 		return nil, err
 	}

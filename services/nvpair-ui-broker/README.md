@@ -326,6 +326,7 @@ Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other
 |---|---|---|
 | `--ipc <path>` | _(stdio)_ | IPC endpoint to dial: Unix socket path or Windows named pipe (e.g. `\\.\pipe\nvpair-ui-broker`) |
 | `--scanner-path <path>` | `./nvpair-node-scanner[.exe]` in the CWD | Explicit path to the `nvpair-node-scanner` binary the broker should spawn |
+| `--scanner-mdns <bool>` | `true` | `false` passes `--mdns=false` on every scanner spawn, disabling multicast browse and advertisement before startup while retaining self and authenticated directory behavior |
 | `--node-info-path <path>` | `./nvpair-node-info[.exe]` in the CWD | Explicit path to the `nvpair-node-info` binary the broker should spawn. When omitted and no default sibling exists, the broker runs without the local inventory server (non-fatal); when set to an invalid path, the broker exits with an error |
 | `--proxy-path <path>` | `./nvpair-proxy[.exe]` in the CWD | Explicit path to the `nvpair-proxy` binary. One process fronts every engine: the broker spawns it once and then sends a `facade/enable` per entry in `--proxy-engines`. Same optional semantics as `--node-info-path`: an absent default sibling means no local proxies (non-fatal); an invalid explicit path exits with an error |
 | `--proxy-engines <csv>` | `ollama,lmstudio,llamacpp` | Which engines to front with a proxy. An unrecognized name exits with an error rather than being skipped, so a typo cannot look like it worked. An engine left out is not started **and not prepared** — the broker will not relocate an engine whose facade nothing is going to claim |
@@ -340,6 +341,9 @@ Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other
 | `--workload-manager-port <port>` | `14320` | Workload relay listener (`wl`) passed to `nvpair-workload-manager` as `--port` and registered with discovery |
 | `--cluster-manager-port <port>` | `14321` | Cluster pairing listener (`cl`) passed to `nvpair-cluster-manager` as `--port` and registered with discovery |
 | `--manual-nodes-path <path>` | `./nvpair-manual-nodes[.exe]` in the CWD | Explicit path to the `nvpair-manual-nodes` binary the broker spawns for user-added nodes. Same optional semantics as `--node-info-path` |
+| `--manual-ollama-port <n>` | `11434` | Forwarded as manual-nodes `--ollama-port`; zero disables this probe |
+| `--manual-lmstudio-port <n>` | `1234` | Forwarded as manual-nodes `--lmstudio-port`; zero disables this probe |
+| `--manual-node-info-port <n>` | `14318` | Forwarded as manual-nodes `--node-info-port`; zero disables plain probing, preserving explicit entry TLS targets |
 | `--settings-path <path>` | `./nvpair-node-settings[.exe]` in the CWD | Explicit path to the `nvpair-node-settings` binary the broker spawns for the typed settings store. Same optional semantics as `--node-info-path` |
 | `--cluster-manager-path <path>` | `./nvpair-cluster-manager[.exe]` in the CWD | Explicit path to the `nvpair-cluster-manager` binary the broker spawns for cluster pairing / membership. Same optional semantics as `--node-info-path` |
 | `--scheduler-path <path>` | `./nvpair-job-scheduler[.exe]` in the CWD | Explicit path to the `nvpair-job-scheduler` binary the broker spawns for responsive, node-wide workload and GPU-pressure ranking. Same optional semantics as `--node-info-path` |
@@ -347,7 +351,24 @@ Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other
 | `--log-level <lvl>` | _(env `NVPAIR_LOG_LEVEL` or `info`)_ | `debug` \| `info` \| `warn` \| `error` |
 | `--version` | | Print version and exit |
 
-The `--*-port` flags above form one immutable startup plan. Before any worker starts, the broker rejects a plan in which a port is outside 1 to 65535, two services share a port, or a service takes an engine's compatibility facade port or managed backend base port from the engine table (reserved even for an engine left out of `--proxy-engines`). Each worker receives, registers and replays exactly its planned port, including across supervised restarts and scanner respawns; a port at its default is left to the worker's identical flag default, preserving historical port arguments and default listener behavior. The planned ports stay reserved against engine settings and the inherited `OLLAMA_HOST` alias, and a default port that the plan moved elsewhere is released. These flags separate listeners only: a second instance on one host still needs its own app data, cluster identity, IPC endpoint and engine facades.
+The node-info, errors, workload-manager, cluster-manager and engine-manager
+listener flags form one immutable startup plan. Before any worker starts, the
+broker rejects a plan in which a port is outside 1 to 65535, two services share
+a port, or a service takes an engine's compatibility facade port or managed
+engine base port from the engine table (reserved even for an engine left out of
+`--proxy-engines`). Each worker receives, registers and replays exactly its
+planned port, including across supervised restarts and scanner respawns; a port
+at its default is left to the worker's identical flag default. The planned ports
+stay reserved against engine settings and the inherited `OLLAMA_HOST` alias,
+and a default port that the plan moved elsewhere is released. These flags
+separate listeners only: another instance on one host still needs its own app
+data, cluster identity, IPC endpoint and engine facades.
+
+Manual probe overrides are outbound targets, separate from the local service
+listener plan. They accept 0 to 65535 before startup and are forwarded unchanged
+on each worker restart. They retain the existing manual status fields and TLS
+selection. `--scanner-mdns=false` prevents ambient multicast discovery; restored
+authenticated peer routes still use their configured service endpoints.
 
 `--engine-manager-control-host` rejects empty, DNS, malformed, bracketed and
 zone-qualified values before product startup; there is no fallback for invalid

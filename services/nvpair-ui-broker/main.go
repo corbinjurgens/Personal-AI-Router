@@ -25,6 +25,10 @@ import (
 func main() {
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
 	scannerPath := flag.String("scanner-path", "", "path to nvpair-node-scanner binary (default: ./nvpair-node-scanner in the current working directory)")
+	scannerMDNS := flag.Bool("scanner-mdns", true, "enable scanner multicast discovery and advertisement; false passes --mdns=false before scanner startup")
+	manualOllamaPort := flag.Int("manual-ollama-port", 11434, "manual-node Ollama probe port (0 disables the probe)")
+	manualLMStudioPort := flag.Int("manual-lmstudio-port", 1234, "manual-node LM Studio probe port (0 disables the probe)")
+	manualNodeInfoPort := flag.Int("manual-node-info-port", nodeInfoHTTPPort, "manual-node plain node-info probe port (0 disables it; explicit entry TLS ports take precedence)")
 	nodeInfoPath := flag.String("node-info-path", "", "path to nvpair-node-info binary (default: ./nvpair-node-info in the current working directory)")
 	proxyPath := flag.String("proxy-path", "", "path to nvpair-proxy binary (default: ./nvpair-proxy in the current working directory)")
 	proxyEngines := flag.String("proxy-engines", strings.Join(engines.Names(), ","), "comma-separated engines to front with a proxy; one nvpair-proxy process hosts a facade for each entry")
@@ -46,6 +50,10 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
+	manualPorts := &manualProbePorts{ollama: *manualOllamaPort, lmstudio: *manualLMStudioPort, nodeInfo: *manualNodeInfoPort}
+	if err := manualPorts.validate(); err != nil {
+		log.Fatal(err)
+	}
 	if err := validateEngineManagerControlHost(*engineMgrControlHost); err != nil {
 		log.Fatal(err)
 	}
@@ -284,6 +292,8 @@ func main() {
 		workloadMgrPort:      *workloadMgrPort,
 		clusterMgrPort:       *clusterMgrPort,
 		manualNodes:          resolvedManualNodes,
+		disableMDNS:          !*scannerMDNS,
+		manualProbePorts:     manualPorts,
 		settings:             resolvedSettings,
 		clusterMgr:           resolvedClusterMgr,
 		scheduler:            resolvedScheduler,

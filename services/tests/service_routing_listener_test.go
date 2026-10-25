@@ -427,11 +427,12 @@ func TestServiceRoutingListenerWithoutFacades(t *testing.T) {
 	// not part of what a ready fixture must show; it is inventoried separately.
 	proxyOnly := &serviceProcessInventory{paths: []string{f.proxyPath}, known: make(map[int32]serviceProcessIdentity)}
 	f.inventory.paths = slices.DeleteFunc(f.inventory.paths, func(p string) bool { return p == f.proxyPath })
-	f.service = f.startChild(
+	args := []string{
 		"--broker-path", f.brokerPath, "--endpoint", f.endpoint, "--log-dir", filepath.Join(f.dir, "logs"),
 		"--", "--scanner-path", f.scannerPath, "--cluster-dir", f.clusterDir,
 		"--proxy-path", f.proxyPath, "--proxy-engines=",
-	)
+	}
+	f.service = f.startChild(append(args, f.ports.args()...)...)
 	c := f.readyClient()
 	proxies := func() int {
 		t.Helper()

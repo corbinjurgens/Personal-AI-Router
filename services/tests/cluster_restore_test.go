@@ -26,16 +26,18 @@ func startBrokerInDir(t *testing.T, configDir string, extraArgs ...string) (io.W
 	t.Helper()
 	base := configDir
 	port := freePort(t)
-	bridge, env := newPortInteropBridge(t, clusterMgrBin, port)
-	args := append([]string{"--scanner-path", scannerBin, "--cluster-dir", filepath.Join(base, "cluster"), "--cluster-manager-path", bridge}, extraArgs...)
-	env = append(env,
-		"HOME="+configDir,
-		"XDG_CONFIG_HOME="+configDir,
-		"APPDATA="+configDir,
-		"LOCALAPPDATA="+configDir,
-	)
+	args := append([]string{"--scanner-path", scannerBin, "--cluster-dir", filepath.Join(base, "cluster"), "--cluster-manager-path", clusterMgrBin}, extraArgs...)
+	ports := reserveFixtureServicePorts(t)
+	ports.clusterManager = port
+	args = append(args, ports.args()...)
+	env := []string{
+		"HOME=" + configDir,
+		"XDG_CONFIG_HOME=" + configDir,
+		"APPDATA=" + configDir,
+		"LOCALAPPDATA=" + configDir,
+	}
 	p := startInteropProcess(t, base, brokerBin, port, env, args...)
-	for _, path := range []string{scannerBin, nodeSettingsBin, bridge, clusterMgrBin} {
+	for _, path := range []string{scannerBin, nodeSettingsBin, clusterMgrBin} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
 			t.Fatal(err)

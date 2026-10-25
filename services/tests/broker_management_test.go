@@ -103,49 +103,25 @@ func startClientErrorsBroker(t *testing.T) *interopProcess {
 	return p
 }
 
-// manualProbePorts are the product ports nvpair-manual-nodes probes on a manual
-// node's address (Ollama, LM Studio, node-info). The worker fixes them, so a
-// test pointing it at loopback fakes must own all three: otherwise the prober
-// reaches whatever else listens there, typically an installed PAIR.
-var manualProbePorts = []int{11434, 1234, 14318}
-
-// skipIfManualProbePortsOccupied skips, without binding beside or contacting the
-// owner, when any manual probe port is held on IPv4 or IPv6.
-func skipIfManualProbePortsOccupied(t *testing.T) {
+// fakeOllama owns a private probe and route target. Other manual probe legs
+// remain disabled by the common fixture launch configuration.
+func fakeOllama(t *testing.T) int {
 	t.Helper()
-	for _, port := range manualProbePorts {
-		skipIfDefaultPortOccupied(t, port, "the loopback manual-node probe fixture")
-	}
-}
-
-// fakeOllama stands up a minimal Ollama-looking HTTP server on the fixed
-// port nvpair-manual-nodes probes (11434): GET / returns 200 (liveness) and
-// GET /api/tags returns one model, so a manual node pointed at it reports
-// ollama_up=true with a model list. Returns a stop func. Callers first run
-// skipIfManualProbePortsOccupied. Skips the test if the port can't be bound.
-func fakeOllama(t *testing.T) func() {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:11434")
-	if err != nil {
-		t.Skipf("cannot bind fake ollama on 127.0.0.1:11434 (%v); skipping", err)
-	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"models":[{"name":"llama3.2:latest"}]}`)
 	})
-	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(ln) }()
-	return func() { _ = srv.Close() }
+	srv := newFixtureHTTPServer(t, mux)
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().(*net.TCPAddr).Port
 }
 
-// Own every endpoint the manual worker probes, including a negative Ollama
-// response and a stable node-info identity. Otherwise an installed node-info
-// changes the candidate's key from the manual name to the machine's UUID.
-func fakeLMStudio(t *testing.T, hostUUID string) {
+// Own the LM Studio and node-info legs, and disable the unrelated Ollama leg.
+// The stable fixture identity keeps an installed node-info out of this route.
+func fakeLMStudio(t *testing.T, hostUUID string) (int, []string) {
 	t.Helper()
-	skipIfManualProbePortsOccupied(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -160,51 +136,25 @@ func fakeLMStudio(t *testing.T, hostUUID string) {
 			t.Errorf("write fixture node-info: %v", err)
 		}
 	})
-	for _, endpoint := range []struct {
-		port    int
-		handler http.Handler
-	}{
-		{1234, mux},
-		{11434, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })},
-		{14318, nodeInfo},
-	} {
-		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(endpoint.port)))
-		if err != nil {
-			t.Fatalf("bind manual probe fixture port %d: %v", endpoint.port, err)
-		}
-		srv := &http.Server{Handler: endpoint.handler}
-		go func() {
-			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-				t.Errorf("serve manual probe fixture: %v", err)
-			}
-		}()
-		t.Cleanup(func() {
-			if err := srv.Close(); err != nil {
-				t.Errorf("close manual probe fixture: %v", err)
-			}
-		})
-	}
+	studio := newFixtureHTTPServer(t, mux)
+	info := newFixtureHTTPServer(t, nodeInfo)
+	t.Cleanup(studio.Close)
+	t.Cleanup(info.Close)
+	port := studio.Listener.Addr().(*net.TCPAddr).Port
+	return port, []string{"--manual-ollama-port=0", "--manual-lmstudio-port", strconv.Itoa(port), "--manual-node-info-port", strconv.Itoa(info.Listener.Addr().(*net.TCPAddr).Port)}
 }
 
-// fakeNodeInfo stands up a minimal node-info server on the fixed port the
-// manual prober hits (14318): GET /v1/node-info returns 200 with the given
-// hostUuid, so a manual node pointed at it learns its stable UUID. Callers
-// first run skipIfManualProbePortsOccupied. Skips the test if the port can't
-// be bound.
-func fakeNodeInfo(t *testing.T, hostUUID string) func() {
+// fakeNodeInfo supplies a stable identity on a private manual probe target.
+func fakeNodeInfo(t *testing.T, hostUUID string) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:14318")
-	if err != nil {
-		t.Skipf("cannot bind fake node-info on 127.0.0.1:14318 (%v); skipping", err)
-	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/node-info", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, fmt.Sprintf(`{"GPUs":[],"hostUuid":%q}`, hostUUID))
 	})
-	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(ln) }()
-	return func() { _ = srv.Close() }
+	srv := newFixtureHTTPServer(t, mux)
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().(*net.TCPAddr).Port
 }
 
 // proxyNode mirrors the proxy's nodes/list element (ollama-proxy Node).
@@ -234,6 +184,23 @@ func proxyNodesHas(t *testing.T, raw json.RawMessage, id string) bool {
 	return false
 }
 
+func assertProxyManualTarget(t *testing.T, raw json.RawMessage, id string, port int) {
+	t.Helper()
+	var result proxyNodesResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range result.Nodes {
+		if node.ID == id {
+			if node.Host != "127.0.0.1" || node.Port != port {
+				t.Fatalf("manual proxy route = %+v, want fixture 127.0.0.1:%d", node, port)
+			}
+			return
+		}
+	}
+	t.Fatalf("manual proxy route %q missing", id)
+}
+
 // TestBrokerBridgesManualNodeIntoProxy is the leg-A repro: with the broker
 // supervising both nvpair-manual-nodes and ollama-proxy, a manual node whose
 // Ollama is reachable must be bridged into the proxy (node/add-manual) so it
@@ -243,12 +210,11 @@ func TestBrokerBridgesManualNodeIntoProxy(t *testing.T) {
 	if portBusy(11435) {
 		t.Skip("ollama-proxy port 11435 already in use; skipping")
 	}
-	skipIfManualProbePortsOccupied(t)
-	stopOllama := fakeOllama(t)
-	t.Cleanup(stopOllama)
+	ollamaPort := fakeOllama(t)
 
 	stdin, msgs, _, cleanup := startBrokerWith(t,
 		"--manual-nodes-path", manualNodesBin,
+		"--manual-ollama-port", strconv.Itoa(ollamaPort),
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 	)
 	t.Cleanup(cleanup)
@@ -276,6 +242,7 @@ func TestBrokerBridgesManualNodeIntoProxy(t *testing.T) {
 				t.Fatal("broker stream closed before the manual node bridged into the proxy")
 			}
 			if msg.Method == "" && msg.ID != nil && proxyNodesHas(t, msg.Result, nodeName) {
+				assertProxyManualTarget(t, msg.Result, nodeName, ollamaPort)
 				t.Logf("manual node %q bridged into proxy nodes/list", nodeName)
 				return
 			}
@@ -298,14 +265,12 @@ func TestBrokerBridgesManualNodeUnderLearnedUUID(t *testing.T) {
 	if portBusy(11435) {
 		t.Skip("ollama-proxy port 11435 already in use; skipping")
 	}
-	skipIfManualProbePortsOccupied(t)
-	stopOllama := fakeOllama(t)
-	t.Cleanup(stopOllama)
-	stopNodeInfo := fakeNodeInfo(t, "learned-host-uuid")
-	t.Cleanup(stopNodeInfo)
+	ollamaPort := fakeOllama(t)
+	nodeInfoPort := fakeNodeInfo(t, "learned-host-uuid")
 
 	stdin, msgs, _, cleanup := startBrokerWith(t,
 		"--manual-nodes-path", manualNodesBin,
+		"--manual-ollama-port", strconv.Itoa(ollamaPort), "--manual-node-info-port", strconv.Itoa(nodeInfoPort),
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 	)
 	t.Cleanup(cleanup)
@@ -331,6 +296,7 @@ func TestBrokerBridgesManualNodeUnderLearnedUUID(t *testing.T) {
 			}
 			if msg.Method == "" && msg.ID != nil {
 				if proxyNodesHas(t, msg.Result, "learned-host-uuid") {
+					assertProxyManualTarget(t, msg.Result, "learned-host-uuid", ollamaPort)
 					t.Logf("manual node bridged into proxy under learned hostUuid")
 					return
 				}
@@ -354,7 +320,7 @@ func TestBrokerBridgesManualNodeUnderLearnedUUID(t *testing.T) {
 // lmstudio-proxy:nodes/list — even though it never appears over mDNS.
 func TestBrokerBridgesManualNodeIntoLMStudioProxy(t *testing.T) {
 	const hostUUID = "xproc-manual-lmstudio-uuid"
-	fakeLMStudio(t, hostUUID)
+	studioPort, probeArgs := fakeLMStudio(t, hostUUID)
 	base := t.TempDir()
 	proxyPort := freePort(t)
 	journal := map[string]any{"lmstudio": map[string]any{
@@ -372,6 +338,7 @@ func TestBrokerBridgesManualNodeIntoLMStudioProxy(t *testing.T) {
 		"--manual-nodes-path", manualNodesBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "lmstudio",
 	}, reserveFixtureServicePorts(t).args()...)
+	args = append(args, probeArgs...)
 	p := startInteropProcess(t, base, brokerBin, proxyPort, nil, args...)
 	for _, path := range []string{scannerBin, manualNodesBin, proxyBin} {
 		canonical, err := canonicalServicePath(path)
@@ -409,6 +376,7 @@ func TestBrokerBridgesManualNodeIntoLMStudioProxy(t *testing.T) {
 					t.Fatalf("manual node/proxy RPC id=%s: %+v; stderr: %s", *msg.ID, msg.Error, p.output.String())
 				}
 				if proxyNodesHas(t, msg.Result, hostUUID) {
+					assertProxyManualTarget(t, msg.Result, hostUUID, studioPort)
 					t.Logf("manual node %q bridged under learned UUID %q", nodeName, hostUUID)
 					return
 				}

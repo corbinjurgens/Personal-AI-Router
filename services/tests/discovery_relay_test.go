@@ -32,6 +32,7 @@ func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 	hostUUID := fixtureNodeUUID(t, base)
 	ports := reserveFixtureServicePorts(t)
 	_, msgs, stderr, cleanup := startBrokerWithPorts(t, t.TempDir(), filepath.Join(base, "cluster"), nil, ports,
+		"--scanner-mdns=true",
 		"--node-info-path", nodeInfoBin)
 	t.Cleanup(cleanup)
 	// Drain the broker's stdout/stderr so it doesn't stall on a full pipe while
