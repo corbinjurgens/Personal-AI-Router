@@ -126,8 +126,12 @@ globally bounded to 32, evicting the oldest insertion. Both fields use the
 nonempty ASCII identity syntax and 128-byte bound of switch request IDs.
 Uniqueness and refusal are scoped to the pair: a foreign tombstone does not
 reserve another caller's ID and may coexist with that caller's receipt.
-An identical fence retry neither appends nor advances generation. A retained
-owned tombstone refuses switch acceptance with kind `fenced`, code `-32010`,
+An identical fence retry neither appends nor advances generation, including
+when another caller subsequently accepted the same ID. The retained confirmed
+own tombstone wins over foreign receipt refusal without disclosing that receipt;
+a foreign receipt without prior own proof still refuses fencing. Storage
+uncertainty blocks fence acknowledgement even when a foreign receipt exists.
+A retained owned tombstone refuses switch acceptance with kind `fenced`, code `-32010`,
 before effects, regardless of payload. Receipts remain non-evicting and unchanged.
 
 Fence writes use the existing journal generation increment, without changing

@@ -127,8 +127,9 @@ func (s *engineSwitchStore) IsFenced(caller, id string) bool {
 }
 
 // Fence is serialized with both admission lookups by engineConfigMu. Receipts
-// win over absence fencing and retain their global ID ownership rule. The
-// bounded tombstones reserve only (caller, ID), never another caller's namespace.
+// owned by this caller win over absence fencing. A confirmed owned tombstone
+// remains readable alongside a foreign receipt; without that proof, global
+// receipt ownership refuses the collision. Tombstones reserve only (caller, ID).
 func (s *engineSwitchStore) Fence(nodeID, caller, id string) (settings.SwitchFenceResult, error) {
 	if err := s.trustError(); err != nil {
 		return settings.SwitchFenceResult{}, err
@@ -141,10 +142,8 @@ func (s *engineSwitchStore) Fence(nodeID, caller, id string) (settings.SwitchFen
 	if nodeID == "" {
 		return settings.SwitchFenceResult{}, switchStoreError(settings.SwitchErrorInvalidRequest, "node identity is required")
 	}
-	if receipt, ok := s.Lookup(id); ok {
-		if receipt.Caller != caller {
-			return settings.SwitchFenceResult{}, switchStoreError(settings.SwitchErrorReusedID, "request ID belongs to another caller")
-		}
+	receipt, exists := s.Lookup(id)
+	if exists && receipt.Caller == caller {
 		result.Receipt = &receipt
 		if err := result.Validate(); err != nil {
 			return settings.SwitchFenceResult{}, err
@@ -155,6 +154,9 @@ func (s *engineSwitchStore) Fence(nodeID, caller, id string) (settings.SwitchFen
 		return settings.SwitchFenceResult{}, s.fenceErr
 	}
 	if !s.IsFenced(caller, id) {
+		if exists {
+			return settings.SwitchFenceResult{}, switchStoreError(settings.SwitchErrorReusedID, "request ID belongs to another caller")
+		}
 		next := s.copyJournal()
 		if len(next.Tombstones) == settings.MaxSwitchTombstones {
 			next.Tombstones = next.Tombstones[1:]

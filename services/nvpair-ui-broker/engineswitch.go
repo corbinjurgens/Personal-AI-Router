@@ -1297,9 +1297,9 @@ func (b *Broker) fenceEngineSwitch(ctx context.Context, p settings.SwitchFenceRe
 		identity = settings.SwitchOriginLocal
 	}
 	c := b.switchCoordinator()
-	// Existing receipts remain readable even behind a storage latch. An
+	// Existing owned receipts remain readable even behind a storage latch. An
 	// adopted-but-uncertain tombstone must never take that retry read path.
-	if _, ok := c.store.Lookup(p.RequestID); !ok && c.err != nil {
+	if receipt, ok := c.store.Lookup(p.RequestID); c.err != nil && (!ok || receipt.Caller != identity) {
 		return settings.SwitchFenceResult{}, c.err
 	}
 	result, err := c.store.Fence(b.nodeID, identity, p.RequestID)

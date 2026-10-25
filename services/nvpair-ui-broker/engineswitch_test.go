@@ -347,14 +347,134 @@ func TestSwitchFencePeerOwnershipAndFreshGrant(t *testing.T) {
 	}
 	h.waitIdle(t)
 	result, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: p.RequestID}, "peer")
-	if switchErrorDetail(err, "").Kind != settings.SwitchErrorReusedID || result.Receipt != nil || result.Fenced {
-		t.Fatalf("foreign receipt = %+v %v", result, err)
+	if err != nil || result.Receipt != nil || !result.Fenced {
+		t.Fatalf("retained owned fence = %+v %v", result, err)
 	}
 	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
 	result, err = h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: "new-id"}, "peer")
 	var denied *remoteManagementDeniedError
 	if !errors.As(err, &denied) || result.Fenced {
 		t.Fatalf("revoked = %+v %v", result, err)
+	}
+}
+
+func TestSwitchFenceLostAcknowledgementSurvivesForeignReceipt(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	params := settingsJSON(settings.SwitchFenceRequest{NodeID: "target", RequestID: "lost"})
+	// The first reply is deliberately discarded, as if its acknowledgement
+	// were lost after the target durably saved the caller's absence proof.
+	if _, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, params, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	fresh := h.request(t, "lost")
+	if _, err := h.b.acceptEngineSwitch(context.Background(), fresh, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.waitIdle(t)
+	status, err := h.b.engineSwitchStatus(context.Background(), settings.SwitchStatusRequest{RequestID: "lost"}, "peer")
+	if err == nil || switchErrorDetail(err, "").Kind != settings.SwitchErrorUnknownReceipt || status.Receipt != nil {
+		t.Fatalf("caller status = %+v %v", status, err)
+	}
+	before := h.b.engineSwitch.store.copyJournal()
+	disk, err := os.ReadFile(h.b.engineSwitch.store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engineCalls, proxyCalls := h.engine.snapshot(), h.proxy.snapshot()
+	h.b.engineSwitch.store.write = func(string, []byte, os.FileMode) error { t.Fatal("fence reconfirmation wrote journal"); return nil }
+	raw, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, params, "peer")
+	if err != nil {
+		t.Fatalf("lost fence acknowledgement could not be recovered: %v", err)
+	}
+	result, ok := raw.(settings.SwitchFenceResult)
+	if !ok || !result.Fenced || result.Receipt != nil || result.NodeID != "target" || result.RequestID != "lost" {
+		t.Fatalf("fence reconfirmation = %+v", raw)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	afterDisk, err := os.ReadFile(h.b.engineSwitch.store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(h.b.engineSwitch.store.journal, before) || !reflect.DeepEqual(disk, afterDisk) {
+		t.Fatal("reconfirmation changed generation, tombstones or foreign receipt")
+	}
+	if !reflect.DeepEqual(h.engine.snapshot(), engineCalls) || !reflect.DeepEqual(h.proxy.snapshot(), proxyCalls) {
+		t.Fatal("reconfirmation had worker effects")
+	}
+}
+
+func TestSwitchFenceForeignReceiptWithoutOwnProof(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	fresh := h.request(t, "foreign-only")
+	if _, err := h.b.acceptEngineSwitch(context.Background(), fresh, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.waitIdle(t)
+	before := h.b.engineSwitch.store.copyJournal()
+	result, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, settingsJSON(settings.SwitchFenceRequest{RequestID: fresh.RequestID}), "peer")
+	if err == nil || switchErrorDetail(err, "").Kind != settings.SwitchErrorReusedID {
+		t.Fatalf("foreign receipt without proof = %+v %v", result, err)
+	}
+	if fence, ok := result.(settings.SwitchFenceResult); ok && (fence.Fenced || fence.Receipt != nil) {
+		t.Fatalf("foreign receipt disclosed or fenced: %+v", fence)
+	}
+	if !reflect.DeepEqual(h.b.engineSwitch.store.journal, before) {
+		t.Fatal("foreign refusal changed journal")
+	}
+}
+
+func TestSwitchFenceForeignReceiptDoesNotBypassStorageLatch(t *testing.T) {
+	for _, name := range []string{"coordinator storage latch", "uncertain fence replacement"} {
+		t.Run(name, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+			grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+			params := settingsJSON(settings.SwitchFenceRequest{RequestID: "lost"})
+			if _, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, params, "peer"); err != nil {
+				t.Fatal(err)
+			}
+			fresh := h.request(t, "lost")
+			if _, err := h.b.acceptEngineSwitch(context.Background(), fresh, ""); err != nil {
+				t.Fatal(err)
+			}
+			h.waitIdle(t)
+			fault := errors.New("coordinator storage failure")
+			if name == "uncertain fence replacement" {
+				h.b.engineSwitch.store.write = func(path string, data []byte, mode os.FileMode) error {
+					if err := durablefile.WriteFile(path, data, mode); err != nil {
+						return err
+					}
+					return durablefile.ErrReplaced
+				}
+				if _, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, settingsJSON(settings.SwitchFenceRequest{RequestID: "uncertain"}), "peer"); !errors.Is(err, durablefile.ErrReplaced) {
+					t.Fatalf("uncertain persistence = %v", err)
+				}
+				fault = durablefile.ErrReplaced
+			} else {
+				h.b.engineSwitch.err = fault
+			}
+			before := h.b.engineSwitch.store.copyJournal()
+			result, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchFenceMethod, params, "peer")
+			if !errors.Is(err, fault) {
+				t.Fatalf("storage latch bypassed by foreign receipt: %+v %v", result, err)
+			}
+			if fence, ok := result.(settings.SwitchFenceResult); ok && (fence.Fenced || fence.Receipt != nil) {
+				t.Fatalf("latched false acknowledgement = %+v", fence)
+			}
+			if !reflect.DeepEqual(h.b.engineSwitch.store.journal, before) {
+				t.Fatal("latched retry changed journal")
+			}
+			own, err := h.b.fenceEngineSwitch(context.Background(), settings.SwitchFenceRequest{RequestID: "lost"}, "")
+			if err != nil || own.Fenced || own.Receipt == nil || !reflect.DeepEqual(*own.Receipt, before.Receipts["lost"]) {
+				t.Fatalf("own receipt behind latch = %+v %v", own, err)
+			}
+		})
 	}
 }
 

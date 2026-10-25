@@ -600,9 +600,13 @@ func TestEngineSwitchStoreFenceOwnershipAndEviction(t *testing.T) {
 		t.Fatal("fence changed accepted receipt")
 	}
 	result, err = s.Fence("node", "local", "lost")
+	if err != nil || result.Receipt != nil || !result.Fenced || s.Generation() != 3 {
+		t.Fatalf("retained own proof lost behind foreign receipt: %+v %v", result, err)
+	}
+	result, err = s.Fence("node", "no-prior-proof", "lost")
 	switchStoreKind(t, err, settings.SwitchErrorReusedID)
-	if result.Receipt != nil || result.Fenced {
-		t.Fatal("foreign receipt disclosed or fenced")
+	if result.Receipt != nil || result.Fenced || s.Generation() != 3 {
+		t.Fatal("foreign receipt disclosed or fenced without prior own proof")
 	}
 	for i := 0; i < settings.MaxSwitchTombstones; i++ {
 		fence("local", fmt.Sprintf("new-%d", i))
@@ -628,6 +632,35 @@ func TestEngineSwitchStoreFenceOwnershipAndEviction(t *testing.T) {
 	}
 	if reopened.IsFenced("local", "new-0") || reopened.journal.Tombstones[0].RequestID != "new-1" {
 		t.Fatal("duplicate retry refreshed insertion order")
+	}
+}
+
+func TestEngineSwitchStoreFenceForeignReceiptDoesNotBypassStorageLatch(t *testing.T) {
+	s := switchStoreOpen(t)
+	if _, err := s.Fence("node", "peer", "lost"); err != nil {
+		t.Fatal(err)
+	}
+	accepted := switchStoreAccept(t, s, switchStoreReceipt("lost"))
+	s.write = func(path string, data []byte, mode os.FileMode) error {
+		if err := durablefile.WriteFile(path, data, mode); err != nil {
+			return err
+		}
+		return durablefile.ErrReplaced
+	}
+	if _, err := s.Fence("node", "peer", "uncertain"); !errors.Is(err, durablefile.ErrReplaced) {
+		t.Fatalf("uncertain write = %v", err)
+	}
+	before := s.copyJournal()
+	result, err := s.Fence("node", "peer", "lost")
+	if !errors.Is(err, durablefile.ErrReplaced) || result.Fenced || result.Receipt != nil {
+		t.Fatalf("latched retry = %+v %v", result, err)
+	}
+	if !reflect.DeepEqual(s.journal, before) {
+		t.Fatal("latched retry changed journal")
+	}
+	result, err = s.Fence("node", "local", "lost")
+	if err != nil || result.Fenced || result.Receipt == nil || !reflect.DeepEqual(*result.Receipt, accepted) {
+		t.Fatalf("owned receipt behind latch = %+v %v", result, err)
 	}
 }
 
