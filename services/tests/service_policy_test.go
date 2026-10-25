@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
@@ -173,18 +174,42 @@ func TestModelControlsServicePolicyWrites(t *testing.T) {
 				t.Fatal("write fixture does not contain exactly its intended raw model token")
 			}
 			params = bytes.Replace(params, []byte(`"j304-invalid-placeholder"`), []byte(tc.token), 1)
-			m, err := c.call(strconv.Itoa(30400+i), "policy:set", params, serviceCallTimeout)
-			if err != nil {
-				t.Fatalf("invalid write transport: %v", err)
-			}
-			if m.Error == nil || m.Error.Code != -32602 || len(m.Result) != 0 {
-				t.Fatal("invalid new model write was accepted")
-			}
-			if strings.Contains(m.Error.Message, "raw-") || strings.Contains(m.Error.Message, "bad") || strings.Contains(m.Error.Message, strings.Repeat("b", 513)) || strings.Contains(m.Error.Message, strings.Repeat("界", 171)) {
-				t.Fatal("invalid write echoed model text")
+			id := strconv.Itoa(30400 + i)
+			malformedWire := !utf8.Valid(params)
+			if malformedWire {
+				// The physical history guard quarantines malformed UTF-8 before
+				// policy dispatch. The valid read below is the processing barrier;
+				// this frame must not manufacture a policy validation response.
+				if err := c.request(id, "policy:set", params); err != nil {
+					t.Fatalf("malformed frame write: %v", err)
+				}
+			} else {
+				m, err := c.call(id, "policy:set", params, serviceCallTimeout)
+				if err != nil {
+					t.Fatalf("invalid write transport: %v", err)
+				}
+				if m.Error == nil || m.Error.Code != -32602 || len(m.Result) != 0 {
+					t.Fatal("invalid new model write was accepted")
+				}
+				if strings.Contains(m.Error.Message, "raw-") || strings.Contains(m.Error.Message, "bad") || strings.Contains(m.Error.Message, strings.Repeat("b", 513)) || strings.Contains(m.Error.Message, strings.Repeat("界", 171)) {
+					t.Fatal("invalid write echoed model text")
+				}
 			}
 			if !reflect.DeepEqual(fetchServicePolicy(t, c), before) || !bytes.Equal(readPolicyBytes(t, f.policyPath()), stored) {
 				t.Fatal("invalid write changed policy, revision, availability or persisted bytes")
+			}
+			if malformedWire {
+				c.mu.Lock()
+				replied := false
+				for _, frame := range c.frames {
+					if frame.ID != nil && string(*frame.ID) == id {
+						replied = true
+					}
+				}
+				c.mu.Unlock()
+				if replied {
+					t.Fatal("quarantined malformed frame reached RPC response dispatch")
+				}
 			}
 			assertPolicySnapshot(t, fetchServicePolicy(t, observer), policy, nodepolicy.Available)
 			observer.mu.Lock()

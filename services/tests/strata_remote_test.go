@@ -18,6 +18,7 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 	a, b := strataContractNew(t, true), strataContractNew(t, true)
 	const uuidA, uuidB = "strata-contract-a", "strata-contract-b"
 	const nodeB = "strata-contract-peer-b"
+	const nodeA = "strata-contract-peer-a"
 	certA := mintClusterIdentity(t, a.ClusterDir, uuidA)
 	certB := mintClusterIdentity(t, b.ClusterDir, uuidB)
 	writeActiveAdmission(t, a.ClusterDir)
@@ -38,22 +39,39 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 	if b.ControlPort == 0 {
 		t.Fatal("could not allocate a distinct private control port")
 	}
+	for attempt := 0; attempt < 8; attempt++ {
+		port := strataContractPort(t)
+		if port != a.Port && port != b.Port && port != b.ControlPort {
+			a.ControlPort = port
+			break
+		}
+	}
+	if a.ControlPort == 0 {
+		t.Fatal("could not allocate the local private control port")
+	}
 	b.strataContractStartManager(t)
 	b.strataContractStartRuntime(t)
 	a.strataContractStartManager(t)
 	a.strataContractStartRuntime(t)
 	// Supply the available-node projection normally published by the broker,
 	// so target authorization reaches the engine's capability check.
-	b.Manager.strataContractNotify(t, "engine:node-projection", map[string]any{
-		"policy":            nodepolicy.Default().Advertisement(),
-		"pausedLocally":     false,
-		"managementBlocked": false,
-	})
-	// The manager applies projections in its stdio read loop. A following
-	// manifest read is a processing barrier with no runtime mutation or probe.
-	b.Manager.strataContractOK(t, "engine:describe", map[string]string{"engine": "strata"}, nil)
+	for _, fixture := range []*strataContractFixture{a, b} {
+		fixture.Manager.strataContractNotify(t, "engine:node-projection", map[string]any{
+			"policy":            nodepolicy.Default().Advertisement(),
+			"pausedLocally":     false,
+			"managementBlocked": false,
+		})
+		// The manager applies projections in its stdio read loop. A following
+		// manifest read is a processing barrier with no runtime mutation or probe.
+		fixture.Manager.strataContractOK(t, "engine:describe", map[string]string{"engine": "strata"}, nil)
+	}
 	a.Manager.strataContractNotify(t, "discovery:nodes", noderec.GetNodesResult{
 		Nodes: []noderec.DirectoryNode{{
+			HostUUID: nodeA, Name: nodeA, IP: "127.0.0.1", ClusterUUID: uuidA, Trusted: true,
+			Services: map[noderec.ServiceKey]noderec.ServiceStatus{
+				noderec.ServiceEngineControl: {Port: a.ControlPort},
+			},
+		}, {
 			HostUUID: nodeB, Name: nodeB, IP: "127.0.0.1", ClusterUUID: uuidB, Trusted: true,
 			Services: map[noderec.ServiceKey]noderec.ServiceStatus{
 				noderec.ServiceEngineControl: {Port: b.ControlPort},
@@ -115,7 +133,7 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 
 	t.Run("remote copy rejects destination without a model store", func(t *testing.T) {
 		filesA, filesB := strataContractArtifacts(t, a.Root), strataContractArtifacts(t, b.Root)
-		const diagnostic = `model copy is not supported for this engine: "strata"`
+		const diagnostic = `destination is not ready for model copy: Model copy is unavailable for this engine on this device.`
 		type copyProgress struct {
 			OpID    string `json:"opId"`
 			Node    string `json:"node"`

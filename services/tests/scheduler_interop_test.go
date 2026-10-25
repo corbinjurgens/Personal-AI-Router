@@ -434,7 +434,7 @@ func runBlockedProxyBurst(t *testing.T, pending, pressure []int, requests int) (
 		go func() {
 			<-start
 			resp, err := client.Post(endpoint, "application/json",
-				bytes.NewReader([]byte(`{"model":"burst-model","messages":[]}`)))
+				bytes.NewReader([]byte(`{"model":"burst-model","messages":[],"stream":false}`)))
 			if err != nil {
 				results <- err
 				return

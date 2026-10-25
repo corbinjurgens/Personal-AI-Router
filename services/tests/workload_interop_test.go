@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/testbin"
 )
@@ -829,7 +830,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	// never dialed at all. The fixture feeds the public worker discovery seam,
 	// avoiding installed peers and multicast registration/teardown dependencies.
 	fx := newInterNodeCluster(t)
-	received, peerPort, restartPeer, stopPeer := startWorkloadBroadcastPeer(t, fx)
+	received, peerPort, stopPeer := startWorkloadBroadcastPeer(t, fx)
 	base := t.TempDir()
 	executable, err := os.Executable()
 	if err != nil {
@@ -986,8 +987,10 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 		}
 	}
 	var capture []json.RawMessage
-	read := func(raw json.RawMessage) workloadBroadcastFrame {
+	oldPeerConnections := make(map[string]bool)
+	read := func(observed workloadBroadcastCapture) workloadBroadcastFrame {
 		t.Helper()
+		raw := observed.Raw
 		capture = append(capture, raw)
 		var frame workloadBroadcastFrame
 		if err := json.Unmarshal(raw, &frame); err != nil {
@@ -1034,6 +1037,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	for !terminal {
 		select {
 		case raw := <-received:
+			oldPeerConnections[raw.RemoteAddr] = true
 			frame := read(raw)
 			info := frame.Params.WorkloadInfo
 			if info.Model != workloadBroadcastModel {
@@ -1065,6 +1069,32 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			t.Fatalf("timed out draining measured workload: submitted=%t terminal=%t", id != "", terminal)
 		}
 	}
+	// Prove private routing data was actually produced during the peer capture.
+	assertPrivateHistory := func() {
+		neEventually(t, "measured request has local private history", 30*time.Second, func() bool {
+			writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":"privacy-history","method":"routing:get-initial","params":{}}`)
+			reply := waitForResponse(t, msgs, 5*time.Second)
+			if reply.Error != nil {
+				if reply.Error.Code == jsonrpc.HistoryBusyCode {
+					return false
+				}
+				t.Fatalf("private history positive control: %+v", reply.Error)
+			}
+			initial, diagnostic, err := nodepolicy.DecodeRoutingHistoryInitial(reply.Result)
+			if err != nil || diagnostic.Count != 0 {
+				t.Fatalf("private history positive control: diagnostic=%+v error=%v", diagnostic, err)
+			}
+			for _, record := range initial.Requests {
+				if record.Request.OriginNodeID == fx.nodeUUID && record.Request.ProxyRunID == runID && record.Request.RequestID == id {
+					if record.State != "completed" || record.Workload == nil || record.Workload.Engine != "ollama" || record.Workload.ID != id || record.Workload.ProxyRunID != runID {
+						t.Fatalf("private history and measured workload disagree: %+v", record)
+					}
+					return true
+				}
+			}
+			return false
+		})
+	}
 	// This accepted notification follows the malformed and unknown injections
 	// on the same serialized worker stdout. Its presence is the consumption
 	// barrier; its later peer replay proves the broker retained the projection.
@@ -1095,12 +1125,16 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 				injected = true
 			}
 		case raw := <-received:
+			oldPeerConnections[raw.RemoteAddr] = true
 			read(raw)
 		case <-injectionDeadline.C:
 			t.Fatal("broker did not accept the projected worker injection control")
 		}
 	}
 
+	// Read the RPC baseline only after consuming the notification barrier;
+	// waitForResponse deliberately discards unrelated queued notifications.
+	assertPrivateHistory()
 	// Revalidate path/PID/creation time at the signal edge. The broker must
 	// replace the killed real worker and its bridge while retaining this proxy.
 	if err := p.inventory.kill(originalWorker); err != nil {
@@ -1149,11 +1183,9 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 		}
 	}
 	awaitReplacement()
-	// Close/join the old peer connections, preserve their frames, and reopen
-	// the same checked port. No buffered old-worker POST can satisfy replay.
-	for _, raw := range restartPeer() {
-		read(raw)
-	}
+	// Keep the peer available: closing its listener invalidates the replacement
+	// worker's pooled connection. A replay must arrive on a new connection after
+	// the original worker has exited, so queued predecessor traffic cannot pass.
 	replayDeadline := time.NewTimer(75 * time.Second)
 	defer replayDeadline.Stop()
 	measuredReplay, controlReplay := false, false
@@ -1161,12 +1193,17 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 		select {
 		case raw := <-received:
 			frame := read(raw)
+			if oldPeerConnections[raw.RemoteAddr] {
+				continue
+			}
 			info := frame.Params.WorkloadInfo
 			if info.ID != id && info.ID != workloadBroadcastControlID {
 				continue
 			}
-			if info.OriginatedFrom != fx.nodeUUID || info.RunID != runID || info.Engine != "ollama" || frame.Method != "workload:completed" || info.State != "completed" || info.Seq != terminalSeq || frame.Params.Resync == nil || !*frame.Params.Resync {
-				t.Fatal("restarted manager reasserted the wrong workload identity/state/sequence")
+			// Broker startup rehydration forwards canonical workload frames;
+			// only the manager's later heartbeat adds resync:true.
+			if info.OriginatedFrom != fx.nodeUUID || info.RunID != runID || info.Engine != "ollama" || frame.Method != "workload:completed" || info.State != "completed" || info.Seq != terminalSeq {
+				t.Fatalf("restarted manager replay identity/state: origin=%q run=%q engine=%q method=%q state=%q seq=%d want seq=%d", info.OriginatedFrom, info.RunID, info.Engine, frame.Method, info.State, info.Seq, terminalSeq)
 			}
 			if info.ID == id && info.Model == workloadBroadcastModel {
 				measuredReplay = true
@@ -1195,9 +1232,14 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 
 // Preserve the entire wire body: jsonrpc.Message alone would discard unknown
 // envelope members before the privacy assertion could inspect them.
-func startWorkloadBroadcastPeer(t *testing.T, fx *interNodeCluster) (<-chan json.RawMessage, int, func() []json.RawMessage, func()) {
+type workloadBroadcastCapture struct {
+	Raw        json.RawMessage
+	RemoteAddr string
+}
+
+func startWorkloadBroadcastPeer(t *testing.T, fx *interNodeCluster) (<-chan workloadBroadcastCapture, int, func()) {
 	t.Helper()
-	received := make(chan json.RawMessage, 128)
+	received := make(chan workloadBroadcastCapture, 128)
 	listener := listenFixtureLoopback(t)
 	port := listener.Addr().(*net.TCPAddr).Port
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1217,7 +1259,7 @@ func startWorkloadBroadcastPeer(t *testing.T, fx *interNodeCluster) (<-chan json
 			return
 		}
 		select {
-		case received <- json.RawMessage(body):
+		case received <- workloadBroadcastCapture{Raw: json.RawMessage(body), RemoteAddr: r.RemoteAddr}:
 			w.WriteHeader(http.StatusOK)
 		default:
 			t.Error("peer capture exceeded its frame budget")
@@ -1257,29 +1299,6 @@ func startWorkloadBroadcastPeer(t *testing.T, fx *interNodeCluster) (<-chan json
 		}
 	}
 	start(listener)
-	restart := func() []json.RawMessage {
-		t.Helper()
-		stopServing()
-		var prior []json.RawMessage
-	drain:
-		for {
-			select {
-			case raw := <-received:
-				prior = append(prior, raw)
-			default:
-				break drain
-			}
-		}
-		if err := validateFixturePort(port); err != nil {
-			t.Fatal(err)
-		}
-		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-		if err != nil {
-			t.Fatalf("reopen checked peer port %d: %v", port, err)
-		}
-		start(listener)
-		return prior
-	}
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -1290,7 +1309,7 @@ func startWorkloadBroadcastPeer(t *testing.T, fx *interNodeCluster) (<-chan json
 	}
 	t.Cleanup(stop)
 	t.Logf("fixture_listener peer_port=%d", port)
-	return received, port, restart, stop
+	return received, port, stop
 }
 
 // postPeerEvent POSTs a peer workload frame to the manager's inter-node endpoint

@@ -27,6 +27,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -280,7 +281,17 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		directory.Services[noderec.ServiceEngineControl] = noderec.ServiceStatus{Port: ec}
 		directory.ModelsByEngine = map[string][]string{"ollama": {phase04Model}}
 		f.proxies[n.uuid].send(t, engines.AddressMethod("ollama", noderec.NotifyNodes), noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{directory}}, false)
-		f.control.engines[n.uuid].send(t, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{directory}}, false)
+		// Destination-owned copy coordination resolves this manager's host ID
+		// from the broker directory, independently of its cluster principal.
+		self := f.control.directory(n)
+		self.Services[noderec.ServiceEngineControl] = noderec.ServiceStatus{Port: f.files[n.uuid].port}
+		manager := f.control.engines[n.uuid]
+		manager.send(t, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{self, directory}}, false)
+		manager.send(t, "engine:node-projection", map[string]any{
+			"policy": nodepolicy.Default().Advertisement(), "pausedLocally": false, "managementBlocked": false,
+		}, false)
+		// A read on the same stream joins both fixture inputs before copy starts.
+		manager.call(t, "engine:configured-ports", nil)
 		f.proxies[n.uuid].call(t, engines.AddressMethod("ollama", "node/select"), map[string]string{"id": peer.uuid})
 	}
 	return f
