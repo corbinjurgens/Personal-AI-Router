@@ -723,12 +723,192 @@ func TestModelCopyControlDispatchedMutationIsNotReplayed(t *testing.T) {
 	p := controlCopyRequest()
 	p.DestinationNodeID = "host-peer"
 	_, err := f.client(t, ctx).copyModel(ctx, p, nil)
-	if err == nil || !strings.Contains(err.Error(), "unknown") {
+	var unknown *copyOutcomeUnknownError
+	if !errors.As(err, &unknown) {
 		t.Fatalf("lost response=%v", err)
 	}
 	if accepted.Load() != 1 || f.directCalls.Load() != 1 || f.reverseCalls.Load() != 0 {
 		t.Fatalf("accepted=%d direct=%d reverse=%d", accepted.Load(), f.directCalls.Load(), f.reverseCalls.Load())
 	}
+}
+
+type copyLostResultWriter struct {
+	http.ResponseWriter
+	lost *atomic.Bool
+}
+
+func (w *copyLostResultWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *copyLostResultWriter) Write(data []byte) (int, error) {
+	var frame streamFrame
+	if json.Unmarshal(data, &frame) == nil && frame.Type == "result" {
+		w.lost.Store(true)
+		return 0, io.ErrClosedPipe
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func TestModelCopyControlPostPublicationLostResponseIsUnknown(t *testing.T) {
+	f := newCopyControlFixture(t)
+	destinationOutput, controllerOutput := &syncBuffer{}, &syncBuffer{}
+	f.destination.codec, f.controller.codec = NewCodec(destinationOutput), NewCodec(controllerOutput)
+	var lost atomic.Bool
+	control := (&controlServer{exec: f.destination.exec, mesh: f.authority.mesh, copyFromPeer: f.destination.copyFromPeer}).mux()
+	server := rmTLSServer(t, f.authority.mesh, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == controlCopyPath {
+			control.ServeHTTP(&copyLostResultWriter{ResponseWriter: w, lost: &lost}, r)
+			return
+		}
+		control.ServeHTTP(w, r)
+	}))
+	copyControlDirectory(f.controller, copyControlNode(t, "controller-host", "controller-certificate", nil), copyControlNode(t, "destination-host", "destination-certificate", server))
+	p := controlCopyRequest()
+	_, err := f.controller.executeCopy(remoteFixtureContext(t), p, false, nil, nil)
+	if err == nil || !lost.Load() {
+		t.Fatalf("post-publication loss=%v lost=%v", err, lost.Load())
+	}
+	var unknown *copyOutcomeUnknownError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("lost acknowledgement has no typed uncertainty: %v", err)
+	}
+	list, err := f.source.modelSourceFiles(context.Background(), p.Engine, p.Model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hashModelFiles(context.Background(), &list, func(string, int) {}); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range list.Files {
+		data, err := os.ReadFile(filepath.Join(f.destinationStore, filepath.FromSlash(file.Path)))
+		if err != nil || int64(len(data)) != file.Size || sha256Hex(data) != file.SHA256 {
+			t.Fatalf("published destination file %s differs: %v", file.Path, err)
+		}
+	}
+	check := func(name string, output *syncBuffer, stage string) {
+		t.Run(name, func(t *testing.T) {
+			terminal := 0
+			for _, frame := range output.frames() {
+				if frame.Method != "engine:remote-progress" {
+					continue
+				}
+				var cp copyProgress
+				if err := json.Unmarshal(frame.Params, &cp); err != nil {
+					t.Fatal(err)
+				}
+				switch cp.Stage {
+				case "done", "error", "cancelled", "unknown":
+				default:
+					continue
+				}
+				terminal++
+				if cp.Stage != stage || cp.OpID != p.OpID || cp.SourceNodeID != p.SourceNodeID || cp.DestinationNodeID != p.DestinationNodeID || cp.Engine != p.Engine || cp.Model != p.Model {
+					t.Fatalf("terminal=%+v want stage=%s", cp, stage)
+				}
+			}
+			if terminal != 1 {
+				t.Fatalf("terminal outcomes=%d", terminal)
+			}
+		})
+	}
+	check("destination knows publication completed", destinationOutput, "done")
+	check("controller lost publication acknowledgement", controllerOutput, "unknown")
+	if len(f.controller.activeCopies()) != 0 || len(f.destination.activeCopies()) != 0 {
+		t.Fatal("lost acknowledgement retained active state")
+	}
+}
+
+func TestModelCopyControlStreamErrorStatesStayDistinct(t *testing.T) {
+	test := func(name string, cause error, stage string, code int) {
+		t.Run(name, func(t *testing.T) {
+			s := &controlServer{copyFromPeer: func(context.Context, copyRequest, func() error, func(copyProgress)) (copyModelResult, error) {
+				return copyModelResult{}, cause
+			}}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.handleCopy(w, r, "verified-controller") }))
+			defer server.Close()
+			client := &remoteClient{base: server.URL, controlHTTP: server.Client()}
+			_, err := client.copyModel(context.Background(), controlCopyRequest(), nil)
+			if err == nil || copyErrorStage(err) != stage || rpcCode(err) != code {
+				t.Fatalf("stream outcome=%v stage=%s code=%d", err, copyErrorStage(err), rpcCode(err))
+			}
+		})
+	}
+	test("typed acknowledgement uncertainty", copyUnknown(io.ErrUnexpectedEOF), "unknown", -32000)
+	test("uncertain transport cancellation is not explicit cancel", copyUnknown(context.Canceled), "unknown", -32000)
+	test("definite error text cannot create uncertainty", errors.New("unknown model binding"), "error", -32000)
+	test("definite permission refusal keeps its code", &codedError{code: codeRemoteManagementDenied, message: remoteManagementDeniedMessage}, "error", codeRemoteManagementDenied)
+	test("explicit cancellation stays cancelled", context.Canceled, "cancelled", -32000)
+}
+
+type copyCapabilityDeadlineTransport struct {
+	base     http.RoundTripper
+	deadline chan time.Time
+}
+
+func (tr *copyCapabilityDeadlineTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	deadline, _ := req.Context().Deadline()
+	tr.deadline <- deadline
+	return tr.base.RoundTrip(req)
+}
+
+func TestModelCopyControlCapabilitiesBodyIsBounded(t *testing.T) {
+	test := func(name string, parentDeadline bool) {
+		t.Run(name, func(t *testing.T) {
+			headers, closed := make(chan struct{}), make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := io.WriteString(w, `{"version":`); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := http.NewResponseController(w).Flush(); err != nil {
+					t.Error(err)
+					return
+				}
+				close(headers)
+				<-r.Context().Done()
+				close(closed)
+			}))
+			t.Cleanup(server.Close)
+			ctx, cancel := context.WithCancel(context.Background())
+			if parentDeadline {
+				cancel()
+				ctx, cancel = context.WithTimeout(context.Background(), 100*time.Millisecond)
+			}
+			defer cancel()
+			observed := make(chan time.Time, 1)
+			client := &remoteClient{base: server.URL, controlHTTP: &http.Client{Transport: &copyCapabilityDeadlineTransport{base: server.Client().Transport, deadline: observed}}}
+			finished := make(chan error, 1)
+			go func() { _, err := client.copyCapabilities(ctx, "ollama"); finished <- err }()
+			select {
+			case <-headers:
+			case <-time.After(time.Second):
+				t.Fatal("capability headers did not arrive")
+			}
+			deadline := <-observed
+			if deadline.IsZero() || deadline.After(time.Now().Add(remoteResponseHeaderTimeout)) {
+				t.Fatal("capability GET has no bounded whole-request deadline")
+			}
+			want := error(context.DeadlineExceeded)
+			if !parentDeadline {
+				cancel()
+				want = context.Canceled
+			}
+			select {
+			case err := <-finished:
+				if !errors.Is(err, want) {
+					t.Fatalf("stalled body=%v want=%v", err, want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("capability body ignored context completion")
+			}
+			select {
+			case <-closed:
+			case <-time.After(time.Second):
+				t.Fatal("capability body remained open")
+			}
+		})
+	}
+	test("background caller gets a bounded request and can cancel body", false)
+	test("earlier parent deadline terminates stalled body", true)
 }
 
 func TestModelCopyControlReverseStreamsExactTuple(t *testing.T) {

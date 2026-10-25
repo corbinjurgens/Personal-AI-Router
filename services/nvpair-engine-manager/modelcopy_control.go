@@ -31,6 +31,35 @@ const (
 	maxActiveCopies             = 8
 )
 
+// A dispatched mutation without a trustworthy terminal acknowledgement cannot
+// be classified as a failed copy: publication may already have completed.
+type copyOutcomeUnknownError struct{ error }
+
+func (e *copyOutcomeUnknownError) Unwrap() error { return e.error }
+
+func copyUnknown(cause error) error {
+	return &copyOutcomeUnknownError{fmt.Errorf("copy acknowledgement unavailable; operation outcome is unknown: %w", cause)}
+}
+
+func copyErrorStage(err error) string {
+	var unknown *copyOutcomeUnknownError
+	if errors.As(err, &unknown) {
+		return "unknown"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	return "error"
+}
+
+func copyTerminalStage(stage string) bool {
+	switch stage {
+	case "done", "error", "cancelled", "unknown":
+		return true
+	}
+	return false
+}
+
 type copyRequest struct {
 	OpID              string `json:"opId"`
 	SourceNodeID      string `json:"sourceNodeId"`
@@ -435,28 +464,30 @@ func (m *Manager) executeCopy(parent context.Context, p copyRequest, inbound boo
 		}
 	}
 	defer func() {
-		if err != nil && ctx.Err() != nil {
+		if err != nil && errors.Is(ctx.Err(), context.Canceled) {
 			err = ctx.Err()
 		}
+		var unknown *copyOutcomeUnknownError
+		uncertain := errors.As(err, &unknown)
 		var pathError *os.PathError
 		var linkError *os.LinkError
 		if errors.As(err, &pathError) || errors.As(err, &linkError) {
 			err = &codedError{code: rpcCode(err), message: "Model copy could not access its files on the selected device."}
+			if uncertain {
+				err = copyUnknown(err)
+			}
 		}
 		cp := latest
 		cp.File = ""
 		if err != nil {
-			cp.Stage, cp.Percent, cp.Message = "error", -1, err.Error()
-			if errors.Is(err, context.Canceled) {
-				cp.Stage = "cancelled"
-			}
+			cp.Stage, cp.Percent, cp.Message = copyErrorStage(err), -1, err.Error()
 		} else {
 			cp.Stage, cp.Percent, cp.Message, cp.BytesDone, cp.BytesTotal, cp.ExportID = "done", 100, "", res.BytesTotal, res.BytesTotal, res.ExportID
 		}
 		emit(cp)
 	}()
 	progress := func(cp copyProgress) {
-		if cp.Stage != "done" && cp.Stage != "error" && cp.Stage != "cancelled" {
+		if !copyTerminalStage(cp.Stage) {
 			emit(cp)
 		}
 	}
@@ -623,7 +654,7 @@ func (s *controlServer) handleCopy(w http.ResponseWriter, r *http.Request, calle
 	go func() {
 		res, err := s.copyFromPeer(ctx, p, func() error { return s.copyAuthorization(caller) }, func(cp copyProgress) {
 			// Terminal delivery belongs exclusively to the response frame.
-			if cp.Stage == "done" || cp.Stage == "error" || cp.Stage == "cancelled" {
+			if copyTerminalStage(cp.Stage) {
 				return
 			}
 			select {
@@ -665,6 +696,7 @@ func (s *controlServer) handleCopy(w http.ResponseWriter, r *http.Request, calle
 			frame := streamFrame{Type: "result", OpID: p.OpID, Engine: p.Engine, Op: "copy"}
 			if out.err != nil {
 				frame.Type, frame.Message, frame.Code = "error", out.err.Error(), wireCodes[rpcCode(out.err)]
+				frame.Stage = copyErrorStage(out.err)
 			} else {
 				frame.Result, err = json.Marshal(out.result)
 				if err != nil {
@@ -683,6 +715,8 @@ func (s *controlServer) handleCopy(w http.ResponseWriter, r *http.Request, calle
 
 func (c *remoteClient) copyCapabilities(ctx context.Context, engine string) (copyCapabilities, error) {
 	var capability copyCapabilities
+	ctx, cancel := context.WithTimeout(ctx, remoteResponseHeaderTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+controlCopyCapabilitiesPath+"?engine="+url.QueryEscape(engine), nil)
 	if err != nil {
 		return capability, err
@@ -728,7 +762,7 @@ func (c *remoteClient) copyModel(ctx context.Context, p copyRequest, emit func(c
 	req.Close, req.GetBody = true, nil
 	resp, err := c.controlClient(false).Do(req)
 	if err != nil {
-		return res, fmt.Errorf("copy request failed; operation outcome is unknown: %w", err)
+		return res, copyUnknown(err)
 	}
 	defer resp.Body.Close()
 	stall := time.AfterFunc(copyStallTimeout, cancel)
@@ -747,25 +781,25 @@ func (c *remoteClient) copyModel(ctx context.Context, p copyRequest, emit func(c
 		// artifact manifest. Every frame has the smaller progress-frame cap.
 		data, err := reader.ReadSlice('\n')
 		if err != nil {
-			return res, fmt.Errorf("copy stream lost; operation outcome is unknown: %w", err)
+			return res, copyUnknown(err)
 		}
 		if len(data) > maxCopyProgressFrame {
-			return res, fmt.Errorf("copy frame exceeds bounds; operation outcome is unknown")
+			return res, copyUnknown(fmt.Errorf("copy frame exceeds bounds"))
 		}
 		var frame streamFrame
 		if err := json.Unmarshal(data, &frame); err != nil || frame.OpID != p.OpID || frame.Engine != p.Engine || frame.Op != "copy" {
-			return res, fmt.Errorf("invalid copy stream; operation outcome is unknown")
+			return res, copyUnknown(fmt.Errorf("invalid copy stream"))
 		}
 		switch frame.Type {
 		case "progress":
 			if frame.SourceNodeID != p.SourceNodeID || frame.DestinationNodeID != destination || frame.Model != p.Model || frame.Node != p.SourceNodeID {
-				return res, fmt.Errorf("invalid copy progress identity")
+				return res, copyUnknown(fmt.Errorf("invalid copy progress identity"))
 			}
-			if frame.Stage == "done" || frame.Stage == "error" || frame.Stage == "cancelled" {
-				return res, fmt.Errorf("unexpected terminal copy progress")
+			if copyTerminalStage(frame.Stage) {
+				return res, copyUnknown(fmt.Errorf("unexpected terminal copy progress"))
 			}
 			if frame.BytesDone < 0 || frame.BytesTotal < 0 || frame.BytesDone > frame.BytesTotal || frame.Percent < 0 || frame.Percent > 100 || frame.ExportID != "" && !lowerHex(frame.ExportID, 64) {
-				return res, fmt.Errorf("invalid copy progress counters")
+				return res, copyUnknown(fmt.Errorf("invalid copy progress counters"))
 			}
 			if frame.Stage != previous.Stage || frame.File != previous.File || frame.Percent > previous.Percent || frame.BytesDone > previous.BytesDone {
 				stall.Reset(copyStallTimeout)
@@ -775,20 +809,26 @@ func (c *remoteClient) copyModel(ctx context.Context, p copyRequest, emit func(c
 				emit(copyProgress{remoteProgress: remoteProgress{OpID: frame.OpID, Node: frame.Node, Engine: frame.Engine, Op: frame.Op, Stage: frame.Stage, Percent: frame.Percent, Message: frame.Message}, SourceNodeID: frame.SourceNodeID, DestinationNodeID: frame.DestinationNodeID, Model: frame.Model, ExportID: frame.ExportID, File: frame.File, BytesDone: frame.BytesDone, BytesTotal: frame.BytesTotal})
 			}
 		case "error":
+			if frame.Stage == "unknown" {
+				return res, &copyOutcomeUnknownError{errors.New(frame.Message)}
+			}
+			if frame.Stage == "cancelled" {
+				return res, context.Canceled
+			}
 			if code, ok := codeOfWire(frame.Code); ok {
 				return res, &codedError{code: code, message: frame.Message}
 			}
 			return res, fmt.Errorf("%s", frame.Message)
 		case "result":
 			if err := json.Unmarshal(frame.Result, &res); err != nil || !validCopyResult(res, p.Engine, p.Model) {
-				return res, fmt.Errorf("invalid terminal copy result")
+				return res, copyUnknown(fmt.Errorf("invalid terminal copy result"))
 			}
 			if p.ExpectedExportID != "" && res.ExportID != p.ExpectedExportID {
-				return res, copyConflict("copy result does not match expected export identity")
+				return res, copyUnknown(fmt.Errorf("copy result does not match expected export identity"))
 			}
 			return res, nil
 		default:
-			return res, fmt.Errorf("unrecognized copy stream frame")
+			return res, copyUnknown(fmt.Errorf("unrecognized copy stream frame"))
 		}
 	}
 }

@@ -117,21 +117,27 @@ func TestModelCopyRelayPreservesTypedRefusals(t *testing.T) {
 }
 
 func TestModelCopyRelayPreservesProgress(t *testing.T) {
-	b, client, source := modelCopyRelayFixture(t, func(_ *Peer, _ *Message) { t.Error("progress made an RPC") })
-	payload := json.RawMessage(`{"opId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","node":"msi-host","sourceNodeId":"msi-host","destinationNodeId":"joes-host","engine":"llamacpp","model":"alias","op":"copy","stage":"done","percent":100,"bytesDone":100,"bytesTotal":100,"exportId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)
-	done := make(chan struct{})
-	go func() { b.forwardEngineNotificationFrom(source, "engine:remote-progress", payload); close(done) }()
-	message, err := client.Read()
-	if err != nil {
-		t.Fatal(err)
+	test := func(name, stage string, percent int) {
+		t.Run(name, func(t *testing.T) {
+			b, client, source := modelCopyRelayFixture(t, func(_ *Peer, _ *Message) { t.Error("progress made an RPC") })
+			payload := json.RawMessage(`{"opId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","node":"msi-host","sourceNodeId":"msi-host","destinationNodeId":"joes-host","engine":"llamacpp","model":"alias","op":"copy","stage":"` + stage + `","percent":` + strconv.Itoa(percent) + `,"bytesDone":100,"bytesTotal":100,"exportId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`)
+			done := make(chan struct{})
+			go func() { b.forwardEngineNotificationFrom(source, "engine:remote-progress", payload); close(done) }()
+			message, err := client.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if message.Method != "engine:remote-progress" {
+				t.Fatalf("method=%s", message.Method)
+			}
+			requireCopyRelayJSON(t, message.Params, payload)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("progress forward did not finish")
+			}
+		})
 	}
-	if message.Method != "engine:remote-progress" {
-		t.Fatalf("method=%s", message.Method)
-	}
-	requireCopyRelayJSON(t, message.Params, payload)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("progress forward did not finish")
-	}
+	test("verified terminal byte counts", "done", 100)
+	test("unknown acknowledgement retains operation identity", "unknown", -1)
 }

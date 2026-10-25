@@ -629,6 +629,8 @@ Adapter names are `ollama`, `llamacpp`, and `lmstudio`; llama.cpp also supports
 `llama-artifacts-v1`. No filesystem paths or grant lists are returned. Missing
 routes/versions are unsupported. Source and destination layouts must intersect,
 the selected export must be supported by both, and the destination must be installed.
+The capabilities GET has a 30-second context budget covering both response
+headers and the complete bounded body, shortened by an earlier caller deadline.
 
 An explicit retry can bind `expectedExportId` to a learned custom export.
 After destination authorization/admission, a matching committed receipt is
@@ -719,8 +721,14 @@ source, `sourceNodeId`, `destinationNodeId`, `engine`, `model`, and `exportId`
 as soon as a custom listing resolves. Stages are `listing`, `hashing` (relayed from the source, `file` set),
 `checking`, `downloading` (`file`, and `bytesDone`/`bytesTotal`/`percent` over
 the whole model, about every 500 ms), `finalizing`, then a terminal `done`
-(`percent:100`), `error` or `cancelled` (`percent:-1`, `message`). Each accepted
+(`percent:100`), `error`, `cancelled` or `unknown` (`percent:-1`, `message`). Each accepted
 operation emits exactly one terminal outcome; done follows verified publication.
+Lost or invalid copy acknowledgements carry a typed unknown outcome and emit
+`stage:"unknown"`, even if the destination already published the model.
+Definite remote refusals remain errors; explicit cancellation remains cancelled.
+An unknown outcome permits explicit idempotent retry and never establishes failure
+or success from the transport error text. Copy stream error frames preserve this
+distinction in `stage` independently of their diagnostic message.
 Copy NDJSON uses the per-operation callback, bounded coalescing and checked
 write/flush errors that cancel the transfer. It does not subscribe to another
 operation's engine-wide progress. Terminal result byte counts and the custom

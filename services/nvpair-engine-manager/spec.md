@@ -920,6 +920,9 @@ Requirements:
   without paths, grants or other-peer permission state. Unsupported versions
   or missing routes are never allows. Require an installed destination and a
   shared layout, then verify the actual export against both endpoints' lists.
+  The outbound capabilities GET has the ordinary 30-second remote-control budget
+  as a context deadline covering headers and the whole bounded response body;
+  an earlier caller deadline or cancellation still wins.
   After destination authorization/admission, an identity-bound retry first
   verifies a matching committed receipt and fully hashes every confined file
   before source lookup/dial/capability checks. Verified completion may therefore
@@ -1010,12 +1013,18 @@ Requirements:
   `op:"copy"`, `stage`, `percent?`, `message` and adds `sourceNodeId`,
   `destinationNodeId`, `model`, `exportId?`, `file?`, `bytesDone?`, `bytesTotal?`.
   Per-operation callbacks stream coalesced listing/hashing/checking/downloading/
-  finalizing progress, followed by exactly one done/error/cancelled outcome.
+  finalizing progress, followed by exactly one done/error/cancelled/unknown outcome.
   Done follows verified publication and carries total byte counts. The remote
   NDJSON endpoint emits one terminal result/error frame, checks actual writes
   and flushes, and cancels on failure or request loss. Progress frames are
   bounded individually; inactivity and write deadlines bound a stalled stream.
-  Controller transport loss reports unknown outcome without replaying the POST.
+  Missing or invalid mutation acknowledgements carry a copy-specific typed
+  uncertainty error and emit terminal `stage:"unknown"` with `percent:-1`,
+  including when destination publication completed before acknowledgement loss.
+  Definite refusal/error and explicit cancellation retain their distinct stages.
+  The copy stream's terminal error frame preserves `stage:"unknown"` as
+  structured state; diagnostic message text never selects the outcome. Controller
+  transport loss never replays the POST or fabricates a definite failed copy.
 
 Stores: Ollama uses `OLLAMA_MODELS` from the engine's launch environment or this process, else `{models_dir}/models`; llama.cpp uses `LLAMA_CACHE` (the manifest sets `{models_dir}`) in the Hugging Face hub cache layout, selecting `owner/repo:TAG` files as llama.cpp does; LM Studio uses `{models_dir}` and the paths `lms ls --json` reports. The layout is selected by the manifest's `family`, so a fork with its own id and `models_dir` uses its family's layout rooted at its own store; an engine whose family has no layout is refused. One copy of a given model runs at a time per node.
 
