@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type IEngineApi, createEngineApi } from '@/ui/api/engine-api'
+import { refreshNodeManagement } from '@/ui/stores/node-configuration.store'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type {
     AvailableNode,
@@ -275,9 +276,16 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
         },
         nodePolicy: {
             get: nodeId => transport.invoke('policy:get', { nodeId }),
-            set: request => transport.invoke('policy:set', request),
+            set: request =>
+                transport.invoke('policy:set', request).then(result => {
+                    refreshNodeManagement(request.nodeId)
+                    return result
+                }),
             setAvailability: (state, nodeId) =>
-                transport.invoke('node:set-availability', { nodeId, state }),
+                transport.invoke('node:set-availability', { nodeId, state }).then(result => {
+                    refreshNodeManagement(nodeId)
+                    return result
+                }),
             onAvailabilityChanged: cb => transport.subscribePush('node:availability-changed', cb),
             onPolicyChanged: cb => transport.subscribePush('policy:changed', cb)
         },

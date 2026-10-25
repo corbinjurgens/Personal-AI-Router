@@ -201,6 +201,38 @@ describe('engine switch controls in node settings', () => {
             1
         )
     })
+    it('Refresh exposes a peer grant while connected and preserves the selected engines', async () => {
+        useConnectionStore.setState({ selfId: 'self' })
+        permission.mockResolvedValue({
+            version: 1,
+            allowed: false,
+            state: 'unreviewed',
+            revision: '1'
+        })
+        await mount()
+        await select(0, 'ollama')
+        await select(1, 'llamacpp')
+        expect(submit().disabled).toBe(true)
+        expect(container.textContent).toContain('has not granted remote management')
+
+        permission.mockResolvedValue({ version: 1, allowed: true, state: 'allowed', revision: '2' })
+        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
+        const refresh = [...container.querySelectorAll('button')].find(
+            button => button.textContent === 'Refresh readback'
+        )
+        if (!refresh) throw new Error('Refresh button missing')
+        await act(async () => refresh.click())
+
+        expect(submit().disabled).toBe(false)
+        expect(container.textContent).not.toContain('has not granted remote management')
+        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('Ollama')
+        expect(container.querySelector('[aria-label="To"]')?.textContent).toBe('llama.cpp')
+        expect(useConnectionStore.getState().connected).toBe(true)
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
+            0
+        )
+    })
+
     it('permission revoked after selection retains draft and disables mutation', async () => {
         useConnectionStore.setState({ selfId: 'self' })
         await mount()
@@ -240,6 +272,13 @@ describe('engine switch controls in node settings', () => {
             state: 'allowed',
             revision: '1'
         })
+        // Submit's status refresh independently checks permission before sending.
+        permission.mockResolvedValueOnce({
+            version: 1,
+            allowed: true,
+            state: 'allowed',
+            revision: '1'
+        })
         permission.mockResolvedValueOnce({
             version: 1,
             allowed: false,
@@ -261,7 +300,7 @@ describe('engine switch controls in node settings', () => {
         expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('Ollama')
         expect(container.querySelector('[aria-label="To"]')?.textContent).toBe('llama.cpp')
         expect(submit().disabled).toBe(true)
-        expect(permission).toHaveBeenCalledTimes(3)
+        expect(permission).toHaveBeenCalledTimes(4)
         expect(useEngineSwitchStore.getState().reserved('node-a', 'ollama')).toBe(false)
         expect(useEngineSwitchStore.getState().reserved('node-a', 'llamacpp')).toBe(false)
         permission.mockResolvedValue({ version: 1, allowed: true, state: 'allowed', revision: '3' })
