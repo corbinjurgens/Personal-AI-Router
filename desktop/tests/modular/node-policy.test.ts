@@ -33,8 +33,9 @@ import type {
     WorkloadCancelRequest
 } from '@/shared/types/node-policy'
 import { workloadCancelRequest } from '@/shared/utils/workloads'
-import type { INodePolicyApi } from '@/ui/api/pair-api'
+import type { IClusterApi, INodePolicyApi } from '@/ui/api/pair-api'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
+import { useNodeConfigurationStore, withRoles } from '@/ui/stores/node-configuration.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { workloadModelLabel } from '@/ui/utils/workload-labels'
 import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
@@ -210,6 +211,135 @@ describe('served/resident policy contract', () => {
     it('rejects Unicode case-folded model preference keys like Go', () => {
         expect(() => parsePolicyText('{"ſervedModels":[]}')).toThrow()
         expect(() => parsePolicyText('{"reſidentModels":[]}')).toThrow()
+    })
+})
+
+describe('engine binding policy transport', () => {
+    const bindings = [{ engine: 'ollama', model: 'Native/Model' }]
+
+    it.each([undefined, [], bindings])('preserves bindings %j through get, set and push', value => {
+        const policy = {
+            revision: '31',
+            routing: { accounts: [] },
+            ...(value === undefined ? {} : { engineBindings: value })
+        }
+        const document = parsePolicyDocument({ policy, availability: 'available' })
+        const params = policySetParams({
+            nodeId: 'peer',
+            policy: document.policy,
+            expectedPersistedRevision: document.revision
+        })
+        expect(params).toEqual({ nodeId: 'peer', policy, expectedPersistedRevision: '31' })
+        const saved = parsePolicySetResult({ policy: params.policy })
+        expect(parsePolicyText(saved.policy)).toEqual(policy)
+        expect(parsePolicyChange({ nodeId: 'peer', policy })?.policy).toBe(document.policy)
+        expect(parsePolicyText(withRoles(document.policy, { weak: bindings[0] }))).toEqual({
+            ...policy,
+            roles: { weak: bindings[0] }
+        })
+    })
+
+    const invalid: [string, JsonValue][] = [
+        ['null', null],
+        ['non-list', {}],
+        ['invalid engine', [{ engine: '../bad', model: 'm' }]],
+        ['empty model', [{ engine: 'ollama', model: '' }]],
+        ['alias', [{ engine: 'ollama', model: 'weak-local' }]],
+        ['control', [{ engine: 'ollama', model: 'm\u0080' }]],
+        ['encoded reference bound', [{ engine: 'ollama', model: 'm'.repeat(230) }]],
+        ['escaped reference bound', [{ engine: 'ollama', model: '<'.repeat(40) }]],
+        ['extra member', [{ engine: 'ollama', model: 'm', extra: true }]],
+        ['case variant member', [{ engine: 'ollama', Model: 'm' }]],
+        [
+            'duplicate native name',
+            [
+                { engine: 'ollama', model: 'm' },
+                { engine: 'llamacpp', model: 'm' }
+            ]
+        ],
+        [
+            'entry bound',
+            Array.from({ length: 257 }, (_, i) => ({ engine: 'ollama', model: `m${i}` }))
+        ]
+    ]
+    it.each(invalid)('rejects %s across get, set, push and drafts', (_name, engineBindings) => {
+        const policy = { revision: '31', engineBindings }
+        expect(() => parsePolicyText(JSON.stringify(policy))).toThrow()
+        expect(() => parsePolicyDocument({ policy, availability: 'available' })).toThrow()
+        expect(() => parsePolicySetResult({ policy })).toThrow()
+        expect(parsePolicyChange({ nodeId: 'peer', policy })).toBeNull()
+    })
+
+    it('refuses case variant binding keys', () => {
+        expect(() => parsePolicyText('{"EngineBindings":[]}')).toThrow()
+        expect(() => parsePolicyText('{"engineBindingſ":[]}')).toThrow()
+    })
+
+    it('keeps case-sensitive names and leaves descriptor checks to the target', () => {
+        const policy = {
+            engineBindings: [
+                { engine: 'ollama', model: 'M' },
+                { engine: 'llamacpp', model: 'm' }
+            ],
+            servedModels: [
+                { engine: 'ollama', model: 'M:latest' },
+                { engine: 'llamacpp', model: 'm' }
+            ]
+        }
+        expect(parsePolicyText(JSON.stringify(policy))).toEqual(policy)
+    })
+
+    it('preserves each bulk target binding and private fields in the actual writer', async () => {
+        const get = vi.fn<INodePolicyApi['get']>()
+        const set = vi.fn<INodePolicyApi['set']>()
+        get.mockImplementation(async target =>
+            parsePolicyDocument({
+                policy: {
+                    revision: '31',
+                    roles: {},
+                    engineBindings: [{ engine: 'ollama', model: `${target}-model` }],
+                    routing: { accounts: [] }
+                },
+                availability: 'available'
+            })
+        )
+        set.mockImplementation(async request =>
+            parsePolicySetResult({ policy: parsePolicyText(request.policy) })
+        )
+        Object.defineProperty(window, 'pairApi', {
+            configurable: true,
+            value: {
+                nodePolicy: { get, set },
+                cluster: {
+                    getRemoteManagementForNode: vi
+                        .fn<IClusterApi['getRemoteManagementForNode']>()
+                        .mockResolvedValue({
+                            version: 1,
+                            state: 'allowed',
+                            allowed: true,
+                            revision: '1'
+                        })
+                }
+            }
+        })
+        useNodeConfigurationStore.setState({ editors: new Map(), management: new Map() })
+        await useNodeConfigurationStore.getState().applyAll(
+            [
+                { targetId: 'one', nodeId: 'one' },
+                { targetId: 'two', nodeId: 'two' }
+            ],
+            { weak: bindings[0] }
+        )
+        expect(set).toHaveBeenCalledTimes(2)
+        for (const [request] of set.mock.calls) {
+            expect(request.expectedPersistedRevision).toBe('31')
+            expect(parsePolicyText(request.policy)).toEqual({
+                revision: '31',
+                roles: { weak: bindings[0] },
+                engineBindings: [{ engine: 'ollama', model: `${request.nodeId}-model` }],
+                routing: { accounts: [] }
+            })
+        }
     })
 })
 
