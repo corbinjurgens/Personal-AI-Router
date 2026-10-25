@@ -232,19 +232,14 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 		if err := os.MkdirAll(manifestDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		for _, engine := range []string{"ollama", "lmstudio", "llamacpp"} {
-			port := temporaryClusterPort(t)
-			if engine == "ollama" {
-				port = fakePort
-			}
-			task1WriteJSON(t, filepath.Join(manifestDir, engine+".json"), map[string]any{
-				"engine":  engine,
-				"runtime": map[string]any{"port": port, "ready": map[string]any{"http": "http://127.0.0.1:{port}/api/version", "status": 200}},
-				"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
-					"detect": []string{nodeInfoBin}, "runtime": map[string]any{"bin": nodeInfoBin, "port": port},
-				}},
-			})
-		}
+		writeDisabledBuiltinEngineOverrides(t, n.base, filepath.Dir(manifestDir))
+		task1WriteJSON(t, filepath.Join(manifestDir, "ollama.json"), map[string]any{
+			"engine":  "ollama",
+			"runtime": map[string]any{"port": fakePort, "ready": map[string]any{"http": "http://127.0.0.1:{port}/api/version", "status": 200}},
+			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
+				"detect": []string{nodeInfoBin}, "runtime": map[string]any{"bin": nodeInfoBin, "port": fakePort},
+			}},
+		})
 		var members []task1Member
 		for _, peer := range nodes {
 			members = append(members, task1Member{ID: peer.uuid, NodeUUID: peer.uuid, Name: peer.uuid, IPAddress: "127.0.0.1", Port: f.directory(peer).Services[noderec.ServiceCluster].Port, ClusterID: task1ClusterID, AdmissionEpoch: 1, State: "member"})

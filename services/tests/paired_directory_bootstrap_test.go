@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strconv"
 	"sync"
@@ -232,21 +231,7 @@ func newPairedBootstrapFixture(t *testing.T, blocked bool) *pairedBootstrapFixtu
 		f.local.inventory.paths = append(f.local.inventory.paths, canonical)
 	}
 	// No local installed engine or engine API participates in this test.
-	config := f.local.configDir
-	if runtime.GOOS == "darwin" {
-		config = filepath.Join(config, "Library", "Application Support")
-	}
-	for _, engine := range []string{"ollama", "lmstudio", "llamacpp"} {
-		manifestDir := filepath.Join(config, "Nvidia Corporation", "Personal AI Router", "engines")
-		if err := os.MkdirAll(manifestDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		task1WriteJSON(t, filepath.Join(manifestDir, engine+".json"), map[string]any{
-			"engine":    engine,
-			"runtime":   map[string]any{"port": temporaryClusterPort(t)},
-			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{filepath.Join(f.local.dir, "absent-engine")}}},
-		})
-	}
+	writeDisabledBuiltinEngineOverrides(t, f.local.dir, jointAppDir(f.local.configDir))
 	f.a.ports[noderec.ServiceEngineManager] = temporaryClusterPort(t)
 	f.a.ports[noderec.ServiceEngineControl] = temporaryClusterPort(t)
 	args := append(f.local.args(), "--cluster-manager-path", bridge, "--engine-manager-path", localEngine,
