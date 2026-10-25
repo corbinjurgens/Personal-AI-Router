@@ -13,13 +13,11 @@ import { copyFileSync, mkdirSync, readdirSync } from 'fs'
 // via `build.externalizeDeps: false`. Electron-vite still externalizes
 // `electron`, `electron/*`, and Node built-ins out of the box (unconditionally
 // — see node_modules/electron-vite/dist/chunks/*.js), which is all we need at
-// runtime. Leaving npm deps external would force electron-builder to copy
-// huge renderer-only packages (react, overlayscrollbars, etc.) into
-// the packaged app's `node_modules/`, even though the renderer bundles them
-// into `out/ui/` and the main/preload processes never require them at runtime.
-// Setting `externalizeDeps: false` makes Vite inline every npm dep into the
-// main and preload bundles, and the packaged app ships zero `node_modules/`
-// entries (see `files` in electron-builder.config.ts).
+// runtime. Setting `externalizeDeps: false` makes Vite inline npm imports into
+// the main and preload bundles; the renderer also bundles its dependencies
+// into `out/ui/`. Independently, electron-builder collects the locked production
+// dependency closure into the packaged app's `node_modules/` tree, including
+// renderer dependencies. The `files` whitelist does not disable that collection.
 
 function copyIconsPlugin() {
     return {

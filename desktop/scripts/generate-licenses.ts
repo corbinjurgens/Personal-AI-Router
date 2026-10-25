@@ -25,6 +25,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pkg from '../package.json' with { type: 'json' }
 import { collectGoModuleEntries, type LicenseEntry } from './collect-go-licenses'
+import { npmLicenseText } from './npm-license-text'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '..')
@@ -60,9 +61,9 @@ function normalizeLicense(licenses: string | string[] | undefined): string {
     return licenses
 }
 
-function toEntry(key: string, info: ModuleInfo): Entry {
+async function toEntry(key: string, info: ModuleInfo): Promise<Entry> {
     const { name, version } = parseKey(key)
-    const licenseText = (info.licenseText ?? '').trim()
+    const { text, source } = await npmLicenseText(key, info)
     return {
         name,
         version,
@@ -71,7 +72,8 @@ function toEntry(key: string, info: ModuleInfo): Entry {
         email: info.email ?? null,
         repository: info.repository ?? null,
         homepage: info.url ?? null,
-        licenseText: licenseText.length > 0 ? licenseText : '(no license file found in package)'
+        licenseText: text.replace(/[\t ]+$/gm, ''),
+        licenseSource: source
     }
 }
 
@@ -111,12 +113,12 @@ async function buildElectronEntry(): Promise<Entry> {
     }
 }
 
-function mergeEntries(scan: ModuleInfos, extras: Entry[]): Entry[] {
+async function mergeEntries(scan: ModuleInfos, extras: Entry[]): Promise<Entry[]> {
     const byKey = new Map<string, Entry>()
     for (const [key, info] of Object.entries(scan)) {
         const { name } = parseKey(key)
         if (name === pkg.name) continue
-        byKey.set(key, toEntry(key, info))
+        byKey.set(key, await toEntry(key, info))
     }
     for (const entry of extras) {
         byKey.set(`${entry.name}@${entry.version}`, entry)
@@ -164,6 +166,7 @@ function renderMarkdown(entries: Entry[]): string {
     for (const e of entries) {
         parts.push(`### ${e.name} ${e.version}`, '', `License: ${e.license}`, '')
         if (e.repository !== null) parts.push(`Repository: ${e.repository}`, '')
+        if (e.licenseSource) parts.push(`License source: ${e.licenseSource}`, '')
         parts.push('```text', e.licenseText, '```', '')
     }
 
@@ -188,9 +191,11 @@ async function main(): Promise<void> {
         customFormat: { licenseText: '' }
     })
 
+    // Validate npm sources before invoking Go collection or writing any output.
+    const npmEntries = await mergeEntries(prod, [])
     const electronEntry = await buildElectronEntry()
     const goEntries = await collectGoModuleEntries(servicesDir, await serviceComponentNames())
-    const entries = mergeEntries(prod, [electronEntry, ...goEntries])
+    const entries = await mergeEntries({}, [...npmEntries, electronEntry, ...goEntries])
 
     await writeFile(NOTICE_PATH, renderMarkdown(entries))
     console.log(

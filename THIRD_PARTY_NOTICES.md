@@ -188,7 +188,7 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `github.com/jaypipes/pcidb` | v1.1.1 | Apache-2.0 |
 | `github.com/lucasb-eyer/go-colorful` | v1.3.0 | MIT |
 | `github.com/mattn/go-isatty` | v0.0.20 | MIT |
-| `github.com/mattn/go-localereader` | v0.0.1 | Unknown |
+| `github.com/mattn/go-localereader` | v0.0.1 | MIT |
 | `github.com/mattn/go-runewidth` | v0.0.19 | MIT |
 | `github.com/Microsoft/go-winio` | v0.6.2 | MIT |
 | `github.com/miekg/dns` | v1.1.55 | BSD-3-Clause |
@@ -312,6 +312,8 @@ License: MIT
 
 Repository: https://github.com/asamuzaK/cssColor
 
+License source: @asamuzakjp/css-color@5.1.11/LICENSE
+
 ```text
 MIT License
 
@@ -341,6 +343,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/asamuzaK/domSelector
+
+License source: @asamuzakjp/dom-selector@7.1.1/LICENSE
 
 ```text
 MIT License
@@ -372,6 +376,8 @@ License: MIT
 
 Repository: https://github.com/asamuzaK/generationalCache
 
+License source: @asamuzakjp/generational-cache@1.0.1/LICENSE
+
 ```text
 MIT License
 
@@ -401,6 +407,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/dperini/nwsapi
+
+License source: @asamuzakjp/nwsapi@2.3.9/LICENSE
 
 ```text
 Copyright (c) 2007-2019 Diego Perini (http://www.iport.it/)
@@ -433,6 +441,8 @@ License: MIT
 
 Repository: https://github.com/bramus/specificity
 
+License source: @bramus/specificity@2.4.2/LICENSE
+
 ```text
 Copyright (c) 2022 Bramus Van Damme - https://www.bram.us/
 
@@ -461,6 +471,8 @@ License: MIT-0
 
 Repository: https://github.com/csstools/postcss-plugins
 
+License source: @csstools/color-helpers@6.0.2/LICENSE.md
+
 ```text
 MIT No Attribution (MIT-0)
 
@@ -487,6 +499,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/csstools/postcss-plugins
+
+License source: @csstools/css-calc@3.2.1/LICENSE.md
 
 ```text
 The MIT License (MIT)
@@ -517,6 +531,8 @@ License: MIT
 
 Repository: https://github.com/csstools/postcss-plugins
 
+License source: @csstools/css-color-parser@4.1.1/LICENSE.md
+
 ```text
 The MIT License (MIT)
 
@@ -545,6 +561,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/csstools/postcss-plugins
+
+License source: @csstools/css-parser-algorithms@4.0.0/LICENSE.md
 
 ```text
 The MIT License (MIT)
@@ -575,6 +593,8 @@ License: MIT-0
 
 Repository: https://github.com/csstools/postcss-plugins
 
+License source: @csstools/css-syntax-patches-for-csstree@1.1.4/LICENSE.md
+
 ```text
 MIT No Attribution (MIT-0)
 
@@ -601,6 +621,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/csstools/postcss-plugins
+
+License source: @csstools/css-tokenizer@4.0.0/LICENSE.md
 
 ```text
 The MIT License (MIT)
@@ -631,6 +653,8 @@ License: MIT
 
 Repository: https://github.com/date-fns/tz
 
+License source: @date-fns/tz@1.4.1/LICENSE.md
+
 ```text
 MIT License
 
@@ -649,103 +673,18 @@ License: BSD-2-Clause
 
 Repository: https://github.com/electron/extract-zip
 
+License source: standard SPDX text for declared license, no upstream LICENSE file at 1.0.4; https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/json/details/BSD-2-Clause.json
+
 ```text
-# @electron-internal/extract-zip
+Copyright (c) <year> <owner>
 
-> [!WARNING]
-> **Internal to the Electron project.** This package exists to serve Electron's
-> own tooling. Use from non-Electron packages is not supported: the API may
-> change to suit Electron's needs, and bug reports or feature requests from
-> outside use cases may be closed without action. If you need a general-purpose
-> extractor, use [`extract-zip`](https://github.com/max-mapper/extract-zip).
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
 
-Fast, safe, native zip extraction for Node.js. Drop-in replacement for [`extract-zip`](https://github.com/max-mapper/extract-zip).
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
 
-- **Native**: Rust core via N-API, decompression runs off the event loop.
-- **Fast**: ~2x faster on entry-heavy archives, never slower. See [benchmarks](#benchmarks).
-- **Safe**: hardened against Zip Slip, symlink escapes, absolute paths, NUL injection, Windows reserved names, and zip bombs.
-- **Zero runtime deps**: no `debug`/`yauzl`/`get-stream` in your tree.
-- **Cross-platform**: prebuilt binaries for macOS, Linux (glibc/musl), and Windows (x64/arm64).
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
 
-## Install
-
-```sh
-yarn add @electron-internal/extract-zip
-```
-
-## Usage
-
-ESM only:
-
-```js
-import extract from '@electron-internal/extract-zip';
-
-await extract('archive.zip', { dir: '/absolute/output/path' });
-```
-
-`dir` (required, absolute) is the only option. Everything else is fixed: existing
-files are overwritten, archive mode bits (masked to `0o777`) and mtimes are
-preserved, symlinks are created (skipped on Windows without symlink privilege),
-and writes are parallelised across `min(cpus, 8)` workers. The original's
-`onEntry`, `defaultDirMode`, and `defaultFileMode` are not supported, since no
-consumer in the `electron` org uses them.
-
-## Security
-
-Every entry path is verified to land inside `dir`:
-
-- `..` traversal is rejected and absolute paths are stripped, via the `zip` crate's audited `enclosed_name()`.
-- Directories are created one component at a time without following symlinks; an entry whose path crosses a symlink is rejected.
-- Symlinks are created after all files. Each target is walked against the on-disk tree and the archive's own symlink set, with relative-only hops bounded by `dir` and a hop cap, so a chain resolving outside `dir` is rejected before any link is created.
-- NUL bytes and Windows reserved device names (`CON`, `AUX`, `COM1`, trailing space/dot) are rejected on every platform.
-- Symlink targets are capped at 4 KiB; per-file output is capped at `max(2 x declared size, 1 MB)` to catch entries that lie about their size.
-
-`test/security.test.js` exercises these escapes end-to-end with hand-crafted archives.
-
-## Benchmarks
-
-`yarn bench` (Apple M-series, Node 24, median of 5):
-
-| Corpus | Zip size | `extract-zip` (JS) | this | Speedup |
-|---|--:|--:|--:|--:|
-| electron-v42.2.0-darwin-arm64 | 112 MB | 817 ms | 441 ms | 1.9x |
-| 8 x 4 MB compressible | 0.1 MB | 24 ms | 3 ms | 9.4x |
-| 2000 small text files | 0.4 MB | 372 ms | 199 ms | 1.9x |
-| 200 incompressible files | 6.2 MB | 40 ms | 22 ms | 1.8x |
-| `node_modules` | 2.9 MB | 68 ms | 37 ms | 1.9x |
-
-Extraction runs in phases: validate paths and create directories, inflate and
-write files in parallel with zlib-ng, then apply symlinks and directory
-metadata. The Electron number is gated by its single 182 MB framework binary,
-which can't be split further.
-
-## Distribution
-
-One package ships all prebuilt binaries (~2 MB gzipped): macOS
-`darwin-universal`, Windows `x64`/`arm64`, and Linux `x64`/`arm64` for both glibc
-and musl. `binding.js` picks the right one at load time. No
-`optionalDependencies`, no postinstall, no network at install.
-
-## Building from source
-
-Requires a Rust toolchain (and `cmake` for zlib-ng).
-
-```sh
-yarn install
-yarn build     # builds index.<your-platform>.node
-yarn test
-```
-
-## Releasing
-
-Releases are driven by [semantic-release](https://semantic-release.gitbook.io/)
-on every push to `main`: conventional commit messages decide the version bump,
-CI builds all targets, and the fat package is published to npm via trusted
-publishing. No manual version bumps or tags.
-
-## License
-
-BSD-2-Clause
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### @electron-toolkit/utils 4.0.0
@@ -753,6 +692,8 @@ BSD-2-Clause
 License: MIT
 
 Repository: https://github.com/alex8088/electron-toolkit
+
+License source: @electron-toolkit/utils@4.0.0/LICENSE
 
 ```text
 MIT License
@@ -784,6 +725,8 @@ License: MIT
 
 Repository: https://github.com/electron/get
 
+License source: @electron/get@5.0.0/LICENSE
+
 ```text
 MIT License
 
@@ -813,6 +756,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/ExodusOSS/bytes
+
+License source: @exodus/bytes@1.15.0/LICENSE
 
 ```text
 MIT License
@@ -844,6 +789,8 @@ License: MIT
 
 Repository: https://github.com/floating-ui/floating-ui
 
+License source: @floating-ui/core@1.7.5/LICENSE
+
 ```text
 MIT License
 
@@ -872,6 +819,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/floating-ui/floating-ui
+
+License source: @floating-ui/dom@1.7.6/LICENSE
 
 ```text
 MIT License
@@ -902,6 +851,8 @@ License: MIT
 
 Repository: https://github.com/floating-ui/floating-ui
 
+License source: @floating-ui/react-dom@2.1.8/LICENSE
+
 ```text
 MIT License
 
@@ -930,6 +881,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/floating-ui/floating-ui
+
+License source: @floating-ui/utils@0.2.11/LICENSE
 
 ```text
 MIT License
@@ -960,6 +913,8 @@ License: MIT
 
 Repository: https://github.com/paulmillr/noble-hashes
 
+License source: @noble/hashes@2.2.0/LICENSE
+
 ```text
 The MIT License (MIT)
 
@@ -987,6 +942,8 @@ THE SOFTWARE.
 ### @nvidia/foundations-react-core 1.0.0
 
 License: Apache-2.0
+
+License source: @nvidia/foundations-react-core@1.0.0/LICENSE.md
 
 ```text
 Apache License
@@ -1198,20 +1155,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/number@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `number`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/number
-# or
-$ npm install @radix-ui/number
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/primitive 1.1.3
@@ -1219,6 +1186,8 @@ This is an internal utility, not intended for public usage.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/primitive@1.1.3/LICENSE
 
 ```text
 MIT License
@@ -1250,6 +1219,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-accessible-icon@1.1.7/LICENSE
+
 ```text
 MIT License
 
@@ -1279,6 +1250,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-accordion@1.2.12/LICENSE
 
 ```text
 MIT License
@@ -1310,6 +1283,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-alert-dialog@1.1.15/LICENSE
+
 ```text
 MIT License
 
@@ -1339,6 +1314,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-arrow@1.1.7/LICENSE
 
 ```text
 MIT License
@@ -1370,6 +1347,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-aspect-ratio@1.1.7/LICENSE
+
 ```text
 MIT License
 
@@ -1399,6 +1378,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-avatar@1.1.10/LICENSE
 
 ```text
 MIT License
@@ -1430,6 +1411,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-checkbox@1.3.3/LICENSE
+
 ```text
 MIT License
 
@@ -1459,6 +1442,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-collapsible@1.1.12/LICENSE
 
 ```text
 MIT License
@@ -1490,6 +1475,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-collection@1.1.7/LICENSE
+
 ```text
 MIT License
 
@@ -1520,20 +1507,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-compose-refs@1.1.2 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-compose-refs`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-compose-refs
-# or
-$ npm install @radix-ui/react-compose-refs
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-context 1.1.2
@@ -1542,20 +1539,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-context@1.1.2 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-context`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-context
-# or
-$ npm install @radix-ui/react-context
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-context-menu 2.2.16
@@ -1563,6 +1570,8 @@ This is an internal utility, not intended for public usage.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-context-menu@2.2.16/LICENSE
 
 ```text
 MIT License
@@ -1594,6 +1603,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-dialog@1.1.15/LICENSE
+
 ```text
 MIT License
 
@@ -1624,20 +1635,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-direction@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-direction`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-direction
-# or
-$ npm install @radix-ui/react-direction
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-View docs [here](https://radix-ui.com/primitives/docs/utilities/direction).
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-dismissable-layer 1.1.11
@@ -1645,6 +1666,8 @@ View docs [here](https://radix-ui.com/primitives/docs/utilities/direction).
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-dismissable-layer@1.1.11/LICENSE
 
 ```text
 MIT License
@@ -1676,6 +1699,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-dropdown-menu@2.1.16/LICENSE
+
 ```text
 MIT License
 
@@ -1705,6 +1730,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-focus-guards@1.1.3/LICENSE
 
 ```text
 MIT License
@@ -1736,6 +1763,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-focus-scope@1.1.7/LICENSE
+
 ```text
 MIT License
 
@@ -1765,6 +1794,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-form@0.1.8/LICENSE
 
 ```text
 MIT License
@@ -1796,6 +1827,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-hover-card@1.1.15/LICENSE
+
 ```text
 MIT License
 
@@ -1826,20 +1859,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-id@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-id`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-id
-# or
-$ npm install @radix-ui/react-id
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-View docs [here](https://radix-ui.com/primitives/docs/utilities/id-provider).
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-label 2.1.7
@@ -1847,6 +1890,8 @@ View docs [here](https://radix-ui.com/primitives/docs/utilities/id-provider).
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-label@2.1.7/LICENSE
 
 ```text
 MIT License
@@ -1878,6 +1923,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-menu@2.1.16/LICENSE
+
 ```text
 MIT License
 
@@ -1907,6 +1954,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-menubar@1.1.16/LICENSE
 
 ```text
 MIT License
@@ -1938,6 +1987,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-navigation-menu@1.2.14/LICENSE
+
 ```text
 MIT License
 
@@ -1967,6 +2018,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-one-time-password-field@0.1.8/LICENSE
 
 ```text
 MIT License
@@ -1998,6 +2051,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-password-toggle-field@0.1.3/LICENSE
+
 ```text
 MIT License
 
@@ -2027,6 +2082,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-popover@1.1.15/LICENSE
 
 ```text
 MIT License
@@ -2058,6 +2115,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-popper@1.2.8/LICENSE
+
 ```text
 MIT License
 
@@ -2087,6 +2146,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-portal@1.1.9/LICENSE
 
 ```text
 MIT License
@@ -2118,6 +2179,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-presence@1.1.5/LICENSE
+
 ```text
 MIT License
 
@@ -2147,6 +2210,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-primitive@2.1.3/LICENSE
 
 ```text
 MIT License
@@ -2178,6 +2243,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-progress@1.1.7/LICENSE
+
 ```text
 MIT License
 
@@ -2207,6 +2274,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-radio-group@1.3.8/LICENSE
 
 ```text
 MIT License
@@ -2238,6 +2307,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-roving-focus@1.1.11/LICENSE
+
 ```text
 MIT License
 
@@ -2267,6 +2338,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-scroll-area@1.2.10/LICENSE
 
 ```text
 MIT License
@@ -2298,6 +2371,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-select@2.2.6/LICENSE
+
 ```text
 MIT License
 
@@ -2327,6 +2402,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-separator@1.1.7/LICENSE
 
 ```text
 MIT License
@@ -2358,6 +2435,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-slider@1.3.6/LICENSE
+
 ```text
 MIT License
 
@@ -2387,6 +2466,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-slot@1.2.3/LICENSE
 
 ```text
 MIT License
@@ -2418,6 +2499,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-switch@1.2.6/LICENSE
+
 ```text
 MIT License
 
@@ -2447,6 +2530,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-tabs@1.1.13/LICENSE
 
 ```text
 MIT License
@@ -2478,6 +2563,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-toast@1.2.15/LICENSE
+
 ```text
 MIT License
 
@@ -2507,6 +2594,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-toggle@1.1.10/LICENSE
 
 ```text
 MIT License
@@ -2538,6 +2627,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-toggle-group@1.1.11/LICENSE
+
 ```text
 MIT License
 
@@ -2567,6 +2658,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-toolbar@1.1.11/LICENSE
 
 ```text
 MIT License
@@ -2598,6 +2691,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-tooltip@1.2.8/LICENSE
+
 ```text
 MIT License
 
@@ -2628,20 +2723,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-use-callback-ref@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-use-callback-ref`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-use-callback-ref
-# or
-$ npm install @radix-ui/react-use-callback-ref
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-use-controllable-state 1.2.2
@@ -2649,6 +2754,8 @@ This is an internal utility, not intended for public usage.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-use-controllable-state@1.2.2/LICENSE
 
 ```text
 MIT License
@@ -2680,6 +2787,8 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: @radix-ui/react-use-effect-event@0.0.2/LICENSE
+
 ```text
 MIT License
 
@@ -2710,20 +2819,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-use-escape-keydown@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-use-escape-keydown`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-use-escape-keydown
-# or
-$ npm install @radix-ui/react-use-escape-keydown
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-use-is-hydrated 0.1.0
@@ -2731,6 +2850,8 @@ This is an internal utility, not intended for public usage.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-use-is-hydrated@0.1.0/LICENSE
 
 ```text
 MIT License
@@ -2762,20 +2883,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-use-layout-effect@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-use-layout-effect`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-use-layout-effect
-# or
-$ npm install @radix-ui/react-use-layout-effect
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-use-previous 1.1.1
@@ -2784,20 +2915,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-use-previous@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-use-previous`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-use-previous
-# or
-$ npm install @radix-ui/react-use-previous
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-use-rect 1.1.1
@@ -2806,20 +2947,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-use-rect@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-use-rect`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-use-rect
-# or
-$ npm install @radix-ui/react-use-rect
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-use-size 1.1.1
@@ -2828,20 +2979,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/react-use-size@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `react-use-size`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/react-use-size
-# or
-$ npm install @radix-ui/react-use-size
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @radix-ui/react-visually-hidden 1.2.3
@@ -2849,6 +3010,8 @@ This is an internal utility, not intended for public usage.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: @radix-ui/react-visually-hidden@1.2.3/LICENSE
 
 ```text
 MIT License
@@ -2880,20 +3043,30 @@ License: MIT
 
 Repository: https://github.com/radix-ui/primitives
 
+License source: upstream LICENSE at npm @radix-ui/rect@1.1.1 gitHead fcef0668a5c827e5a4baac405474d75680f9a4eb; https://raw.githubusercontent.com/radix-ui/primitives/fcef0668a5c827e5a4baac405474d75680f9a4eb/LICENSE
+
 ```text
-# `rect`
+MIT License
 
-## Installation
+Copyright (c) 2022 WorkOS
 
-```sh
-$ yarn add @radix-ui/rect
-# or
-$ npm install @radix-ui/rect
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Usage
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is an internal utility, not intended for public usage.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @shikijs/core 4.0.2
@@ -2901,6 +3074,8 @@ This is an internal utility, not intended for public usage.
 License: MIT
 
 Repository: https://github.com/shikijs/shiki
+
+License source: @shikijs/core@4.0.2/LICENSE
 
 ```text
 MIT License
@@ -2933,6 +3108,8 @@ License: MIT
 
 Repository: https://github.com/shikijs/shiki
 
+License source: @shikijs/engine-javascript@4.0.2/LICENSE
+
 ```text
 MIT License
 
@@ -2963,6 +3140,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/shikijs/shiki
+
+License source: @shikijs/langs@4.0.2/LICENSE
 
 ```text
 MIT License
@@ -2995,6 +3174,8 @@ License: MIT
 
 Repository: https://github.com/shikijs/shiki
 
+License source: @shikijs/primitive@4.0.2/LICENSE
+
 ```text
 MIT License
 
@@ -3025,6 +3206,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/shikijs/shiki
+
+License source: @shikijs/themes@4.0.2/LICENSE
 
 ```text
 MIT License
@@ -3057,6 +3240,8 @@ License: MIT
 
 Repository: https://github.com/shikijs/shiki
 
+License source: @shikijs/types@4.0.2/LICENSE
+
 ```text
 MIT License
 
@@ -3088,6 +3273,8 @@ License: MIT
 
 Repository: https://github.com/shikijs/vscode-textmate
 
+License source: @shikijs/vscode-textmate@10.0.2/LICENSE.md
+
 ```text
 The MIT License (MIT)
 
@@ -3115,6 +3302,8 @@ SOFTWARE.
 ### @tabby_ai/hijri-converter 1.0.5
 
 License: MIT
+
+License source: @tabby_ai/hijri-converter@1.0.5/LICENSE
 
 ```text
 MIT License
@@ -3146,6 +3335,8 @@ License: MIT
 
 Repository: https://github.com/DefinitelyTyped/DefinitelyTyped
 
+License source: @types/hast@3.0.4/LICENSE
+
 ```text
 MIT License
 
@@ -3175,6 +3366,8 @@ MIT License
 License: MIT
 
 Repository: https://github.com/DefinitelyTyped/DefinitelyTyped
+
+License source: @types/mdast@4.0.4/LICENSE
 
 ```text
 MIT License
@@ -3206,6 +3399,8 @@ License: MIT
 
 Repository: https://github.com/DefinitelyTyped/DefinitelyTyped
 
+License source: @types/node@24.13.2/LICENSE
+
 ```text
 MIT License
 
@@ -3235,6 +3430,8 @@ MIT License
 License: MIT
 
 Repository: https://github.com/DefinitelyTyped/DefinitelyTyped
+
+License source: @types/react@19.2.14/LICENSE
 
 ```text
 MIT License
@@ -3266,6 +3463,8 @@ License: MIT
 
 Repository: https://github.com/DefinitelyTyped/DefinitelyTyped
 
+License source: @types/react-dom@19.2.3/LICENSE
+
 ```text
 MIT License
 
@@ -3295,6 +3494,8 @@ MIT License
 License: MIT
 
 Repository: https://github.com/DefinitelyTyped/DefinitelyTyped
+
+License source: @types/trusted-types@2.0.7/LICENSE
 
 ```text
 MIT License
@@ -3326,6 +3527,8 @@ License: MIT
 
 Repository: https://github.com/DefinitelyTyped/DefinitelyTyped
 
+License source: @types/unist@3.0.3/LICENSE
+
 ```text
 MIT License
 
@@ -3356,6 +3559,8 @@ License: ISC
 
 Repository: https://github.com/ungap/structured-clone
 
+License source: @ungap/structured-clone@1.3.0/LICENSE
+
 ```text
 ISC License
 
@@ -3380,152 +3585,29 @@ License: MIT
 
 Repository: https://github.com/TooTallNate/node-agent-base
 
+License source: standard SPDX text for declared license, no upstream LICENSE file at 6.0.2; https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/json/details/MIT.json; copyright notice: https://raw.githubusercontent.com/TooTallNate/node-agent-base/c4b8ea2e1a11bae023bb09b708050a50418204e9/README.md
+
 ```text
-agent-base
-==========
-### Turn a function into an [`http.Agent`][http.Agent] instance
-[![Build Status](https://github.com/TooTallNate/node-agent-base/workflows/Node%20CI/badge.svg)](https://github.com/TooTallNate/node-agent-base/actions?workflow=Node+CI)
+Copyright (c) 2013 Nathan Rajlich <nathan@tootallnate.net>
 
-This module provides an `http.Agent` generator. That is, you pass it an async
-callback function, and it returns a new `http.Agent` instance that will invoke the
-given callback function when sending outbound HTTP requests.
+MIT License
 
-#### Some subclasses:
+Copyright (c) <year> <copyright holders>
 
-Here's some more interesting uses of `agent-base`.
-Send a pull request to list yours!
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
 
- * [`http-proxy-agent`][http-proxy-agent]: An HTTP(s) proxy `http.Agent` implementation for HTTP endpoints
- * [`https-proxy-agent`][https-proxy-agent]: An HTTP(s) proxy `http.Agent` implementation for HTTPS endpoints
- * [`pac-proxy-agent`][pac-proxy-agent]: A PAC file proxy `http.Agent` implementation for HTTP and HTTPS
- * [`socks-proxy-agent`][socks-proxy-agent]: A SOCKS proxy `http.Agent` implementation for HTTP and HTTPS
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
 
-
-Installation
-------------
-
-Install with `npm`:
-
-``` bash
-$ npm install agent-base
-```
-
-
-Example
--------
-
-Here's a minimal example that creates a new `net.Socket` connection to the server
-for every HTTP request (i.e. the equivalent of `agent: false` option):
-
-```js
-var net = require('net');
-var tls = require('tls');
-var url = require('url');
-var http = require('http');
-var agent = require('agent-base');
-
-var endpoint = 'http://nodejs.org/api/';
-var parsed = url.parse(endpoint);
-
-// This is the important part!
-parsed.agent = agent(function (req, opts) {
-  var socket;
-  // `secureEndpoint` is true when using the https module
-  if (opts.secureEndpoint) {
-    socket = tls.connect(opts);
-  } else {
-    socket = net.connect(opts);
-  }
-  return socket;
-});
-
-// Everything else works just like normal...
-http.get(parsed, function (res) {
-  console.log('"response" event!', res.headers);
-  res.pipe(process.stdout);
-});
-```
-
-Returning a Promise or using an `async` function is also supported:
-
-```js
-agent(async function (req, opts) {
-  await sleep(1000);
-  // etc…
-});
-```
-
-Return another `http.Agent` instance to "pass through" the responsibility
-for that HTTP request to that agent:
-
-```js
-agent(function (req, opts) {
-  return opts.secureEndpoint ? https.globalAgent : http.globalAgent;
-});
-```
-
-
-API
----
-
-## Agent(Function callback[, Object options]) → [http.Agent][]
-
-Creates a base `http.Agent` that will execute the callback function `callback`
-for every HTTP request that it is used as the `agent` for. The callback function
-is responsible for creating a `stream.Duplex` instance of some kind that will be
-used as the underlying socket in the HTTP request.
-
-The `options` object accepts the following properties:
-
-  * `timeout` - Number - Timeout for the `callback()` function in milliseconds. Defaults to Infinity (optional).
-
-The callback function should have the following signature:
-
-### callback(http.ClientRequest req, Object options, Function cb) → undefined
-
-The ClientRequest `req` can be accessed to read request headers and
-and the path, etc. The `options` object contains the options passed
-to the `http.request()`/`https.request()` function call, and is formatted
-to be directly passed to `net.connect()`/`tls.connect()`, or however
-else you want a Socket to be created. Pass the created socket to
-the callback function `cb` once created, and the HTTP request will
-continue to proceed.
-
-If the `https` module is used to invoke the HTTP request, then the
-`secureEndpoint` property on `options` _will be set to `true`_.
-
-
-License
--------
-
-(The MIT License)
-
-Copyright (c) 2013 Nathan Rajlich &lt;nathan@tootallnate.net&gt;
-
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-'Software'), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
-
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-[http-proxy-agent]: https://github.com/TooTallNate/node-http-proxy-agent
-[https-proxy-agent]: https://github.com/TooTallNate/node-https-proxy-agent
-[pac-proxy-agent]: https://github.com/TooTallNate/node-pac-proxy-agent
-[socks-proxy-agent]: https://github.com/TooTallNate/node-socks-proxy-agent
-[http.Agent]: https://nodejs.org/api/http.html#http_class_http_agent
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### argparse 2.0.1
@@ -3533,6 +3615,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: Python-2.0
 
 Repository: https://github.com/nodeca/argparse
+
+License source: argparse@2.0.1/LICENSE
 
 ```text
 A. HISTORY OF THE SOFTWARE
@@ -3797,6 +3881,8 @@ License: MIT
 
 Repository: https://github.com/theKashey/aria-hidden
 
+License source: aria-hidden@1.2.6/LICENSE
+
 ```text
 MIT License
 
@@ -3826,6 +3912,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/alexindigo/asynckit
+
+License source: asynckit@0.4.0/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -3857,6 +3945,8 @@ License: MIT
 
 Repository: https://github.com/axios/axios
 
+License source: axios@1.18.0/LICENSE
+
 ```text
 # Copyright (c) 2014-present Matt Zabriskie & Collaborators
 
@@ -3872,6 +3962,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 License: MIT
 
 Repository: https://github.com/lojjic/bidi-js
+
+License source: bidi-js@1.0.3/LICENSE.txt
 
 ```text
 Copyright (c) 2021 Jason Johnston
@@ -3904,6 +3996,8 @@ License: MIT
 
 Repository: https://github.com/electron-userland/electron-builder
 
+License source: builder-util-runtime@9.7.0/LICENSE
+
 ```text
 The MIT License (MIT)
 
@@ -3934,6 +4028,8 @@ License: MIT
 
 Repository: https://github.com/ljharb/call-bind-apply-helpers
 
+License source: call-bind-apply-helpers@1.0.2/LICENSE
+
 ```text
 MIT License
 
@@ -3963,6 +4059,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/wooorm/ccount
+
+License source: ccount@2.0.1/license
 
 ```text
 (The MIT License)
@@ -3995,6 +4093,8 @@ License: MIT
 
 Repository: https://github.com/wooorm/character-entities-html4
 
+License source: character-entities-html4@2.1.0/license
+
 ```text
 (The MIT License)
 
@@ -4026,6 +4126,8 @@ License: MIT
 
 Repository: https://github.com/wooorm/character-entities-legacy
 
+License source: character-entities-legacy@3.0.0/license
+
 ```text
 (The MIT License)
 
@@ -4056,6 +4158,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: Apache-2.0
 
 Repository: https://github.com/joe-bell/cva
+
+License source: class-variance-authority@0.7.1/LICENSE
 
 ```text
 Apache License
@@ -4256,6 +4360,8 @@ License: MIT
 
 Repository: https://github.com/lukeed/clsx
 
+License source: clsx@2.1.1/license
+
 ```text
 MIT License
 
@@ -4273,6 +4379,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 License: MIT
 
 Repository: https://github.com/felixge/node-combined-stream
+
+License source: combined-stream@1.0.8/License
 
 ```text
 Copyright (c) 2011 Debuggable Limited <felix@debuggable.com>
@@ -4301,6 +4409,8 @@ THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/wooorm/comma-separated-tokens
+
+License source: comma-separated-tokens@2.0.3/license
 
 ```text
 (The MIT License)
@@ -4333,6 +4443,8 @@ License: MIT
 
 Repository: https://github.com/csstree/csstree
 
+License source: css-tree@3.2.1/LICENSE
+
 ```text
 Copyright (C) 2016-2026 by Roman Dvornov
 
@@ -4360,6 +4472,8 @@ THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/frenic/csstype
+
+License source: csstype@3.2.3/LICENSE
 
 ```text
 Copyright (c) 2017-2018 Fredrik Nicol
@@ -4389,6 +4503,8 @@ License: MIT
 
 Repository: https://github.com/jsdom/data-urls
 
+License source: data-urls@7.0.0/LICENSE.txt
+
 ```text
 Copyright © Domenic Denicola <d@domenic.me>
 
@@ -4404,6 +4520,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 License: MIT
 
 Repository: https://github.com/date-fns/date-fns
+
+License source: date-fns@4.1.0/LICENSE.md
 
 ```text
 MIT License
@@ -4435,6 +4553,8 @@ License: MIT
 
 Repository: https://github.com/date-fns-jalali/date-fns-jalali
 
+License source: date-fns-jalali@4.1.0-0/LICENSE.md
+
 ```text
 MIT License
 
@@ -4465,6 +4585,8 @@ License: MIT
 
 Repository: https://github.com/debug-js/debug
 
+License source: debug@4.4.3/LICENSE
+
 ```text
 (The MIT License)
 
@@ -4492,6 +4614,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/MikeMcl/decimal.js
+
+License source: decimal.js@10.6.0/LICENCE.md
 
 ```text
 The MIT Licence.
@@ -4524,6 +4648,8 @@ License: MIT
 
 Repository: https://github.com/felixge/node-delayed-stream
 
+License source: delayed-stream@1.0.0/License
+
 ```text
 Copyright (c) 2011 Debuggable Limited <felix@debuggable.com>
 
@@ -4551,6 +4677,8 @@ THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/lukeed/dequal
+
+License source: dequal@2.0.3/license
 
 ```text
 The MIT License (MIT)
@@ -4582,6 +4710,8 @@ License: MIT
 
 Repository: https://github.com/thekashey/detect-node
 
+License source: detect-node-es@1.1.0/LICENSE
+
 ```text
 MIT License
 
@@ -4611,6 +4741,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/wooorm/devlop
+
+License source: devlop@1.1.0/license
 
 ```text
 (The MIT License)
@@ -4642,6 +4774,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: (MPL-2.0 OR Apache-2.0)
 
 Repository: https://github.com/cure53/DOMPurify
+
+License source: dompurify@3.4.13/LICENSE
 
 ```text
 Apache License
@@ -4853,6 +4987,8 @@ License: MIT
 
 Repository: https://github.com/es-shims/dunder-proto
 
+License source: dunder-proto@1.0.1/LICENSE
+
 ```text
 MIT License
 
@@ -4913,6 +5049,8 @@ License: MIT
 
 Repository: https://github.com/megahertz/electron-log
 
+License source: electron-log@5.4.4/LICENSE
+
 ```text
 The MIT License (MIT)
 
@@ -4942,6 +5080,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/electron-userland/electron-builder
+
+License source: electron-updater@6.8.9/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -4973,6 +5113,8 @@ License: BSD-2-Clause
 
 Repository: https://github.com/fb55/entities
 
+License source: entities@8.0.0/LICENSE
+
 ```text
 Copyright (c) Felix Böhm
 All rights reserved.
@@ -4993,6 +5135,8 @@ License: MIT
 
 Repository: https://github.com/sindresorhus/env-paths
 
+License source: env-paths@3.0.0/license
+
 ```text
 MIT License
 
@@ -5010,6 +5154,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 License: MIT
 
 Repository: https://github.com/ljharb/es-define-property
+
+License source: es-define-property@1.0.1/LICENSE
 
 ```text
 MIT License
@@ -5041,6 +5187,8 @@ License: MIT
 
 Repository: https://github.com/ljharb/es-errors
 
+License source: es-errors@1.3.0/LICENSE
+
 ```text
 MIT License
 
@@ -5070,6 +5218,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/ljharb/es-object-atoms
+
+License source: es-object-atoms@1.1.1/LICENSE
 
 ```text
 MIT License
@@ -5101,6 +5251,8 @@ License: MIT
 
 Repository: https://github.com/es-shims/es-set-tostringtag
 
+License source: es-set-tostringtag@2.1.0/LICENSE
+
 ```text
 MIT License
 
@@ -5131,88 +5283,30 @@ License: MIT
 
 Repository: https://github.com/aholachek/react-flip-toolkit
 
+License source: upstream LICENSE at npm flip-toolkit@7.2.4 gitHead cd72b6b0cee32b4f4037a0ffa0b3ba5805759480; https://raw.githubusercontent.com/aholachek/react-flip-toolkit/cd72b6b0cee32b4f4037a0ffa0b3ba5805759480/LICENSE
+
 ```text
-# flip-toolkit
+MIT License
 
-[![Minified & Gzipped size](https://badgen.net/bundlephobia/minzip/flip-toolkit)](https://bundlephobia.com/result?p=flip-toolkit)
-[![MIT license](https://badgen.net/npm/license/react-flip-toolkit)](http://opensource.org/licenses/MIT)
-[![npm version](https://badgen.net/npm/v/flip-toolkit)](https://npmjs.org/package/flip-toolkit 'View this project on npm')
+Copyright (c) 2018 Alex Holachek
 
-Using `Vue.js` ? Try [vue-flip-toolkit](https://github.com/mattrothenberg/vue-flip-toolkit).
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Basic Example
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-[**Fork this example on CodeSandbox**](https://codesandbox.io/s/5v1k1nwz8l)
-
-```js
-import { Flipper } from 'flip-toolkit'
-const container = document.querySelector('.container')
-const square = document.querySelector('.square')
-const innerSquare = document.querySelector('.inner-square')
-
-const flipper = new Flipper({ element: container })
-
-// add flipped children to the parent
-flipper.addFlipped({
-  element: square,
-  // assign a unique id to the element
-  flipId: 'square',
-  onStart: () => console.log('animation started!'),
-  onSpringUpdate: springValue =>
-    console.log(`current spring value: ${springValue}`),
-  onComplete: () => console.log('animation completed!')
-})
-
-// to add an inverted child
-// (so that the text doesn't warp)
-// use this method with
-// a reference to the parent element
-flipper.addInverted({
-  element: innerSquare,
-  parent: square
-})
-
-square.addEventListener('click', () => {
-  // record positions before they change
-  flipper.recordBeforeUpdate()
-  square.classList.toggle('big-square')
-  // record new positions, and begin animations
-  flipper.update()
-})
-```
-
-To learn more about which configuration options are available, [check out the code for the `Flipper` class here](../react-flip-toolkit/src/FlipToolkit/Flipper.ts) or [read the docs for `react-flip-toolkit`](../react-flip-toolkit/README.md)
-
-## Spring
-
-`flip-toolkit` also exports a utility function, `spring`, that can be used to orchestrate non-FLIP animations.
-
-[**Fork this example on CodeSandbox**](https://codesandbox.io/s/spring-example-6xw5p)
-
-```js
-import { spring } from "flip-toolkit";
-
-const container = document.querySelector(".container");
-const squares = [...container.querySelectorAll(".square")];
-
-squares.forEach((el, i) => {
-  spring({
-    config: "wobbly",
-    values: {
-      translateY: [-15, 0],
-      opacity: [0, 1]
-    },
-    onUpdate: ({ translateY, opacity }) => {
-      el.style.opacity = opacity;
-      el.style.transform = `translateY(${translateY}px)`;
-    },
-    delay: i * 25,
-    onComplete: () => {
-      // add callback logic here if necessary
-    }
-  });
-});
-```
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### follow-redirects 1.16.0
@@ -5220,6 +5314,8 @@ squares.forEach((el, i) => {
 License: MIT
 
 Repository: https://github.com/follow-redirects/follow-redirects
+
+License source: follow-redirects@1.16.0/LICENSE
 
 ```text
 Copyright 2014–present Olivier Lalonde <olalonde@gmail.com>, James Talmage <james@talmage.io>, Ruben Verborgh
@@ -5247,6 +5343,8 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/form-data/form-data
+
+License source: form-data@4.0.6/License
 
 ```text
 Copyright (c) 2012 Felix Geisendörfer (felix@debuggable.com) and contributors
@@ -5276,6 +5374,8 @@ License: MIT
 
 Repository: https://github.com/jprichardson/node-fs-extra
 
+License source: fs-extra@10.1.0/LICENSE
+
 ```text
 (The MIT License)
 
@@ -5299,6 +5399,8 @@ OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHE
 License: MIT
 
 Repository: https://github.com/Raynos/function-bind
+
+License source: function-bind@1.1.2/LICENSE
 
 ```text
 Copyright (c) 2013 Raynos.
@@ -5327,6 +5429,8 @@ THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/ljharb/get-intrinsic
+
+License source: get-intrinsic@1.3.0/LICENSE
 
 ```text
 MIT License
@@ -5358,6 +5462,8 @@ License: MIT
 
 Repository: https://github.com/theKashey/get-nonce
 
+License source: get-nonce@1.0.1/LICENSE
+
 ```text
 MIT License
 
@@ -5387,6 +5493,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/ljharb/get-proto
+
+License source: get-proto@1.0.1/LICENSE
 
 ```text
 MIT License
@@ -6849,6 +6957,208 @@ Apache License
       defend, and hold each Contributor harmless for any liability
       incurred by, or claims asserted against, such Contributor by reason
       of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
 ```
 
 ### github.com/lucasb-eyer/go-colorful v1.3.0
@@ -6887,12 +7197,31 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### github.com/mattn/go-localereader v0.0.1
 
-License: Unknown
+License: MIT
 
 Repository: https://github.com/mattn/go-localereader
 
+License source: standard SPDX text for declared license, no upstream LICENSE file at v0.0.1; MIT declared in https://raw.githubusercontent.com/mattn/go-localereader/6338b4c69507fb1f9edba3db33882a8e9ab9bfa8/README.md; https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/json/details/MIT.json
+
 ```text
-(no license file found in module)
+MIT License
+
+Copyright (c) <year> <copyright holders>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### github.com/mattn/go-runewidth v0.0.19
@@ -7432,6 +7761,8 @@ License: MIT
 
 Repository: https://github.com/ljharb/gopd
 
+License source: gopd@1.2.0/LICENSE
+
 ```text
 MIT License
 
@@ -7512,6 +7843,20 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+Copyright 2011-2016 Canonical Ltd.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 ```
 
 ### graceful-fs 4.2.11
@@ -7519,6 +7864,8 @@ limitations under the License.
 License: ISC
 
 Repository: https://github.com/isaacs/node-graceful-fs
+
+License source: graceful-fs@4.2.11/LICENSE
 
 ```text
 The ISC License
@@ -7543,6 +7890,8 @@ IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 License: MIT
 
 Repository: https://github.com/inspect-js/has-symbols
+
+License source: has-symbols@1.1.0/LICENSE
 
 ```text
 MIT License
@@ -7574,6 +7923,8 @@ License: MIT
 
 Repository: https://github.com/inspect-js/has-tostringtag
 
+License source: has-tostringtag@1.0.2/LICENSE
+
 ```text
 MIT License
 
@@ -7603,6 +7954,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/inspect-js/hasOwn
+
+License source: hasown@2.0.4/LICENSE
 
 ```text
 MIT License
@@ -7634,6 +7987,8 @@ License: MIT
 
 Repository: https://github.com/syntax-tree/hast-util-to-html
 
+License source: hast-util-to-html@9.0.5/license
+
 ```text
 (The MIT License)
 
@@ -7664,6 +8019,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/syntax-tree/hast-util-whitespace
+
+License source: hast-util-whitespace@3.0.0/license
 
 ```text
 (The MIT License)
@@ -7763,6 +8120,8 @@ License: MIT
 
 Repository: https://github.com/jsdom/html-encoding-sniffer
 
+License source: html-encoding-sniffer@6.0.0/LICENSE.txt
+
 ```text
 Copyright © Domenic Denicola <d@domenic.me>
 
@@ -7778,6 +8137,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 License: MIT
 
 Repository: https://github.com/wooorm/html-void-elements
+
+License source: html-void-elements@3.0.0/license
 
 ```text
 (The MIT License)
@@ -7810,144 +8171,29 @@ License: MIT
 
 Repository: https://github.com/TooTallNate/node-https-proxy-agent
 
+License source: standard SPDX text for declared license, no upstream LICENSE file at 5.0.1; https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/json/details/MIT.json; copyright notice: https://raw.githubusercontent.com/TooTallNate/node-https-proxy-agent/d0d80cc0482f20495aa8595f802e1a9f3b1b3409/README.md
+
 ```text
-https-proxy-agent
-================
-### An HTTP(s) proxy `http.Agent` implementation for HTTPS
-[![Build Status](https://github.com/TooTallNate/node-https-proxy-agent/workflows/Node%20CI/badge.svg)](https://github.com/TooTallNate/node-https-proxy-agent/actions?workflow=Node+CI)
+Copyright (c) 2013 Nathan Rajlich <nathan@tootallnate.net>
 
-This module provides an `http.Agent` implementation that connects to a specified
-HTTP or HTTPS proxy server, and can be used with the built-in `https` module.
+MIT License
 
-Specifically, this `Agent` implementation connects to an intermediary "proxy"
-server and issues the [CONNECT HTTP method][CONNECT], which tells the proxy to
-open a direct TCP connection to the destination server.
+Copyright (c) <year> <copyright holders>
 
-Since this agent implements the CONNECT HTTP method, it also works with other
-protocols that use this method when connecting over proxies (i.e. WebSockets).
-See the "Examples" section below for more.
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
 
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
 
-Installation
-------------
-
-Install with `npm`:
-
-``` bash
-$ npm install https-proxy-agent
-```
-
-
-Examples
---------
-
-#### `https` module example
-
-``` js
-var url = require('url');
-var https = require('https');
-var HttpsProxyAgent = require('https-proxy-agent');
-
-// HTTP/HTTPS proxy to connect to
-var proxy = process.env.http_proxy || 'http://168.63.76.32:3128';
-console.log('using proxy server %j', proxy);
-
-// HTTPS endpoint for the proxy to connect to
-var endpoint = process.argv[2] || 'https://graph.facebook.com/tootallnate';
-console.log('attempting to GET %j', endpoint);
-var options = url.parse(endpoint);
-
-// create an instance of the `HttpsProxyAgent` class with the proxy server information
-var agent = new HttpsProxyAgent(proxy);
-options.agent = agent;
-
-https.get(options, function (res) {
-  console.log('"response" event!', res.headers);
-  res.pipe(process.stdout);
-});
-```
-
-#### `ws` WebSocket connection example
-
-``` js
-var url = require('url');
-var WebSocket = require('ws');
-var HttpsProxyAgent = require('https-proxy-agent');
-
-// HTTP/HTTPS proxy to connect to
-var proxy = process.env.http_proxy || 'http://168.63.76.32:3128';
-console.log('using proxy server %j', proxy);
-
-// WebSocket endpoint for the proxy to connect to
-var endpoint = process.argv[2] || 'ws://echo.websocket.org';
-var parsed = url.parse(endpoint);
-console.log('attempting to connect to WebSocket %j', endpoint);
-
-// create an instance of the `HttpsProxyAgent` class with the proxy server information
-var options = url.parse(proxy);
-
-var agent = new HttpsProxyAgent(options);
-
-// finally, initiate the WebSocket connection
-var socket = new WebSocket(endpoint, { agent: agent });
-
-socket.on('open', function () {
-  console.log('"open" event!');
-  socket.send('hello world');
-});
-
-socket.on('message', function (data, flags) {
-  console.log('"message" event! %j %j', data, flags);
-  socket.close();
-});
-```
-
-API
----
-
-### new HttpsProxyAgent(Object options)
-
-The `HttpsProxyAgent` class implements an `http.Agent` subclass that connects
-to the specified "HTTP(s) proxy server" in order to proxy HTTPS and/or WebSocket
-requests. This is achieved by using the [HTTP `CONNECT` method][CONNECT].
-
-The `options` argument may either be a string URI of the proxy server to use, or an
-"options" object with more specific properties:
-
-  * `host` - String - Proxy host to connect to (may use `hostname` as well). Required.
-  * `port` - Number - Proxy port to connect to. Required.
-  * `protocol` - String - If `https:`, then use TLS to connect to the proxy.
-  * `headers` - Object - Additional HTTP headers to be sent on the HTTP CONNECT method.
-  * Any other options given are passed to the `net.connect()`/`tls.connect()` functions.
-
-
-License
--------
-
-(The MIT License)
-
-Copyright (c) 2013 Nathan Rajlich &lt;nathan@tootallnate.net&gt;
-
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-'Software'), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
-
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
-TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
-SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-[CONNECT]: http://en.wikipedia.org/wiki/HTTP_tunnel#HTTP_CONNECT_Tunneling
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### is-potential-custom-element-name 1.0.1
@@ -7955,6 +8201,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/mathiasbynens/is-potential-custom-element-name
+
+License source: is-potential-custom-element-name@1.0.1/LICENSE-MIT.txt
 
 ```text
 Copyright Mathias Bynens <https://mathiasbynens.be/>
@@ -7984,6 +8232,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/kkomelin/isomorphic-dompurify
+
+License source: isomorphic-dompurify@3.13.0/LICENSE
 
 ```text
 MIT License
@@ -8015,6 +8265,8 @@ License: MIT
 
 Repository: https://github.com/lydell/js-tokens
 
+License source: js-tokens@4.0.0/LICENSE
+
 ```text
 The MIT License (MIT)
 
@@ -8045,6 +8297,8 @@ License: MIT
 
 Repository: https://github.com/nodeca/js-yaml
 
+License source: js-yaml@4.2.0/LICENSE
+
 ```text
 (The MIT License)
 
@@ -8074,6 +8328,8 @@ THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/jsdom/jsdom
+
+License source: jsdom@29.1.1/LICENSE.txt
 
 ```text
 Copyright (c) 2010 Elijah Insua
@@ -8106,6 +8362,8 @@ License: MIT
 
 Repository: https://github.com/jprichardson/node-jsonfile
 
+License source: jsonfile@6.2.1/LICENSE
+
 ```text
 (The MIT License)
 
@@ -8130,18 +8388,27 @@ License: MIT
 
 Repository: https://github.com/develar/lazy-val
 
+License source: standard SPDX text for declared license, no upstream LICENSE file at 1.0.5; https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/json/details/MIT.json
+
 ```text
-## lazy-val 
+MIT License
 
-Lazy value.
+Copyright (c) <year> <copyright holders>
 
-```typescript
-class Lazy<T> {
-    constructor(creator: () => Promise<T>)
-    readonly hasValue: boolean
-    value: Promise<T>
-}
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### lodash.escaperegexp 4.1.2
@@ -8149,6 +8416,8 @@ class Lazy<T> {
 License: MIT
 
 Repository: https://github.com/lodash/lodash
+
+License source: lodash.escaperegexp@4.1.2/LICENSE
 
 ```text
 Copyright jQuery Foundation and other contributors <https://jquery.org/>
@@ -8206,6 +8475,8 @@ License: MIT
 
 Repository: https://github.com/lodash/lodash
 
+License source: lodash.isequal@4.5.0/LICENSE
+
 ```text
 Copyright JS Foundation and other contributors <https://js.foundation/>
 
@@ -8262,6 +8533,8 @@ License: MIT
 
 Repository: https://github.com/zertosh/loose-envify
 
+License source: loose-envify@1.4.0/LICENSE
+
 ```text
 The MIT License (MIT)
 
@@ -8291,6 +8564,8 @@ THE SOFTWARE.
 License: BlueOak-1.0.0
 
 Repository: https://github.com/isaacs/node-lru-cache
+
+License source: lru-cache@11.3.6/LICENSE.md
 
 ```text
 # Blue Oak Model License
@@ -8356,6 +8631,8 @@ License: ISC
 
 Repository: https://github.com/lucide-icons/lucide
 
+License source: lucide-react@1.16.0/LICENSE
+
 ```text
 ISC License
 
@@ -8408,6 +8685,8 @@ License: MIT
 
 Repository: https://github.com/es-shims/math-intrinsics
 
+License source: math-intrinsics@1.1.0/LICENSE
+
 ```text
 MIT License
 
@@ -8437,6 +8716,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/syntax-tree/mdast-util-to-hast
+
+License source: mdast-util-to-hast@13.2.1/license
 
 ```text
 (The MIT License)
@@ -8468,6 +8749,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: CC0-1.0
 
 Repository: https://github.com/mdn/data
+
+License source: mdn-data@2.27.1/LICENSE
 
 ```text
 CC0 1.0 Universal
@@ -8594,6 +8877,8 @@ License: MIT
 
 Repository: https://github.com/micromark/micromark.git#main
 
+License source: micromark-util-character@2.1.1/license
+
 ```text
 (The MIT License)
 
@@ -8624,6 +8909,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/micromark/micromark.git#main
+
+License source: micromark-util-encode@2.0.1/license
 
 ```text
 (The MIT License)
@@ -8656,6 +8943,8 @@ License: MIT
 
 Repository: https://github.com/micromark/micromark.git#main
 
+License source: micromark-util-sanitize-uri@2.0.1/license
+
 ```text
 (The MIT License)
 
@@ -8686,6 +8975,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/micromark/micromark.git#main
+
+License source: micromark-util-symbol@2.0.1/license
 
 ```text
 (The MIT License)
@@ -8718,6 +9009,8 @@ License: MIT
 
 Repository: https://github.com/micromark/micromark.git#main
 
+License source: micromark-util-types@2.0.2/license
+
 ```text
 (The MIT License)
 
@@ -8748,6 +9041,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/jshttp/mime-db
+
+License source: mime-db@1.52.0/LICENSE
 
 ```text
 (The MIT License)
@@ -8781,6 +9076,8 @@ License: MIT
 
 Repository: https://github.com/jshttp/mime-types
 
+License source: mime-types@2.1.35/LICENSE
+
 ```text
 (The MIT License)
 
@@ -8813,6 +9110,8 @@ License: MIT
 
 Repository: https://github.com/vercel/ms
 
+License source: ms@2.1.3/license.md
+
 ```text
 The MIT License (MIT)
 
@@ -8842,6 +9141,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/sindresorhus/object-assign
+
+License source: object-assign@4.1.1/license
 
 ```text
 The MIT License (MIT)
@@ -8873,6 +9174,8 @@ License: MIT
 
 Repository: https://github.com/slevithan/oniguruma-parser
 
+License source: oniguruma-parser@0.12.2/LICENSE
+
 ```text
 MIT License
 
@@ -8902,6 +9205,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/slevithan/oniguruma-to-es
+
+License source: oniguruma-to-es@4.3.6/LICENSE
 
 ```text
 MIT License
@@ -8933,1509 +9238,30 @@ License: MIT
 
 Repository: https://github.com/KingSora/OverlayScrollbars
 
+License source: upstream LICENSE at npm overlayscrollbars@2.15.1 gitHead ade6e45d84e434355e075ed58add75c431eb3b3e; https://raw.githubusercontent.com/KingSora/OverlayScrollbars/ade6e45d84e434355e075ed58add75c431eb3b3e/LICENSE
+
 ```text
-<div align="center">
-  <a href="https://kingsora.github.io/OverlayScrollbars">
-    <img src="https://raw.githubusercontent.com/KingSora/OverlayScrollbars/master/logo/logo.png" width="160" height="160" alt="OverlayScrollbars">
-  </a>
-</div>
-<br />
-<div align="center">
-
-  [![Downloads](https://img.shields.io/npm/dm/overlayscrollbars.svg?style=flat-square)](https://www.npmjs.com/package/overlayscrollbars)
-  [![Version](https://img.shields.io/npm/v/overlayscrollbars.svg?style=flat-square)](https://www.npmjs.com/package/overlayscrollbars)
-  [![License](https://img.shields.io/github/license/kingsora/overlayscrollbars.svg?style=flat-square)](https://github.com/KingSora/OverlayScrollbars/blob/master/LICENSE)
-  [![Code Coverage](https://img.shields.io/codecov/c/github/KingSora/OverlayScrollbars?style=flat-square)](https://app.codecov.io/gh/KingSora/OverlayScrollbars)
-  [![Max. Bundle Size](https://img.shields.io/bundlephobia/minzip/overlayscrollbars?label=max.%20bundle%20size&style=flat-square)](https://bundlephobia.com/package/overlayscrollbars)
-  
-</div>
-<h3 align="center">
-  <a href="https://kingsora.github.io/OverlayScrollbars">Website</a>
-  &nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="https://kingsora.github.io/OverlayScrollbars/examples">Examples</a>
-</h3>
-
-# OverlayScrollbars
-
-> A javascript scrollbar plugin that hides the native scrollbars, provides custom styleable overlay scrollbars, and preserves the native functionality and feel.
-
-## Why?
-
-I created this plugin because I hate ugly and space-consuming scrollbars. Similar plugins didn't meet my requirements in terms of features, quality, simplicity, license or browser support.
-
-## Goals & Features
-
- - Simple, powerful and well-documented API.
- - High browser compatibility - **Firefox 59+**, **Chrome 55+**, **Opera 42+**, **Edge 15+** and **Safari 10+**.
- - **Fully Accessible** - Native scrolling behavior is fully preserved.
- - Can run on the server (`Node`, `Deno` and `Bun`) - **SSR**, **SSG** and **ISR** support.
- - Tested on various devices - **Mobile**, **Desktop** and **Tablet**.
- - Tested with various (and mixed) inputs - **Mouse**, **Touch** and **Pen**.
- - **Treeshaking** - bundle only what you really need.
- - Automatic update detection - **no polling required**.
- - Leverage latest browser features - best performance in new browsers.
- - Flow independent - supports all values for `direction`, `flex-direction` and `writing-mode`.
- - Supports scroll snapping.
- - Supports all **virtual scrolling** libraries.
- - Supports the `body` element.
- - Easy and effective scrollbar styling.
- - Highly customizable.
- - TypeScript support - completely written in TypeScript.
- - Dependency-free - 100% self-written to ensure small size and best functionality.
- - High quality and fully typed framework versions for [`react`](https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-react), [`vue`](https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-vue), [`angular`](https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-ngx), [`svelte`](https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-svelte) and [`solid`](https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-solid).
-
-## Choose your framework
-
-In addition to the vanilla JavaScript version, you can use the official framework components & utilities:
-
-<a href="https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-react"><img src="https://raw.githubusercontent.com/KingSora/OverlayScrollbars/master/packages/overlayscrollbars-react/logo.svg" width="80" height="80" alt="React"></a>
-<a href="https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-vue"><img src="https://raw.githubusercontent.com/KingSora/OverlayScrollbars/master/packages/overlayscrollbars-vue/logo.svg" width="80" height="80" alt="Vue"></a>
-<a href="https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-ngx"><img src="https://raw.githubusercontent.com/KingSora/OverlayScrollbars/master/packages/overlayscrollbars-ngx/logo.svg" width="80" height="80" alt="Angular"></a>
-<a href="https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-svelte"><img src="https://raw.githubusercontent.com/KingSora/OverlayScrollbars/master/packages/overlayscrollbars-svelte/logo.svg" width="80" height="80" alt="Svelte"></a>
-<a href="https://github.com/KingSora/OverlayScrollbars/tree/master/packages/overlayscrollbars-solid"><img src="https://raw.githubusercontent.com/KingSora/OverlayScrollbars/master/packages/overlayscrollbars-solid/logo.svg" width="80" height="80" alt="Solid"></a>
-
-## Getting started
-
-### npm & nodejs
-
-OverlayScrollbars can be downloaded from [npm](https://www.npmjs.com/package/overlayscrollbars) or the package manager of your choice:
-```sh
-npm install overlayscrollbars
-```
-Once installed, it can be imported:
-```js
-import 'overlayscrollbars/overlayscrollbars.css';
-import { 
-  OverlayScrollbars, 
-  ScrollbarsHidingPlugin, 
-  SizeObserverPlugin, 
-  ClickScrollPlugin 
-} from 'overlayscrollbars';
-```
-
-> __Note__: If the path `'overlayscrollbars/overlayscrollbars.css'` is not working use `'overlayscrollbars/styles/overlayscrollbars.css'` as the import path for the CSS file.
-
-You can use this [Node Example](https://github.com/KingSora/OverlayScrollbars/tree/master/examples/node) as an reference / starting point.
-
-### Manual Download & Embedding
-
-You can use OverlayScrollbars without any bundler or package manager.  
-Simply download one of the [Releases](https://github.com/KingSora/OverlayScrollbars/releases) or use a [CDN](https://cdnjs.com/libraries/overlayscrollbars).
-
-- Use the javascript files with the `.browser` extension.
-- Use the javascript files with the `.es5` extension if you need to support older browsers, otherwise use the `.es6` files.
-- For production use the javascript / stylesheet files with the `.min` extension. 
-
-Embed OverlayScrollbars manually in your HTML:
-```html
-<link type="text/css" href="path/to/overlayscrollbars.css" rel="stylesheet" />
-<script type="text/javascript" src="path/to/overlayscrollbars.browser.es.js" defer></script>
-```
-
-Use the global variable `OverlayScrollbarsGlobal` to access the api similar to how you can do it in nodejs / modules:
-```js
-var { 
-  OverlayScrollbars, 
-  ScrollbarsHidingPlugin, 
-  SizeObserverPlugin, 
-  ClickScrollPlugin  
-} = OverlayScrollbarsGlobal;
-```
-
-You can use this [Browser Example](https://github.com/KingSora/OverlayScrollbars/tree/master/examples/browser) as an reference or a starting point.
-
-The examples in this documentation use the `import` syntax instead of the `OverlayScrollbarsGlobal` object. However, both versions are equivalent.
-
-## Initialization
-
-The initialization of `OverlayScrollbars` is explicit _per element_. Only the scrollbars of the element on which the plugin is initialized will be changed. Scrollbars of child elements will remain unchanged unless the plugin is initialized on them as well.
-
-You can either initialize a new instance directly with an `Element` or with an `Object` where you have more control over the initialization process. 
-
-```js
-// Simple initialization with an element
-const osInstance = OverlayScrollbars(document.querySelector('#myElement'), {});
-```
-
-### Bridging initialization flickering
-
-When you initialize OverlayScrollbars, it takes a few milliseconds to create and append all the elements to the DOM. During this time, the native scrollbars are still visible and will be switched out after the initialization is finished. This is seen as flickering. 
-
-To fix this behavior apply the `data-overlayscrollbars-initialize` attribute to the target element (and the `html` element as well when initializing a scrollbar for the `body` element).
-
-```html
-<!-- for the body element -->
-<html data-overlayscrollbars-initialize>
-  <head></head>
-  <body data-overlayscrollbars-initialize></body>
-</html>
-
-<!-- for all other elements -->
-<div data-overlayscrollbars-initialize>
-  OverlayScrollbars is applied to this div
-</div>
-```
-
-### Initialization with an Object
-<details>
-  <summary>
-    This is an in depth topic. Click here to read it.
-  </summary>
-  <br />
-  
-The only required field is the `target` field. This is the field to which the plugin will be applied.  
-If you use the object initialization with only the `target` field, the result is equivalent to the element initialization:
-```js
-// Both initializations have the same outcome
-
-OverlayScrollbars(document.querySelector('#myElement'), {});
-OverlayScrollbars({ target: document.querySelector('#myElement') }, {});
-```
-
-When initializing with an object you can specify how the library handles generated elements.
-For example, you can specify an existing element as the `viewport' element. Then the library won't generate it, but use the specified element instead:
-
- ```js
-OverlayScrollbars({ 
-  target: document.querySelector('#target'),
-  elements: {
-    viewport: document.querySelector('#viewport'),
-  },
-}, {});
-```
-
-This is very useful if you have a fixed DOM structure and don't want OverlayScrollbars to create its own elements. These cases are very common when you want another library to work with OverlayScrollbars.
-
----
-
-You can also decide to which element the scrollbars should be applied to:
-
- ```js
-OverlayScrollbars({ 
-  target: document.querySelector('#target'),
-  scrollbars: {
-    slot: document.querySelector('#target').parentElement,
-  },
-}, {});
-```
-
----
-
-Last but not least, you can decide when to cancel the initialization:
-
- ```js
-OverlayScrollbars({ 
-  target: document.querySelector('#target'),
-  cancel: {
-    nativeScrollbarsOverlaid: true,
-    body: null,
-  }
-}, {});
-```
-
-In the above example, the initialization will be aborted if the native scrollbars are overlaid, or if your target is a `body` element and the plugin has determined that initializing to the `body` element would interfere with native functionality such as `window.scrollTo`.
-
-</details>
-
-## Styling
-
-OverlayScrollbars provides a set of `CSS Custom Properties` which makes styling easy and fast.
-
-Out of the box you can choose between two scrollbar themes called `os-theme-dark` and `os-theme-light`. You can use the `scrollbars.theme` option to change the theme.
-
-Custom scrollbar themes can be done in several ways. The easiest and fastest way is to use the predefined set of `CSS Custom Properties` aka CSS variables. If that's not enough, you can add custom class names or add custom styling to the existing class names.  
-
-### Styling in depth
-
-<details>
-  <summary>
-    This is an in depth topic. Click here to read it.
-  </summary>
-
-  ### CSS Custom properties
-
-  OverlayScrollbars provides the following `CSS Custom Properties`:
-
-  **Viewport styling:**
-
-  ```scss
-  [data-overlayscrollbars-viewport] {
-    overflow-x: var(--os-viewport-overflow-x);
-    overflow-y: var(--os-viewport-overflow-y);
-  }
-  ```
-
-  You can use the `--os-viewport-overflow-x` and `--os-viewport-overflow-y` properties to re-apply the correct `overflow` styles in case other styling rules (e.g. from 3rd party libraries) are overwriting them.
-
-  **Scrollbar styling:**
-
-  ```scss
-  .os-scrollbar {
-    // The size of the scrollbar
-    --os-size: 0;
-    // The axis-perpendicular padding of the scrollbar (horizontal: padding-y, vertical: padding-x)
-    --os-padding-perpendicular: 0;
-    // The axis padding of the scrollbar (horizontal: padding-x, vertical: padding-y)
-    --os-padding-axis: 0;
-    // The border radius of the scrollbar track
-    --os-track-border-radius: 0;
-    // The background of the scrollbar track
-    --os-track-bg: none;
-    // The :hover background of the scrollbar track
-    --os-track-bg-hover: none;
-    // The :active background of the scrollbar track
-    --os-track-bg-active: none;
-    // The border of the scrollbar track
-    --os-track-border: none;
-    // The :hover background of the scrollbar track
-    --os-track-border-hover: none;
-    // The :active background of the scrollbar track
-    --os-track-border-active: none;
-    // The border radius of the scrollbar handle
-    --os-handle-border-radius: 0;
-    // The background of the scrollbar handle
-    --os-handle-bg: none;
-    // The :hover background of the scrollbar handle
-    --os-handle-bg-hover: none;
-    // The :active background of the scrollbar handle
-    --os-handle-bg-active: none;
-    // The border of the scrollbar handle
-    --os-handle-border: none;
-    // The :hover border of the scrollbar handle
-    --os-handle-border-hover: none;
-    // The :active border of the scrollbar handle
-    --os-handle-border-active: none;
-    // The min size of the scrollbar handle
-    --os-handle-min-size: 33px;
-    // The max size of the scrollbar handle
-    --os-handle-max-size: none;
-    // The axis-perpendicular size of the scrollbar handle (horizontal: height, vertical: width)
-    --os-handle-perpendicular-size: 100%;
-    // The :hover axis-perpendicular size of the scrollbar handle (horizontal: height, vertical: width)
-    --os-handle-perpendicular-size-hover: 100%;
-    // The :active axis-perpendicular size of the scrollbar handle (horizontal: height, vertical: width)
-    --os-handle-perpendicular-size-active: 100%;
-    // Increases the interactive area of the scrollbar handle.
-    --os-handle-interactive-area-offset: 0;
-  }
-  ```
-
-  You can change the properties for both scrollbars at once, or for each scrollbar axis. In the example below, I've chosen `os-theme-custom` as the theme name:
-
-  ```scss
-  // Horizontal and vertical scrollbar are 10px 
-  .os-theme-custom {
-    --os-size: 10px;
-  }
-
-  // Horizontal scrollbar is 10px
-  .os-theme-custom.os-scrollbar-horizontal {
-    --os-size: 10px;
-  }
-  // Vertical scrollbar is 20px
-  .os-theme-custom.os-scrollbar-vertical {
-    --os-size: 20px;
-  }
-  ```
-
-  You can then use your theme by assigning it via the `scrollbars.theme` option:
-
-  ```js
-  OverlayScrollbars(document.body, {
-    scrollbars: {
-      theme: 'os-theme-custom'
-    }
-  });
-  ```
-
-  Since scrollbar styles are usually simple, this set of options should be enough to get the styling you want.
-  If you need more freedom, you can create your own styles by adding styling to the base class names described in the next section.
-
-  ### Scrollbars structure and CSS class names
-
-  The scrollbars HTML markup looks like:
-
-  ```html
-  <div class="os-scrollbar os-scrollbar-horizontal">
-      <div class="os-scrollbar-track">
-          <div class="os-scrollbar-handle">
-          </div>
-      </div>
-  </div>
-  <div class="os-scrollbar os-scrollbar-vertical">
-      <div class="os-scrollbar-track">
-          <div class="os-scrollbar-handle">
-          </div>
-      </div>
-  </div>
-  ```
-
-  The class names are simplified, in a real application the `.os-scrollbar` element can have additional class names which modify the appearance (mostly visibility and alignment).  
-
-  Below is a list of the most important class names you will encounter:
-
-  | CSS class name | description |
-| :--- | :--- |
-| `.os-scrollbar` | The root element of a scrollbar. |
-| `.os-scrollbar-rtl` | Indicates a `RTL` direction of the host element the scrollbar belongs to. |
-| `.os-scrollbar-horizontal` | The root element of a horizontal scrollbar. |
-| `.os-scrollbar-vertical` | The root element of a vertical scrollbar. |
-| `.os-scrollbar-handle-interactive` | Indicates that the handle inside the scrollbar is interactive (`scrollbars.dragScroll` is not `false`). |
-| `.os-scrollbar-track-interactive` | Indicates that the track inside the scrollbar is interactive (`scrollbars.clickScroll` is not `false`). |
-| `.os-scrollbar-track` | The track element. This is the track of the nested handle element. If `scrollbars.clickScroll` is not `false` this is the element users can click to change the scroll offset. |
-| `.os-scrollbar-handle` | The handle element. If `scrollbars.dragScroll` is not `false` this is the handle users can drag to change the scroll offset. |
-
-  If you create your own theme, please only use the classes listed above. All other classes are modifier classes used to change visibility, alignment and pointer-events of the scrollbars.
-
-  ### Gotchas
-
-  It is important that the chosen theme class name in your CSS file matches the assigned theme name in the options. If the CSS class name is `.my-theme`, the `scrollbars.theme` must be `'my-theme'`.  
-    
-    
-  Please be aware of your stack. For example, `css-modules` will change your class names to avoid naming collisions. Always check that your CSS is what you expect it to be.
-
-</details>
-
-## Options
-
-You can initialize OverlayScrollbars with an initial set of options, which can be changed at any time with the `options` method:
-```js
-OverlayScrollbars(document.querySelector('#myElement'), {
-  overflow: {
-    x: 'hidden',
-  },
-});
-```
-
-### Options in depth
-<details>
-  <summary>
-    This is an in depth topic. Click here to read it.
-  </summary>
-  <br />
-
-The default options are:
-```js
-const defaultOptions = {
-  paddingAbsolute: false,
-  showNativeOverlaidScrollbars: false,
-  update: {
-    elementEvents: [['img', 'load']],
-    debounce: {
-      mutation: [0, 33],
-      resize: null,
-      event: [33, 99],
-      env: [222, 666, true],
-    },
-    attributes: null,
-    ignoreMutation: null,
-    flowDirectionStyles: null,
-  },
-  overflow: {
-    x: 'scroll',
-    y: 'scroll',
-  },
-  scrollbars: {
-    theme: 'os-theme-dark',
-    visibility: 'auto',
-    autoHide: 'never',
-    autoHideDelay: 1300,
-    autoHideSuspend: false,
-    dragScroll: true,
-    clickScroll: false,
-    pointers: ['mouse', 'touch', 'pen'],
-  },
-};
-```
-
-### `paddingAbsolute`
-
-| type  | default |
-| :--- | :--- |
-| `boolean` | `false` |
-
-Indicates whether the padding for the content should be absolute.
-
-### `showNativeOverlaidScrollbars`
-
-| type  | default |
-| :--- | :--- |
-| `boolean` | `false` |
-
-Indicates whether the native overlaid scrollbars should be visible.
-
-### `update.elementEvents`
-
-| type  | default |
-| :--- | :--- |
-| `Array<[string, string]> \| null` | `[['img', 'load']]` |
-
-An array of tuples. The first value in the tuple is an `selector` and the second value are `event names`. The plugin will update itself if any of the elements with the specified selector emits any of the specified events. The default value can be interpreted as "The plugin will update itself if any `img` element emits a `load` event."
-
-### `update.debounce`
-
-Options to debounce updates to fine-tune performance.
-
-Each **field** in this object has the following type:
-| type |
-| :--- |
-| `[timeout?: number, maxWait?: number, leading?: boolean] \| number \| null` |
-
-The tuple type of `[timeout?: number, maxWait?: number, leading?: boolean]` has three values:
-- timeout: The timeout of the debounce in milliseconds.
-- maxWait: The max wait of the debounce in milliseconds.
-- leading: Indicates whether the debounce is also executed on the leading edge.
-
-If a `number` is specified it is treated as the timeout in milliseconds.
-
-If `null` is specified no debounce will take place.
-
-> __Note__: If 0 is used as the timeout, `requestAnimationFrame` will be used instead of `setTimeout` for the debounce.
-
-### `update.debounce.mutation`
-
-| type  | default |
-| :--- | :--- |
-| `[timeout?: number, maxWait?: number, leading?: boolean] \| number \| null` | `[0, 33]` |
-
-Debounce updates which were triggered by a MutationObserver.
-
-### `update.debounce.resize`
-
-| type  | default |
-| :--- | :--- |
-| `[timeout?: number, maxWait?: number, leading?: boolean] \| number \| null` | `null` |
-
-Debounce updates which were triggered by a ResizeObserver.
-
-### `update.debounce.event`
-
-| type  | default |
-| :--- | :--- |
-| `[timeout?: number, maxWait?: number, leading?: boolean] \| number \| null` | `[33, 99]` |
-
-Debounce updates which were triggered by an event registered in the `update.elementEvents` option.
-
-### `update.debounce.env`
-
-| type  | default |
-| :--- | :--- |
-| `[timeout?: number, maxWait?: number, leading?: boolean] \| number \| null` | `[222, 666, true]` |
-
-Debounce updates which were triggered by environmental changes. (e.g. zooming & window resize)
-
-### `update.attributes`
-
-| type  | default |
-| :--- | :--- |
-| `string[] \| null` | `null` |
-
-> __Note__: There is a base array of attributes that the `MutationObserver` always observes, even if this option is `null`.
-
-An array of additional attributes that the `MutationObserver` should observe the content for. 
-
-### `update.ignoreMutation`
-
-| type  | default |
-| :--- | :--- |
-| `((mutation) => boolean) \| null` | `null` |
-
-A function which receives a [`MutationRecord`](https://developer.mozilla.org/en-US/docs/Web/API/MutationRecord) as an argument. If the function returns a truthy value the mutation will be ignored and the plugin won't update. **Useful to fine-tune performance.**
-
-### `update.flowDirectionStyles`
-
-| type  | default |
-| :--- | :--- |
-| `((viewport) => Record<string, unknown>) \| null` | `null` |
-
-A function which returns a map of styles which influence the viewports flow direction or `null` if the default behavior shall be used.
-The default behavior reads the computed `display`, `flexDirection`, `direction` and `writingMode` styles of the viewport element.
-
-This function can be used to skip or customize the expensive "non default flow direction" check:
-Use an empty style object to skip the check.
-Non-empty style objects will lead to a check when they change compared to the previously returned value.
-
-Examples of styles which influence the flow direction:
-- `direction: rtl`
-- `flexDirection: column-reverse`
-- `writingMode: vertical-rl`
-
-### `overflow.x`
-
-| type  | default |
-| :--- | :--- |
-| `string` | `'scroll'` |
-
-> __Note__: Valid values are: `'hidden'`, `'scroll'`, `'visible'`, `'visible-hidden'` and `'visible-scroll'`.
-
-The overflow behavior for the horizontal (x) axis.
-
-### `overflow.y`
-
-| type  | default |
-| :--- | :--- |
-| `string` | `'scroll'` |
-
-> __Note__: Valid values are: `'hidden'`, `'scroll'`, `'visible'`, `'visible-hidden'` and `'visible-scroll'`.
-
-The overflow behavior for the vertical (y) axis.
-
-### `scrollbars.theme`
-
-| type  | default |
-| :--- | :--- |
-| `string \| null` | `'os-theme-dark'` |
-
-Applies the specified theme (classname) to the scrollbars.
-
-### `scrollbars.visibility`
-
-| type  | default |
-| :--- | :--- |
-| `string` | `'auto'` |
-
-> __Note__: Valid values are: `'visible'`, `'hidden'`, and `'auto'`.
-
-The visibility of a scrollbar if its scroll axis is able to have a scrollable overflow. (Scrollable overflow for an axis is only possible with the overflow behavior set to `'scroll'` or `'visible-scroll'`).
-
-### `scrollbars.autoHide`
-
-| type  | default |
-| :--- | :--- |
-| `string` | `'never'` |
-
-> __Note__: Valid values are: `'never'`, `'scroll'`, `'leave'` and `'move'`.
-
-Dictates whether to hide visible scrollbars automatically after a certain user action.
-
-### `scrollbars.autoHideDelay`
-
-| type  | default |
-| :--- | :--- |
-| `number` | `1300` |
-
-The delay in milliseconds before the scrollbars are automatically hidden.
-
-### `scrollbars.autoHideSuspend`
-
-| type  | default | 
-| :--- | :--- |
-| `boolean` | `false` |
-
-Suspend the autoHide functionality until the first scroll interaction is performed.  
-The default value for this option is `false` for backwards compatibility reasons but is recommended to be `true` for better accessibility.
-
-### `scrollbars.dragScroll`
-
-| type  | default |
-| :--- | :--- |
-| `boolean` | `true` |
-
-Indicates whether you can drag the scrollbar handles for scrolling.
-
-### `scrollbars.clickScroll`
-
-| type  | default |
-| :--- | :--- |
-| `boolean \| 'instant' \| ((isHorizontal) => Partial<ScrollbarsClickScrollBehaviorOptions>)` | `false` |
-
-> __Note__: The **ClickScrollPlugin** is required if this option is not `false` or `'instant'`.
-
-Indicates whether you can click on the scrollbar track for scrolling.
-
-Can also be a function which customizes the click scroll behavior.
-
-### `scrollbars.pointers`
-
-| type  | default |
-| :--- | :--- |
-| `string[] \| null` | `['mouse', 'touch', 'pen']` |
-
-The [`PointerTypes`](https://developer.mozilla.org/en-US/docs/Web/API/PointerEvent/pointerType) the plugin should react to.
-
-#### TypeScript 
-
-```ts
-// The options of a OverlayScrollbars instance.
-type Options = {
-  // Whether the padding should be absolute.
-  paddingAbsolute: boolean;
-  // Whether to show the native scrollbars. Has effect only if the native scrollbars are overlaid.
-  showNativeOverlaidScrollbars: boolean;
-  // Customizes the automatic update behavior.
-  update: {
-    /**
-     * The given Event(s) from the elements with the given selector(s) will trigger an update.
-     * Useful for everything the MutationObserver and ResizeObserver can't detect
-     * e.g.: An image's `load` event or the `transitionend` / `animationend` events.
-     */
-    elementEvents: Array<[elementSelector: string, eventNames: string]> | null;
-    /**
-     * Options to debounce updates to fine-tune performance.
-     * It is possible to debounce updates caused by mutations, resizes, events and environmental changes.
-     */
-    debounce: {
-      // Debounce updates which were triggered by a MutationObserver.
-      mutation: OptionsDebounceValue;
-      // Debounce updates which were triggered by a ResizeObserver.
-      resize: OptionsDebounceValue;
-      // Debounce updates which were triggered by a Event.
-      event: OptionsDebounceValue;
-      // Debounce updates which were triggered by environmental changes. (e.g. zooming & window resize)
-      env: OptionsDebounceValue;
-    };
-    /**
-     * HTML attributes which will trigger an update if they're changed.
-     * Basic attributes like `id`, `class`, `style` etc. are always observed and don't have to be added explicitly.
-     */
-    attributes: string[] | null;
-    // A function which makes it possible to ignore a content mutation or `null` if nothing should be ignored.
-    ignoreMutation: ((mutation: MutationRecord) => boolean) | null;
-    /**
-     * A function which returns a map of styles which influence the viewports flow direction or `null` if the default behavior shall be used.
-     * This function can be used to skip or customize the expensive "non default flow direction" check.
-     */
-    flowDirectionStyles:
-      | ((viewport: HTMLElement) => Record<string, unknown>)
-      | null;
-  };
-  // Customizes the overflow behavior per axis.
-  overflow: {
-    // The overflow behavior of the horizontal (x) axis.
-    x: OverflowBehavior;
-    // The overflow behavior of the vertical (y) axis.
-    y: OverflowBehavior;
-  };
-  // Customizes appearance of the scrollbars.
-  scrollbars: {
-    // The scrollbar's theme. The theme value will be added as `class` to all `scrollbar` elements of the instance.
-    theme: string | null;
-    // The scrollbar's visibility behavior.
-    visibility: ScrollbarsVisibilityBehavior;
-    // The scrollbar's auto hide behavior.
-    autoHide: ScrollbarsAutoHideBehavior;
-    // The scrollbar's auto hide delay in milliseconds.
-    autoHideDelay: number;
-    // Whether the scrollbar's auto hide behavior is suspended until a scroll happened.
-    autoHideSuspend: boolean;
-    // Whether it is possible to drag the handle of a scrollbar to scroll the viewport.
-    dragScroll: boolean;
-    // Whether it is possible to click the track of a scrollbar to scroll the viewport.
-    clickScroll: ScrollbarsClickScrollBehavior;
-    // An array of pointer types that shall be supported.
-    pointers: string[] | null;
-  };
-};
-
-/**
- * If a tuple is provided you can customize the `timeout` and the `maxWait` in milliseconds. The third value `leading` indicates whether the debounce is also executed on the leading edge.
- * A single number customizes the `timeout` in milliseconds.
- * If the `timeout` is `0`, a debounce still exists. (its executed via `requestAnimationFrame`).
- */
-type OptionsDebounceValue =
-  | [
-      timeout?: number | false | null | undefined,
-      maxWait?: number | false | null | undefined,
-      leading?: boolean | null | undefined,
-    ]
-  | number
-  | false
-  | null;
-
-// The overflow behavior of an axis.
-type OverflowBehavior =
-  // No scrolling is possible and the content is clipped.
-  | 'hidden'
-  // No scrolling is possible and the content isn't clipped.
-  | 'visible'
-  // Scrolling is possible if there is an overflow.
-  | 'scroll'
-  /**
-   * If the other axis has no overflow the behavior is similar to `visible`.
-   * If the other axis has overflow the behavior is similar to `hidden`.
-   */
-  | 'visible-hidden'
-  /**
-   * If the other axis has no overflow the behavior is similar to `visible`.
-   * If the other axis has overflow the behavior is similar to `scroll`.
-   */
-  | 'visible-scroll';
-
-// The scrollbars visibility behavior.
-type ScrollbarsVisibilityBehavior =
-  // The scrollbars are always visible.
-  | 'visible'
-  // The scrollbars are always hidden.
-  | 'hidden'
-  // The scrollbars are only visibile if there is overflow.
-  | 'auto';
-
-// The scrollbars auto hide behavior
-type ScrollbarsAutoHideBehavior =
-  // The scrollbars are never hidden automatically.
-  | 'never'
-  // The scrollbars are hidden unless the user scrolls.
-  | 'scroll'
-  // The scrollbars are hidden unless the pointer moves in the host element or the user scrolls.
-  | 'move'
-  // The scrollbars are hidden if the pointer leaves the host element or unless the user scrolls.
-  | 'leave';
-
-// The scrollbar click scroll behavior.
-type ScrollbarsClickScrollBehavior =
-  | boolean
-  | 'instant'
-  | ((
-      isHorizontal: boolean
-    ) => Partial<ScrollbarsClickScrollBehaviorOptions> | false | null | undefined | void);
-
-interface ScrollbarsClickScrollBehaviorOptions {
-  // The scroll distance of the click scroll. If `0` the `clickScrollDistance` is the destination distance. Default: `one viewport unit`.
-  clickScrollDistance: number;
-  // The duration in milliseconds it takes to scroll the `clickScrollDistance`. Default `200`.
-  clickScrollDuration: number;
-  // The delay in milliseconds between click and press scroll. Default: `150`.
-  clickPressDelay: number;
-  // The duration in milliseconds it takes to travel one viewport unit during press scroll. Default: `90`.
-  pressDistanceDuration: number;
-}
-```
-
-</details>
-
-## Events
-
-You can initialize OverlayScrollbars with an initial set of events, which can be managed at any time with the `on` and `off` methods:
-```js
-OverlayScrollbars(document.querySelector('#myElement'), {}, {
-  updated(osInstance, onUpdatedArgs) {
-    // ...
-  }
-});
-```
-
-### Events in depth
-
-<details>
-  <summary>
-    This is an in depth topic. Click here to read it.
-  </summary>
-  <br />
-
-> __Note__: Every event receives the `instance` from which it was dispatched as the first argument. Always.
-
-### `initialized`
-
-| arguments  | description |
-| :--- | :--- |
-| `instance` | The instance which dispatched the event. |
-
-Dispatched after all generated elements, observers and events were appended to the DOM.
-
-### `updated`
-
-| arguments  | description |
-| :--- | :--- |
-| `instance` | The instance which dispatched the event. |
-| `onUpdatedArgs` | An `object` which describes the update in detail. |
-
-> __Note__: If an update was triggered but nothing changed, the event won't be dispatched.
-
-Dispatched after the instance was updated. 
-
-### `destroyed`
-
-| arguments  | description |
-| :--- | :--- |
-| `instance` | The instance which dispatched the event. |
-| `canceled` | A `boolean` which indicates whether the initialization was canceled and thus destroyed. |
-
-Dispatched after all generated elements, observers and events were removed from the DOM.
-
-### `scroll`
-
-| arguments  | description |
-| :--- | :--- |
-| `instance` | The instance which dispatched the event. |
-| `event` | The original `event` argument of the DOM event. |
-
-Dispatched by scrolling the viewport.
-
-#### TypeScript 
-
-```ts
-// A mapping between event names and their listener arguments.
-type EventListenerArgs = {
-  // Dispatched after all elements are initialized and appended.
-  initialized: [instance: OverlayScrollbars];
-  // Dispatched after an update.
-  updated: [instance: OverlayScrollbars, onUpdatedArgs: OnUpdatedEventListenerArgs];
-  // Dispatched after all elements, observers and events are destroyed.
-  destroyed: [instance: OverlayScrollbars, canceled: boolean];
-  // Dispatched on scroll.
-  scroll: [instance: OverlayScrollbars, event: Event];
-};
-
-interface OnUpdatedEventListenerArgs {
-  // Hints which describe what changed in the DOM.
-  updateHints: {
-    // Whether the size of the host element changed.
-    sizeChanged: boolean;
-    // Whether the direction of the host element changed.
-    directionChanged: boolean;
-    // Whether the intrinsic height behavior changed.
-    heightIntrinsicChanged: boolean;
-    // Whether the overflow edge (clientWidth / clientHeight) of the viewport element changed.
-    overflowEdgeChanged: boolean;
-    // Whether the overflow amount changed.
-    overflowAmountChanged: boolean;
-    // Whether the overflow style changed.
-    overflowStyleChanged: boolean;
-    // Whether the scroll coordinates changed.
-    scrollCoordinatesChanged: boolean;
-    // Whether an host mutation took place.
-    hostMutation: boolean;
-    // Whether an content mutation took place.
-    contentMutation: boolean;
-  };
-  // The changed options.
-  changedOptions: PartialOptions;
-  // Whether the update happened with force-invalidated cache.
-  force: boolean;
-}
-```
-
-</details>
-
-## Instance
-
-The OverlayScrollbars instance can be created by calling the `OverlayScrollbars` function with an element and options object.
-
-```js
-const osInstance = OverlayScrollbars(document.body, {});
-```
-
-### Instance Methods
-
-<details>
-  <summary>
-    This is an in depth topic. Click here to read it.
-  </summary>
-
-  ### `options(): Options`
-
-  Get the current options of the instance.
-
-  | returns | description |
-  | :--- | :--- |
-  | `Options` | The current options. |
-
-  ### `options(newOptions, pure?): Options`
-
-  Sets the current options of the instance.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | newOptions | `PartialOptions` | The new (partial) options which should be applied. |
-  | pure | `boolean \| undefined` | Whether the options should be reset before the new options are added. |
-
-  | returns | description |
-  | :--- | :--- |
-  | `Options` | The complete new options. |
-
-  ### `on(eventListeners, pure?): Function`
-
-  Adds event listeners to the instance.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | eventListeners | `EventListeners` | An object which contains the added listeners. The fields are the event names and the listeners. |
-  | pure | `boolean \| undefined` | Whether all already added event listeners should be removed before the new listeners are added. |
-
-  | returns | description |
-  | :--- | :--- |
-  | `Function` | A function which removes all added event listeners. |
-
-  ### `on(name, listener): Function`
-
-  Adds a single event listener to the instance.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | name | `string` | The event name. |
-  | listener | `Function` | The function invoked when the event is dispatched. |
-
-  | returns | description |
-  | :--- | :--- |
-  | `Function` | A function which removes the added event listener. |
-  
-  ### `on(name, listeners): Function`
-
-  Adds multiple event listeners to the instance.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | name | `string` | The event name. |
-  | listeners | `Function[]` | The functions invoked when the event is dispatched. |
-
-  | returns | description |
-  | :--- | :--- |
-  | `Function` | A function which removes the added event listeners. |
-
-  ### `off(name, listener): void`
-
-  Removes a single event listener from the instance.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | name | `string` | The event name. |
-  | listener | `Function` | The function to be removed. |
-
-  ### `off(name, listeners): void`
-
-  Removes multiple event listeners from the instance.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | name | `string` | The event name. |
-  | listeners | `Function[]` | The functions to be removed. |
-
-  ### `update(force?): boolean`
-
-  Updates the instance.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | force | `boolean \| undefined` |  Whether the update should force the cache to be invalidated. |
-
-  | returns | description |
-  | :--- | :--- |
-  | `Function` | A boolean which indicates whether the `update` event was triggered through this update. |
-
-  ### `sleep(sleeping: boolean): void`
-
-  Puts the instance to sleep or wakes it up.
-
-  When the instance is sleeping updates and (almost) all event listeners are ignored.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | sleeping | `boolean` |  Whether the instance should be put to sleep. |
-
-  ### `state(): State`
-
-  Gets the instance's state.
-
-  | returns | description |
-  | :--- | :--- |
-  | `State` | An object describing the state of the instance. |
-
-  ### `elements(): Elements`
-
-  Gets the instances elements.
-
-  | returns | description |
-  | :--- | :--- |
-  | `Elements` | An object describing the elements of the instance. |
-
-  ### `destroy(): void`
-
-  Destroys the instance and removes all added elements.
-
-  ### `plugin(plugin: object): object | undefined`
-
-  Gets the instance modules instance of the passed plugin.
-
-  | returns | description |
-  | :--- | :--- |
-  | `object \| undefined` | An object which describes the plugins instance modules instance or `undefined` if no instance was found. |
-
-  #### TypeScript 
-
-  ```ts
-  // A simplified version of the OverlayScrollbars TypeScript interface.
-  interface OverlayScrollbars {
-    // Get the current options of the instance.
-    options(): Options;
-    // Sets the current options of the instance.
-    options(newOptions: PartialOptions, pure?: boolean): Options;
-
-    // Adds event listeners to the instance.
-    on(eventListeners: EventListeners, pure?: boolean): () => void;
-    // Adds a single event listener to the instance.
-    on<N extends keyof EventListenerArgs>(name: N, listener: EventListener<N>): () => void;
-    // Adds multiple event listeners to the instance.
-    on<N extends keyof EventListenerArgs>(name: N, listener: EventListener<N>[]): () => void;
-
-    // Removes a single event listener from the instance.
-    off<N extends keyof EventListenerArgs>(name: N, listener: EventListener<N>): void;
-    // Removes multiple event listeners from the instance.
-    off<N extends keyof EventListenerArgs>(name: N, listener: EventListener<N>[]): void;
-
-    // Updates the instance.
-    update(force?: boolean): boolean;
-
-    // Puts the instance to sleep or wakes it up.
-    sleep(sleeping: boolean): void;
-
-    // Gets the instance's state.
-    state(): State;
-
-    // Gets the instance's elements.
-    elements(): Elements;
-
-    // Destroys the instance and removes all added elements.
-    destroy(): void;
-
-    // Gets the instance modules instance of the passed plugin.
-    plugin<P extends InstancePlugin>(osPlugin: P): InferInstancePluginModuleInstance<P> | undefined;
-  }
-
-  // Describes a OverlayScrollbars instances state.
-  interface State {
-    // Describes the current padding in pixels.
-    padding: TRBL;
-    // Whether the current padding is absolute.
-    paddingAbsolute: boolean;
-    // The client width (x) & height (y) of the viewport in pixels.
-    overflowEdge: XY<number>;
-    // The overflow amount in pixels.
-    overflowAmount: XY<number>;
-    // The css overflow style of the viewport.
-    overflowStyle: XY<OverflowStyle>;
-    // Whether the viewport has an overflow.
-    hasOverflow: XY<boolean>;
-    // The scroll coordinates of the viewport.
-    scrollCoordinates: {
-      // The start (origin) scroll coordinates for each axis.
-      start: XY<number>;
-      // The end scroll coordinates for each axis.
-      end: XY<number>;
-    };
-    // Whether the direction is considered rtl.
-    directionRTL: boolean;
-    // Whether the instance is sleeping.
-    sleeping: boolean;
-    // Whether the instance is considered destroyed.
-    destroyed: boolean;
-  }
-
-  // Describes the elements of a OverlayScrollbars instance.
-  interface Elements {
-    // The element the instance was applied to.
-    target: HTMLElement;
-    // The host element. It's the root of all other elements.
-    host: HTMLElement;
-    /**
-     * The element responsible for the correct padding.
-     * Depending on initialization it can be the same as the viewport element.
-     */
-    padding: HTMLElement;
-    // The element responsible of the scrolling.
-    viewport: HTMLElement;
-    /**
-     * The element responsible for holding the actual content.
-     * Depending on initialization it can be the same as the viewport element.
-     */
-    content: HTMLElement;
-    /**
-     * The element through which you can get the current `scrollLeft` or `scrollTop` offset.
-     * Depending on the target element it can be the same as the viewport element.
-     */
-    scrollOffsetElement: HTMLElement;
-    /**
-     * The element through which you can add `scroll` events.
-     * Depending on the target element it can be the same as the viewport element.
-     */
-    scrollEventElement: HTMLElement | Document;
-    // The horizontal scrollbar's elements.
-    scrollbarHorizontal: CloneableScrollbarElements;
-    // The vertical scrollbar's elements.
-    scrollbarVertical: CloneableScrollbarElements;
-  }
-  ```
-</details>
-
-
-## Static Object
-
-The static `OverlayScrollbars` object.
-
-```js
-OverlayScrollbars.plugin(SomePlugin);
-```
-
-### Static Object Methods
-
-<details>
-  <summary>
-    This is an in depth topic. Click here to read it.
-  </summary>
-
-  ### `valid(osInstance): boolean`
-
-  Checks whether the passed value is a valid and not destroyed overlayscrollbars instance
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | osInstance | `any` | The value to be checked. |
-
-  | returns | description |
-  | :--- | :--- |
-  | `boolean` | Whether the passed value is a valid and not destroyed overlayscrollbars instance. |
-
-  ### `env(): Environment`
-
-  Gets the environment.
-
-  | returns | description |
-  | :--- | :--- |
-  | `Environment` | An object describing the environment. |
-
-  ### `nonce(newNonce): void`
-
-  Sets the nonce attribute for inline styles.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | newNonce | `string \| undefined` | The new nonce attribute for inline styles. |
-
-  ### `trustedTypePolicy(newTrustedTypePolicy): void`
-
-  Sets the trusted type policy.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | newTrustedTypePolicy | `TrustedTypePolicy \| undefined` | The new trusted type policy. |
-
-  ### `plugin(plugin): object | undefined`
-
-  Adds a single plugin.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | plugin | `object` | The plugin to be added. |
-
-  | returns | description |
-  | :--- | :--- |
-  | `object \| void` | An object describing the plugin's static module instance or `void` if no instance was found. |
-
-  ### `plugin(plugins): (object | void)[]`
-
-  Adds multiple plugins.
-
-  | parameter | type | description |
-  | :--- | :--- | :--- |
-  | plugins | `object[]` | The plugins to be added. |
-
-  | returns | description |
-  | :--- | :--- |
-  | `(object \| void)[]` | An array describing the plugins static modules instances or `undefined` if no instance was found. |
-
-  #### TypeScript
-
-  ```ts
-  // The OverlayScrollbars static object.
-  interface OverlayScrollbarsStatic {
-    // Gets the instance of the passed target or `undefined` the target has no instance.
-    (target: InitializationTarget): OverlayScrollbars | undefined;
-    // Initializes OverlayScrollbars to the passed target with passed options and event listeners.
-    (target: InitializationTarget, options: PartialOptions, eventListeners?: EventListeners): OverlayScrollbars;
-
-    // Checks whether the passed value is a valid and not destroyed overlayscrollbars instance.
-    valid(osInstance: any): osInstance is OverlayScrollbars;
-
-    // Gets the environment.
-    env(): Environment;
-
-    // Sets the nonce attribute for inline styles.
-    nonce(newNonce: string | undefined): void;
-
-    // Adds a single plugin.
-    plugin(plugin: Plugin): InferStaticPluginModuleInstance<Plugin>
-    // Adds multiple plugins.
-    plugin(plugins: Plugin[]): InferStaticPluginModuleInstance<Plugin>[];
-  }
-
-  // Describes the OverlayScrollbars environment.
-  interface Environment {
-    // The native scrollbars size of the browser / system.
-    scrollbarsSize: XY<number>;
-    // Whether the native scrollbars are overlaid.
-    scrollbarsOverlaid: XY<boolean>;
-    // Whether the browser supports native scrollbar hiding.
-    scrollbarsHiding: boolean;
-    // Whether the browser supports the ScrollTimeline API.
-    scrollTimeline: boolean;
-    // The default Initialization to use if nothing else is specified.
-    staticDefaultInitialization: Initialization;
-    // The default Options to use if nothing else is specified.
-    staticDefaultOptions: Options;
-
-    // Returns the current default Initialization.
-    getDefaultInitialization(): Initialization;
-    // Returns the current default Options.
-    getDefaultOptions(): Options;
-
-    /**
-     * Sets a new default Initialization.
-     * If the new default Initialization is partially filled, its deeply merged with the current default Initialization.
-     * @param newDefaultInitialization The new default Initialization.
-     * @returns The current default Initialization.
-     */
-    setDefaultInitialization(newDefaultInitialization: PartialInitialization): Initialization;
-    /**
-     * Sets new default Options.
-     * If the new default Options are partially filled, they're deeply merged with the current default Options.
-     * @param newDefaultOptions The new default Options.
-     * @returns The current default options.
-     */
-    setDefaultOptions(newDefaultOptions: PartialOptions): Options;
-  }
-  ```
-</details>
-
-## Plugins
-
-Anything that is not considered core functionality or old browser compatibility is exposed via a plugin. This is done because all unused plugins are omitted during treeshaking and won't end up in your final bundle. OverlayScrollbars ships with the following plugins:
-
-- **ScrollbarsHidingPlugin**: Needed for old browsers that don't support native scrollbar styling. [You can find the list of browsers where you need this plugin here](https://caniuse.com/?search=scrollbar%20styling) (note that even though `iOS Safari >= 14` is marked as unsupported, you only need this plugin for `iOS < 7.1`).
-- **SizeObserverPlugin**: Needed for old browsers that don't support the `ResizeObserver` api. [You can find the list of browsers that need this plugin here](https://caniuse.com/?search=ResizeObserver)
-- **ClickScrollPlugin**: If you want to use the option `scrollbars: { clickScroll: true }`.
-
-### Consuming Plugins
-
-Plugins are consumed like:
-```ts
-import { 
-  OverlayScrollbars, 
-  ScrollbarsHidingPlugin, 
-  SizeObserverPlugin, 
-  ClickScrollPlugin 
-} from 'overlayscrollbars';
-
-// Single plugin
-OverlayScrollbars.plugin(ScrollbarsHidingPlugin);
-
-// Multiple plugins
-OverlayScrollbars.plugin([SizeObserverPlugin, ClickScrollPlugin]);
-```
-
-### Plugins in depth
-
-<details>
-  <summary>
-    This is an in depth topic. Click here to read it.
-  </summary>
-  <br />
-
-Plugins are plain objects with a **single field**, the name of the field is the name of the plugin. This name is the plugin's identifier and _must_ be unique across all plugins. In case multiple plugins have the same name, the last added plugin overwrites the plugin added previously under the same name.
-
-### Plugin Modules
-
-A Plugin module is the constructor of a plugin module's instance. There are two kinds of plugin modules: `static` and `instance`. A single plugin must have one or more modules. A plugin module can return an instance, but doesn't have to.
-
-#### Static Plugin Module
-
-The `static` plugin module is invoked when the plugin is added with the `OverlayScrollbars.plugin` function.
-
-Example plugin with a `static` module:
-```js
-const staticPlugin = {
-  // Plugin has the name `examplePlugin`.
-  examplePlugin: {
-    // The `static` function describes a static module and returns the module instance or void / undefined if no instance is needed.
-    // The `osStatic` parameter is the global `OverlayScrollbars` object.
-    static: (osStatic) => {
-      let count = 0;
-      const staticPluginModuleInstance = {
-        getCount: () => count,
-        increment: () => { count++ },
-      }
-      return staticPluginModuleInstance;
-    }
-  }
-}
-```
-
-When the plugin is added with the `OverlayScrollbars.plugin` function, the static module instance is returned:
-```js
-const staticModuleInstance = OverlayScrollbars.plugin(staticPlugin); // Plugins static module is invoked
-staticModuleInstance.count; // 0
-staticModuleInstance.increment();
-staticModuleInstance.count; // 1
-```
-
-#### Instance Plugin Module
-
-The `instance` plugin module is invoked when a new `OverlayScrollbars` instance is created but before the `initialized` event is dispatched.
-
-Example plugin with a `instance` module:
-```js
-const instancePlugin = {
-  // Plugin has the name `examplePlugin`.
-  examplePlugin: {
-    // Instance function describes na instance module and returns the module instance or void / undefined if no instance is needed.
-    // The `osInstance` parameter is the OverlayScrollbar instance the plugin is bound to.
-    // The `event` parameter is a function which adds events to the instance which can't be removed from outside the plugin.
-    // The `osStatic` parameter is the global OverlayScrollbar object.
-    instance: (osInstance, event, osStatic) => {
-      let count = 0;
-
-      const instancePluginModuleInstance = {
-        getCount: () => count,
-        increment: () => { count++ },
-      }
-
-      // Event which fires when the instance was initialized.
-      event('initialized', () => {
-        console.log("instance initialized");
-      });
-
-      // Event which fires when the viewport was scrolled.
-      const removeScrollEvent = event('scroll', () => {
-        console.log("viewport scrolled");
-        removeScrollEvent(); // Removes the event after the first scroll.
-      });
-      
-      return instancePluginModuleInstance;
-    }
-  }
-}
-```
-
-When the plugin is added with the `OverlayScrollbars.plugin` function, all OverlayScrollbar instances will automatically add the plugin from that point on. Previously created instances will not have the plugin. The instance module instance is returned with the `osInstance.plugin` function:
-```js
-OverlayScrollbars.plugin(instancePlugin); // Plugin is added
-
-const osInstance = OverlayScrollbars(document.body, {}); // Plugin's instance module is invoked
-const instancePluginInstance = osInstance.plugin(instancePlugin);
-
-instancePluginInstance.count; // 0
-instancePluginInstance.increment();
-instancePluginInstance.count; // 1
-```
-
-#### TypeScript
-
-```ts
-// Describes a OverlayScrollbar plugin.
-type Plugin<
-  // The name of the plugin.
-  Name extends string = string,
-  // The module instance type of the static module.
-  S extends PluginModuleInstance | void = PluginModuleInstance | void, 
-  // The module instance type of the instance module.
-  I extends PluginModuleInstance | void = PluginModuleInstance | void 
-> = {
-  [pluginName in Name]: PluginModule<S, I>;
-};
-
-// Describes a OverlayScrollbar plugin which has only a static module.
-type StaticPlugin<
-  Name extends string = string,
-  T extends PluginModuleInstance = PluginModuleInstance
-> = Plugin<Name, T, void>;
-
-// Describes a OverlayScrollbar plugin which has only a instance module.
-type InstancePlugin<
-  Name extends string = string,
-  T extends PluginModuleInstance = PluginModuleInstance
-> = Plugin<Name, void, T>;
-
-// Infers the type of the static module's instance of the passed plugin.
-type InferStaticPluginModuleInstance<T extends StaticPlugin>;
-
-// Infers the type of the instance modules instance of the passed plugin.
-type InferInstancePluginModuleInstance<T extends InstancePlugin>;
-```
-
-</details>
-
-
-## FAQ
-
-<details>
-  <summary>
-    How do I <code>get / set</code> the <code>scroll position</code> of an element I applied OverlayScrollbars to?
-  </summary>
-  <br />
-
- If you applied `OverlayScrollbars` to the `body` element you can use [`window.scrollX`](https://developer.mozilla.org/en-US/docs/Web/API/Window/scrollX), [`window.scrollY`](https://developer.mozilla.org/en-US/docs/Web/API/Window/scrollY), [`window.scroll`](https://developer.mozilla.org/en-US/docs/Web/API/Window/scroll), [`window.scrollTo`](https://developer.mozilla.org/en-US/docs/Web/API/Window/scrollTo), [`window.scrollBy`](https://developer.mozilla.org/en-US/docs/Web/API/Window/scrollBy) or any other native api. 
-
-If the plugin was applied to any other element you have to get the `viewport` element with the `instance.elements()` function first. With this element you can use [`element.scrollTop`](https://developer.mozilla.org/en-US/docs/Web/API/Element/scrollTop), [`element.scrollLeft`](https://developer.mozilla.org/en-US/docs/Web/API/Element/scrollLeft), [`element.scroll`](https://developer.mozilla.org/en-US/docs/Web/API/Element/scroll), [`element.scrollTo`](https://developer.mozilla.org/en-US/docs/Web/API/Element/scrollTo), [`element.scrollBy`](https://developer.mozilla.org/en-US/docs/Web/API/Element/scrollBy) or any other native api.
-
-```js
-const { viewport } = osInstance.elements();
-const { scrollLeft, scrollTop } = viewport; // Get scroll offset
-viewport.scrollTo({ top: 0 }); // Set scroll offset
-```
-</details>
-
-<details>
-  <summary>
-    Is it possible to <code>limit / adjust the scrollbar handle length</code>? 
-  </summary>
-  <br />
-
- You can adjust a scrollbar's handle length by setting a `min-width / min-height` and `max-width / max-height` style:
-
-```css
-/* horizontal boundaries */
-.os-scrollbar-horizontal .os-scrollbar-handle {
-  min-width: 50px;
-  max-width: 200px;
-}
-/* vertical boundaries */
-.os-scrollbar-vertical .os-scrollbar-handle {
-  min-height: 40px;
-  max-height: 40px;
-}
-```
-
-  You can assign the same value to both properties to force the scrollbar to be always the same size.  
-  Setting the `width` and `height` properties won't work since those are set by the plugin automatically. 
-
-</details>
-
-## Feature comparison to `v1`
-
-- The `scroll` function is missing. Planned as a `plugin`. (WIP)
-- Initialization to the `textarea` element isn't supported yet. Planned as a `plugin`. (WIP) 
-
-## Future Plans
-
- - Provide plugin based support for missing features. (treeshakeable)
- - Frequent updates in terms of bug-fixes and enhancements. (always use latest browser features)
- - Improve tests. (unit & browser tests)
-
-## Used by
-
-- [Spotify](https://github.com/KingSora/OverlayScrollbars/issues/150#issuecomment-658658186)
-- [IntelliJ IDEA](https://github.com/JetBrains/intellij-community/blob/ee35416f381ed33f976d7b9322a5ee6156e7fa2f/platform/platform-api/src/com/intellij/ui/jcef/JBCefScrollbarsHelper.java#L41-L50)
-- [Storybook](https://github.com/storybookjs/storybook/blob/32d2fafa8d1d2e197e885349f2c01f5422bde5b4/code/ui/components/package.json#L66-L67)
-- [Admin LTE](https://github.com/ColorlibHQ/AdminLTE/blob/3113ac5efed25971ccd0972f5eeff3c364f218dc/src/html/components/_scripts.astro#L6-L7)
-- and many more...
-
-## Sponsors
-<table>
-  <tbody>
-    <tr>
-        <td>
-            <a href="https://www.browserstack.com" target="_blank">
-              <img align="center" src="https://kingsora.github.io/OverlayScrollbars/img/browserstack.png" width="250">
-            </a>
-        </td>
-        <td>
-          Thanks to <a href="https://www.browserstack.com" target="_blank">BrowserStack</a> for sponsoring open source projects and letting me test OverlayScrollbars for free.
-        </td>
-    </tr>
-  </tbody>
-</table>
-
-## License
-
-MIT
+MIT License
+
+Copyright (c) 2022 Rene Haas
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### overlayscrollbars-react 0.5.6
@@ -10444,153 +9270,30 @@ License: MIT
 
 Repository: https://github.com/KingSora/OverlayScrollbars
 
+License source: upstream LICENSE at npm overlayscrollbars-react@0.5.6 gitHead e0ad5d026909b85d10e9ed0f7605cddd067408c9; https://raw.githubusercontent.com/KingSora/OverlayScrollbars/e0ad5d026909b85d10e9ed0f7605cddd067408c9/LICENSE
+
 ```text
-<div align="center">
-  <a href="https://kingsora.github.io/OverlayScrollbars"><img src="https://raw.githubusercontent.com/KingSora/OverlayScrollbars/master/logo/logo.png" width="160" height="160" alt="OverlayScrollbars"></a>
-  <a href="https://reactjs.org"><img src="https://raw.githubusercontent.com/KingSora/OverlayScrollbars/master/packages/overlayscrollbars-react/logo.svg" width="160" height="160" alt="React"></a>
-</div>
-<br />
-<div align="center">
+MIT License
 
-  [![OverlayScrollbars](https://img.shields.io/badge/OverlayScrollbars-%5E2.0.0-338EFF?style=flat-square)](https://github.com/KingSora/OverlayScrollbars)
-  [![React](https://img.shields.io/badge/React-%3E=16.8.0-61DAFB?style=flat-square&logo=React)](https://github.com/facebook/react/)
-  [![Downloads](https://img.shields.io/npm/dt/overlayscrollbars-react.svg?style=flat-square)](https://www.npmjs.com/package/overlayscrollbars-react)
-  [![Version](https://img.shields.io/npm/v/overlayscrollbars-react.svg?style=flat-square)](https://www.npmjs.com/package/overlayscrollbars-react)
-  [![License](https://img.shields.io/github/license/kingsora/overlayscrollbars.svg?style=flat-square)](#)
+Copyright (c) 2022 Rene Haas
 
-</div>
-<h3 align="center">
-  <a href="https://kingsora.github.io/OverlayScrollbars">Website</a>
-  &nbsp;&nbsp;&bull;&nbsp;&nbsp;
-  <a href="https://kingsora.github.io/OverlayScrollbars/examples">Examples</a>
-</h3>
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-# OverlayScrollbars for React
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-This is the official OverlayScrollbars React wrapper.
-
-## Installation
-
-```sh
-npm install overlayscrollbars-react
-```
-
-## Peer Dependencies
-
-OverlayScrollbars for React has the following **peer dependencies**:
-
-- The vanilla JavaScript library: [overlayscrollbars](https://www.npmjs.com/package/overlayscrollbars)
-
-```
-npm install overlayscrollbars
-```
-
-- The React framework: [react](https://www.npmjs.com/package/react)
-
-```
-npm install react
-```
-
-## Usage
-
-The first step is to import the CSS file into your app:
-```ts
-import 'overlayscrollbars/overlayscrollbars.css';
-```
-
-> __Note__: If the path `'overlayscrollbars/overlayscrollbars.css'` is not working use `'overlayscrollbars/styles/overlayscrollbars.css'` as the import path for the CSS file.
-
-## Component
-
-The main entry point is the `OverlayScrollbarsComponent` which can be used in your application as a component:
-
-```jsx
-import { OverlayScrollbarsComponent } from "overlayscrollbars-react";
-
-// ...
-
-<OverlayScrollbarsComponent defer>
-  example content
-</OverlayScrollbarsComponent>
-```
-
-### Properties
-
-The component accepts all properties of regular elements such as `div` and `span`.  
-Additionally it has custom optional properties:
-
-- `element`: accepts a `string` which represents the tag of the root element.
-- `options`: accepts an `object` which represents the OverlayScrollbars options.
-- `events`: accepts an `object` which represents the OverlayScrollbars events.
-- `defer`: accepts an `boolean` or `object`. Defers the initialization to a point in time when the browser is idle.
-
-> __Note__: None of the properties has to be memoized.
-
-> __Note__: Its **highly recommended** to use the `defer` option whenever possible to defer the initialization to a browser's idle period.
-
-```jsx
-// example usage
-<OverlayScrollbarsComponent
-  element="span"
-  options={{ scrollbars: { autoHide: 'scroll' } }}
-  events={{ scroll: () => { /* ... */ } }}
-  defer
-/>
-```
-
-### Ref
-
-The `ref` of the `OverlayScrollbarsComponent` will give you an object with which you can access the OverlayScrollbars `instance` and the root `element` of the component.  
-The ref object has two properties:
-
-- `osInstance`: a function which returns the OverlayScrollbars instance.
-- `getElement`: a function which returns the root element.
-
-## Hook
-
-In case the `OverlayScrollbarsComponent` is not enough, you can also use the `useOverlayScrollbars` hook:
-
-```jsx
-import { useOverlayScrollbars } from "overlayscrollbars-react";
-
-// example usage
-const Component = () => {
-  const ref = useRef();
-  const [initialize, instance] = useOverlayScrollbars({ options, events, defer });
-  
-  useEffect(() => {
-    initialize(ref.current);
-  }, [initialize]);
-  
-  return <div ref={ref} />
-}
-```
-
-The hook is for advanced usage and lets you control the whole initialization process. This is useful if you want to integrate it with other plugins such as `react-window` or `react-virtualized`.
-
-The hook will destroy the instance automatically if the component unmounts.
-
-### Parameters
-
-Parameters are optional and similar to the `OverlayScrollbarsComponent`.
-Its an `object` with optional properties:
-
-- `options`: accepts an `object` which represents the OverlayScrollbars options.
-- `events`: accepts an `object` which represents the OverlayScrollbars events.
-- `defer`: accepts an `boolean` or `object`. Defers the initialization to a point in time when the browser is idle.
-
-### Return
-
-The `useOverlayScrollbars` hook returns a `tuple` with two values:
-
-- The first value is the `initialization` function, it takes one argument which is the `InitializationTarget`.
-- The second value is a function which returns the current OverlayScrollbars instance or `null` if not initialized.
-
-> __Note__: The identity of both functions is stable and won't change, thus they can safely be used in any dependency array.
-
-## License
-
-MIT
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### parse5 8.0.1
@@ -10598,6 +9301,8 @@ MIT
 License: MIT
 
 Repository: https://github.com/inikulin/parse5
+
+License source: parse5@8.0.1/LICENSE
 
 ```text
 Copyright (c) 2013-2019 Ivan Nikulin (ifaaan@gmail.com, https://github.com/inikulin)
@@ -10626,6 +9331,8 @@ THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/visionmedia/node-progress
+
+License source: progress@2.0.3/LICENSE
 
 ```text
 (The MIT License)
@@ -10658,6 +9365,8 @@ License: MIT
 
 Repository: https://github.com/facebook/prop-types
 
+License source: prop-types@15.8.1/LICENSE
+
 ```text
 MIT License
 
@@ -10687,6 +9396,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/wooorm/property-information
+
+License source: property-information@7.1.0/license
 
 ```text
 (The MIT License)
@@ -10719,6 +9430,8 @@ License: MIT
 
 Repository: https://github.com/Rob--W/proxy-from-env
 
+License source: proxy-from-env@2.1.0/LICENSE
+
 ```text
 The MIT License
 
@@ -10748,6 +9461,8 @@ License: MIT
 
 Repository: https://github.com/mathiasbynens/punycode.js
 
+License source: punycode@2.3.1/LICENSE-MIT.txt
+
 ```text
 Copyright Mathias Bynens <https://mathiasbynens.be/>
 
@@ -10776,6 +9491,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/radix-ui/primitives
+
+License source: radix-ui@1.4.3/LICENSE
 
 ```text
 MIT License
@@ -10807,6 +9524,8 @@ License: MIT
 
 Repository: https://github.com/facebook/react
 
+License source: react@19.2.5/LICENSE
+
 ```text
 MIT License
 
@@ -10837,12 +9556,30 @@ License: MIT
 
 Repository: https://github.com/facebook/react
 
+License source: upstream LICENSE at npm react-compiler-runtime@1.0.0 gitHead 5c15c1cd3442f28044217703b5625f98c40042ee; https://raw.githubusercontent.com/facebook/react/5c15c1cd3442f28044217703b5625f98c40042ee/LICENSE
+
 ```text
-# react-compiler-runtime
+MIT License
 
-Backwards compatible shim for runtime APIs used by React Compiler. Primarily meant for React versions prior to 19, but it will also work on > 19.
+Copyright (c) Meta Platforms, Inc. and affiliates.
 
-See also https://github.com/reactwg/react-compiler/discussions/6.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### react-day-picker 9.14.0
@@ -10850,6 +9587,8 @@ See also https://github.com/reactwg/react-compiler/discussions/6.
 License: MIT
 
 Repository: https://github.com/gpbl/react-day-picker
+
+License source: react-day-picker@9.14.0/LICENSE
 
 ```text
 The MIT License (MIT)
@@ -10881,6 +9620,8 @@ License: MIT
 
 Repository: https://github.com/facebook/react
 
+License source: react-dom@19.2.5/LICENSE
+
 ```text
 MIT License
 
@@ -10911,544 +9652,30 @@ License: MIT
 
 Repository: https://github.com/aholachek/react-flip-toolkit
 
+License source: upstream LICENSE at npm react-flip-toolkit@7.2.4 gitHead 2d00d4517d926598122242c8f40d05ae48553044; https://raw.githubusercontent.com/aholachek/react-flip-toolkit/2d00d4517d926598122242c8f40d05ae48553044/LICENSE
+
 ```text
-<p align="center">
-  <a href="https://codepen.io/aholachek/pen/ERRpEj">
-  <img src="./example-assets/rft-logo.gif" width='500px' alt='react-flip-toolkit animated logo' />
-  </a>
-</p>
-
-[![Minified & Gzipped size](https://badgen.net/bundlephobia/minzip/react-flip-toolkit)](https://bundlephobia.com/result?p=react-flip-toolkit)
-[![MIT license](https://badgen.net/npm/license/react-flip-toolkit)](http://opensource.org/licenses/MIT)
-[![npm version](https://badgen.net/npm/v/react-flip-toolkit)](https://npmjs.org/package/react-flip-toolkit 'View this project on npm')
-
-**Comparison with other React FLIP libraries**
-
-| Feature                                                                        | [`react-flip-move`](https://github.com/joshwcomeau/react-flip-move) | [`react-overdrive`](https://github.com/berzniz/react-overdrive) | `react-flip-toolkit` |
-| ------------------------------------------------------------------------------ | :-----------------------------------------------------------------: | :-------------------------------------------------------------: | :------------------: |
-| Animate position                                                               |                                 ✅                                  |                               ✅                                |          ✅          |
-| Animate scale                                                                  |                                 ❌                                  |                               ✅                                |          ✅          |
-| Animate opacity                                                                |                                 ❌                                  |                               ✅                                |          ✅          |
-| [Animate parent's size without warping children](#nested-scale-transforms) |                                 ❌                                  |                               ❌                                |          ✅          |
-| Use real FLIP instead of cloning & crossfading                                 |                                 ✅                                  |                               ❌                                |          ✅          |
-| [Use springs for animations](https://codesandbox.io/s/react-flip-toolkit-spring-settings-explorer-vjrsh)                                                     |                                 ❌                                  |                               ❌                                |          ✅          |
-| Support spring-based stagger effects                                           |                                 ❌                                  |                               ❌                                |          ✅          |
-| [Usable with frameworks other than React](packages/flip-toolkit)               |                                 ❌                                  |                               ❌                                |          ✅          |
-
-## Quick start
-
-`npm install react-flip-toolkit` or `yarn add react-flip-toolkit`
-
-1. Wrap all animated children with a single `Flipper` component that has a `flipKey` prop that changes every time animations should happen.
-
-2. Wrap elements that should be animated with `Flipped` components that have a `flipId` prop matching them across renders.
-
-
-## Table of Contents
-
-- [Forkable Examples](#forkable-examples)
-  - [Simple Example: An Expanding Div](#simple-example-an-expanding-div)
-  - [Simple Example: Two Divs](#simple-example-two-divs)
-  - [Simple Example: List Shuffle](#simple-example-list-shuffle)
-  - [List Transitions](#list-transitions)
-  - [Stagger Effects](#stagger-effects)
-  - [Spring Customizations](#spring-customizations)
-  - [Nested Scale Transforms](#nested-scale-transforms)
-  - [Route-based Animations With React Router](#route-based-animations-with-react-router)
-  - [More examples](#more-examples)
-- [The Components](#the-components)
-  - [`Flipper`](#flipper)
-    - [Basic Props](#basic-props)
-    - [Advanced Props](#advanced-props)
-  - [`Flipped`](#flipped)
-    - [Wrapping a React Component](#wrapping-a-react-component)
-    - [Basic props](#basic-props)
-    - [Callback props](#callback-props)
-    - [Transform props](#transform-props)
-    - [Advanced props](#advanced-props)
-  - [`Spring`](#spring)
-- [Library details](#library-details)
-- [Troubleshooting](#troubleshooting)
-  - [Problem #1: Nothing is happening](#problem-1-nothing-is-happening)
-  - [Problem #2: Things look weird / animations aren't behaving](#problem-2-things-look-weird--animations-arent-behaving)
-  - [Problem #3: It's still not working](#problem-3-its-still-not-working)
-- [Performance](#performance)
-  - [`Memoization`](#memoization)
-  - [`will-change:transform`](#will-changetransform)
-
-## Forkable Examples
-
-### Simple Example: An Expanding Div
-
-<a href="https://codesandbox.io/s/8130rn9q2">
-<img src="./example-assets/square.gif" height="200px" alt="animated square" />
-</a>
-
-[Fork this example on Code Sandbox](https://codesandbox.io/s/8130rn9q2)
-
-
-```jsx
-import React, { useState } from 'react'
-import { Flipper, Flipped } from 'react-flip-toolkit'
-
-const AnimatedSquare = () => {
-  const [fullScreen, setFullScreen] = useState(false)
-  const toggleFullScreen = () => setFullScreen(prevState => !prevState)
-
-  return (
-    <Flipper flipKey={fullScreen}>
-      <Flipped flipId="square">
-        <div
-          className={fullScreen ? 'full-screen-square' : 'square'}
-          onClick={toggleFullScreen}
-        />
-      </Flipped>
-    </Flipper>
-  )
-}
-```
-
-### Simple Example: Two Divs
-
-<a href="https://codesandbox.io/s/74q85nq1qq">
-<img src="./example-assets/2squares.gif" height="200px" alt="2 animated squares" />
-</a>
-
-[Fork this example on Code Sandbox](https://codesandbox.io/s/74q85nq1qq)
-
-```jsx
-import React, { useState } from 'react'
-import { Flipper, Flipped } from 'react-flip-toolkit'
-
-const Square = ({ toggleFullScreen }) => (
-  <Flipped flipId="square">
-    <div className="square" onClick={toggleFullScreen} />
-  </Flipped>
-)
-
-const FullScreenSquare = ({ toggleFullScreen }) => (
-  <Flipped flipId="square">
-    <div className="full-screen-square" onClick={toggleFullScreen} />
-  </Flipped>
-)
-
-const AnimatedSquare = () => {
-  const [fullScreen, setFullScreen] = useState(false)
-  const toggleFullScreen = () => setFullScreen(prevState => !prevState)
-
-  return (
-    <Flipper flipKey={fullScreen}>
-      {fullScreen ? (
-        <FullScreenSquare toggleFullScreen={toggleFullScreen} />
-      ) : (
-        <Square toggleFullScreen={toggleFullScreen} />
-      )}
-    </Flipper>
-  )
-}
-```
-
-### Simple Example: List Shuffle
-
-<a href="https://codesandbox.io/s/14v8o5xy44">
-<img src="./example-assets/listshuffle.gif" height="60px" alt="shuffling a list" />
-</a>
-
-[Fork this example on Code Sandbox](https://codesandbox.io/s/14v8o5xy44)
-
-```jsx
-import React, { useState } from 'react'
-import { Flipper, Flipped } from 'react-flip-toolkit'
-import shuffle from 'lodash.shuffle'
-
-const ListShuffler = () => {
-  const [data, setData] = useState([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-  const shuffleList = () => setData(shuffle(data))
-
-  return (
-    <Flipper flipKey={data.join('')}>
-      <button onClick={shuffleList}> shuffle</button>
-      <ul className="list">
-        {data.map(d => (
-          <Flipped key={d} flipId={d}>
-            <li>{d}</li>
-          </Flipped>
-        ))}
-      </ul>
-    </Flipper>
-  )
-}
-```
-
-### List Transitions
-
-Add some interest to a dynamic list of cards by animating changes to cards' sizes and positions.
-
-<a href="https://codesandbox.io/s/list-transitions-ju549">
-<img src="./example-assets/listanimations.gif" height="200px" alt='animated list' />
-</a>
-
-[Fork this example on Code Sandbox](https://codesandbox.io/s/list-transitions-ju549)
-
-### Stagger Effects
-
-The `react-flip-toolkit` library offers spring-driven stagger configurations so that you can achieve complex sequenced effects.
-
-For the most basic stagger effect, you can simply add a `stagger` boolean prop to your `Flipped` element:
-
-```jsx
-<Flipped flipId={`element-${i}`} stagger>
-  <AnimatedListItem/>
-</Flipped>
-```
-
-<a href="https://codesandbox.io/s/wnnxl223n8">
-<img src="./example-assets/list-transition.gif" height="300px" alt='animation for the selected state of a list item' />
-</a>
-
-[Fork this example on Code Sandbox](https://codesandbox.io/s/wnnxl223n8)
-
-
-### Spring Customizations
-
-`react-flip-toolkit` uses springs for animations. To customize the spring, you can pass in a preset name:
-
-```jsx
-// spring preset can be one of: "stiff", "noWobble", "gentle", "veryGentle", or "wobbly"
-<Flipper flipKey='foo' spring='wobbly'>
-  {/* Flipped components go here...*/}
-</Flipper>
-```
-
-or a custom spring config:
-
-```jsx
-<Flipper flipKey='foo' spring={{ stiffness: 280, damping: 22 }} >
-  {/* Flipped components go here...*/}
-</Flipper>
-```
-[View all spring options in the interactive explorer](https://codesandbox.io/s/react-flip-toolkit-spring-settings-explorer-vjrsh)
-
-
-### Nested Scale Transforms
-
-<a href="https://codesandbox.io/s/github/aholachek/react-stripe-menu">
-<img src="./example-assets/stripe-menu.gif" height="300px" alt="stripe menu" />
-</a>
-
-- [Fork this example on Code Sandbox](https://codesandbox.io/s/github/aholachek/react-stripe-menu)
-- [Fork Github repo](https://github.com/aholachek/react-stripe-menu)
-
-
-Interesting animations often involve scale transforms in addition to simple translate transforms. The problem with scale animations has to do with children &mdash; if you scale a div up 2x, you will warp any children it has by scaling them up too, creating a weird-looking animation. That's why this library allows you to wrap the child with a `Flipped` component that has an `inverseFlipId` to counteract the transforms of the parent:
-
-```jsx
-<Flipped flipId={id}>
-  <div>
-    <Flipped inverseFlipId={id} scale>
-      <div>some text that will not be warped</div>
-    </Flipped>
-  </div>
-</Flipped>
-```
-
-By default, both the scale and the translation transforms of the parent will be counteracted (this allows children components to make their own FLIP animations without being affected by the parent).
-But for many use cases, you'll want to additionally specify the `scale` prop to limit the adjustment to the scale and allow the positioning to move with the parent.
-
-Note: the DOM element with the inverse transform should lie flush against its parent container for the most seamless animation.
-
-That means any layout styles &mdash; padding, flexbox, etc&mdash;should be applied to the inverted container (the element wrapped with a `Flipped` component with an `inverseFlipId`) rather than the parent `Flipped` container.
-
-
-
-### Route-based Animations With React Router
-
-<a href="https://github.com/aholachek/react-flip-toolkit-router-example">
-  <img src="./example-assets/compressed-demo.gif" width='500px' alt='React-flip-toolkit with React-Router' />
-</a>
-
-[Fork Github repo](https://github.com/aholachek/react-flip-toolkit-router-example)
-
-
-`react-flip-toolkit` works great with client-side routers to provide route-driven transitions:
-
-```jsx
-<Route
-  render={({ location, search }) => {
-    return (
-      <Flipper
-        flipKey={`${location.pathname}-${location.search}`}
-      >
-      {/* Child routes that contain Flipped components go here...*/}
-      </Flipper>
-    )
-  }}
-/>
-```
-
-### More examples
-
-- [Guitar shop](https://react-flip-toolkit-demos.surge.sh/guitar)
-- [React-flip-toolkit logo](https://codepen.io/aholachek/pen/ERRpEj)
-- [Using Portals](https://react-flip-toolkit-demos.surge.sh/portal)
-
-## The Components
-
-### `Flipper`
-
-The parent wrapper component that contains all the elements to be animated. You'll often need only one of these per page, but sometimes it will be more convenient to have multiple `Flipper` regions of your page concerned with different transitions.
-
-```jsx
-<Flipper flipKey={someKeyThatChanges}>{/* children */}</Flipper>
-```
-
-#### Basic Props
-
-| prop                    |  default   | type                       | details                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ----------------------- | :--------: | :------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| flipKey **(required)**  |     -      | `string`, `number`, `bool` | Changing this tells `react-flip-toolkit` to transition child elements wrapped in `Flipped` components.                                                                                                                                                                                                                                                                                                          |
-| children **(required)** |     -      | `node`                     | One or more element children                                                                                                                                                                                                                                                                                                                                                                                    |
-| spring                  | `noWobble` | `string` or `object`       | Provide a string referencing one of the spring presets &mdash; `noWobble` (default), `veryGentle`, `gentle`, `wobbly`, or `stiff`, OR provide an object with stiffness and damping parameters. [Explore the spring setting options here](https://codesandbox.io/s/react-flip-toolkit-spring-settings-explorer-vjrsh). The prop provided here will be the spring default that can be overrided on a per-element basis on the `Flipped` component. |
-| applyTransformOrigin    |   `true`   | `bool`                     | Whether or not `react-flip-toolkit` should apply a transform-origin of "0 0" to animating children (this is generally, but not always, desirable for FLIP animations)                                                                                                                                                                                                                                           |
-| element                 |   `div`    | `string`                   | If you'd like the wrapper element created by the `Flipped` container to be something other than a `div`, you can specify that here.                                                                                                                                                                                                                                                                             |
-| className               |     -      | `string`                   | A class applied to the wrapper element, helpful for styling.                                                                                                                                                                                                                                                                                                                                                    |
-| staggerConfig           |     -      | `object`                   | Provide configuration for staggered `Flipped` children. The config object might look something like the code snippet below:                                                                                                                                                                                                                                                                                     |
-
-```js
-staggerConfig={{
-  // the "default" config will apply to staggered elements without explicit keys
-      default: {
-        // default direction is forwards
-        reverse: true,
-        // default is .1, 0 < n < 1
-        speed: .5
-      },
-  // this will apply to Flipped elements with the prop stagger='namedStagger'
-    namedStagger : { speed: .2 }
-  }}
-```
-
-#### Advanced Props
-
-| prop                    | default | type       | details                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ----------------------- | :-----: | :--------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| decisionData            |    -    | `any`      | Sometimes, you'll want the animated children of `Flipper` to behave differently depending on the state transition &mdash; maybe only certain `Flipped` elements should animate in response to a particular change. By providing the `decisionData` prop to the `Flipper` component, you'll make that data available to the `shouldFlip` and `shouldInvert` methods of each child `Flipped` component, so they can decided for themselves whether to animate or not.                                                                                                                                                                                                                                    |
-| debug                   | `false` | `boolean`  | This experimental prop will pause your animation right at the initial application of FLIP-ped styles. That will allow you to inspect the state of the animation at the very beginning, when it should look similar or identical to the UI before the animation began.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| portalKey               |    -    | `string`   | In general, the `Flipper` component will only apply transitions to its descendents. This allows multiple `Flipper` elements to coexist on the same page, but it will prevent animations from working if you use [portals](https://reactjs.org/docs/portals.html). You can provide a unique `portalKey` prop to `Flipper` to tell it to scope element selections to the entire document, not just to its children, so that elements in portals can be transitioned.                                                                                                                                                                                                                                     |
-| onStart              |    -    | `function` | This callback prop will be called before any of the individual FLIP animations have started. It receives as arguments the HTMLElement of the Flipper and the decisionData object described elsewhere.                                                                                                                                                                                                                                                                                                                                                                        |
-| onComplete              |    -    | `function` | This callback prop will be called when all individual FLIP animations have completed. Its single argument is a list of `flipId`s for the `Flipped` components that were activated during the animation. If an animation is interrupted, `onComplete` will be still called right before the in-progress animation is terminated.                                                                                                                                                                                                                                                                                                                                                                        |
-| handleEnterUpdateDelete |    -    | `function` | By default, `react-flip-toolkit` finishes animating out exiting elements before animating in new elements, with updating elements transforming immediately. You might want to have more control over the sequence of transitions &mdash; say, if you wanted to hide elements, pause, update elements, pause again, and finally animate in new elements. Or you might want transitions to happen simultaneously. If so, provide the function `handleEnterUpdateDelete` as a prop. [The best way to understand how this works is to check out this interactive example.](https://codesandbox.io/s/4q7qpkn8q0) `handleEnterUpdateDelete` receives the following arguments every time a transition occurs: |
-
-```js
-handleEnterUpdateDelete({
-  // this func applies an opacity of 0 to entering elements so
-  // they can be faded in - it should be called immediately
-  hideEnteringElements,
-  // calls `onAppear` for all entering elements
-  animateEnteringElements,
-  //calls `onExit` for all exiting elements
-  // returns a promise that resolves when all elements have exited
-  animateExitingElements,
-  // the main event: `FLIP` animations for updating elements
-  // this also returns a promise that resolves when
-  // animations have completed
-  animateFlippedElements
-})
-```
-
-### `Flipped`
-
-Wraps an element that should be animated.
-
-E.g. in one component you can have
-
-```jsx
-<Flipped flipId="coolDiv">
-  <div className="small" />
-</Flipped>
-```
-
-and in another component somewhere else you can have
-
-```jsx
-<Flipped flipId="coolDiv">
-  <div className="big" />
-</Flipped>
-```
-
-and they will be tweened by `react-flip-toolkit`.
-
-The `Flipped` component produces no markup, it simply passes some props down to its wrapped child.
-
-#### Wrapping a React Component
-
-If you want to wrap a React component rather than a JSX element like a `div`, you can provide a render prop and then apply the `flippedProps` directly to the wrapped element in your component:
-
-```jsx
-<Flipped>
-  {flippedProps => <MyCoolComponent flippedProps={flippedProps} />}
-</Flipped>
-
-const MyCoolComponent = ({ flippedProps }) => <div {...flippedProps} />
-```
-
-You can also simply provide a regular React component as long as that component spreads unrecognized props directly onto the wrapped element (this technique works well for wrapping styled components):
-
-```jsx
-<Flipped>
-  <MyCoolComponent />
-</Flipped>
-
-const MyCoolComponent = ({ knownProp, ...rest }) => <div {...rest} />
-```
-
-#### Basic props
-
-| prop                                                   |  default   | type                  | details                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ------------------------------------------------------ | :--------: | :-------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| children **(required)**                                |     -      | `node` or `function`  | Wrap a single element, React component, or render prop child with the `Flipped` component                                                                                                                                                                                                                                                                                                                                                               |
-| flipId **(required unless inverseFlipId is provided)** |     -      | `string`              | Use this to tell `react-flip-toolkit` how elements should be matched across renders so they can be animated.                                                                                                                                                                                                                                                                                                                                            |
-| inverseFlipId                                          |     -      | `string`              | Refer to the id of the parent `Flipped` container whose transform you want to cancel out. If this prop is provided, the `Flipped` component will become a limited version of itself that is only responsible for cancelling out its parent transform. It will read from any provided `transform` props and will ignore all other props (besides `inverseFlipId`.) [Read more about canceling out parent transforms here.](#practical-scale-transitions) |
-| transformOrigin                                        |  `"0 0"`   | `string`              | This is a convenience method to apply the proper CSS `transform-origin` to the element being FLIP-ped. This will override `react-flip-toolkit`'s default application of `transform-origin: 0 0;` if it is provided as a prop.                                                                                                                                                                                                                           |
-| spring                                                 | `noWobble` | `string` or `object`  | Provide a string referencing one of the spring presets &mdash; `noWobble` (default), `veryGentle`, `gentle`, `wobbly`, or `stiff`, OR provide an object with stiffness and damping parameters. [Explore the spring setting options here.](https://codepen.io/aholachek/full/bKmZbV/)                                                                                                                                                                               |
-| stagger                                                |  `false`   | `boolean` or `string` | Provide a natural, spring-based staggering effect in which the spring easing of each item is pinned to the previous one's movement. Provide `true` to stagger the element with all other staggered elements. If you want to get more granular, you can provide a string key and the element will be staggered with other elements with the same key.                                                                                                    |
-| delayUntil                                               |  `false`   | `string` (flipId) | Delay an animation by providing a reference to another `Flipped` component that it should wait for before animating (the other `Flipped` component should have a stagger delay as that is the only use case in which this prop is necessary.)                                                                                                    |
-
-#### Callback props
-
-<p>
-<a href="https://codesandbox.io/s/q787wz5lx4">
-  <img src="./example-assets/enter-update-delete.gif" height="300px" alt='animation of a sentence transforming into another sentence' />
-</a>
-</p>
-
-The above animation uses `onAppear` and `onExit` callbacks for fade-in and fade-out animations.
-
-| prop             | arguments                           | details                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ---------------- | :---------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| onAppear         | `element`, `index`, `{previous: decisionData, current: decisionData }`                  | Called when the element first appears in the DOM. It is provided a reference to the DOM element being transitioned as the first argument, and the index of the element relative to all appearing elements as the second. Note: If you provide an `onAppear` prop, the default opacity of the element will be set to 0 to allow you to animate it in without any initial flicker. If you don't want any opacity animation, just set the element's opacity to 1 immediately in your `onAppear` function. |
-| onStart          | `element`, `{previous: decisionData, current: decisionData }`                          | Called when the FLIP animation for the element starts. It is provided a reference to the DOM element being transitioned as the first argument.                                                                                                                                                                                                                                                                                                                                                         |
-| onStartImmediate | `element`, `{previous: decisionData, current: decisionData }`                          | Similar to `onStart`, but guaranteed to run for all FLIP-ped elements on the initial tick of the FLIP animation, before the next frame has rendered, even if the element in question has a stagger delay. It is provided a reference to the DOM element being transitioned as the first argument.                                                                                                                                                                                                      |
-| onSpringUpdate   | `springValue`                       | Called with the current spring value (normally between 0 - 1 but might briefly go over or under that range depending on the level of "bounciness" of the spring). Useful if you'd like to tween other, non-FLIP animations in concert with a FLIP transition.                                                                                                                                                                                                                                          |
-| onComplete       | `element`,`{previous: decisionData, current: decisionData }`                          | Called when the FLIP animation completes. It is provided a reference to the DOM element being transitioned as the first argument. (If transitions are interruped by new ones, `onComplete` will still be called.)                                                                                                                                                                                                                                                                                      |
-| onExit           | `element`, `index`, `removeElement`, `{previous: decisionData, current: decisionData }` | Called when the element is removed from the DOM. It must call the `removeElement` function when the exit transition has completed.                                                                                                                                                                                                                                                                                                                                                                     |
-
-#### Transform props
-
-By default the FLIP-ped elements' translate, scale, and opacity properties are all transformed. However, certain effects require more control so if you specify any of these props, _only the specified attribute(s) will be tweened_:
-
-| prop      |  type  | details                             |
-| --------- | :----: | :---------------------------------- |
-| translate | `bool` | Tween `translateX` and `translateY` |
-| scale     | `bool` | Tween `scaleX` and `scaleY`         |
-| opacity   | `bool` |                                     |
-
-#### Advanced props
-
-Functions to control when FLIP happens
-
-| prop         | arguments                                     | details                                                                                                                                                                                                                                              |
-| ------------ | :-------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| shouldFlip   | `previousDecisionData`, `currentDecisionData` | A function provided with the current and previous `decisionData` props passed down by the `Flipper` component. Returns a `boolean` to indicate whether a `Flipped` component should animate at that particular moment or not.                        |
-| shouldInvert | `previousDecisionData`, `currentDecisionData` | A function provided with the current and previous `decisionData` props passed down by the `Flipper` component. Returns a `boolean` indicating whether to apply inverted transforms to all `Flipped` children that request it via an `inverseFlipId`. |
-
-
-### `Spring`
-
-As a convenience, `react-flip-toolkit` exports a tiny function to access the same spring system used to create FLIP transitions.
-
-[Fork example on CodeSandbox](https://codesandbox.io/s/react-flip-toolkit-spring-example-e6pyc)
-
-```jsx
-import { spring } from 'react-flip-toolkit'
-
-spring({
-  config: "wobbly",
-  values: {
-    translateY: [-15, 0],
-    opacity: [0, 1]
-  },
-  onUpdate: ({ translateY, opacity }) => {
-    el.style.opacity = opacity;
-    el.style.transform = `translateY(${translateY}px)`;
-  },
-  delay: i * 25,
-  onComplete: () => console.log('done')
-});
-```
-
-<a href="https://codesandbox.io/s/react-flip-toolkit-spring-example-e6pyc">
-  <img src="./example-assets/spring.gif" alt="spring example" width="200px"/>
-</a>
-
-
-## Global configuration functions
-
-You can programmatically call the following functions if you need to disable (or re-enable) FLIP animations everywhere.
-
-#### `disableFlip()`
-
-Global switch to disable all animations in all `Flipper` containers.
-
-#### `enableFlip()`
-
-Global switch to (re-)enable all animations in all `Flipper` containers. Animations are enabled by default. Calling this function is needed only if animations were previously disabled with `disableFlip()`.
-
-#### `isFlipEnabled()`
-
-Returns a boolean indicating whether animations are globally enabled or disabled.
-
-
-## Library details
-
-<a href="https://www.browserstack.com/">
-<img src="./example-assets/browserstack.png" alt="browserstack" width="140"/>
-</a>
-
-- Tested in latest Chrome, Firefox, Safari, and Edge with [Browserstack](https://www.browserstack.com/).
-- Requires React 16+
-- Uses [Rematrix](https://github.com/jlmakes/rematrix) for matrix calculations and a simplified fork of [Rebound](https://github.com/facebook/rebound-js) for spring animations
-
-## Troubleshooting
-
-### Problem #1: Nothing is happening
-
-- Make sure you're updating the `flipKey` attribute in the `Flipper` component whenever an animation should happen.
-- If one of your `Flipped` components is wrapping another React component rather than a DOM element, [use a render prop to get the Flipped props](#wrapping-a-react-component) and pass down to the necessary DOM element.
-- Is the element that's receiving props from `Flipped` visible in the DOM? `react-flip-toolkit` attempts to optimize performance by not animating elements that are off-screen or elements that have no width or height.
-- `display:inline` elements cannot be animated. If you want an `inline` element to animate, set `display:inline-block`.
-- Do you have the [prefers-reduced-motion](https://developer.mozilla.org/en-US/docs/Web/CSS/@media/prefers-reduced-motion) setting turned on? As of v7.1.0 that setting will disable all animations.
-
-### Problem #2: Things look weird / animations aren't behaving
-
-- **Check to make sure all `flipId`s are unique.** At any point, there can only be one element with a specified `flipId` on the page. If there are multiple `Flipped` elements on the page with the same id, the animation will break.
-- **Make sure you are animating the element you want to animate and not, for instance, a wrapper div**. If you are animating an inline element like some text, but have wrapped it in a `div`, you're actually animating the div, which might have a much wider width that you'd expect at certain points, which will throw off the animation. Check to see if you need to add an `inline-block` style to the animated element.
-- Make sure you don't have any **competing CSS transitions** on the element in question.
-- **If you are animating an image**, try giving the image hard-coded dimensions and seeing if that fixes the problem. (If you are relying on the innate dimensions of the image, it might not have been fully rendered by the browser in time for the new image dimensions to be measured.)
-
-### Problem #3: It's still not working
-
-- Try out the `debug` prop. If you still can't figure out what's going wrong, you can add the [the `debug` prop](#props) directly on your `Flipper` component to pause transitions at the beginning.
-- If you think something might actually be broken, or are completely stuck, feel free to make an issue.
-
-## Performance
-
-`React-flip-toolkit` does a lot of work under the hood to try to maximize the performance of your animations &mdash; for instance, off-screen elements won't be animated, and style updates are batched to prevent [layout thrashing](https://developers.google.com/web/fundamentals/performance/rendering/avoid-large-complex-layouts-and-layout-thrashing).
-However, if you are building particularly complex animations&mdash;ones that involve dozens of elements or large images&mdash; there are some additional strategies you can use to ensure performant animations.
-
-### `Memoization`
-
-When you trigger a complex FLIP animation with `react-flip-toolkit`, `React` could be spending vital milliseconds doing unnecessary reconciliation work before allowing the animation to start. If you notice a slight delay between when the animation is triggered, and when it begins, this is probably the culprit. To short-circuit this possibly unnecessary work, try memoizing your component by using [`React.memo`](https://reactjs.org/docs/react-api.html#reactmemo) or [`PureComponent`](https://reactjs.org/docs/react-api.html#reactpurecomponent) for your animated elements, and seeing if you can refactor your code to minimize prop updates to animated children when an animation is about to occur.
-
-### `will-change:transform`
-
-```css
-.box {
-  will-change: transform;
-}
-```
-
-This [CSS property](https://dev.opera.com/articles/css-will-change-property/) tells the browser to anticipate changes to an element. It should be used with caution, because it can increase browser resource usage. If you notice rendering issues in your animation, try seeing if it increases the performance of the animation.
+MIT License
+
+Copyright (c) 2018 Alex Holachek
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### react-is 16.13.1
@@ -11456,6 +9683,8 @@ This [CSS property](https://dev.opera.com/articles/css-will-change-property/) te
 License: MIT
 
 Repository: https://github.com/facebook/react
+
+License source: react-is@16.13.1/LICENSE
 
 ```text
 MIT License
@@ -11487,6 +9716,8 @@ License: MIT
 
 Repository: https://github.com/theKashey/react-remove-scroll
 
+License source: react-remove-scroll@2.7.2/LICENSE
+
 ```text
 MIT License
 
@@ -11517,59 +9748,27 @@ License: MIT
 
 Repository: https://github.com/theKashey/react-remove-scroll-bar
 
+License source: standard SPDX text for declared license, no upstream LICENSE file at 2.3.8; npm gitHead b3b1287aad81def2e2ae707274b74531b61ddbaf is unavailable upstream (HTTP 404), and the published package has no LICENSE; https://raw.githubusercontent.com/spdx/license-list-data/d46e94e2c78ceede1cfc63cfa0396472d2798d4c/json/details/MIT.json
+
 ```text
-<h1>react-remove-scroll-bar</h1>
+MIT License
 
-[![npm](https://img.shields.io/npm/v/react-remove-scroll-bar.svg)](https://www.npmjs.com/package/react-remove-scroll-bar)
-[![bundle size](https://badgen.net/bundlephobia/minzip/react-remove-scroll-bar)](https://bundlephobia.com/result?p=react-remove-scroll-bar)
-[![downloads](https://badgen.net/npm/dm/react-remove-scroll-bar)](https://www.npmtrends.com/react-remove-scroll-bar)
+Copyright (c) <year> <copyright holders>
 
-<hr />
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
 
-> v1+ for React 15, v2+ requires React 16.8+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
 
-Removes scroll bar (by setting `overflow: hidden` on body), and preserves the scroll bar "gap".
-
-Read - it just makes scroll bar invisible.
-
-Does nothing if scroll bar does not consume any space.
-
-# Usage
-
-```js
-import {RemoveScrollBar} from 'react-remove-scroll-bar';
-
-<RemoveScrollBar /> -> no scroll bar
-```
-
-### The Right Border
-To prevent content jumps __position:fixed__ elements with `right:0`  should have additional classname applied.
-It will just provide a _non-zero_ right, when it needed, to maintain the right "gap".
-```js
-import {zeroRightClassName,fullWidthClassName, noScrollbarsClassName} from 'react-remove-scroll-bar';
-
-// to set `right:0` on an element
-<div className={zeroRightClassName} />
-
-// to set `width:100%` on an element
-<div className={fullWidthClassName} />
-
-// to remove scrollbar from an element
-<div className={noScrollbarsClassName} />
-
-```
-
-# Size
-500b after compression (excluding tslib).
-
-# Scroll-Locky
-All code is a result of a [react-scroll-locky](https://github.com/theKashey/react-scroll-locky) refactoring.
-
-# Article
-There is a medium article about preventing the body scroll - [How to fight the <body> scroll](https://medium.com/@antonkorzunov/how-to-fight-the-body-scroll-2b00267b37ac)
-
-# License
-MIT
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### react-style-singleton 2.2.3
@@ -11577,6 +9776,8 @@ MIT
 License: MIT
 
 Repository: https://github.com/theKashey/react-style-singleton
+
+License source: react-style-singleton@2.2.3/LICENSE
 
 ```text
 MIT License
@@ -11608,6 +9809,8 @@ License: MIT
 
 Repository: https://github.com/slevithan/regex
 
+License source: regex@6.1.0/LICENSE
+
 ```text
 MIT License
 
@@ -11637,6 +9840,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/slevithan/regex-recursion
+
+License source: regex-recursion@6.0.2/LICENSE
 
 ```text
 MIT License
@@ -11668,6 +9873,8 @@ License: MIT
 
 Repository: https://github.com/slevithan/regex-utilities
 
+License source: regex-utilities@2.3.0/LICENSE
+
 ```text
 MIT License
 
@@ -11697,6 +9904,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/jlmakes/rematrix
+
+License source: rematrix@0.2.2/LICENSE
 
 ```text
 MIT License
@@ -11728,6 +9937,8 @@ License: MIT
 
 Repository: https://github.com/floatdrop/require-from-string
 
+License source: require-from-string@2.0.2/license
+
 ```text
 The MIT License (MIT)
 
@@ -11757,6 +9968,8 @@ THE SOFTWARE.
 License: BlueOak-1.0.0
 
 Repository: https://github.com/isaacs/sax-js
+
+License source: sax@1.6.0/LICENSE.md
 
 ```text
 # Blue Oak Model License
@@ -11822,330 +10035,73 @@ License: ISC
 
 Repository: https://github.com/lddubeau/saxes
 
+License source: upstream LICENSE at npm saxes@6.0.0 gitHead 211fa0ebec9b628affc09219199639887174bfc3; https://raw.githubusercontent.com/lddubeau/saxes/211fa0ebec9b628affc09219199639887174bfc3/LICENSE
+
 ```text
-# saxes
-
-A sax-style non-validating parser for XML.
-
-Saxes is a fork of [sax](https://github.com/isaacs/sax-js) 1.2.4. All mentions
-of sax in this project's documentation are references to sax 1.2.4.
-
-Designed with [node](http://nodejs.org/) in mind, but should work fine in the
-browser or other CommonJS implementations.
-
-Saxes does not support Node versions older than 10.
-
-## Notable Differences from Sax.
-
-* Saxes aims to be much stricter than sax with regards to XML
-  well-formedness. Sax, even in its so-called "strict mode", is not strict. It
-  silently accepts structures that are not well-formed XML. Projects that need
-  better compliance with well-formedness constraints cannot use sax as-is.
-
-  Consequently, saxes does not support HTML, or pseudo-XML, or bad XML. Saxes
-  will report well-formedness errors in all these cases but it won't try to
-  extract data from malformed documents like sax does.
-
-* Saxes is much much faster than sax, mostly because of a substantial redesign
-  of the internal parsing logic. The speed improvement is not merely due to
-  removing features that were supported by sax. That helped a bit, but saxes
-  adds some expensive checks in its aim for conformance with the XML
-  specification. Redesigning the parsing logic is what accounts for most of the
-  performance improvement.
-
-* Saxes does not aim to support antiquated platforms. We will not pollute the
-  source or the default build with support for antiquated platforms. If you want
-  support for IE 11, you are welcome to produce a PR that adds a *new build*
-  transpiled to ES5.
-
-* Saxes handles errors differently from sax: it provides a default onerror
-  handler which throws. You can replace it with your own handler if you want. If
-  your handler does nothing, there is no `resume` method to call.
-
-* There's no `Stream` API. A revamped API may be introduced later. (It is still
-  a "streaming parser" in the general sense that you write a character stream to
-  it.)
-
-* Saxes does not have facilities for limiting the size the data chunks passed to
-  event handlers. See the FAQ entry for more details.
-
-## Conformance
-
-Saxes supports:
-
-* [XML 1.0 fifth edition](https://www.w3.org/TR/2008/REC-xml-20081126/)
-* [XML 1.1 second edition](https://www.w3.org/TR/2006/REC-xml11-20060816/)
-* [Namespaces in XML 1.0 (Third Edition)](https://www.w3.org/TR/2009/REC-xml-names-20091208/).
-* [Namespaces in XML 1.1 (Second Edition)](https://www.w3.org/TR/2006/REC-xml-names11-20060816/).
-
-## Limitations
-
-This is a non-validating parser so it only verifies whether the document is
-well-formed. We do aim to raise errors for all malformed constructs
-encountered. However, this parser does not thorougly parse the contents of
-DTDs. So most malformedness errors caused by errors **in DTDs** cannot be
-reported.
-
-## Regarding `<!DOCTYPE` and `<!ENTITY`
-
-The parser will handle the basic XML entities in text nodes and attribute
-values: `&amp; &lt; &gt; &apos; &quot;`. It's possible to define additional
-entities in XML by putting them in the DTD. This parser doesn't do anything with
-that. If you want to listen to the `doctype` event, and then fetch the
-doctypes, and read the entities and add them to `parser.ENTITIES`, then be my
-guest.
-
-## Documentation
-
-The source code contains JSDOC comments. Use them. What follows is a brief
-summary of what is available. The final authority is the source code.
-
-**PAY CLOSE ATTENTION TO WHAT IS PUBLIC AND WHAT IS PRIVATE.**
-
-The move to TypeScript makes it so that everything is now formally private,
-protected, or public.
-
-If you use anything not public, that's at your own peril.
-
-If there's a mistake in the documentation, raise an issue. If you just assume,
-you may assume incorrectly.
-
-## Summary Usage Information
-
-### Example
-
-```javascript
-var saxes = require("./lib/saxes"),
-  parser = new saxes.SaxesParser();
-
-parser.on("error", function (e) {
-  // an error happened.
-});
-parser.on("text", function (t) {
-  // got some text.  t is the string of text.
-});
-parser.on("opentag", function (node) {
-  // opened a tag.  node has "name" and "attributes"
-});
-parser.on("end", function () {
-  // parser stream is done, and ready to have more stuff written to it.
-});
-
-parser.write('<xml>Hello, <who name="world">world</who>!</xml>').close();
-```
-
-### Constructor Arguments
-
-Settings supported:
-
-* `xmlns` - Boolean. If `true`, then namespaces are supported. Default
-  is `false`.
-
-* `position` - Boolean. If `false`, then don't track line/col/position. Unset is
-  treated as `true`. Default is unset. Currently, setting this to `false` only
-  results in a cosmetic change: the errors reported do not contain position
-  information. sax-js would literally turn off the position-computing logic if
-  this flag was set to false. The notion was that it would optimize
-  execution. In saxes at least it turns out that continually testing this flag
-  causes a cost that offsets the benefits of turning off this logic.
-
-* `fileName` - String. Set a file name for error reporting. This is useful only
-  when tracking positions. You may leave it unset.
-
-* `fragment` - Boolean. If `true`, parse the XML as an XML fragment. Default is
-  `false`.
-
-* `additionalNamespaces` - A plain object whose key, value pairs define
-   namespaces known before parsing the XML file. It is not legal to pass
-   bindings for the namespaces `"xml"` or `"xmlns"`.
-
-* `defaultXMLVersion` - The default version of the XML specification to use if
-  the document contains no XML declaration. If the document does contain an XML
-  declaration, then this setting is ignored. Must be `"1.0"` or `"1.1"`. The
-  default is `"1.0"`.
-
-* `forceXMLVersion` - Boolean. A flag indicating whether to force the XML
-  version used for parsing to the value of ``defaultXMLVersion``. When this flag
-  is ``true``, ``defaultXMLVersion`` must be specified. If unspecified, the
-  default value of this flag is ``false``.
-
-  Example: suppose you are parsing a document that has an XML declaration
-  specifying XML version 1.1.
-
-  If you set ``defaultXMLVersion`` to ``"1.0"`` without setting
-  ``forceXMLVersion`` then the XML declaration will override the value of
-  ``defaultXMLVersion`` and the document will be parsed according to XML 1.1.
-
-  If you set ``defaultXMLVersion`` to ``"1.0"`` and set ``forceXMLVersion`` to
-  ``true``, then the XML declaration will be ignored and the document will be
-  parsed according to XML 1.0.
-
-### Methods
-
-`write` - Write bytes onto the stream. You don't have to pass the whole document
-in one `write` call. You can read your source chunk by chunk and call `write`
-with each chunk.
-
-`close` - Close the stream. Once closed, no more data may be written until it is
-done processing the buffer, which is signaled by the `end` event.
-
-### Properties
-
-The parser has the following properties:
-
-`line`, `column`, `columnIndex`, `position` - Indications of the position in the
-XML document where the parser currently is looking. The `columnIndex` property
-counts columns as if indexing into a JavaScript string, whereas the `column`
-property counts Unicode characters.
-
-`closed` - Boolean indicating whether or not the parser can be written to.  If
-it's `true`, then wait for the `ready` event to write again.
-
-`opt` - Any options passed into the constructor.
-
-`xmlDecl` - The XML declaration for this document. It contains the fields
-`version`, `encoding` and `standalone`. They are all `undefined` before
-encountering the XML declaration. If they are undefined after the XML
-declaration, the corresponding value was not set by the declaration. There is no
-event associated with the XML declaration. In a well-formed document, the XML
-declaration may be preceded only by an optional BOM. So by the time any event
-generated by the parser happens, the declaration has been processed if present
-at all. Otherwise, you have a malformed document, and as stated above, you
-cannot rely on the parser data!
-
-### Error Handling
-
-The parser continues to parse even upon encountering errors, and does its best
-to continue reporting errors. You should heed all errors reported. After an
-error, however, saxes may interpret your document incorrectly. For instance
-``<foo a=bc="d"/>`` is invalid XML. Did you mean to have ``<foo a="bc=d"/>`` or
-``<foo a="b" c="d"/>`` or some other variation?  For the sake of continuing to
-provide errors, saxes will continue parsing the document, but the structure it
-reports may be incorrect. It is only after the errors are fixed in the document
-that saxes can provide a reliable interpretation of the document.
-
-That leaves you with two rules of thumb when using saxes:
-
-* Pay attention to the errors that saxes report. The default `onerror` handler
-  throws, so by default, you cannot miss errors.
-
-* **ONCE AN ERROR HAS BEEN ENCOUNTERED, STOP RELYING ON THE EVENT HANDLERS OTHER
-  THAN `onerror`.** As explained above, when saxes runs into a well-formedness
-  problem, it makes a guess in order to continue reporting more errors. The guess
-  may be wrong.
-
-### Events
-
-To listen to an event, override `on<eventname>`. The list of supported events
-are also in the exported `EVENTS` array.
-
-See the JSDOC comments in the source code for a description of each supported
-event.
-
-### Parsing XML Fragments
-
-The XML specification does not define any method by which to parse XML
-fragments. However, there are usage scenarios in which it is desirable to parse
-fragments. In order to allow this, saxes provides three initialization options.
-
-If you pass the option `fragment: true` to the parser constructor, the parser
-will expect an XML fragment. It essentially starts with a parsing state
-equivalent to the one it would be in if `parser.write("<foo">)` had been called
-right after initialization. In other words, it expects content which is
-acceptable inside an element. This also turns off well-formedness checks that
-are inappropriate when parsing a fragment.
-
-The option `additionalNamespaces` allows you to define additional prefix-to-URI
-bindings known before parsing starts. You would use this over `resolvePrefix` if
-you have at the ready a series of namespaces bindings to use.
-
-The option `resolvePrefix` allows you to pass a function which saxes will use if
-it is unable to resolve a namespace prefix by itself. You would use this over
-`additionalNamespaces` in a context where getting a complete list of defined
-namespaces is onerous.
-
-Note that you can use `additionalNamespaces` and `resolvePrefix` together if you
-want. `additionalNamespaces` applies before `resolvePrefix`.
-
-The options `additionalNamespaces` and `resolvePrefix` are really meant to be
-used for parsing fragments. However, saxes won't prevent you from using them
-with `fragment: false`. Note that if you do this, your document may parse
-without errors and yet be malformed because the document can refer to namespaces
-which are not defined *in* the document.
-
-Of course, `additionalNamespaces` and `resolvePrefix` are used only if `xmlns`
-is `true`. If you are parsing a fragment that does not use namespaces, there's
-no point in setting these options.
-
-### Performance Tips
-
-* saxes works faster on files that use newlines (``\u000A``) as end of line
-  markers than files that use other end of line markers (like ``\r`` or
-  ``\r\n``). The XML specification requires that conformant applications behave
-  as if all characters that are to be treated as end of line characters are
-  converted to ``\u000A`` prior to parsing. The optimal code path for saxes is a
-  file in which all end of line characters are already ``\u000A``.
-
-* Don't split Unicode strings you feed to saxes across surrogates. When you
-  naively split a string in JavaScript, you run the risk of splitting a Unicode
-  character into two surrogates. e.g.  In the following example ``a`` and ``b``
-  each contain half of a single Unicode character: ``const a = "\u{1F4A9}"[0];
-  const b = "\u{1F4A9}"[1]`` If you feed such split surrogates to versions of
-  saxes prior to 4, you'd get errors. Saxes version 4 and over are able to
-  detect when a chunk of data ends with a surrogate and carry over the surrogate
-  to the next chunk. However this operation entails slicing and concatenating
-  strings. If you can feed your data in a way that does not split surrogates,
-  you should do it. (Obviously, feeding all the data at once with a single write
-  is fastest.)
-
-* Don't set event handlers you don't need. Saxes has always aimed to avoid doing
-  work that will just be tossed away but future improvements hope to do this
-  more aggressively. One way saxes knows whether or not some data is needed is
-  by checking whether a handler has been set for a specific event.
-
-## FAQ
-
-Q. Why has saxes dropped support for limiting the size of data chunks passed to
-event handlers?
-
-A. With sax you could set ``MAX_BUFFER_LENGTH`` to cause the parser to limit the
-size of data chunks passed to event handlers. So if you ran into a span of text
-above the limit, multiple ``text`` events with smaller data chunks were fired
-instead of a single event with a large chunk.
-
-However, that functionality had some problematic characteristics. It had an
-arbitrary default value. It was library-wide so all parsers created from a
-single instance of the ``sax`` library shared it. This could potentially cause
-conflicts among libraries running in the same VM but using sax for different
-purposes.
-
-These issues could have been easily fixed, but there were larger issues. The
-buffer limit arbitrarily applied to some events but not others. It would split
-``text``, ``cdata`` and ``script`` events. However, if a ``comment``,
-``doctype``, ``attribute`` or ``processing instruction`` were more than the
-limit, the parser would generate an error and you were left picking up the
-pieces.
-
-It was not intuitive to use. You'd think setting the limit to 1K would prevent
-chunks bigger than 1K to be passed to event handlers. But that was not the
-case. A comment in the source code told you that you might go over the limit if
-you passed large chunks to ``write``. So if you want a 1K limit, don't pass 64K
-chunks to ``write``. Fair enough. You know what limit you want so you can
-control the size of the data you pass to ``write``. So you limit the chunks to
-``write`` to 1K at a time. Even if you do this, your event handlers may get data
-chunks that are 2K in size. Suppose on the previous ``write`` the parser has
-just finished processing an open tag, so it is ready for text. Your ``write``
-passes 1K of text. You are not above the limit yet, so no event is generated
-yet. The next ``write`` passes another 1K of text. It so happens that sax checks
-buffer limits only once per ``write``, after the chunk of data has been
-processed. Now you've hit the limit and you get a ``text`` event with 2K of
-data. So even if you limit your ``write`` calls to the buffer limit you've set,
-you may still get events with chunks at twice the buffer size limit you've
-specified.
-
-We may consider reinstating an equivalent functionality, provided that it
-addresses the issues above and does not cause a huge performance drop for
-use-case scenarios that don't need it.
+The ISC License
+
+Copyright (c) Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+====
+
+The following license is the one that governed sax, from which saxes
+was forked. Isaac Schlueter is not *directly* involved with saxes so
+don't go bugging him for saxes issues.
+
+The ISC License
+
+Copyright (c) Isaac Z. Schlueter and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+====
+
+`String.fromCodePoint` by Mathias Bynens is no longer used, but it can
+still be found in old commits. It was once used according to terms of
+MIT License, as follows:
+
+    Copyright Mathias Bynens <https://mathiasbynens.be/>
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+    LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+    OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+    WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### scheduler 0.27.0
@@ -12153,6 +10109,8 @@ use-case scenarios that don't need it.
 License: MIT
 
 Repository: https://github.com/facebook/react
+
+License source: scheduler@0.27.0/LICENSE
 
 ```text
 MIT License
@@ -12184,6 +10142,8 @@ License: ISC
 
 Repository: https://github.com/npm/node-semver
 
+License source: semver@7.7.4/LICENSE
+
 ```text
 The ISC License
 
@@ -12208,6 +10168,8 @@ License: ISC
 
 Repository: https://github.com/npm/node-semver
 
+License source: semver@7.8.5/LICENSE
+
 ```text
 The ISC License
 
@@ -12231,6 +10193,8 @@ IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 License: BSD-3-Clause
 
 Repository: https://github.com/7rulnik/source-map-js
+
+License source: source-map-js@1.2.1/LICENSE
 
 ```text
 Copyright (c) 2009-2011, Mozilla Foundation and contributors
@@ -12268,6 +10232,8 @@ License: MIT
 
 Repository: https://github.com/wooorm/space-separated-tokens
 
+License source: space-separated-tokens@2.0.2/license
+
 ```text
 (The MIT License)
 
@@ -12299,6 +10265,8 @@ License: MIT
 
 Repository: https://github.com/wooorm/stringify-entities
 
+License source: stringify-entities@4.0.4/license
+
 ```text
 (The MIT License)
 
@@ -12329,6 +10297,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: Apache-2.0
 
 Repository: https://github.com/malept/sumchecker
+
+License source: sumchecker@3.0.1/LICENSE
 
 ```text
 Apache License
@@ -12540,6 +10510,8 @@ License: MIT
 
 Repository: https://github.com/jsdom/js-symbol-tree
 
+License source: symbol-tree@3.2.4/LICENSE
+
 ```text
 The MIT License (MIT)
 
@@ -12569,6 +10541,8 @@ THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/binier/tiny-typed-emitter
+
+License source: tiny-typed-emitter@2.1.0/LICENSE
 
 ```text
 MIT License
@@ -12600,6 +10574,8 @@ License: MIT
 
 Repository: https://github.com/remusao/tldts
 
+License source: tldts@7.0.30/LICENSE
+
 ```text
 Copyright (c) 2017 Thomas Parisot, 2018 Rémi Berson
 
@@ -12621,6 +10597,8 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTH
 License: MIT
 
 Repository: https://github.com/remusao/tldts
+
+License source: tldts-core@7.0.30/LICENSE
 
 ```text
 Copyright (c) 2017 Thomas Parisot, 2018 Rémi Berson
@@ -12644,6 +10622,8 @@ License: BSD-3-Clause
 
 Repository: https://github.com/salesforce/tough-cookie
 
+License source: tough-cookie@6.0.1/LICENSE
+
 ```text
 Copyright (c) 2015, Salesforce.com, Inc.
 All rights reserved.
@@ -12664,6 +10644,8 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 License: MIT
 
 Repository: https://github.com/jsdom/tr46
+
+License source: tr46@6.0.0/LICENSE.md
 
 ```text
 The MIT License (MIT)
@@ -12694,6 +10676,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/wooorm/trim-lines
+
+License source: trim-lines@3.0.1/license
 
 ```text
 (The MIT License)
@@ -12726,6 +10710,8 @@ License: 0BSD
 
 Repository: https://github.com/Microsoft/tslib
 
+License source: tslib@2.8.1/LICENSE.txt
+
 ```text
 Copyright (c) Microsoft Corporation.
 
@@ -12746,6 +10732,8 @@ PERFORMANCE OF THIS SOFTWARE.
 License: MIT
 
 Repository: https://github.com/nodejs/undici
+
+License source: undici@7.28.0/LICENSE
 
 ```text
 MIT License
@@ -12777,6 +10765,8 @@ License: MIT
 
 Repository: https://github.com/nodejs/undici
 
+License source: undici-types@7.18.2/LICENSE
+
 ```text
 MIT License
 
@@ -12806,6 +10796,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/syntax-tree/unist-util-is
+
+License source: unist-util-is@6.0.1/license
 
 ```text
 (The MIT license)
@@ -12838,6 +10830,8 @@ License: MIT
 
 Repository: https://github.com/syntax-tree/unist-util-position
 
+License source: unist-util-position@5.0.0/license
+
 ```text
 (The MIT License)
 
@@ -12868,6 +10862,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/syntax-tree/unist-util-stringify-position
+
+License source: unist-util-stringify-position@4.0.0/license
 
 ```text
 (The MIT License)
@@ -12900,6 +10896,8 @@ License: MIT
 
 Repository: https://github.com/syntax-tree/unist-util-visit
 
+License source: unist-util-visit@5.1.0/license
+
 ```text
 (The MIT License)
 
@@ -12930,6 +10928,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/syntax-tree/unist-util-visit-parents
+
+License source: unist-util-visit-parents@6.0.2/license
 
 ```text
 (The MIT License)
@@ -12962,6 +10962,8 @@ License: MIT
 
 Repository: https://github.com/RyanZim/universalify
 
+License source: universalify@2.0.1/LICENSE
+
 ```text
 (The MIT License)
 
@@ -12990,6 +10992,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/theKashey/use-callback-ref
+
+License source: use-callback-ref@1.3.3/LICENSE
 
 ```text
 MIT License
@@ -13021,6 +11025,8 @@ License: MIT
 
 Repository: https://github.com/theKashey/use-sidecar
 
+License source: use-sidecar@1.1.3/LICENSE
+
 ```text
 MIT License
 
@@ -13050,6 +11056,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/facebook/react
+
+License source: use-sync-external-store@1.6.0/LICENSE
 
 ```text
 MIT License
@@ -13081,6 +11089,8 @@ License: MIT
 
 Repository: https://github.com/vfile/vfile
 
+License source: vfile@6.0.3/license
+
 ```text
 (The MIT License)
 
@@ -13110,6 +11120,8 @@ THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/vfile/vfile-message
+
+License source: vfile-message@4.0.3/license
 
 ```text
 (The MIT License)
@@ -13141,6 +11153,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/jsdom/w3c-xmlserializer
+
+License source: w3c-xmlserializer@5.0.0/LICENSE.md
 
 ```text
 The MIT License (MIT)
@@ -13176,6 +11190,8 @@ License: BSD-2-Clause
 
 Repository: https://github.com/jsdom/webidl-conversions
 
+License source: webidl-conversions@8.0.1/LICENSE.md
+
 ```text
 # The BSD 2-Clause License
 
@@ -13197,6 +11213,8 @@ License: MIT
 
 Repository: https://github.com/jsdom/whatwg-mimetype
 
+License source: whatwg-mimetype@5.0.0/LICENSE.txt
+
 ```text
 Copyright © Domenic Denicola <d@domenic.me>
 
@@ -13212,6 +11230,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 License: MIT
 
 Repository: https://github.com/jsdom/whatwg-url
+
+License source: whatwg-url@16.0.1/LICENSE.txt
 
 ```text
 The MIT License (MIT)
@@ -13242,6 +11262,8 @@ THE SOFTWARE.
 License: Apache-2.0
 
 Repository: https://github.com/jsdom/xml-name-validator
+
+License source: xml-name-validator@5.0.0/LICENSE.txt
 
 ```text
 Apache License
@@ -13428,6 +11450,8 @@ License: MIT
 
 Repository: https://github.com/lddubeau/xmlchars
 
+License source: xmlchars@2.2.0/LICENSE
+
 ```text
 Copyright Louis-Dominique Dubeau and contributors to xmlchars
 
@@ -13454,6 +11478,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 License: MIT
 
 Repository: https://github.com/pmndrs/zustand
+
+License source: zustand@5.0.12/LICENSE
 
 ```text
 MIT License
@@ -13484,6 +11510,8 @@ SOFTWARE.
 License: MIT
 
 Repository: https://github.com/wooorm/zwitch
+
+License source: zwitch@2.0.4/license
 
 ```text
 (The MIT License)
