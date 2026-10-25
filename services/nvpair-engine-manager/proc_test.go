@@ -5,15 +5,90 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/testbin"
 )
+
+func TestTerminatePIDWaitsForExitEvidence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix unreaped child retains its PID")
+	}
+	cmd := exec.Command(fakeEngineBin, "noserve")
+	configureSysProcAttr(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := false
+	t.Cleanup(func() {
+		if !reaped {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill fixture without reaping: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- terminatePIDContext(ctx, cmd.Process.Pid, 0) }()
+	// Deliberately withhold Wait: even a killed Unix child cannot supply
+	// positive PID-exit evidence until it is reaped.
+	select {
+	case err := <-done:
+		t.Fatalf("termination returned before reaping supplied exit evidence: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	err := cmd.Wait()
+	reaped = true
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("killed fixture wait = %v, want exit error", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil || !orphanPIDExited(cmd.Process.Pid) {
+			t.Fatalf("termination after reaping = %v, exited=%v", err, orphanPIDExited(cmd.Process.Pid))
+		}
+	case <-ctx.Done():
+		t.Fatal("termination did not observe reaped child")
+	}
+}
+
+func TestTerminatePIDExitWaitHonoursCancellation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix unreaped child retains its PID")
+	}
+	cmd := exec.Command(fakeEngineBin, "noserve")
+	configureSysProcAttr(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill fixture without reaping: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := terminatePIDContext(ctx, cmd.Process.Pid, 0); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("termination with unreaped child = %v, want context deadline", err)
+	}
+	if orphanPIDExited(cmd.Process.Pid) {
+		t.Fatal("fixture supplied exit evidence before reaping")
+	}
+}
 
 func TestIsOurEngineImage(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "ollama.exe")

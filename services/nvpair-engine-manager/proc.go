@@ -146,7 +146,7 @@ func terminatePIDContext(ctx context.Context, pid int, grace time.Duration) erro
 		grace = 0
 	}
 	if grace <= 0 {
-		return signalPIDContext(ctx, pid, true)
+		return forceTerminatePIDContext(ctx, pid)
 	}
 	if err := signalPIDContext(ctx, pid, false); err != nil && pidAlive(pid) {
 		return err
@@ -163,7 +163,25 @@ func terminatePIDContext(ctx context.Context, pid int, grace time.Duration) erro
 		}
 	}
 	if pidAlive(pid) {
-		return signalPIDContext(ctx, pid, true)
+		return forceTerminatePIDContext(ctx, pid)
+	}
+	return ctx.Err()
+}
+
+func forceTerminatePIDContext(ctx context.Context, pid int) error {
+	if err := signalPIDContext(ctx, pid, true); err != nil && !orphanPIDExited(pid) {
+		return err
+	}
+	// A successful forced signal is not exit evidence. Allow the existing
+	// default stop grace for teardown/reaping, even for an immediate kill.
+	ctx, cancel := context.WithTimeout(ctx, stopGrace(Runtime{}))
+	defer cancel()
+	for !orphanPIDExited(pid) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	return ctx.Err()
 }

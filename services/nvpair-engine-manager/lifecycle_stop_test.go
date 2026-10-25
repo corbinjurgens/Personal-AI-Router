@@ -76,6 +76,16 @@ func spawnFakeListener(t *testing.T, binPath string, port int) *exec.Cmd {
 	})
 	waitPortServing(t, port)
 	pid, image, ok := pidOnPort(port)
+	// TCP reachability can precede the OS inspection tool observing the
+	// listener under load. Wait for ownership evidence before exercising Stop.
+	deadline := time.Now().Add(10 * time.Second)
+	for !ok || pid != cmd.Process.Pid || image == "" {
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+		pid, image, ok = pidOnPort(port)
+	}
 	if !ok || pid != cmd.Process.Pid || image == "" {
 		t.Fatalf("listener inspection = (%d, %q, %v), want owned pid %d and full image", pid, image, ok, cmd.Process.Pid)
 	}
