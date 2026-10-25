@@ -547,6 +547,13 @@ func (f *controllerCopyFixture) cloneTargetAuthority(t *testing.T) string {
 
 func (f *controllerCopyFixture) writeManifest(t *testing.T, n *task1Node) {
 	t.Helper()
+	f.writeManifestWithRouter(t, n, 0)
+}
+
+// Task 6 adopts only an already-listening synthetic router. The installed
+// marker remains non-executable, so this never authorizes an engine launch.
+func (f *controllerCopyFixture) writeManifestWithRouter(t *testing.T, n *task1Node, port int) {
+	t.Helper()
 	args := []string{}
 	if n == f.source {
 		args = []string{"--models-preset", f.preset}
@@ -559,6 +566,13 @@ func (f *controllerCopyFixture) writeManifest(t *testing.T, n *task1Node) {
 		t.Fatal(err)
 	}
 	rt := map[string]any{"bin": marker, "cli": filepath.Join(n.base, "never-start-cli"), "port": 0, "args": args, "env": map[string]string{"LLAMA_CACHE": f.stores[n.uuid]}, "ready": nil, "health": nil, "auth_statuses": []int{}}
+	if port != 0 {
+		if err := validateFixturePort(port); err != nil {
+			t.Fatal(err)
+		}
+		rt["port"] = port
+		rt["ready"] = map[string]any{"http": "http://127.0.0.1:{port}/ready", "status": http.StatusOK, "timeout_s": 1}
+	}
 	task1WriteJSON(t, filepath.Join(jointAppDir(n.base), "engines", "llamacpp.json"), map[string]any{"engine": "llamacpp", "models_dir": f.stores[n.uuid], "runtime": rt, "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{marker}, "models_dir": f.stores[n.uuid], "runtime": rt}}})
 }
 
@@ -603,11 +617,16 @@ func (f *controllerCopyFixture) assertControlBind(t *testing.T, port int) {
 
 func (f *controllerCopyFixture) seed(t *testing.T, alias string, seed byte) controllerCopyModel {
 	t.Helper()
+	return f.seedSized(t, alias, seed, 768<<10)
+}
+
+func (f *controllerCopyFixture) seedSized(t *testing.T, alias string, seed byte, modelBytes int) controllerCopyModel {
+	t.Helper()
 	m := controllerCopyModel{manifest: controllerCopyManifest{Engine: "llamacpp", Model: alias, Layout: "llama-artifacts-v1"}, data: map[string][]byte{}, paths: map[string]string{}}
 	for _, item := range []struct {
 		role string
 		size int
-	}{{"model", 768 << 10}, {"draft", 4096}} {
+	}{{"model", modelBytes}, {"draft", 4096}} {
 		name := alias + "-" + item.role + ".gguf"
 		rel := item.role + "/" + name
 		data := make([]byte, item.size)
@@ -664,6 +683,14 @@ func (f *controllerCopyFixture) assertNoReceipt(t *testing.T, m controllerCopyMo
 
 func (f *controllerCopyFixture) assertCopied(t *testing.T, m controllerCopyModel, response jsonrpc.Message) {
 	t.Helper()
+	f.assertCopiedArtifacts(t, m, response)
+	f.assertController(t)
+}
+
+// Artifact/receipt verification is shared with the download join, whose source
+// or destination can report an adopted fixture router independently of COPY.
+func (f *controllerCopyFixture) assertCopiedArtifacts(t *testing.T, m controllerCopyModel, response jsonrpc.Message) {
+	t.Helper()
 	if response.Error != nil {
 		t.Fatalf("controller COPY: %+v", response.Error)
 	}
@@ -714,7 +741,6 @@ func (f *controllerCopyFixture) assertCopied(t *testing.T, m controllerCopyModel
 			t.Logf("copy_source_reader certificate_identity=%s range=%q", seen.peer, seen.offset)
 		}
 	}
-	f.assertController(t)
 }
 
 func (f *controllerCopyFixture) assertController(t *testing.T) {

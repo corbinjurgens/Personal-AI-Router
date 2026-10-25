@@ -503,6 +503,19 @@ are not established by this fixture. Its ec bind is loopback; existing em and
 cluster-manager listeners still bind wildcard addresses on private ports. Joined
 peer-transfer receipt assertions and native UI acceptance remain separate.
 
+`TestModelDownloadStateTransferJoinProcess` adds source assertions on the joined
+download/COPY implementation at `efda20f7691a01980dd4740789d5d4829f6ba43b`.
+Windows plain and race runs passed on 2026-10-26 with three named terminals each,
+no failures or skips, and module vet exited zero. The whole-suite run is separate.
+Real custom export list/GET positive controls precede active
+and failed catalog-pull fences, with blocked COPY required to dispatch no
+artifact GET and leave destination artifacts and mutation effects unchanged.
+A real, independently hashed COPY receipt is then kept separate from a failed
+same-key catalog pull: an identity-bound verified retry may report COPY success
+while the catalog snapshot/journal and ready-dependent export fence remain
+unchanged. Explicit successful catalog retry is tested separately as the source
+readiness restoration path. This does not broaden the Task 5 or native UI proof.
+
 `engine:models` (and the `em` `GET /v1/models` surface) returns the flat model
 union, the per-engine breakdown (`modelsByEngine`), the per-engine set of
 models loaded in memory (`loadedByEngine`), and `downloadState`. The engine-manager

@@ -1173,6 +1173,34 @@ retired-source notification is injected by this fixture. The ec listener uses
 wildcard binding on private fixture ports. No installed-machine or transfer-join
 acceptance follows from these scenarios.
 
+The separate `TestModelDownloadStateTransferJoinProcess` source regression joins
+downloads to the accepted COPY implementation on base `efda20f7691a01980dd4740789d5d4829f6ba43b`.
+It first requires a real custom-alias list and full artifact GETs with independently
+checked hashes. Active and failed pulls then refuse that previously reachable
+export and destination COPY: no artifact GET is dispatched by COPY, destination
+store contents and mutation-withdrawal counts stay unchanged, and an explicit
+successful same-key catalog retry restores export and COPY. Another scenario
+creates a real COPY receipt, fails a catalog pull for the same exact key, and
+performs an identity-bound receipt retry. Successful local rehash and skipped
+files must leave the failed download snapshot, durable unsafe marker, receipt
+and readiness fence unchanged. Assertions require absent controller artifact
+stores, stopped controller engines and source/destination certificates on peer
+reads. As in the COPY fixture, they do not observe attempted local artifact syscalls.
+
+On Windows (2026-10-26), the joined selector passed plain and race with three
+named terminals each, no failures or skips; module vet exited zero. Commands
+ran from `services/tests` under the same fixed-path/private/offline bindings:
+
+```sh
+go test -p 1 -parallel 1 -count=1 -json -timeout=20m -run '^TestModelDownloadStateTransferJoinProcess$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=20m -run '^TestModelDownloadStateTransferJoinProcess$' .
+```
+
+The merged whole-suite run remains separate. These scenarios reuse
+the controller COPY fixture and its cleanup, with a fixture-only adopted SSE
+router and Windows-safe aliases holding a 128-byte model and 4 KiB draft. They
+do not extend the unsupported Task 5 injection or native-machine claims above.
+
 ## Shutdown behavior
 
 Shuts down on stdin EOF (parent closed the pipe), `SIGINT`/`SIGTERM`, or a

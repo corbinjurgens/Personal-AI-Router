@@ -205,6 +205,23 @@ func askProcessNoPeer(t *testing.T, f, peer *askProcess, wantCount int) {
 func askProcessDurable(t *testing.T, nodes ...*askProcess) {
 	t.Helper()
 	for _, local := range nodes {
+		// Roster membership becomes visible before pinEntry finishes persisting
+		// the corresponding trust pin. Wait for that durable boundary as well.
+		task1Eventually(t, "durable peer pins", 20*time.Second, func() bool {
+			for _, peer := range nodes {
+				if peer == local {
+					continue
+				}
+				path := filepath.Join(local.dir, "cluster", "trusted", peer.id.NodeUUID+".json")
+				if _, err := os.Stat(path); err != nil {
+					if os.IsNotExist(err) || isWindowsSharingError(err) {
+						return false
+					}
+					t.Fatalf("stat durable peer pin %s: %v", path, err)
+				}
+			}
+			return true
+		})
 		admission := readOutboundJSON[askProcessAuthority](t, filepath.Join(local.dir, "cluster", "admission.json"))
 		if admission.ClusterID != nodes[0].id.ClusterID || admission.Epoch == 0 {
 			t.Fatal("durable local admission mismatch")
