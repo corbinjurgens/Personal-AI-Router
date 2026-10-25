@@ -884,14 +884,18 @@ The `engine:remote-*` methods are the client half: engine-manager resolves the t
 `engine:copy-model {opId, sourceNodeId, destinationNodeId, engine, model, expectedExportId?}` dispatches to the destination's existing `CopyModelFrom`.
 The controller owns no artifact I/O for a copy between other devices.
 `engine:remote-copy-model {node, engine, model}` mints an opId and delegates to
-the same coordinator with this node as destination. Requirements:
+the same coordinator with this node as destination.
+The wrapper retains its original parsing and missing-field error precedence,
+including shared raw model validation, and forwards only the canonical tuple.
+
+Requirements:
 
 - **Identity and admission.** Device selectors are host UUID keys, independently
   associated with certificate principals by the live directory. Resolve this
   node as the unique directory entry whose cluster UUID matches the live mesh
   principal; unknown or ambiguous associations fail closed. Never guess from a
-  hostname or treat the certificate UUID as a host selector. Strict control
-  objects are at most 16 KiB, with exact unique keys, valid Unicode/model
+  hostname or treat the certificate UUID as a host selector. New canonical RPC
+  and inbound HTTP control objects are at most 16 KiB, with exact unique keys, valid Unicode/model
   identifiers and no trailing body. Op IDs are 32 lowercase hex characters;
   expected export IDs are lowercase SHA256 hex. Identical endpoints, malformed
   requests, duplicate active IDs and capacity overflow fail before lookup/dial

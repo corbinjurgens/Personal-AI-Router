@@ -155,25 +155,22 @@ func (k *keyedLocks) lock(ctx context.Context, key string) (func(), error) {
 // methods it runs on its own goroutine and settles when the copy finishes, with
 // live engine:remote-progress frames meanwhile (op "copy", node = the source).
 func (m *Manager) runRemoteCopy(ctx context.Context, msg *Message) {
-	var legacy struct {
-		Node   string `json:"node"`
-		Engine string `json:"engine"`
-		Model  string `json:"model"`
+	var legacy remoteParam
+	if !m.parse(msg, &legacy) {
+		return
 	}
-	err := decodeCopyObject(msg.Params, &legacy, "node", "engine", "model")
-	if err == nil {
-		switch {
-		case legacy.Node == "":
-			err = fmt.Errorf("node is required")
-		case legacy.Engine == "":
-			err = fmt.Errorf("engine is required")
-		case legacy.Model == "":
-			err = fmt.Errorf("model is required")
-		default:
-			err = validateModelRequest(msg.Params, true)
-		}
+	switch {
+	case legacy.Node == "":
+		m.codec.RespondError(msg.ID, -32602, "node is required")
+		return
+	case legacy.Engine == "":
+		m.codec.RespondError(msg.ID, -32602, "engine is required")
+		return
+	case legacy.Model == "":
+		m.codec.RespondError(msg.ID, -32602, "model is required")
+		return
 	}
-	if err != nil {
+	if err := validateModelRequest(msg.Params, true); err != nil {
 		m.codec.RespondError(msg.ID, -32602, err.Error())
 		return
 	}

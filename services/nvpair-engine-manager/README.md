@@ -599,9 +599,11 @@ manager ID, including custom IDs. The controller carries only control and
 progress. Its model store is never opened for a copy between other devices.
 `engine:remote-copy-model {node, engine, model}` mints an operation ID and
 invokes this same coordinator with `node` as source and this device as destination.
+The wrapper retains its original field-validation order and drops unrelated
+parameters when constructing the canonical tuple.
 
-Copy requests accept exact, unique field names and valid model identifiers,
-with a complete 16 KiB control-body limit. Operation IDs are 32 lowercase hex
+Canonical RPC and inbound HTTP copy requests accept exact, unique field names
+and valid model identifiers, with a complete 16 KiB control-body limit. Operation IDs are 32 lowercase hex
 characters. Identical endpoints, unknown fields (including caller, URL and
 path overrides), duplicate active IDs and excess active work are refused before
 peer lookup or transfer. Each Manager owns at most eight active reservations,
