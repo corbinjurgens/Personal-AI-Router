@@ -7,6 +7,7 @@ package servicectl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/Microsoft/go-winio"
+	"golang.org/x/sys/windows"
 )
 
 // Process creation flags for a service that must survive its launcher:
@@ -56,7 +58,13 @@ func pipeSafeUsername(name string) string {
 }
 
 func dialEndpoint(ctx context.Context, endpoint string) (io.ReadWriteCloser, error) {
-	return winio.DialPipeContext(ctx, endpoint)
+	conn, err := winio.DialPipeContext(ctx, endpoint)
+	// A busy pipe is still owned by a listener. go-winio waits for an instance
+	// until ctx ends; that timeout or cancellation must not authorize a start.
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+		return nil, fmt.Errorf("%w: %w", ErrNotRunning, err)
+	}
+	return conn, err
 }
 
 func configureDetached(cmd *exec.Cmd) {
