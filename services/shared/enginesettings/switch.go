@@ -585,6 +585,99 @@ func DecodeSwitchFenceRequest(data []byte) (SwitchFenceRequest, error) {
 	return r, err
 }
 
+// DecodeSwitchFenceResult rejects ambiguous proof before typed decoding. This
+// stricter acknowledgement boundary does not change ordinary switch decoders.
+func DecodeSwitchFenceResult(data []byte) (SwitchFenceResult, error) {
+	fields, err := decodeSwitchFenceObject(data, "nodeId", "requestId", "fenced", "receipt")
+	if err != nil {
+		return SwitchFenceResult{}, err
+	}
+	fenced := bytes.TrimSpace(fields["fenced"])
+	if !bytes.Equal(fenced, []byte("true")) && !bytes.Equal(fenced, []byte("false")) {
+		return SwitchFenceResult{}, errors.New("fence result requires an explicit boolean fenced field")
+	}
+	if receipt, ok := fields["receipt"]; ok {
+		if bytes.Equal(bytes.TrimSpace(receipt), []byte("null")) {
+			return SwitchFenceResult{}, errors.New("fence result receipt must not be null")
+		}
+		if err := validateSwitchFenceReceiptKeys(receipt); err != nil {
+			return SwitchFenceResult{}, err
+		}
+	}
+	r, err := decodeSwitchJSON[SwitchFenceResult](data, MaxSwitchJournalBytes)
+	if err == nil {
+		err = r.Validate()
+	}
+	if err != nil {
+		return SwitchFenceResult{}, err
+	}
+	return r, nil
+}
+
+// Keep receipt values and identity validation at SwitchReceipt.Validate; these
+// field checks additionally reject duplicate keys and Go's case-folded aliases
+// at every object boundary in the receipt carried by a fence acknowledgement.
+func validateSwitchFenceReceiptKeys(data []byte) error {
+	fields, err := decodeSwitchFenceObject(data, "version", "nodeId", "requestId", "caller", "payloadHash", "request",
+		"expectedRevision", "acceptedRevision", "sequence", "phase", "terminal", "acceptedAt", "updatedAt", "deadline",
+		"finishedAt", "source", "target", "error", "recoveryRequired")
+	if err != nil {
+		return err
+	}
+	if request, ok := fields["request"]; ok {
+		if _, err := decodeSwitchFenceObject(request, "nodeId", "requestId", "sourceEngine", "targetEngine", "expectedRevision"); err != nil {
+			return err
+		}
+	}
+	for _, name := range []string{"source", "target"} {
+		if state, ok := fields[name]; ok {
+			if _, err := decodeSwitchFenceObject(state, "intent", "running", "healthy", "observedAt", "terminationVerified"); err != nil {
+				return err
+			}
+		}
+	}
+	if failure, ok := fields["error"]; ok && !bytes.Equal(bytes.TrimSpace(failure), []byte("null")) {
+		if _, err := decodeSwitchFenceObject(failure, "code", "kind", "message"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func decodeSwitchFenceObject(data []byte, allowed ...string) (map[string]json.RawMessage, error) {
+	if len(data) > MaxSwitchJournalBytes {
+		return nil, errors.New("fence result JSON exceeds byte limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return nil, errors.New("fence result JSON must be an object")
+	}
+	fields := make(map[string]json.RawMessage, len(allowed))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		name, ok := token.(string)
+		if !ok || fields[name] != nil || !slices.Contains(allowed, name) {
+			return nil, errors.New("unknown or duplicate fence result JSON field")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		fields[name] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errors.New("fence result JSON contains trailing data")
+	}
+	return fields, nil
+}
+
 func DecodeSwitchJournal(data []byte) (SwitchJournal, error) {
 	j, err := decodeSwitchJSON[SwitchJournal](data, MaxSwitchJournalBytes)
 	if err == nil {

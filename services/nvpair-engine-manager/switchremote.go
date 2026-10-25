@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -139,8 +140,16 @@ func (c *remoteClient) postSwitch(ctx context.Context, path string, params json.
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var body codedBody
-		if response.StatusCode == http.StatusConflict && json.Unmarshal(data, &body) == nil && body.Code == settings.SwitchErrorConfigurationConflict {
-			return nil, &codedError{code: settings.SwitchConfigurationConflictCode, message: body.Error}
+		if response.StatusCode == http.StatusConflict && json.Unmarshal(data, &body) == nil {
+			// Preserve the existing switch conflict alias as well as the ec
+			// owner's codes. A typed target refusal keeps its exact message;
+			// uncoded HTTP/transport failures retain uncertain diagnostics.
+			if body.Code == settings.SwitchErrorConfigurationConflict {
+				return nil, &codedError{code: settings.SwitchConfigurationConflictCode, message: body.Error}
+			}
+			if code, ok := codeOfWire(body.Code); ok {
+				return nil, &codedError{code: code, message: body.Error}
+			}
 		}
 		if response.StatusCode == http.StatusBadRequest {
 			return nil, &codedError{code: settings.SwitchInvalidParamsCode, message: string(data)}
@@ -155,11 +164,8 @@ func (c *remoteClient) postSwitch(ctx context.Context, path string, params json.
 		if err != nil {
 			return nil, err
 		}
-		var result settings.SwitchFenceResult
-		if err := json.Unmarshal(data, &result); err != nil {
-			return nil, fmt.Errorf("remote engine switch fence: invalid response: %w", err)
-		}
-		if err := result.Validate(); err != nil {
+		result, err := settings.DecodeSwitchFenceResult(data)
+		if err != nil {
 			return nil, fmt.Errorf("remote engine switch fence: invalid outcome: %w", err)
 		}
 		if result.NodeID != request.NodeID || result.RequestID != request.RequestID {
@@ -219,6 +225,14 @@ func switchHandler(target string, requirePinCaller func(pinnedPeerHandler) http.
 			if code == codeRemoteManagementDenied {
 				// The target refused a management operation; the origin maps
 				// this back to -32012, distinct from the local veto above.
+				writeCodedError(w, code, err.Error())
+				return
+			}
+			var authoritative *codedError
+			if errors.As(err, &authoritative) && code == codeOperationError {
+				// Broker status absence is a coded -32000 refusal. Preserve it
+				// as an authoritative envelope, without classifying plain relay
+				// failures or inferring absence from diagnostic text.
 				writeCodedError(w, code, err.Error())
 				return
 			}

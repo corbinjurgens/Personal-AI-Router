@@ -1307,6 +1307,21 @@ capacity preserves active terminal reservations. Capacity, cancellation or
 storage failure is not acknowledgement, including an uncertain replacement
 retried within the same process; trusted restart may read the durable journal.
 
+Shared `DecodeSwitchFenceResult` is the acknowledgement decoder: exact unique
+field names, an explicit boolean `fenced`, the validated exclusive union, no
+explicit null receipt and no trailing JSON. The receipt and its nested objects
+reject duplicate, unknown and case-variant keys; existing `SwitchReceipt`
+validation owns values and identity. Other switch decoders remain unchanged.
+
+An authoritative broker RPC operation error uses existing `writeCodedError`
+and the HTTP 409 envelope with `code:"operation_error"`, preserving numeric
+`-32000` and the exact target message at the outbound switch client. This keeps
+`Unknown switch receipt for this caller.` distinguishable from generic
+transport/coordinator failure without matching diagnostic suffixes. The relay
+does not carry `SwitchError.Kind`, so no distinct unknown-receipt kind is
+inferred. Existing aliases and other control families' classification remain
+unchanged. Plain failures remain uncertain and cannot establish absence.
+
 ### Download lifecycle and content admission
 
 The canonical model inventory includes optional version-1 `downloadState`:

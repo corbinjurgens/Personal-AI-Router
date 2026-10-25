@@ -985,6 +985,20 @@ Receipts remain unchanged and non-evicting; callers read a fresh configuration
 baseline after acknowledgement. Failure, including uncertain persistence, is
 not acknowledgement. See the broker README for durability and capacity rules.
 
+Fence acknowledgements use shared `DecodeSwitchFenceResult`: field names are
+case-sensitive and unique, `fenced` is an explicit boolean, and the exact union
+rejects a null receipt or trailing JSON. Nested receipt objects reject unknown,
+duplicate and case-variant fields before the existing receipt validator checks
+values and identities. Ordinary switch request/journal decoding is unchanged.
+
+Authoritative broker operation errors travel through the existing coded HTTP
+409 envelope as `operation_error` (`-32000`). The switch client preserves their
+exact target message, including `Unknown switch receipt for this caller.`;
+absence still establishes no fence by itself. The relay carries only numeric
+code and message, so it does not supply a distinct `unknown_receipt` wire kind.
+Uncoded transport/coordinator failures remain uncertain diagnostics. Existing
+policy/conflict/veto/permission/lock aliases retain their meanings.
+
 ## Target-owned model downloads
 
 `PullModelStream` owns local, CLI and paired catalog pulls. The existing

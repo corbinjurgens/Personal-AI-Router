@@ -155,6 +155,12 @@ func TestSwitchFenceRemoteReplyMustMatchCanonicalRequest(t *testing.T) {
 		{"wrong ID", `{"nodeId":"peer","requestId":"other","fenced":true}`},
 		{"neither outcome", `{"nodeId":"peer","requestId":"lost","fenced":false}`},
 		{"null", `null`},
+		{"case variant discriminant", `{"nodeId":"peer","requestId":"lost","fenced":false,"Fenced":true}`},
+		{"duplicate discriminant", `{"nodeId":"peer","requestId":"lost","fenced":false,"fenced":true}`},
+		{"duplicate node", `{"nodeId":"other","nodeId":"peer","requestId":"lost","fenced":true}`},
+		{"duplicate request", `{"nodeId":"peer","requestId":"other","requestId":"lost","fenced":true}`},
+		{"unknown field", `{"nodeId":"peer","requestId":"lost","fenced":true,"extra":true}`},
+		{"null receipt", `{"nodeId":"peer","requestId":"lost","fenced":true,"receipt":null}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := switchTestClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.result)) }))
@@ -163,6 +169,59 @@ func TestSwitchFenceRemoteReplyMustMatchCanonicalRequest(t *testing.T) {
 				func(context.Context, ecPeer) (*remoteClient, error) { return client, nil })
 			if err == nil || result != nil {
 				t.Fatalf("invalid reply accepted: %s %v", result, err)
+			}
+		})
+	}
+}
+
+func TestSwitchAuthoritativeAbsentHTTPRoundTripPreservesCodeAndMessage(t *testing.T) {
+	const message = "Unknown switch receipt for this caller."
+	handler := switchHandler("peer", switchTestGate, func(_ context.Context, method, caller string, raw json.RawMessage) (json.RawMessage, error) {
+		if method != settings.SwitchStatusMethod || caller != "pinned-principal" {
+			t.Fatalf("wrong status relay: %s %s", method, caller)
+		}
+		request, err := settings.DecodeSwitchStatusRequest(raw)
+		if err != nil {
+			return nil, err
+		}
+		if request.NodeID != "peer" || request.RequestID != "lost" {
+			t.Fatalf("status params = %+v", request)
+		}
+		return nil, &codedError{code: settings.SwitchOperationErrorCode, message: message}
+	})
+	params := json.RawMessage(`{"nodeId":"peer","requestId":"lost"}`)
+	recorder := httptest.NewRecorder()
+	handler(recorder, httptest.NewRequest(http.MethodPost, settings.SwitchStatusPath, strings.NewReader(string(params))))
+	var body codedBody
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("absence is not a coded envelope: %v; %s", err, recorder.Body.String())
+	}
+	if recorder.Code != http.StatusConflict || body.Error != message || body.Code != "operation_error" {
+		t.Fatalf("absence envelope = %d %+v", recorder.Code, body)
+	}
+	result, err := switchTestClient(handler).postSwitch(context.Background(), settings.SwitchStatusPath, params)
+	var coded *codedError
+	if !errors.As(err, &coded) || rpcCode(err) != settings.SwitchOperationErrorCode || err.Error() != message || result != nil {
+		t.Fatalf("authoritative absence = %s %v (code %d)", result, err, rpcCode(err))
+	}
+}
+
+func TestSwitchGenericHTTPFailuresDoNotEstablishAbsence(t *testing.T) {
+	const message = "Unknown switch receipt for this caller."
+	for _, tc := range []struct {
+		name     string
+		relayErr error
+	}{
+		{"uncoded coordinator error", errors.New(message)},
+		{"different authoritative operation error", &codedError{code: settings.SwitchOperationErrorCode, message: "Coordinator storage unavailable."}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := switchHandler("peer", switchTestGate, func(context.Context, string, string, json.RawMessage) (json.RawMessage, error) {
+				return nil, tc.relayErr
+			})
+			result, err := switchTestClient(handler).postSwitch(context.Background(), settings.SwitchStatusPath, json.RawMessage(`{"requestId":"lost"}`))
+			if err == nil || err.Error() == message || result != nil {
+				t.Fatalf("generic error established absence: %s %v", result, err)
 			}
 		})
 	}
