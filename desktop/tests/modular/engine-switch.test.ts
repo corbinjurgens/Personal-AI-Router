@@ -239,6 +239,9 @@ describe('typed engine switch transport', () => {
             const preload: PreloadServiceTransport = {
                 connected: true,
                 invoke: async () => ({ success: false, error: '-32011 misleading text', code }),
+                invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
+                    throw new Error('Unexpected history invoke in ordinary transport fixture')
+                }),
                 subscribePush: () => () => {},
                 onConnect: () => () => {},
                 onDisconnect: () => () => {},
@@ -264,6 +267,9 @@ describe('typed engine switch transport', () => {
         const preload: PreloadServiceTransport = {
             connected: true,
             invoke,
+            invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
+                throw new Error('Unexpected history invoke in ordinary transport fixture')
+            }),
             subscribePush,
             onConnect: () => () => {},
             onDisconnect: () => () => {},

@@ -80,6 +80,23 @@ Electron main handles logical requests in
 
 See [Frontend API Reference](frontend-api.md) for the channel surface.
 
+Routing history uses sender-aware `routing-history:pull` and
+`routing-history:consumed` IPC rather than ordinary history data fanout.
+`routing-delivery.ts` keeps the shared bounded history banks and attaches only
+generation, cursor, lease and flags to each existing window registration. One
+scalar `routing-history:ready` token permits a pull; one outstanding transfer
+per renderer blocks further data copies until its exact generation/lease ack.
+The renderer validates and commits each packet before acknowledging it.
+
+Electron structured clone makes the transfer copy independent of the main
+source bank. The renderer's H allowance funds queued or delivered IPC bytes;
+renderer-internal memory after delivery belongs to that process. The existing
+window owner also releases a transfer on webContents destruction, renderer
+process loss, or committed main-frame document navigation (`did-navigate`).
+Canceled navigation, same-document navigation, load completion, unsubscribe and
+timeouts do not establish document destruction or release an outstanding loan.
+No per-renderer history cache or completion-attestation registry is required.
+
 ### Renderer to Electron
 
 `window.windowApi` is reserved for Electron-native operations:
@@ -278,6 +295,26 @@ remain unknown. Custom artifact receipts retain serving-setup and publication
 durability qualifications independently of native inventory. The existing
 Copy-to-this-PC API delegates to this same path. See the
 [frontend copy contract](frontend-api.md#pairapiengines).
+
+### Model download observations
+
+Model downloads are owned by the target's engine-manager. Electron subscribes
+to lifecycle events before fetching canonical `engine:models`, and hydrates
+again after broker reconnect. Both local notifications and scanner-enriched
+discovery carry the same versioned full `downloadState`; source/revision fences
+prevent a late baseline or retired incarnation from replacing newer facts.
+The service remains a relay and Electron holds only observations, with no
+model bytes or download execution on a controller.
+
+Content readiness, operation outcome, and loaded residency are independent.
+Model rows combine canonical ready names, real loaded names, and exact lifecycle
+entries. Last-good inventory is retained separately from currentness. Missing,
+malformed, unsupported, stale or recovery-required lifecycle data cannot make a
+name ready. A lifecycle completion waits for a current canonical inventory read;
+settling the initiating RPC cannot clear a newer target operation. The target's
+content gate refuses unsafe Load/export effects, including raw action and
+automatic residency paths. Existing authorization, engine intent, pause, lock
+and strict identity boundaries continue to apply.
 
 ### Engine settings
 

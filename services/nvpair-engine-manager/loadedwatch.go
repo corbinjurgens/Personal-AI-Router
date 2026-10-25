@@ -7,14 +7,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"sort"
 	"time"
 
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/performancewire"
 )
 
-// modelsChangedMethod is the push emitted whenever an engine's set of loaded
-// (in-memory) models changes.
+// modelsChangedMethod carries ready inventory, residency and download lifecycle
+// changes, including changes with no corresponding loaded-name change.
 const modelsChangedMethod = "engine:models-changed"
 
 // defaultLoadedPollSeconds is the default cadence of the loaded-model watcher,
@@ -62,6 +64,8 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 	var prev map[string][]string
 	runs := make(map[string]string)
 	var previousMemory *performancewire.MemoryEvidence
+	var previousInventory map[string][]string
+	var previousDownloads *modeldownload.Snapshot
 	var lastInventory time.Time
 	var identity *modelIdentityParams
 	for {
@@ -95,14 +99,56 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 		// Identity is reported from the first sweep on: its consumer starts
 		// with none, so it must never wait for a change.
 		identity = e.publishModelIdentity(identity)
+		// Identity publication can wait for a prior owner. Recheck inventory
+		// epochs and readiness after it, immediately before model publication.
+		res = e.currentModelsResult(res)
 		// The first successful loaded_models read is an observation too. A
 		// broker snapshot may have preceded engine start, so publish even an
 		// empty resident set when its engine key first appears.
 		changed = mergeMemoryChanges(changed, memoryChanged)
+		changed = mergeMemoryChanges(changed, changedInventoryEngines(previousInventory, res.ByEngine))
+		changed = mergeMemoryChanges(changed, changedDownloadEngines(previousDownloads, res.DownloadState, e.reg.Names()))
+		previousInventory = res.ByEngine
+		previousDownloads = res.DownloadState
 		for _, name := range changed {
 			e.notify(modelsChangedMethod, modelsChangedParams{Engine: name, Models: res})
 		}
 	}
+}
+
+func changedInventoryEngines(previous, current map[string][]string) []string {
+	changed := changedEngines(previous, current)
+	for name := range previous {
+		if _, ok := current[name]; !ok {
+			changed = append(changed, name)
+		}
+	}
+	sort.Strings(changed)
+	return changed
+}
+
+func changedDownloadEngines(previous, current *modeldownload.Snapshot, engines []string) []string {
+	if previous == nil && current == nil || previous != nil && current != nil && previous.Equal(*current) {
+		return nil
+	}
+	if previous == nil || current == nil || previous.SourceID != current.SourceID || previous.RecoveryRequired != current.RecoveryRequired {
+		return append([]string{}, engines...)
+	}
+	before := make(map[string][]modeldownload.Entry)
+	after := make(map[string][]modeldownload.Entry)
+	for _, entry := range previous.Entries {
+		before[entry.Engine] = append(before[entry.Engine], entry)
+	}
+	for _, entry := range current.Entries {
+		after[entry.Engine] = append(after[entry.Engine], entry)
+	}
+	var changed []string
+	for _, engine := range engines {
+		if !reflect.DeepEqual(before[engine], after[engine]) {
+			changed = append(changed, engine)
+		}
+	}
+	return changed
 }
 
 // A successful first memory baseline, memory-only changes and withdrawal use

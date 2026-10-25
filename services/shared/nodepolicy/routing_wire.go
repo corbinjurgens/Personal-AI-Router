@@ -12,7 +12,6 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -306,7 +305,7 @@ func historyError(category string) error {
 
 type RoutingHistoryDestination struct {
 	Kind         string  `json:"kind"`
-	Model        string  `json:"model"`
+	Model        *string `json:"model"`
 	NodeID       *string `json:"nodeId"`
 	Engine       *string `json:"engine"`
 	DeploymentID *string `json:"deploymentId"`
@@ -637,36 +636,89 @@ func historyProject(raw any, dst reflect.Value, stripped *int) error {
 
 // Exact integral JSON numbers without float rounding or exponent-sized memory.
 func historyInteger(value string) (int64, bool) {
-	negative := strings.HasPrefix(value, "-")
-	value = strings.TrimPrefix(value, "-")
-	mantissa, exponent, hasExponent := strings.Cut(strings.ToLower(value), "e")
-	whole, fraction, _ := strings.Cut(mantissa, ".")
-	digits := strings.TrimLeft(whole+fraction, "0")
-	if digits == "" {
+	return historyScalarInteger(value)
+}
+
+// Both callers have already validated JSON grammar. Walk the original token;
+// even a legal near-R decimal/exponent needs only scalar indices and words.
+func historyScalarInteger[T ~string | ~[]byte](value T) (int64, bool) {
+	negative := len(value) > 0 && value[0] == '-'
+	start := 0
+	if negative {
+		start = 1
+	}
+	end, dot, first, digits, trailing := len(value), -1, -1, int64(0), int64(0)
+	for i := start; i < len(value); i++ {
+		c := value[i]
+		if c == 'e' || c == 'E' {
+			end = i
+			break
+		}
+		if c == '.' {
+			dot = i
+			continue
+		}
+		if first < 0 && c != '0' {
+			first = i
+		}
+		if first >= 0 {
+			digits++
+			if c == '0' {
+				trailing++
+			} else {
+				trailing = 0
+			}
+		}
+	}
+	// Preserve zero's exponent short-circuit, including negative zero and
+	// exponents that would overflow int64 for a nonzero mantissa.
+	if first < 0 {
 		return 0, true
 	}
 	if negative {
 		return 0, false
 	}
 	var shift int64
-	if hasExponent {
-		var err error
-		shift, err = strconv.ParseInt(exponent, 10, 64)
-		if err != nil || shift < -RoutingHistoryRecordBytes || shift > RoutingHistoryRecordBytes {
-			return 0, false
+	if end < len(value) {
+		i, minus := end+1, false
+		if value[i] == '-' || value[i] == '+' {
+			minus = value[i] == '-'
+			i++
+		}
+		for ; i < len(value); i++ {
+			shift = shift*10 + int64(value[i]-'0')
+			// This bound is smaller than int64 overflow and is the same
+			// final refusal as ParseInt followed by the former bound check.
+			if shift > RoutingHistoryRecordBytes {
+				return 0, false
+			}
+		}
+		if minus {
+			shift = -shift
 		}
 	}
-	shift -= int64(len(fraction))
-	for shift < 0 && strings.HasSuffix(digits, "0") {
-		digits = strings.TrimSuffix(digits, "0")
-		shift++
+	if dot >= 0 {
+		shift -= int64(end - dot - 1)
 	}
-	if shift < 0 || shift > 16 || int64(len(digits))+shift > 16 {
+	if shift < 0 {
+		trim := min(-shift, trailing)
+		digits -= trim
+		shift += trim
+	}
+	if shift < 0 || shift > 16 || digits+shift > 16 {
 		return 0, false
 	}
-	digits += strings.Repeat("0", int(shift))
-	n, err := strconv.ParseInt(digits, 10, 64)
-	return n, err == nil && n <= routingHistorySafeInteger
+	var n int64
+	for i := first; digits > 0; i++ {
+		if value[i] != '.' {
+			n = n*10 + int64(value[i]-'0')
+			digits--
+		}
+	}
+	for ; shift > 0; shift-- {
+		n *= 10
+	}
+	return n, n <= routingHistorySafeInteger
 }
 
 func historyEnum(value, choices string) bool {
@@ -699,14 +751,14 @@ func historyMoney(values ...*NanoUSD) bool {
 }
 
 func (d RoutingHistoryDestination) valid() bool {
-	if !historyModel(d.Model, false) {
+	if d.Model != nil && ValidateModelIdentifier(*d.Model) != nil {
 		return false
 	}
 	switch d.Kind {
 	case "local":
 		return historyID(d.NodeID) && historyID(d.Engine) && d.DeploymentID == nil && d.AccountID == nil
 	case "api":
-		return historyID(d.DeploymentID) && historyID(d.AccountID) && d.NodeID == nil && d.Engine == nil
+		return d.Model != nil && historyID(d.DeploymentID) && historyID(d.AccountID) && d.NodeID == nil && d.Engine == nil
 	default:
 		return false
 	}
@@ -715,21 +767,53 @@ func (d RoutingHistoryDestination) valid() bool {
 // Validate checks only schema facts. Links into the dropped prefix must still
 // be verified by the future producer against I's complete attempt facts.
 func (r RoutingHistoryRecord) Validate() error {
+	header := RoutingHistoryRecordHeader{
+		Schema: r.Schema, Request: r.Request, Workload: r.Workload, Seq: r.Seq, Requested: r.Requested,
+		CreatedAt: r.CreatedAt, EndedAt: r.EndedAt, State: r.State, Reason: r.Reason, Status: r.Status,
+		Served: r.Served, Recoverable: r.Recoverable, Spend: r.Spend, DroppedAttempts: r.DroppedAttempts,
+	}
+	return validateHistoryRecord(header, r.Attempts != nil, len(r.Attempts), func(i int, dst *RoutingHistoryAttempt) error {
+		*dst = r.Attempts[i]
+		return nil
+	})
+}
+
+// RoutingHistoryRecordHeader contains no attempt slice. Transport adapters keep
+// this bounded header and load only the current and related attempt slots.
+// Field order follows RoutingHistoryRecord for the private packed-bank writer.
+type RoutingHistoryRecordHeader struct {
+	Schema          int64
+	Request         RoutingRequestKey
+	Workload        *RoutingHistoryWorkload
+	Seq             int64
+	Requested       RoutingHistoryRequested
+	CreatedAt       int64
+	EndedAt         *int64
+	State           string
+	Reason          string
+	Status          *int64
+	Served          *RoutingHistoryDestination
+	Recoverable     bool
+	Spend           RoutingHistorySpend
+	DroppedAttempts int64
+}
+
+func validateHistoryRecord(r RoutingHistoryRecordHeader, attemptsPresent bool, count int, attempt func(int, *RoutingHistoryAttempt) error) error {
 	invalid := func() error { return historyError("invalid-value") }
-	// Retained lifecycle facts establish that I already validated a model,
-	// even when all attempts have since left the presentation window.
-	modelValidated := len(r.Attempts) > 0 || r.DroppedAttempts > 0 || r.Workload != nil || r.Served != nil ||
+	// Retained lifecycle facts require a model unless a retained local attempt
+	// explicitly records that its model is unknown.
+	modelValidated := count > 0 || r.DroppedAttempts > 0 || r.Workload != nil || r.Served != nil ||
 		r.State == "completed" || r.State == "streaming"
 	if r.Schema != 1 || r.Request.Validate() != nil || !historyNumber(r.Seq) || r.Seq == 0 ||
 		!historyNumber(r.CreatedAt) || !historyNullableNumber(r.EndedAt) || (r.EndedAt != nil && *r.EndedAt < r.CreatedAt) ||
-		!historyStatus(r.Status) || !historyNumber(r.DroppedAttempts) || !historyModel(r.Requested.Model, !modelValidated) ||
+		!historyStatus(r.Status) || !historyNumber(r.DroppedAttempts) || !historyModel(r.Requested.Model, true) ||
 		!historyEnum(r.Requested.Tier, "|weak|medium|strong") || !historyEnum(r.Requested.Mode, "chat|completion|embedding|other") ||
 		!historyEnum(r.State, "routing|streaming|completed|failed|cancelled") || !historyEnum(r.Reason, historyReasons) ||
 		r.Spend.Currency != "USD" || !historyEnum(r.Spend.Accounting, historyAccounting) ||
-		!historyMoney(r.Spend.CeilingNanoUSD, r.Spend.GrantedNanoUSD, r.Spend.HeldNanoUSD, r.Spend.ChargedNanoUSD) || r.Attempts == nil {
+		!historyMoney(r.Spend.CeilingNanoUSD, r.Spend.GrantedNanoUSD, r.Spend.HeldNanoUSD, r.Spend.ChargedNanoUSD) || !attemptsPresent {
 		return invalid()
 	}
-	if len(r.Attempts) > RoutingHistoryAttempts {
+	if count > RoutingHistoryAttempts {
 		return historyError("limit-exceeded")
 	}
 	terminal := historyEnum(r.State, "completed|failed|cancelled")
@@ -745,8 +829,13 @@ func (r RoutingHistoryRecord) Validate() error {
 	if r.Served != nil && !r.Served.valid() {
 		return invalid()
 	}
-	served, awaiting := false, false
-	for i, a := range r.Attempts {
+	served, awaiting, modelUnknown := false, false, false
+	var current, related RoutingHistoryAttempt
+	for i := 0; i < count; i++ {
+		if err := attempt(i, &current); err != nil {
+			return err
+		}
+		a := &current
 		// Subtraction avoids overflowing the safe-integer domain at its edge.
 		if !historyNumber(a.Index) || a.Index < r.DroppedAttempts || a.Index-r.DroppedAttempts != int64(i) ||
 			!historyNumber(a.StartedAt) || a.StartedAt < r.CreatedAt || !historyNullableNumber(a.EndedAt) ||
@@ -763,6 +852,7 @@ func (r RoutingHistoryRecord) Validate() error {
 			return invalid()
 		}
 		if a.Destination.Kind == "local" {
+			modelUnknown = modelUnknown || a.Destination.Model == nil
 			if a.Account != nil {
 				return invalid()
 			}
@@ -779,15 +869,28 @@ func (r RoutingHistoryRecord) Validate() error {
 			}
 			if predecessor >= r.DroppedAttempts {
 				offset := predecessor - r.DroppedAttempts
-				if offset >= int64(i) || r.Attempts[int(offset)].Outcome != "interrupted" {
+				if offset >= int64(i) {
+					return invalid()
+				}
+				if err := attempt(int(offset), &related); err != nil {
+					return err
+				}
+				interrupted := related.Outcome == "interrupted"
+				related = RoutingHistoryAttempt{}
+				if !interrupted {
 					return invalid()
 				}
 			}
 		}
 		if a.Outcome == "interrupted" {
 			linked := false
-			for _, successor := range r.Attempts[i+1:] {
-				if successor.ContinuationOf != nil && *successor.ContinuationOf == a.Index {
+			for j := i + 1; j < count; j++ {
+				if err := attempt(j, &related); err != nil {
+					return err
+				}
+				continues := related.ContinuationOf != nil && *related.ContinuationOf == a.Index
+				related = RoutingHistoryAttempt{}
+				if continues {
 					linked = true
 					break
 				}
@@ -799,6 +902,10 @@ func (r RoutingHistoryRecord) Validate() error {
 		if r.Served != nil && a.Outcome == "committed" && a.EndedAt != nil && reflect.DeepEqual(a.Destination, *r.Served) {
 			served = true
 		}
+		current = RoutingHistoryAttempt{}
+	}
+	if r.Requested.Model == "" && modelValidated && !modelUnknown {
+		return invalid()
 	}
 	if r.Served != nil && !served {
 		return invalid()
@@ -817,10 +924,13 @@ func (r RoutingHistoryRecord) Validate() error {
 			}
 		} else {
 			offset := w.AttemptIndex - r.DroppedAttempts
-			if offset >= int64(len(r.Attempts)) {
+			if offset >= int64(count) {
 				return invalid()
 			}
-			a := r.Attempts[int(offset)]
+			if err := attempt(int(offset), &related); err != nil {
+				return err
+			}
+			a := &related
 			if a.Destination.Kind != "local" || a.Destination.Engine == nil || *a.Destination.Engine != w.Engine {
 				return invalid()
 			}

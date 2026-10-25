@@ -11,7 +11,6 @@ import (
 	"errors"
 	"io"
 	"reflect"
-	"sort"
 	"strconv"
 	"unicode"
 	"unicode/utf8"
@@ -91,8 +90,10 @@ type HistoryProjection struct {
 
 // ProjectHistory checks every subtree before materialization, including unknown
 // members. dst and offsets are caller-owned leases: no growing buffers, maps,
-// decoded unknown strings or json.Decoder token allocations. Each key uses one
-// uint32 raw offset, bounded by the raw value's byte grant.
+// decoded unknown strings or json.Decoder token allocations. The byte, output
+// and offset grants are independent. Each live key uses exactly one uint32;
+// after checking an object's keys, its last slot holds the parent-range base
+// and selected schema field. Arrays require no key or continuation slots.
 func ProjectHistory(raw, dst []byte, offsets []uint32, schema HistoryProjection) ([]byte, int, error) {
 	if len(raw) > schema.Bytes || !utf8.Valid(raw) || !historyJSONValid(raw, schema.Depth) {
 		return nil, 0, ErrHistoryInvalid
@@ -307,6 +308,48 @@ type historyParser struct {
 	members, stripped int
 }
 
+const historyObjectBoundary = uint32(1) << 31
+
+// The checked last key no longer needs its raw offset: traversal reads fields
+// from raw in wire order. Its replacement word marks the range boundary and
+// stores a base index in bits 6..30 and a field selector in bits 0..5. Permitted
+// raw offsets are below H < 2^26. Each key needs at least four distinct raw
+// bytes (quotes, colon, first value byte), so H/4 fits the 25-bit base index.
+func (p *historyParser) popObject() {
+	base := (p.offsets[len(p.offsets)-1] &^ historyObjectBoundary) >> 6
+	p.offsets = p.offsets[:int(base)]
+}
+
+// In-place heapsort keeps duplicate comparison independent of object width:
+// no sort reflection/closure allocation or recursive sorting frames. Key bytes
+// and escaped-name comparison remain owned by this same lossless parser.
+func (p *historyParser) sortKeys(keys []uint32) {
+	for root := len(keys)/2 - 1; root >= 0; root-- {
+		p.siftKeys(keys, root, len(keys))
+	}
+	for end := len(keys) - 1; end > 0; end-- {
+		keys[0], keys[end] = keys[end], keys[0]
+		p.siftKeys(keys, 0, end)
+	}
+}
+
+func (p *historyParser) siftKeys(keys []uint32, root, end int) {
+	for {
+		child := root*2 + 1
+		if child >= end {
+			return
+		}
+		if child+1 < end && compareKeys(p.raw, int(keys[child]), int(keys[child+1])) < 0 {
+			child++
+		}
+		if compareKeys(p.raw, int(keys[root]), int(keys[child])) >= 0 {
+			return
+		}
+		keys[root], keys[child] = keys[child], keys[root]
+		root = child
+	}
+}
+
 func (p *historyParser) space() {
 	for p.pos < len(p.raw) && (p.raw[p.pos] == ' ' || p.raw[p.pos] == '\n' || p.raw[p.pos] == '\r' || p.raw[p.pos] == '\t') {
 		p.pos++
@@ -447,102 +490,243 @@ func keyIs(raw []byte, start int, name string) bool {
 }
 
 func (p *historyParser) value(typ reflect.Type, level int, keep bool) error {
-	p.space()
-	start := p.pos
-	if keep && typ != nil && typ == p.schema.RecordType {
-		if skipValue(p.raw, start)-start > p.schema.RecordBytes {
-			return ErrHistoryInvalid
-		}
-		previous, members := p.schema, p.members
-		p.schema.Depth, p.schema.Members, p.schema.ArrayLimit = previous.RecordDepth, previous.RecordMembers, 32
-		p.schema.RecordType = nil
-		p.members = 0
-		outputStart := len(p.out)
-		err := p.value(typ, 1, keep)
-		p.schema = previous
-		p.members += members
-		if err != nil {
-			return err
-		}
-		if previous.CheckRecord != nil && previous.CheckRecord(p.out[outputStart:]) != nil {
-			return ErrHistoryInvalid
-		}
-		return nil
+	if !keep {
+		_, err := p.discard(level)
+		return err
 	}
-	if p.raw[start] == 'n' {
-		if keep && typ != nil && typ.Kind() != reflect.Pointer {
-			return ErrHistoryInvalid
+	// Replay types through the immutable schema and the checked object ranges.
+	// Slice edges follow Type.Elem and need no stored selector. Struct edges
+	// use the selector in that object's existing last key slot. Only scalar
+	// depth is retained, even for 10000 kept arrays with no offset backing.
+	root := typ
+	frames, shift := 0, 0
+	enter := true
+	var previous HistoryProjection
+	recordEnd, recordOutput, recordMembers := 0, 0, 0
+	for {
+		if recordEnd != 0 && p.pos == recordEnd {
+			p.schema = previous
+			p.members += recordMembers
+			recordEnd, shift = 0, 0
+			if previous.CheckRecord != nil && previous.CheckRecord(p.out[recordOutput:]) != nil {
+				return ErrHistoryInvalid
+			}
 		}
-		p.pos += 4
-		return p.emit(p.raw[start:p.pos], keep)
-	}
-	if typ != nil && typ.Kind() == reflect.Pointer {
-		typ = typ.Elem()
-	}
-	switch p.raw[start] {
-	case '{':
-		if level > p.schema.Depth || (keep && typ != nil && typ.Kind() != reflect.Struct) {
-			return ErrHistoryInvalid
-		}
-		return p.object(typ, level, keep)
-	case '[':
-		if level > p.schema.Depth || (keep && typ != nil && typ.Kind() != reflect.Slice) {
-			return ErrHistoryInvalid
-		}
-		p.pos++
-		if err := p.emit([]byte{'['}, keep); err != nil {
-			return err
-		}
-		p.space()
-		count := 0
-		for p.raw[p.pos] != ']' {
-			if count > 0 {
-				p.pos++
-				if err := p.emit([]byte{','}, keep); err != nil {
+		if enter {
+			p.space()
+			start := p.pos
+			if typ != nil && typ == p.schema.RecordType {
+				recordEnd = skipValue(p.raw, start)
+				if recordEnd-start > p.schema.RecordBytes {
+					return ErrHistoryInvalid
+				}
+				previous, recordMembers, recordOutput = p.schema, p.members, len(p.out)
+				p.schema.Depth, p.schema.Members, p.schema.ArrayLimit = previous.RecordDepth, previous.RecordMembers, 32
+				p.schema.RecordType = nil
+				p.members, shift = 0, level+frames-1
+			}
+			enter = false
+			if p.raw[start] == 'n' {
+				if typ != nil && typ.Kind() != reflect.Pointer {
+					return ErrHistoryInvalid
+				}
+				p.pos += 4
+				if err := p.emit(p.raw[start:p.pos], true); err != nil {
 					return err
 				}
+				continue
 			}
-			count++
-			if keep && count > p.schema.ArrayLimit {
-				return ErrHistoryInvalid
+			if typ != nil && typ.Kind() == reflect.Pointer {
+				typ = typ.Elem()
 			}
-			var elem reflect.Type
-			if typ != nil {
-				elem = typ.Elem()
-			}
-			if err := p.value(elem, level+1, keep); err != nil {
-				return err
-			}
-			p.space()
-		}
-		p.pos++
-		return p.emit([]byte{']'}, keep)
-	default:
-		p.pos = skipValue(p.raw, start)
-		if keep && typ != nil {
-			kind := typ.Kind()
 			c := p.raw[start]
-			if (kind == reflect.String && c != '"') || (kind == reflect.Bool && c != 't' && c != 'f') ||
-				(kind != reflect.String && kind != reflect.Bool && kind != reflect.Int && kind != reflect.Int64) ||
-				((kind == reflect.Int || kind == reflect.Int64) && (c < '0' || c > '9') && c != '-') {
-				return ErrHistoryInvalid
+			if c == '{' || c == '[' {
+				if level+frames-shift > p.schema.Depth {
+					return ErrHistoryInvalid
+				}
+				if c == '{' {
+					if typ == nil {
+						count, err := p.discard(level + frames - shift)
+						if err != nil {
+							return err
+						}
+						p.stripped += count
+						if err := p.emit([]byte{'{', '}'}, true); err != nil {
+							return err
+						}
+						continue
+					}
+					if typ != nil && typ.Kind() != reflect.Struct {
+						return ErrHistoryInvalid
+					}
+					count, err := p.object(typ, true)
+					if err != nil {
+						return err
+					}
+					if count == 0 {
+						p.pos = skipValue(p.raw, p.pos)
+						if err := p.emit([]byte{'{', '}'}, true); err != nil {
+							return err
+						}
+						continue
+					}
+				} else {
+					if typ != nil && typ.Kind() != reflect.Slice {
+						return ErrHistoryInvalid
+					}
+					i, count := start+1, 0
+					for {
+						for p.raw[i] == ' ' || p.raw[i] == '\t' || p.raw[i] == '\n' || p.raw[i] == '\r' {
+							i++
+						}
+						if p.raw[i] == ']' {
+							break
+						}
+						count++
+						if count > p.schema.ArrayLimit {
+							return ErrHistoryInvalid
+						}
+						i = skipValue(p.raw, i)
+						for p.raw[i] == ' ' || p.raw[i] == '\t' || p.raw[i] == '\n' || p.raw[i] == '\r' {
+							i++
+						}
+						if p.raw[i] == ',' {
+							i++
+						}
+					}
+					if count == 0 {
+						p.pos = i + 1
+						if err := p.emit([]byte{'[', ']'}, true); err != nil {
+							return err
+						}
+						continue
+					}
+				}
+				frames++
+				p.pos++
+				if err := p.emit([]byte{c}, true); err != nil {
+					return err
+				}
+				continue
 			}
-			if kind == reflect.String {
-				i, n := start+1, 0
-				for p.raw[i] != '"' {
-					n += utf8.RuneLen(keyRune(p.raw, &i))
-					if n > 512 {
+			p.pos = skipValue(p.raw, start)
+			if typ != nil {
+				kind := typ.Kind()
+				if (kind == reflect.String && c != '"') || (kind == reflect.Bool && c != 't' && c != 'f') ||
+					(kind != reflect.String && kind != reflect.Bool && kind != reflect.Int && kind != reflect.Int64) ||
+					((kind == reflect.Int || kind == reflect.Int64) && (c < '0' || c > '9') && c != '-') {
+					return ErrHistoryInvalid
+				}
+				if kind == reflect.String {
+					i, n := start+1, 0
+					for p.raw[i] != '"' {
+						n += utf8.RuneLen(keyRune(p.raw, &i))
+						if n > 512 {
+							return ErrHistoryInvalid
+						}
+					}
+				}
+				if (kind == reflect.Int || kind == reflect.Int64) && p.schema.Integer != nil {
+					if _, ok := p.schema.Integer(p.raw[start:p.pos]); !ok {
 						return ErrHistoryInvalid
 					}
 				}
 			}
-			if (kind == reflect.Int || kind == reflect.Int64) && p.schema.Integer != nil {
-				if _, ok := p.schema.Integer(p.raw[start:p.pos]); !ok {
-					return ErrHistoryInvalid
+			if err := p.emit(p.raw[start:p.pos], true); err != nil {
+				return err
+			}
+			continue
+		}
+		if frames == 0 {
+			return nil
+		}
+		parent := root
+		boundary := 0
+		for i := 0; i < frames-1 && parent != nil; i++ {
+			if parent.Kind() == reflect.Pointer {
+				parent = parent.Elem()
+			}
+			if parent.Kind() == reflect.Slice {
+				parent = parent.Elem()
+			} else {
+				for p.offsets[boundary]&historyObjectBoundary == 0 {
+					boundary++
+				}
+				index := p.offsets[boundary] & 63
+				boundary++
+				parent = parent.Field(int(index)).Type
+			}
+		}
+		if parent != nil && parent.Kind() == reflect.Pointer {
+			parent = parent.Elem()
+		}
+		array := parent == nil || parent.Kind() == reflect.Slice
+		p.space()
+		if p.raw[p.pos] == ',' {
+			p.pos++
+			p.space()
+			if array {
+				if err := p.emit([]byte{','}, true); err != nil {
+					return err
 				}
 			}
 		}
-		return p.emit(p.raw[start:p.pos], keep)
+		if c := p.raw[p.pos]; c == '}' || c == ']' {
+			p.pos++
+			if !array {
+				p.popObject()
+			}
+			frames--
+			if err := p.emit([]byte{c}, true); err != nil {
+				return err
+			}
+			continue
+		}
+		if array {
+			typ = nil
+			if parent != nil {
+				typ = parent.Elem()
+			}
+			enter = true
+			continue
+		}
+		key := p.pos
+		keyEnd := stringEnd(p.raw, key)
+		p.pos = keyEnd
+		p.space()
+		p.pos++
+		index := -1
+		if parent != nil {
+			for f := 0; f < parent.NumField(); f++ {
+				if keyIs(p.raw, key, parent.Field(f).Tag.Get("json")) {
+					index = f
+					break
+				}
+			}
+		}
+		if index < 0 {
+			p.stripped++
+			if _, err := p.discard(level + frames - shift); err != nil {
+				return err
+			}
+			continue
+		}
+		for p.offsets[boundary]&historyObjectBoundary == 0 {
+			boundary++
+		}
+		p.offsets[boundary] = p.offsets[boundary]&^63 | uint32(index)
+		typ, enter = parent.Field(index).Type, true
+		if p.out[len(p.out)-1] != '{' {
+			if err := p.emit([]byte{','}, true); err != nil {
+				return err
+			}
+		}
+		if err := p.emit(p.raw[key:keyEnd], true); err != nil {
+			return err
+		}
+		if err := p.emit([]byte{':'}, true); err != nil {
+			return err
+		}
 	}
 }
 
@@ -701,9 +885,10 @@ func (p *historyMaterializer) value(dst reflect.Value) error {
 	}
 }
 
-func (p *historyParser) object(typ reflect.Type, level int, keep bool) error {
-	// Reserve this object's contiguous offset range before descending. All key
-	// ranges are stack-owned and reclaimed after the duplicate sort.
+// object reserves and checks one contiguous key range before descent. Parent
+// ranges stay live until their closing brace, including in discarded subtrees.
+// Checking and sorting finish before the last raw offset becomes metadata.
+func (p *historyParser) object(typ reflect.Type, keep bool) (int, error) {
 	base := len(p.offsets)
 	i := p.pos + 1
 	for {
@@ -714,7 +899,7 @@ func (p *historyParser) object(typ reflect.Type, level int, keep bool) error {
 			break
 		}
 		if len(p.offsets) == cap(p.offsets) {
-			return ErrHistoryInvalid
+			return 0, ErrHistoryInvalid
 		}
 		p.offsets = append(p.offsets, uint32(i))
 		i = stringEnd(p.raw, i)
@@ -737,75 +922,95 @@ func (p *historyParser) object(typ reflect.Type, level int, keep bool) error {
 	end := len(p.offsets)
 	p.members += end - base
 	if p.members > p.schema.Members {
-		return ErrHistoryInvalid
+		return 0, ErrHistoryInvalid
 	}
 	keys := p.offsets[base:end]
-	sort.Slice(keys, func(i, j int) bool { return compareKeys(p.raw, int(keys[i]), int(keys[j])) < 0 })
+	p.sortKeys(keys)
 	for i := 1; i < len(keys); i++ {
 		if compareKeys(p.raw, int(keys[i-1]), int(keys[i])) == 0 {
-			return ErrHistoryInvalid
+			return 0, ErrHistoryInvalid
 		}
 	}
-	if err := p.emit([]byte{'{'}, keep); err != nil {
-		return err
-	}
-	p.pos++
-	p.space()
-	var seen uint64
-	written := 0
-	for p.raw[p.pos] != '}' {
-		key := p.pos
-		keyEnd := stringEnd(p.raw, key)
-		p.pos = keyEnd
-		p.space()
-		p.pos++
-		index := -1
-		if keep && typ != nil {
-			if typ.NumField() > 63 {
-				return ErrHistoryInvalid
-			}
+	if keep && typ != nil {
+		if typ.NumField() > 63 {
+			return 0, ErrHistoryInvalid
+		}
+		var seen uint64
+		for _, key := range keys {
 			for f := 0; f < typ.NumField(); f++ {
-				if keyIs(p.raw, key, typ.Field(f).Tag.Get("json")) {
-					index = f
+				if keyIs(p.raw, int(key), typ.Field(f).Tag.Get("json")) {
+					seen |= uint64(1) << f
 					break
 				}
 			}
 		}
-		known := keep && index >= 0
-		var field reflect.Type
-		if known {
-			seen |= uint64(1) << index
-			field = typ.Field(index).Type
-			if written > 0 {
-				if err := p.emit([]byte{','}, true); err != nil {
-					return err
+		if seen != uint64(1)<<typ.NumField()-1 {
+			return 0, ErrHistoryInvalid
+		}
+	}
+	if end != base {
+		p.offsets[end-1] = historyObjectBoundary | uint32(base)<<6
+	}
+	return end - base, nil
+}
+
+// discard is the non-projecting mode of the same lossless walk. Grammar has
+// already proved delimiters, so arrays need only scalar depth, not a Go frame
+// or a per-level allocation. A nonempty object's last key slot holds its
+// marked parent base, exactly as in projecting mode. The returned count is
+// only this root object's keys, for projection with a nil known-field type.
+// Empty objects retain no keys and are consumed together with their brace.
+// Thus even 10,000 unknown levels preserve the original simultaneous-key
+// capacity errors and complete duplicate proof before any refusal attribution.
+func (p *historyParser) discard(level int) (int, error) {
+	p.space()
+	if p.raw[p.pos] != '{' && p.raw[p.pos] != '[' {
+		p.pos = skipValue(p.raw, p.pos)
+		return 0, nil
+	}
+	rootKeys, depth := 0, 0
+	for {
+		c := p.raw[p.pos]
+		switch c {
+		case '{', '[':
+			if level+depth > p.schema.Depth {
+				return 0, ErrHistoryInvalid
+			}
+			if c == '{' {
+				count, err := p.object(nil, false)
+				if err != nil {
+					return 0, err
+				}
+				if depth == 0 {
+					rootKeys = count
+				}
+				if count == 0 {
+					p.pos = skipValue(p.raw, p.pos)
+					if depth == 0 {
+						return rootKeys, nil
+					}
+					continue
 				}
 			}
-			written++
-			if err := p.emit(p.raw[key:keyEnd], true); err != nil {
-				return err
-			}
-			if err := p.emit([]byte{':'}, true); err != nil {
-				return err
-			}
-		} else if keep {
-			p.stripped++
-		}
-		if err := p.value(field, level+1, known); err != nil {
-			return err
-		}
-		p.space()
-		if p.raw[p.pos] == ',' {
+			depth++
 			p.pos++
-			p.space()
+		case '}', ']':
+			if c == '}' {
+				p.popObject()
+			}
+			depth--
+			p.pos++
+			if depth == 0 {
+				return rootKeys, nil
+			}
+		case '"':
+			p.pos = stringEnd(p.raw, p.pos)
+		case ' ', '\n', '\r', '\t', ':', ',':
+			p.pos++
+		default:
+			p.pos = skipValue(p.raw, p.pos)
 		}
 	}
-	p.pos++
-	if keep && typ != nil && seen != uint64(1)<<typ.NumField()-1 {
-		return ErrHistoryInvalid
-	}
-	p.offsets = p.offsets[:base]
-	return p.emit([]byte{'}'}, keep)
 }
 
 // HistoryCorrelation has one live initial. Default arbitrary-ID mode also has
@@ -1053,6 +1258,7 @@ type HistorySchema func(method string, initial bool) (HistoryProjection, bool)
 // HistoryReader leases raw/output/offsets from its owner. Message values borrow
 // output until the next Read; an owner must finish all use before reusing it.
 type HistoryReader struct {
+	readControl *ReadControl
 	r           *bufio.Reader
 	raw, output []byte
 	offsets     []uint32
@@ -1069,7 +1275,12 @@ func NewHistoryCodec(rw io.ReadWriter, ordinary int, raw, output []byte, offsets
 	if ordinary < 1 || ordinary > WorkerFrameBytes || cap(raw) < max(ordinary, HistoryRecordFrameBytes) || cap(output) < HistoryRecordFrameBytes || cap(offsets)*4 > HistoryInitialBytes || cap(offsets) < HistoryRecordBytes/4 || correlation == nil || schema == nil {
 		return nil, ErrHistoryInvalid
 	}
-	return &Codec{writer: rw, wgate: make(chan struct{}, 1), interruptWrite: interrupt, history: &HistoryReader{r: bufio.NewReaderSize(rw, 4096), raw: raw[:0:min(cap(raw), HistoryFrameBytes)], output: output[:0:min(cap(output), HistoryFrameBytes)], offsets: offsets[:0], ordinary: ordinary, correlation: correlation, schema: schema}}, nil
+	codec := &Codec{writer: rw, wgate: make(chan struct{}, 1), interruptWrite: interrupt}
+	// Read assembles bounded fragments into raw before validation. This buffer
+	// is private framing scratch, not a wire or logical-frame limit. rw cannot
+	// be *bufio.Reader (it lacks Write), so NewReaderSize owns this backing.
+	codec.history.Store(&HistoryReader{r: bufio.NewReaderSize(rw, 256), raw: raw[:0:min(cap(raw), HistoryFrameBytes)], output: output[:0:min(cap(output), HistoryFrameBytes)], offsets: offsets[:0], ordinary: ordinary, correlation: correlation, schema: schema})
+	return codec, nil
 }
 
 func (r *HistoryReader) Read() (*Message, error) {

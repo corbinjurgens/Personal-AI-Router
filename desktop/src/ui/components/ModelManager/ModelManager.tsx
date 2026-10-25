@@ -7,29 +7,25 @@ import type { BackendInfo } from '@/ui/types/engine-info'
 import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import { useEngineDescriptor } from '@/ui/stores/engine-status.store'
 import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
-import { ModelExpiry } from '@/shared/types/engines'
+import { ModelExpiry, type ModelItem } from '@/shared/types/engines'
+import { engineManagerName } from '@/shared/utils/engines'
 
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import { ModelHubModal } from '@/ui/components/ModelHub/ModelHubModal'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
+import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { isEnginePullInProgress } from '@/shared/utils/engine-progress'
 
 import ModelRow from './ModelRow'
-import { IncomingSyncPullRow } from './IncomingSyncPullRow'
 import { TransientModelStatusRow } from './TransientModelStatusRow'
-import type { IncomingSyncRow } from '@/ui/types/model-manager'
 import type { ModelEntry } from '@/ui/types/model-hub'
 
 export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId: string }) {
     const [openModelHubModal, setOpenModelHubModal] = useState(false)
     const [modelPendingDelete, setModelPendingDelete] = useState<string | null>(null)
-    const models = (backend.models ?? []).sort((a, b) =>
-        formatModelDisplayName(a.name, backend.type).localeCompare(
-            formatModelDisplayName(b.name, backend.type)
-        )
-    )
+    const observation = useEngineModelsStore(state => state.getModels(nodeId, backend.type))
     const caps = engineCapabilities(backend.type, useEngineDescriptor(backend.type))
 
     const backendType = backend.type
@@ -40,11 +36,10 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
      * pull for THIS engine changes — not every progress tick cluster-wide.
      */
     const pullProgressFingerprint = useEngineProgressStore(state => {
-        const prefix = `${nodeId}:${backend.type}:pull`
         const parts: string[] = []
-        for (const [key, p] of state.progress) {
-            if (key.startsWith(prefix)) {
-                parts.push(`${p.model ?? ''}:${p.status}:${p.percent ?? ''}`)
+        for (const p of state.progress.values()) {
+            if (p.nodeId === nodeId && p.engineType === backend.type && p.operation === 'pull') {
+                parts.push(JSON.stringify(p))
             }
         }
         return parts.join('|')
@@ -87,9 +82,69 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
         [backend.type]
     )
 
-    const isBusy = models.some(
-        m => m.status === 'loading' || m.status === 'ejecting' || m.status === 'pulling'
-    )
+    // Canonical models already contain inventory, residency and lifecycle rows.
+    // Progress may arrive first, so merge only exact model keys without making
+    // an operation event certify content readiness.
+    const models = (() => {
+        const rows = new Map<string, ModelItem>()
+        const supplied =
+            observation.models.length > 0 || observation.downloadState
+                ? observation.models
+                : backend.models
+        for (const model of supplied) {
+            rows.set(model.name, {
+                ...model,
+                downloaded:
+                    observation.downloadStateCurrent === true &&
+                    !!observation.downloadState &&
+                    !observation.downloadState.recoveryRequired &&
+                    model.downloaded,
+                downloadStateCurrent: observation.downloadStateCurrent
+            })
+        }
+        for (const p of useEngineProgressStore.getState().getProgressForNode(nodeId)) {
+            if (
+                p.engineType !== backend.type ||
+                p.operation !== 'pull' ||
+                !p.model ||
+                !p.downloadState
+            )
+                continue
+            const snapshot = observation.downloadState
+            if (
+                snapshot &&
+                (snapshot.sourceId !== p.downloadSourceId ||
+                    (p.downloadRevision && BigInt(p.downloadRevision) < BigInt(snapshot.revision)))
+            )
+                continue
+            const existing = rows.get(p.model)
+            rows.set(p.model, {
+                name: p.model,
+                size: 0,
+                status: 'idle',
+                parameterSize: '',
+                quantization: '',
+                family: '',
+                digest: '',
+                sizeVram: null,
+                expiresAt: null,
+                expiry: '10m',
+                capabilities: [],
+                ...existing,
+                downloaded:
+                    existing?.downloaded === true &&
+                    snapshot?.revision === p.downloadRevision &&
+                    p.downloadStateCurrent === true &&
+                    !p.downloadState.blocksReadiness,
+                downloadState: p.downloadState,
+                downloadStateCurrent: p.downloadStateCurrent
+            })
+        }
+        return Array.from(rows.values()).sort((a, b) =>
+            displayName(a.name).localeCompare(displayName(b.name))
+        )
+    })()
+
     const transientModel = models.find(
         m => m.status === 'loading' || m.status === 'ejecting' || m.status === 'pulling'
     )
@@ -97,33 +152,6 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
     // pullProgressFingerprint triggers re-renders when progress changes;
     // the actual data is read from the store below.
     void pullProgressFingerprint
-
-    const incomingSyncs: IncomingSyncRow[] = (() => {
-        const modelNames = new Set(models.map(m => m.name))
-        const results: IncomingSyncRow[] = []
-
-        for (const p of useEngineProgressStore.getState().getProgressForNode(nodeId)) {
-            if (
-                p.engineType !== backend.type ||
-                !isEnginePullInProgress(p) ||
-                !p.model ||
-                modelNames.has(p.model)
-            ) {
-                continue
-            }
-
-            results.push({
-                rawModel: p.model,
-                label: displayName(p.model),
-                status: p.status,
-                percent: p.percent,
-                completed: p.completed,
-                total: p.total
-            })
-        }
-
-        return results
-    })()
 
     // Only an engine that restarts to pick a deletion up (LM Studio today)
     // confirms first, because the restart interrupts in-flight inference.
@@ -133,8 +161,62 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
     // manager, not to this click.
     const confirmBeforeDelete = caps.restartsOnModelDelete ?? false
 
+    const actionAllowed = useCallback(
+        (modelName: string, action: string) => {
+            const current = useEngineModelsStore.getState().getModels(nodeId, backendType)
+            const model = current.models.find(row => row.name === modelName)
+            const progress = useEngineProgressStore
+                .getState()
+                .getProgress(nodeId, backendType, 'pull', modelName)
+            const entry = current.downloadState?.entries.find(
+                row => row.engine === engineManagerName(backendType) && row.model === modelName
+            )
+            if (
+                usePendingActionsStore.getState().getModelPending(nodeId, backendType, modelName) ||
+                isEnginePullInProgress(progress) ||
+                entry?.phase === 'queued' ||
+                entry?.phase === 'in_progress'
+            )
+                return false
+            const ready =
+                current.downloadStateCurrent === true &&
+                !!current.downloadState &&
+                !current.downloadState.recoveryRequired &&
+                model?.downloaded === true &&
+                !entry?.blocksReadiness &&
+                !progress.downloadState?.blocksReadiness &&
+                (!progress.downloadState ||
+                    (progress.downloadStateCurrent === true &&
+                        progress.downloadSourceId === current.downloadState.sourceId &&
+                        progress.downloadRevision === current.downloadState.revision))
+            switch (action) {
+                case 'load':
+                    return (
+                        caps.hasLoad &&
+                        ready &&
+                        model?.status !== 'loaded' &&
+                        backend.processStatus === 'running'
+                    )
+                case 'copy':
+                    return caps.hasModelCopy && ready && isRemoteNode && !copyInFlight
+                case 'eject':
+                    return (
+                        caps.hasEject &&
+                        model?.status === 'loaded' &&
+                        backend.processStatus === 'running'
+                    )
+                case 'delete':
+                    return caps.hasDeleteModel
+                default:
+                    return false
+            }
+        },
+        [nodeId, backendType, caps, backend.processStatus, isRemoteNode, copyInFlight]
+    )
+
     const handleAction = useCallback(
         (modelName: string, action: string) => {
+            if (!actionAllowed(modelName, action)) return
             switch (action) {
                 case 'load':
                     window.pairApi.engines.loadModel(backendType, nodeId, modelName)
@@ -154,7 +236,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                     break
             }
         },
-        [backendType, confirmBeforeDelete, nodeId]
+        [backendType, confirmBeforeDelete, nodeId, actionAllowed]
     )
 
     // `ConfirmModal` closes (`onOpenChange(false)`) before it calls `onConfirm`,
@@ -162,10 +244,10 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
     // callback closes over the value from the render that showed the modal, and
     // React's state update does not mutate that binding.
     const handleConfirmDelete = useCallback(() => {
-        if (modelPendingDelete) {
+        if (modelPendingDelete && actionAllowed(modelPendingDelete, 'delete')) {
             window.pairApi.engines.deleteModel(backendType, nodeId, modelPendingDelete)
         }
-    }, [backendType, modelPendingDelete, nodeId])
+    }, [backendType, modelPendingDelete, nodeId, actionAllowed])
 
     const handleExpiryChange = useCallback(
         (modelName: string, value: ModelExpiry) => {
@@ -212,57 +294,46 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                 />
             )}
 
-            {incomingSyncs.map(p => (
-                <IncomingSyncPullRow key={p.rawModel} row={p} />
-            ))}
+            {models.length === 0 && observation.downloadStateCurrent !== true && (
+                <Text kind="body/regular/sm" className="text-subtle-color pl-2">
+                    Download status unknown · Disconnected or download status unavailable
+                </Text>
+            )}
+            {(isRunning || modelOpsWhenStopped) &&
+                models.length === 0 &&
+                observation.downloadStateCurrent === true && (
+                    <Text kind="body/regular/sm" className="text-subtle-color pl-2">
+                        No model/weight files downloaded
+                    </Text>
+                )}
+            {!modelOpsWhenStopped && models.length === 0 && backend.processStatus === 'stopped' && (
+                <Text kind="body/regular/sm" className="text-subtle-color pl-2">
+                    Start engine to see models
+                </Text>
+            )}
 
-            {!isBusy && (
-                <>
-                    {(isRunning || modelOpsWhenStopped) &&
-                        models.length === 0 &&
-                        incomingSyncs.length === 0 && (
-                            <Text kind="body/regular/sm" className="text-subtle-color pl-2">
-                                No model/weight files downloaded
-                            </Text>
-                        )}
-                    {!modelOpsWhenStopped &&
-                        models.length === 0 &&
-                        incomingSyncs.length === 0 &&
-                        backend.processStatus === 'stopped' && (
-                            <Text kind="body/regular/sm" className="text-subtle-color pl-2">
-                                Start engine to see models
-                            </Text>
-                        )}
-
-                    {models.length > 0 && (
-                        <Stack gap="1">
-                            {models.map(model => (
-                                <ModelRow
-                                    key={model.name}
-                                    model={model}
-                                    isRunning={isRunning}
-                                    capabilities={caps}
-                                    progress={getProgress(nodeId, backend.type, 'pull', model.name)}
-                                    pendingAction={usePendingActionsStore
-                                        .getState()
-                                        .getModelPending(nodeId, backendType, model.name)}
-                                    canCopyToThisPc={
-                                        isRemoteNode && !copyInFlight && caps.hasModelCopy
-                                    }
-                                    copyProgress={getProgress(
-                                        nodeId,
-                                        backend.type,
-                                        'copy',
-                                        model.name
-                                    )}
-                                    displayName={displayName}
-                                    onAction={handleAction}
-                                    onExpiryChange={handleExpiryChange}
-                                />
-                            ))}
-                        </Stack>
-                    )}
-                </>
+            {models.length > 0 && (
+                <Stack gap="1">
+                    {models
+                        .filter(model => model !== transientModel)
+                        .map(model => (
+                            <ModelRow
+                                key={model.name}
+                                model={model}
+                                isRunning={isRunning}
+                                capabilities={caps}
+                                progress={getProgress(nodeId, backend.type, 'pull', model.name)}
+                                pendingAction={usePendingActionsStore
+                                    .getState()
+                                    .getModelPending(nodeId, backendType, model.name)}
+                                canCopyToThisPc={isRemoteNode && !copyInFlight && caps.hasModelCopy}
+                                copyProgress={getProgress(nodeId, backend.type, 'copy', model.name)}
+                                displayName={displayName}
+                                onAction={handleAction}
+                                onExpiryChange={handleExpiryChange}
+                            />
+                        ))}
+                </Stack>
             )}
 
             <ConfirmModal

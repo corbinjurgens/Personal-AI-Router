@@ -53,6 +53,7 @@ import type {
     ModelCopyResponse,
     ActiveModelCopy
 } from '@/shared/types/model-copy'
+import { parseModelsResult, type ModelsResult } from './model-download'
 import { resolvePullCatchError } from './pull-error-handling'
 import { isServiceLogLevelEnabled, serviceLogLevel } from './service-log-level'
 import { engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
@@ -80,6 +81,7 @@ import { defaultServiceEndpointEnvironment, resolveServiceEndpoint } from './ser
 import { parseAvailabilityChange, parsePolicyChange } from './node-policy'
 import { NodeAvailabilityState, type AvailabilityMenuItem } from './node-availability'
 import { PerformanceSubscription } from './performance'
+import { RoutingHistorySubscription } from './routing'
 import {
     legacyManualNodesPath,
     manualNodesFileOps,
@@ -113,6 +115,12 @@ interface ReadinessWaiter {
     resolve: () => void
     reject: (error: Error) => void
     timeout: ReturnType<typeof setTimeout>
+}
+
+interface ModelRefresh {
+    sessionGeneration: number
+    workerGeneration: number
+    observationSequence: number
 }
 
 export function getCliBinDir(): string {
@@ -190,68 +198,6 @@ function booleanValue(value: JsonValue | undefined): boolean {
     return typeof value === 'boolean' ? value : false
 }
 
-/**
- * Extract model names from a `nvpair-engine-manager` `list_models` action result.
- * The action returns the engine's raw response, which differs per engine:
- * Ollama's `/api/tags` yields `{ models: [{ name }] }`, LM Studio's native
- * `/api/v1/models` yields `{ models: [{ key }] }`, and llama.cpp's router
- * `/models` yields `{ data: [{ id }] }`. A present empty array is authoritative;
- * a missing or malformed inventory throws so callers retain or fall back to
- * their last-good source instead of silently clearing it.
- */
-export function parseListModelNames(result: JsonValue | undefined): string[] {
-    const obj = objectValue(result)
-    if (!obj) throw new Error('list_models returned a non-object response')
-
-    let rows: JsonValue[]
-    let fields: string[]
-    if (Array.isArray(obj.models)) {
-        rows = obj.models
-        fields = ['name', 'key']
-    } else if (obj.models !== undefined) {
-        throw new Error('list_models response is missing its model array')
-    } else if (Array.isArray(obj.data)) {
-        rows = obj.data
-        fields = ['id']
-    } else {
-        throw new Error('list_models response is missing its model array')
-    }
-
-    const names: string[] = []
-    for (const entry of rows) {
-        const row = objectValue(entry)
-        for (const field of fields) {
-            const name = stringValue(row?.[field])
-            if (!name) continue
-            names.push(name)
-            break
-        }
-    }
-    if (rows.length > 0 && names.length === 0) {
-        throw new Error('list_models returned no usable model names')
-    }
-    return names
-}
-
-/**
- * Extract the per-engine loaded-in-memory model set from an
- * `engine:models-changed` push. The payload is `{ engine, models }`
- * where `models` is the full `engine:models` result carrying `loadedByEngine`
- * (engine-manager engine name -> loaded model names). Missing/omitted maps yield
- * an empty record, which stamps every local model `idle`.
- */
-function parseLoadedByEngine(params: JsonValue | undefined): Record<string, string[]> {
-    const models = objectValue(objectValue(params)?.models)
-    const loaded = objectValue(models?.loadedByEngine)
-    if (!loaded) return {}
-    const out: Record<string, string[]> = {}
-    for (const [engine, list] of Object.entries(loaded)) {
-        if (!Array.isArray(list)) continue
-        out[engine] = list.filter((name): name is string => typeof name === 'string')
-    }
-    return out
-}
-
 function normalizeLogLevel(value: string | undefined): ModularLogLevel {
     const lowered = value?.toLowerCase()
     if (lowered && isModularLogLevel(lowered)) return lowered
@@ -315,7 +261,7 @@ function remoteRefusalMessage(err: unknown, action: string): string | undefined 
  * `/api/pull` emits an `{"error":"…"}` NDJSON line on failure. Returns the error
  * text, or `null` when nothing in the stream looks like a failure (LM Studio's
  * CLI text has no such line, so it is treated as success and confirmed by the
- * post-pull `list_models` refresh).
+ * post-pull canonical inventory refresh).
  */
 function pullResultError(result: JsonValue | undefined): string | null {
     if (typeof result !== 'string' || result.length === 0) return null
@@ -396,6 +342,10 @@ function emptyLocalEngineBridge(): LocalEngineBridge {
  *   for telemetry (see `node-info-poller.ts`).
  */
 class ModularSupervisor {
+    private readonly routingHistory = new RoutingHistorySubscription((raw, initial) => {
+        getModularBridgeState().applyRoutingHistory(raw, initial)
+        return undefined
+    })
     private processes = new Map<ModularProcessName, JsonRpcSocketClient>()
     private readinessWaiters = new Map<number, ReadinessWaiter>()
     private nextReadinessWaiterId = 0
@@ -405,14 +355,10 @@ class ModularSupervisor {
     // bridged* fields track what we have actually pushed into the proxy so
     // reconcile is idempotent and re-bridges after a proxy restart.
     private localBridges = new Map<ProxyEngine, LocalEngineBridge>()
-    // Engines whose cached [] was written only because the engine stopped.
-    // A failed first refresh after restart may release this sentinel to
-    // discovery; failures after a successful inventory must retain that
-    // last-known-good result (including an authoritative empty list).
-    private stoppedModelSentinels = new Set<EngineType>()
     private stoppedModelEngines = new Set<EngineType>()
-    private successfulModelInventories = new Set<EngineType>()
-    private modelRefreshGenerations = new Map<EngineType, { sessionGeneration: number }>()
+    private modelRefreshGenerations = new Map<EngineType, ModelRefresh>()
+    private modelWorkerGeneration = 0
+    private modelHydration: { generation: ModelRefresh; promise: Promise<void> } | null = null
     private discoveryModelRetryTimers = new Map<ProxyEngine, ReturnType<typeof setTimeout>>()
     private discoveryModelRetryAttempts = new Map<ProxyEngine, number>()
     // Authoritative value is the persisted ui-config `modularLogLevel`; the
@@ -590,6 +536,7 @@ class ModularSupervisor {
         getModularBridgeState().reconcileModelCopies([])
         getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateEngineLocks()
+        getModularBridgeState().invalidateModelObservations()
         this.shuttingDown = false
         this.performance.reset()
         this.brokerReady = false
@@ -677,10 +624,12 @@ class ModularSupervisor {
         // Mark teardown first so the connection closing during teardown is
         // treated as deliberate, not a crash.
         this.shuttingDown = true
+        this.routingHistory.sourceReset()
         this.brokerSessionGeneration++
         getModularBridgeState().reconcileModelCopies([])
         getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateEngineLocks()
+        getModularBridgeState().invalidateModelObservations()
         await this.performance.stop()
         stopNodeInfoPoller()
         if (this.remoteStatusDebounceTimer) {
@@ -727,6 +676,7 @@ class ModularSupervisor {
         for (const child of processes) {
             try {
                 await close(child)
+                if (child.name === 'broker') this.routingHistory.disconnected()
             } catch (err) {
                 log.warn({
                     sublevel: child.name,
@@ -791,6 +741,10 @@ class ModularSupervisor {
         // notification arrives after the process map is cleared during stop().
         if (!child) return Promise.reject(new Error(`${name} is not running`))
         return child.call(method, params, timeoutMs)
+    }
+
+    setRoutingHistorySubscribed(subscribed: boolean): void {
+        this.routingHistory.setWanted(subscribed)
     }
 
     /**
@@ -937,6 +891,7 @@ class ModularSupervisor {
         getModularBridgeState().reconcileModelCopies([])
         getModularBridgeState().applyEngineIntent(null)
         getModularBridgeState().invalidateEngineLocks()
+        getModularBridgeState().invalidateModelObservations()
         this.performance.reset()
         this.brokerReady = false
         this.brokerHydrationDone = false
@@ -969,6 +924,7 @@ class ModularSupervisor {
         child.on('disconnected', () => {
             if (!isCurrent()) return
             log.warn({ sublevel: child.name, message: 'Lost the connection to the service' })
+            this.routingHistory.disconnected()
             this.resetBrokerSession()
             this.onConnectionLost?.()
         })
@@ -978,6 +934,7 @@ class ModularSupervisor {
         child.on('broker-restarted', () => {
             if (!isCurrent()) return
             log.warn({ sublevel: child.name, message: 'The service restarted the broker' })
+            this.routingHistory.sourceReset()
             this.resetBrokerSession()
             this.onConnectionLost?.()
         })
@@ -985,10 +942,12 @@ class ModularSupervisor {
             if (!isCurrent()) return
             this.processes.delete(child.name as ModularProcessName)
             if (child.name === 'broker') {
+                this.routingHistory.disconnected()
                 this.brokerSessionGeneration++
                 getModularBridgeState().reconcileModelCopies([])
                 getModularBridgeState().applyEngineIntent(null)
                 getModularBridgeState().invalidateEngineLocks()
+                getModularBridgeState().invalidateModelObservations()
                 this.performance.reset()
                 this.brokerReady = false
                 this.brokerHydrationDone = false
@@ -1091,6 +1050,8 @@ class ModularSupervisor {
 
     private async onBrokerReady(): Promise<void> {
         const generation = this.brokerSessionGeneration
+        const historyPeer = this.processes.get('broker')
+        if (historyPeer) this.routingHistory.connect(historyPeer)
         const subscribe = async (method: string, label: string): Promise<void> => {
             try {
                 await this.callProcess('broker', method)
@@ -1120,6 +1081,8 @@ class ModularSupervisor {
         await this.syncClusterIdentityToManager()
         if (generation !== this.brokerSessionGeneration) return
         await this.resolveSelfId()
+        if (generation !== this.brokerSessionGeneration) return
+        await this.hydrateModels()
         if (generation !== this.brokerSessionGeneration) return
         await this.migrateManualNodes()
         if (generation !== this.brokerSessionGeneration) return
@@ -1995,9 +1958,12 @@ class ModularSupervisor {
         }
         if (notification.method === 'engine:ready') {
             getModularBridgeState().reconcileModelCopies([])
+            this.modelWorkerGeneration++
             getModularBridgeState().applyEngineIntent(null)
             getModularBridgeState().invalidateEngineLocks()
+            getModularBridgeState().invalidateModelObservations()
             void this.hydrateEngineIntent()
+            void this.hydrateModels()
             void this.hydrateEngineManager()
             void this.activeModelCopies().catch(() => {})
             return
@@ -2018,12 +1984,18 @@ class ModularSupervisor {
             return
         }
         if (notification.method === 'engine:models-changed') {
-            // An engine's in-memory (loaded) model set changed — explicit
-            // load/unload, LM Studio JIT auto-load, or idle/TTL eviction. The push
-            // carries the full engine:models snapshot; forward its per-engine
-            // loaded set so the local node's model rows reflect residency at once,
-            // ahead of the next discovery model-refresh sweep.
-            getModularBridgeState().applyLocalLoadedModels(parseLoadedByEngine(notification.params))
+            const state = getModularBridgeState()
+            try {
+                if (
+                    state.applyLocalModelsNotification(
+                        parseModelsResult(objectValue(notification.params)?.models)
+                    )
+                ) {
+                    void this.hydrateModels()
+                }
+            } catch {
+                state.invalidateLocalModels()
+            }
             return
         }
         if (notification.method === 'engine:install-progress') {
@@ -2031,11 +2003,9 @@ class ModularSupervisor {
             return
         }
         if (notification.method === 'engine:pull-progress') {
-            // Live download progress for a local model pull (driven via
-            // engine:action{pull_model}) — the local counterpart of
-            // engine:remote-progress. Advances the optimistic pull entry's
-            // percent; the awaited pull RPC still owns clearing it.
-            getModularBridgeState().applyLocalEngineProgress(notification.params)
+            // Target-owned progress, independent of the initiating client.
+            if (getModularBridgeState().applyLocalEngineProgress(notification.params))
+                void this.hydrateModels()
             return
         }
         if (notification.method === 'engine:remote-progress') {
@@ -2052,11 +2022,10 @@ class ModularSupervisor {
      * so we:
      *   1. show an optimistic `pulling` entry immediately (so the modal closing
      *      isn't followed by dead silence) that the streamed progress advances,
-     *   2. **await** the action response — unlike lifecycle ops, the response is
-     *      the only completion signal, so we use a long timeout instead of
-     *      fire-and-forget,
+     *   2. await the action response with a bounded timeout,
      *   3. parse it for an explicit error and otherwise refresh the authoritative
-     *      model list, then clear the optimistic entry.
+     *      inventory. RPC settlement clears only request-local progress;
+     *      target snapshots retain operation outcomes independently.
      * Fire-and-forget from the caller's perspective: it is `void`-ed so the UI
      * command returns immediately.
      */
@@ -2113,7 +2082,7 @@ class ModularSupervisor {
 
     /**
      * Delete a downloaded model locally. Awaits the backend action, refreshes
-     * `list_models`, and surfaces RPC failures so the optimistic spinner clears
+     * canonical inventory, and surfaces RPC failures so the optimistic spinner clears
      * on real completion instead of the safety-net timeout.
      *
      * Whether deleting also restarts the engine is the manifest's decision
@@ -2200,16 +2169,7 @@ class ModularSupervisor {
         await this.refreshEngineModels(engine, engineType)
     }
 
-    /**
-     * Download a model on a remote peer via `engine:remote-pull-model`
-     * (`nvpair-engine-manager` ec surface). Unlike a local pull, the backend emits
-     * **no** terminal `engine:remote-progress` for a remote pull — the peer's
-     * terminal stream frame becomes this RPC's reply
-     * (`nvpair-engine-manager/controlstream.go`), never a notification. So the
-     * awaited RPC settling is the *only* completion signal; we clear the
-     * optimistic entry here on resolve/reject. Fire-and-forget for the caller
-     * (`void`-ed) so the UI command returns immediately.
-     */
+    /** Download on a peer; RPC settlement does not replace its lifecycle facts. */
     async pullModelRemote(
         nodeId: string,
         engine: string,
@@ -2512,39 +2472,63 @@ class ModularSupervisor {
     }
 
     /**
-     * Re-pull an engine's authoritative `list_models` after a model op and push
-     * it. Awaitable (so {@link pullModel} can land the new model in the list
-     * before clearing its spinner) and never throws — a failed refresh just logs.
+     * Re-read canonical inventory after a model operation. Failure retains
+     * last-good names with unavailable currentness.
      */
     private async refreshEngineModels(engine: string, engineType: EngineType): Promise<void> {
         if (this.stoppedModelEngines.has(engineType)) return
         const generation = this.beginModelRefresh(engineType)
         try {
-            const result = await this.callProcess('broker', 'engine:action', {
-                engine,
-                action: 'list_models'
-            })
-            const models = parseListModelNames(result)
+            const result = await this.callProcess('broker', 'engine:models')
+            const models = parseModelsResult(result)
             this.commitModelInventory(engineType, models, generation)
         } catch (err) {
             this.handleModelRefreshFailure(engineType, generation)
             log.verbose({
                 sublevel: 'engine-manager',
-                message: `list_models after pull for ${engine} failed: ${getErrorString(err)}`
+                message: `engine:models after operation for ${engine} failed: ${getErrorString(err)}`
             })
         }
     }
 
-    /**
-     * Pull the local node's model list for an engine via engine-manager's
-     * `list_models` action, then cache + push it. Runs for **every** engine
-     * including Ollama: the discovery plane (proxy mDNS) advertises no model list,
-     * so `/api/tags` is the only working source for the local node's models.
-     * `setLocalEngineModels` scopes the result to the local node, so remote nodes
-     * keep their discovery-derived lists. The action is an HTTP GET against the
-     * engine's loopback API and only works while it is running, so we clear the
-     * list when the engine is stopped/uninstalled.
-     */
+    private hydrateModels(): Promise<void> {
+        const state = getModularBridgeState()
+        const generation: ModelRefresh = {
+            sessionGeneration: this.brokerSessionGeneration,
+            workerGeneration: this.modelWorkerGeneration,
+            observationSequence: state.beginLocalModelsRead()
+        }
+        const existing = this.modelHydration
+        if (
+            existing &&
+            existing.generation.sessionGeneration === generation.sessionGeneration &&
+            existing.generation.workerGeneration === generation.workerGeneration &&
+            existing.generation.observationSequence === generation.observationSequence
+        )
+            return existing.promise
+        const isCurrent = (): boolean =>
+            generation.sessionGeneration === this.brokerSessionGeneration &&
+            generation.workerGeneration === this.modelWorkerGeneration
+        const promise: Promise<void> = this.callProcess('broker', 'engine:models')
+            .then(result => {
+                if (isCurrent())
+                    state.applyLocalModelsResult(
+                        parseModelsResult(result),
+                        generation.observationSequence
+                    )
+            })
+            .catch(() => {
+                if (isCurrent())
+                    state.invalidateLocalModels(undefined, generation.observationSequence)
+            })
+            .finally(() => {
+                if (this.modelHydration?.promise === promise) this.modelHydration = null
+            })
+        this.modelHydration = { generation, promise }
+        return promise
+    }
+
+    /** Refresh canonical local inventory following an engine lifecycle change. */
     refreshManagedEngineModels(params: JsonValue | undefined): void {
         const obj = objectValue(params)
         if (!obj) return
@@ -2555,28 +2539,21 @@ class ModularSupervisor {
         if (!booleanValue(obj.running)) {
             this.beginModelRefresh(engineType)
             this.stoppedModelEngines.add(engineType)
-            this.stoppedModelSentinels.add(engineType)
-            this.successfulModelInventories.delete(engineType)
             if (isProxyEngine(engineType)) {
                 this.cancelDiscoveryModelRefreshRetry(engineType)
             }
-            getModularBridgeState().setLocalEngineModels(engineType, [])
-            return
+            getModularBridgeState().markLocalInventoryStale(engineType)
+        } else {
+            this.stoppedModelEngines.delete(engineType)
         }
 
-        // A late running notification can arrive during teardown, after stop()
-        // has cleared the process map. The stopped branch above must still
-        // invalidate older requests, but a running branch must not make a new
-        // broker call in that window.
+        // A late lifecycle notification must invalidate old reads without
+        // dispatching another request during teardown.
         if (!this.hasProcess('broker')) return
-        this.stoppedModelEngines.delete(engineType)
         const generation = this.beginModelRefresh(engineType)
-        this.callProcess('broker', 'engine:action', {
-            engine,
-            action: 'list_models'
-        })
+        this.callProcess('broker', 'engine:models')
             .then(result => {
-                const models = parseListModelNames(result)
+                const models = parseModelsResult(result)
                 this.commitModelInventory(engineType, models, generation)
             })
             .catch(err => {
@@ -2584,20 +2561,12 @@ class ModularSupervisor {
                 this.handleModelRefreshFailure(engineType, generation)
                 log.verbose({
                     sublevel: 'engine-manager',
-                    message: `list_models for ${engine} failed: ${getErrorString(err)}`
+                    message: `engine:models for ${engine} failed: ${getErrorString(err)}`
                 })
             })
     }
 
-    /**
-     * Re-pull the local node's model list for a proxy engine when discovery
-     * reports it changed (a pull/delete on an already-running engine emits no
-     * `engine:state-changed`, so {@link refreshManagedEngineModels} alone would
-     * miss it). On success the cache holds the complete, untruncated list; if
-     * engine-manager has never supplied a valid inventory (for example an
-     * external engine it has not adopted), a failure falls back to discovery.
-     * Once a valid inventory exists, transient failures retain it.
-     */
+    /** Re-read canonical inventory after discovery changes, retaining stale names on failure. */
     refreshDiscoveryEngineModels(engine: ProxyEngine): void {
         this.cancelDiscoveryModelRefreshRetry(engine, false)
         if (this.stoppedModelEngines.has(engine) || this.shuttingDown) return
@@ -2606,12 +2575,9 @@ class ModularSupervisor {
             return
         }
         const generation = this.beginModelRefresh(engine)
-        this.callProcess('broker', 'engine:action', {
-            engine: engineManagerName(engine),
-            action: 'list_models'
-        })
+        this.callProcess('broker', 'engine:models')
             .then(result => {
-                const models = parseListModelNames(result)
+                const models = parseModelsResult(result)
                 this.commitModelInventory(engine, models, generation)
             })
             .catch(() => {
@@ -2621,34 +2587,34 @@ class ModularSupervisor {
             })
     }
 
-    private beginModelRefresh(engine: EngineType): { sessionGeneration: number } {
-        const generation = { sessionGeneration: this.brokerSessionGeneration }
+    private beginModelRefresh(engine: EngineType): ModelRefresh {
+        const generation = {
+            sessionGeneration: this.brokerSessionGeneration,
+            workerGeneration: this.modelWorkerGeneration,
+            observationSequence: getModularBridgeState().beginLocalModelsRead()
+        }
         this.modelRefreshGenerations.set(engine, generation)
         return generation
     }
 
-    private isCurrentModelRefresh(
-        engine: EngineType,
-        generation: { sessionGeneration: number }
-    ): boolean {
+    private isCurrentModelRefresh(engine: EngineType, generation: ModelRefresh): boolean {
         return (
             generation.sessionGeneration === this.brokerSessionGeneration &&
+            generation.workerGeneration === this.modelWorkerGeneration &&
             this.modelRefreshGenerations.get(engine) === generation
         )
     }
 
     private commitModelInventory(
         engine: EngineType,
-        models: string[],
-        generation: { sessionGeneration: number }
+        models: ModelsResult,
+        generation: ModelRefresh
     ): void {
         if (!this.isCurrentModelRefresh(engine, generation)) return
-        this.stoppedModelSentinels.delete(engine)
-        this.successfulModelInventories.add(engine)
         if (isProxyEngine(engine)) {
             this.cancelDiscoveryModelRefreshRetry(engine)
         }
-        getModularBridgeState().setLocalEngineModels(engine, models)
+        getModularBridgeState().applyLocalModelsResult(models, generation.observationSequence)
     }
 
     private scheduleDiscoveryModelRefreshRetry(engine: ProxyEngine): void {
@@ -2679,20 +2645,9 @@ class ModularSupervisor {
         if (resetAttempt) this.discoveryModelRetryAttempts.delete(engine)
     }
 
-    private handleModelRefreshFailure(
-        engine: EngineType,
-        generation: { sessionGeneration: number }
-    ): void {
+    private handleModelRefreshFailure(engine: EngineType, generation: ModelRefresh): void {
         if (!this.isCurrentModelRefresh(engine, generation)) return
-        if (!isProxyEngine(engine)) return
-        const wasStoppedSentinel = this.stoppedModelSentinels.delete(engine)
-        if (wasStoppedSentinel || !this.successfulModelInventories.has(engine)) {
-            // A stop caches [] so stale models are not shown while the engine is
-            // down. If the first inventory after restart fails, release that
-            // sentinel and use discovery. Once a real inventory succeeds,
-            // including [], later transient failures retain it.
-            getModularBridgeState().fallbackLocalEngineModelsToDiscovery(engine)
-        }
+        getModularBridgeState().invalidateLocalModels(engine, generation.observationSequence)
     }
 
     /** Per-engine local bridge state, created lazily. */

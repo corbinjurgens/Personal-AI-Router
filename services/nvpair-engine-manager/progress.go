@@ -3,18 +3,25 @@
 
 package main
 
-import "sync"
+import (
+	"sync"
+
+	"nvpair-shared/modeldownload"
+)
 
 // ProgressEvent is one progress frame for a long-running engine operation
 // (install or model pull). The same event feeds two consumers: the local
 // engine:install-progress notification path (this node's own UI) and the ec
 // streaming handlers that relay live progress to a remote initiator.
 type ProgressEvent struct {
-	Engine  string `json:"engine"`
-	Op      string `json:"op"` // "install" | "pull"
-	Stage   string `json:"stage,omitempty"`
-	Percent int    `json:"percent"`
-	Message string `json:"message,omitempty"`
+	Engine        string                  `json:"engine"`
+	Op            string                  `json:"op"` // "install" | "pull"
+	Stage         string                  `json:"stage,omitempty"`
+	Percent       int                     `json:"percent"`
+	Message       string                  `json:"message,omitempty"`
+	ID            string                  `json:"id,omitempty"`
+	Model         string                  `json:"model,omitempty"`
+	DownloadState *modeldownload.Snapshot `json:"downloadState,omitempty"`
 }
 
 // wirePercentIncluded reports whether an install or pull progress percent should
@@ -32,12 +39,8 @@ func wirePercentIncluded(pct int) bool {
 // advisory, and the terminal result is delivered out-of-band (as the stream's
 // final frame / the RPC response), not through the hub.
 //
-// Subscriptions are scoped by engine, not by operation id: a subscriber watching
-// "ollama" sees every ollama frame, so if a local pull and a remote ec pull of
-// the same engine run concurrently, the remote initiator's stream may interleave
-// the local pull's advisory frames. That's intentional and harmless — each
-// stream's authoritative terminal result is the out-of-band final frame, never a
-// hub frame — and installs (emitInstallProgress) already have this property.
+// Generic subscriptions retain engine-scoped advisory events. Pull streams use
+// subscribeDownload to isolate the target's exact reservation identity.
 type progressHub struct {
 	mu   sync.Mutex
 	next int
@@ -45,8 +48,10 @@ type progressHub struct {
 }
 
 type progressSub struct {
-	engine string
-	ch     chan ProgressEvent
+	engine     string
+	downloadID string
+	model      string
+	ch         chan ProgressEvent
 }
 
 func newProgressHub() *progressHub {
@@ -57,7 +62,14 @@ func newProgressHub() *progressHub {
 // The returned cancel removes the subscription and closes the channel; callers
 // must invoke it when the op ends so the hub doesn't leak subscribers.
 func (h *progressHub) subscribe(engine string) (<-chan ProgressEvent, func()) {
-	sub := &progressSub{engine: engine, ch: make(chan ProgressEvent, 64)}
+	return h.add(&progressSub{engine: engine, ch: make(chan ProgressEvent, 64)})
+}
+
+func (h *progressHub) subscribeDownload(id, engine, model string) (<-chan ProgressEvent, func()) {
+	return h.add(&progressSub{engine: engine, downloadID: id, model: model, ch: make(chan ProgressEvent, 64)})
+}
+
+func (h *progressHub) add(sub *progressSub) (<-chan ProgressEvent, func()) {
 	h.mu.Lock()
 	id := h.next
 	h.next++
@@ -81,6 +93,9 @@ func (h *progressHub) publish(ev ProgressEvent) {
 	defer h.mu.Unlock()
 	for _, sub := range h.subs {
 		if sub.engine != "" && sub.engine != ev.Engine {
+			continue
+		}
+		if sub.downloadID != "" && (ev.Op != "pull" || sub.downloadID != ev.ID || sub.model != ev.Model) {
 			continue
 		}
 		select {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -314,7 +315,7 @@ func loadRoutingHistoryFixtures(t *testing.T) []routingHistoryFixture {
 	if err := json.Unmarshal(data, &corpus); err != nil {
 		t.Fatal(err)
 	}
-	wantNames := []string{"rejected then served local", "terminal interrupted API retained accounting", "cancelled with dropped prefix", "recoverable interruption", "actual linked successor"}
+	wantNames := []string{"rejected then served local", "terminal interrupted API retained accounting", "cancelled with dropped prefix", "recoverable interruption", "actual linked successor", "model-less local completion"}
 	if corpus.Schema != 1 || len(corpus.Cases) != len(wantNames) {
 		t.Fatal("unexpected corpus schema/cases")
 	}
@@ -463,6 +464,30 @@ func TestRoutingHistoryContract(t *testing.T) {
 		}
 	})
 
+	t.Run("semantic corpus invalid destinations", func(t *testing.T) {
+		data, err := os.ReadFile("testdata/routing-request.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var corpus struct {
+			InvalidCases []struct {
+				Name    string `json:"name"`
+				Fixture int    `json:"fixture"`
+				Path    string `json:"path"`
+				Value   any    `json:"value"`
+			} `json:"invalidCases"`
+		}
+		if err := json.Unmarshal(data, &corpus); err != nil {
+			t.Fatal(err)
+		}
+		if len(corpus.InvalidCases) == 0 {
+			t.Fatal("missing invalid destination cases")
+		}
+		for _, fixture := range corpus.InvalidCases {
+			bad(fixture.Name, fixture.Fixture, fixture.Path, fixture.Value)
+		}
+	})
+
 	t.Run("every required member and nonnullable position", func(t *testing.T) {
 		// Literal contract inventory, independent of the production struct tags.
 		objects := []struct {
@@ -474,11 +499,11 @@ func TestRoutingHistoryContract(t *testing.T) {
 			{0, "request.", "originNodeId proxyRunId requestId", ""},
 			{0, "workload.", "originNodeId proxyRunId engine id attemptIndex attached", ""},
 			{0, "requested.", "model tier mode", ""},
-			{0, "served.", "kind model nodeId engine deploymentId accountId", "nodeId engine deploymentId accountId"},
+			{0, "served.", "kind model nodeId engine deploymentId accountId", "model nodeId engine deploymentId accountId"},
 			{0, "spend.", "currency ceilingNanoUsd grantedNanoUsd heldNanoUsd chargedNanoUsd accounting", "ceilingNanoUsd grantedNanoUsd heldNanoUsd chargedNanoUsd"},
 			{0, "attempts.0.", "index startedAt endedAt destination outcome reason status waits continuationOf account", "endedAt status continuationOf account"},
-			{0, "attempts.0.destination.", "kind model nodeId engine deploymentId accountId", "nodeId engine deploymentId accountId"},
-			{1, "attempts.0.destination.", "kind model nodeId engine deploymentId accountId", "nodeId engine deploymentId accountId"},
+			{0, "attempts.0.destination.", "kind model nodeId engine deploymentId accountId", "model nodeId engine deploymentId accountId"},
+			{1, "attempts.0.destination.", "kind model nodeId engine deploymentId accountId", "model nodeId engine deploymentId accountId"},
 			{0, "attempts.0.waits.", "admissionMs firstByteMs", "firstByteMs"},
 			{1, "attempts.0.account.", "state heldNanoUsd chargedNanoUsd accounting", "heldNanoUsd chargedNanoUsd"},
 		}
@@ -953,5 +978,84 @@ func slicesContainsHistoryCategory(category string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func TestHistoryIntegerScalarForms(t *testing.T) {
+	longOne := "0." + strings.Repeat("0", 66000) + "1E66001"
+	if len(longOne) != 66009 {
+		t.Fatalf("counterexample token bytes = %d", len(longOne))
+	}
+	tests := []struct {
+		name, token string
+		want        int64
+		ok          bool
+	}{
+		{name: "long integral decimal", token: longOne, want: 1, ok: true},
+		{name: "long maximum safe", token: "0." + strings.Repeat("0", 66000) + "9007199254740991E66016", want: routingHistorySafeInteger, ok: true},
+		{name: "long unsafe integer neighbor", token: "0." + strings.Repeat("0", 66000) + "9007199254740992E66016"},
+		{name: "long negative nonzero", token: "-" + longOne},
+		{name: "long fractional neighbor", token: "0." + strings.Repeat("0", 66000) + "1E66000"},
+		{name: "long exponent bound", token: "0." + strings.Repeat("0", 66000) + "1E131073"},
+		{name: "exponent overflow", token: "1E9223372036854775808"},
+		{name: "negative exponent overflow", token: "1E-9223372036854775809"},
+		{name: "maximum safe", token: "9007199254740991.00e0", want: routingHistorySafeInteger, ok: true},
+		{name: "unsafe integer", token: "9007199254740992.00e0"},
+		{name: "zero with enormous exponent", token: "0e" + strings.Repeat("9", 66000), ok: true},
+		{name: "negative zero with enormous exponent", token: "-0.000e-" + strings.Repeat("9", 66000), ok: true},
+		{name: "long zero fraction", token: "0." + strings.Repeat("0", 66000), ok: true},
+		{name: "long leading zero exponent", token: "1E" + strings.Repeat("0", 66000) + "1", want: 10, ok: true},
+		{name: "positive bound", token: "1e131072"},
+		{name: "negative bound", token: "1e-131072"},
+		{name: "trim fractional zeroes", token: "12.300e1", want: 123, ok: true},
+		{name: "positive exponent sign", token: "1e+3", want: 1000, ok: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !json.Valid([]byte(tt.token)) {
+				t.Fatal("numeric fixture is not valid JSON")
+			}
+			n, ok := historyInteger(tt.token)
+			if ok != tt.ok || (ok && n != tt.want) {
+				t.Fatalf("string integer = %d / %v, want %d / %v", n, ok, tt.want, tt.ok)
+			}
+			raw := []byte(tt.token)
+			n, ok = historyTransportInteger(raw)
+			if ok != tt.ok || (ok && n != tt.want) {
+				t.Fatalf("raw integer = %d / %v, want %d / %v", n, ok, tt.want, tt.ok)
+			}
+			if allocations := testing.AllocsPerRun(1, func() { historyInteger(tt.token); historyTransportInteger(raw) }); allocations != 0 {
+				t.Fatalf("scalar conversions allocated: %g", allocations)
+			}
+		})
+	}
+}
+
+func TestHistoryRecordAdapterAttemptPresenceAndLimit(t *testing.T) {
+	row := RoutingHistoryRecord{Schema: 1, Request: RoutingRequestKey{OriginNodeID: "origin", ProxyRunID: "run", RequestID: "1"},
+		Seq: 1, State: "routing", Requested: RoutingHistoryRequested{Mode: "chat"},
+		Spend: RoutingHistorySpend{Currency: "USD", Accounting: "none"}, Attempts: []RoutingHistoryAttempt{}}
+	if err := row.Validate(); err != nil {
+		t.Fatalf("present empty attempts: %v", err)
+	}
+	row.Attempts = nil
+	if err := row.Validate(); err == nil || err.Error() != "invalid-value" {
+		t.Fatalf("nil attempts error = %v", err)
+	}
+	row.Requested.Model = "model"
+	row.Attempts = make([]RoutingHistoryAttempt, RoutingHistoryAttempts+1)
+	if err := row.Validate(); err == nil || err.Error() != "limit-exceeded" {
+		t.Fatalf("attempt count error = %v", err)
+	}
+}
+
+func TestHistorySemanticRegexpScratch(t *testing.T) {
+	// MatchString requests no captures. These anchored deterministic grammars
+	// use a scalar one-pass machine, so history does not grow bit-state or
+	// NFA queues against C, even for shape-valid 512-byte invalid ID/money.
+	for _, re := range []*regexp.Regexp{strictID, nanoUSDCanonical} {
+		if reflect.ValueOf(re).Elem().FieldByName("onepass").IsNil() {
+			t.Fatalf("semantic regexp needs a new scratch census: %s", re.String())
+		}
 	}
 }

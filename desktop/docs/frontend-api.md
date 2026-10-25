@@ -35,6 +35,27 @@ They do not imply a WebSocket connection. Browser clients are not supported.
 
 ## Renderer API
 
+### `pairApi.routing`
+
+`subscribe()` and `getInitial()` share one initial-load promise, resolving void
+after a coherent baseline commit and acknowledgement. `size` and `loading`
+describe the bounded current bank; `consumeCurrent(index, callback)` lends one
+read-only record synchronously. The callback must return `undefined`, and all
+record referents expire when it returns. `onChanged(callback)` reports scalar
+commit/loading tokens, never a queued history graph. `unsubscribe()` retires
+the subscription and cancels its busy retry timer. Existing `active()` and
+`cancel(request)` controls retain their behavior.
+
+The transport subscribes before initial hydration, merges accepted revisions by
+full request identity, retains newest history with a fixed window bound, and
+rejects stale or terminal-regressing updates. A baseline is sent as leased
+packed-record packets followed by a scalar end; its global initial lease stays
+pinned between packets and through the end acknowledgement. Concurrent initial
+loads remain loading with validated rows retained and one retry timer at
+250/500/1000 ms, then 1000 ms until available. Generation changes, disconnect
+and unsubscribe cancel the retry. A stopped renderer may hold its transfer
+indefinitely while other renderers and ordinary invokes continue.
+
 ### `pairApi.app`
 
 - `getInitial()` returns connection state and the local node ID.
@@ -171,6 +192,37 @@ the desktop; the destination's Go service fetches the source artifacts.
   refresh and invalidation. A disconnect or a broker or engine-manager restart
   makes every reported lock unknown again until a new report arrives. Current
   engine-managers do not report it yet.
+- Model snapshots carry `EngineModels.downloadState` (the target's full versioned
+  download snapshot) and `downloadStateCurrent`. Each `ModelItem` can carry its
+  exact `downloadState` entry and the same currentness. Rows are the union of
+  canonical inventory, observed loaded names, and lifecycle entries. `downloaded`
+  requires a current canonical inventory read, supported/current lifecycle data,
+  no recovery requirement, and no matching `blocksReadiness` entry. Names,
+  percentage 100 and operation completion do not independently establish ready
+  content. `status:'loaded'` continues to reflect actual residency, even when
+  the same model is unsafe to Load or Copy.
+- Pull progress carries `downloadState` (entry), `downloadSourceId`,
+  `downloadRevision`, and `downloadStateCurrent` alongside the existing target,
+  engine, model, status and optional percent. Authoritative statuses are
+  `queued`, `in_progress`, `failed`, `complete`, and `unknown`; a missing measured
+  percent stays indeterminate. Failed/unknown entries can remain after an RPC
+  settles. A disconnect preserves facts with unavailable currentness rather than
+  turning an ongoing download into success. Initial snapshots replay the same
+  target facts after a renderer refresh. Renderer action guards consume these
+  facts; the target's Go admission remains authoritative.
+- Model rows display Download queued, Downloading, Download failed, Download
+  complete, or Download status unknown. Only current in-progress observations
+  show a small progress bar: measured percentages are determinate, otherwise
+  indeterminate. Unavailable observations explain that the device is disconnected
+  or its download status is unavailable. Loaded residency remains visible
+  independently; a complete operation can still have unknown content readiness.
+  Load and Copy require current ready content without a readiness block. Active
+  queued/in-progress pulls also disable Eject and Delete with Download in progress.
+  Menu selections recheck current facts, including an already-open menu and delete
+  confirmation. Failed partial content remains available in Add model for explicit
+  catalog retry; no retry, cleanup, or engine start happens automatically.
+  Pending pulls yield only to a new matching target download identity, never to
+  inventory presence, unrelated progress, or a previous download's terminal event.
 - The `engine:command` shape `{ command: 'setLock', engineType, nodeId, locked }`
   maps to the local `engine:set-lock`. The bridge sends it only when `nodeId` is
   this device's own node, and refuses any other target before sending with

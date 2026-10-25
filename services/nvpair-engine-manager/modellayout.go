@@ -749,28 +749,43 @@ func (e *Executor) llamacppPlan(st *engineState, root, model string, list modelF
 // (GET /models?reload=1), so a copied model is listed without a restart. It is
 // best effort: a router that misses it rescans when next started.
 func (e *Executor) reloadLlamaModels(ctx context.Context, st *engineState) {
+	if _, err := e.reloadLlamaModelsResult(ctx, st); err != nil {
+		slog.Warn("llama.cpp model rescan failed")
+	}
+}
+
+// reloadLlamaModelsResult forces a native cache reconstruction. Unlike the
+// copy-finalization wrapper, a caller using absence as proof must check errors.
+func (e *Executor) reloadLlamaModelsResult(ctx context.Context, st *engineState) (json.RawMessage, error) {
 	st.mu.Lock()
 	running, port := st.running, st.port
 	st.mu.Unlock()
 	if !running || port <= 0 {
-		return
+		return nil, errors.New("engine is not running")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/models?reload=1", port), nil)
 	if err != nil {
-		return
+		return nil, err
 	}
-	resp, err := e.client.Do(req)
+	// A redirect can discard reload=1 and return an ordinary cached listing.
+	// Only this exact reconstruction request can establish absence.
+	client := *e.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
-		slog.Warn("llama.cpp model rescan failed", "err", err)
-		return
+		return nil, errors.New("model rescan failed")
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024+1))
+	if err != nil || len(data) > 8*1024*1024 || !json.Valid(data) {
+		return nil, errors.New("invalid model rescan response")
+	}
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("llama.cpp model rescan failed", "status", resp.StatusCode)
+		return nil, errors.New("model rescan refused")
 	}
+	return data, nil
 }
 
 // writeFileAtomic durably replaces path. A landed replacement with uncertain

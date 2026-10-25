@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ModelItem } from '@/ui/types/engine-info'
+import type { ModelItem } from '@/shared/types/engines'
 import type { ModelExpiry } from '@/shared/types/engines'
 import type { EngineProgress } from '@/shared/types/engines'
 import type { EngineCaps } from '@/ui/types/engine-manifest'

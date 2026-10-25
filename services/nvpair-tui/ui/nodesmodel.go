@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"nvpair-shared/buildinfo"
+	"nvpair-shared/modeldownload"
 )
 
 // Being listed and being reachable are different facts: a cluster member that
@@ -127,9 +128,11 @@ type nodeRow struct {
 	nodeInfoTLS     bool
 	probedTelemetry *nodeTelemetry
 
-	models         []string
-	modelsByEngine map[string][]string
-	loadedByEngine map[string][]string
+	models               []string
+	modelsByEngine       map[string][]string
+	loadedByEngine       map[string][]string
+	downloadState        *modeldownload.Snapshot
+	downloadStateCurrent *bool
 }
 
 // modelCount is the number of distinct models the node advertises.
@@ -180,6 +183,8 @@ func mergeNodes(in nodeFeeds) []nodeRow {
 		row.models = d.Models
 		row.modelsByEngine = d.ModelsByEngine
 		row.loadedByEngine = d.LoadedByEngine
+		row.downloadState = d.DownloadState
+		row.downloadStateCurrent = d.DownloadStateCurrent
 		row.presence = discoveredPresence(d)
 		switch {
 		case d.Trusted:

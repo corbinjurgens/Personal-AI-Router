@@ -1,508 +1,249 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { createOverviewWindow } from '@/electron/window'
+import type { JsonObject } from '@/electron/service-bridge/json-rpc-client'
+import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
+import { parseModelsResult } from '@/electron/service-bridge/model-download'
+import { getModularSupervisor, pullModelParams } from '@/electron/service-bridge/modular-supervisor'
 
 vi.mock('electron', () => ({
     app: { isPackaged: false, getAppPath: () => process.cwd() },
     BrowserWindow: { getAllWindows: () => [] }
 }))
-vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
+vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn<typeof createOverviewWindow>() }))
 
-import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
-import {
-    getModularSupervisor,
-    parseListModelNames,
-    pullModelParams
-} from '@/electron/service-bridge/modular-supervisor'
+let fixtureId = 0
 
-describe('engine model wire formats', () => {
-    it('parses strict llama.cpp router inventories', () => {
+function inventory(names: string[], revision = '1'): JsonObject {
+    return {
+        models: names,
+        modelsByEngine: { lmstudio: names },
+        loadedByEngine: { lmstudio: [] },
+        downloadState: {
+            version: 1,
+            sourceId: fixtureId.toString(16).padStart(32, '0'),
+            revision,
+            recoveryRequired: false,
+            entries: []
+        }
+    }
+}
+
+function setup(names: string[]) {
+    const state = getModularBridgeState()
+    const supervisor = getModularSupervisor()
+    const nodeId = `lmstudio-current-inventory-${fixtureId}`
+    state.setSelfId(nodeId)
+    state.applyEngineManagerStatus({
+        engine: 'lmstudio',
+        installed: true,
+        running: true,
+        healthy: true,
+        port: 1235
+    })
+    const discoveryNode = (models: string[]) => ({
+        hostUuid: nodeId,
+        name: nodeId,
+        ipAddress: '127.0.0.1',
+        port: 14318,
+        models,
+        modelsByEngine: { lmstudio: models }
+    })
+    state.handleNotification({
+        source: 'broker',
+        method: 'discovery:nodes-changed',
+        params: { nodes: [discoveryNode(names)] }
+    })
+    state.applyLocalModelsResult(parseModelsResult(inventory(names)))
+    const hasProcess = vi.spyOn(supervisor, 'hasProcess').mockReturnValue(true)
+    const call = vi.spyOn(supervisor, 'callProcess').mockResolvedValue(inventory(names))
+    const rows = () =>
+        state
+            .getEngineInitialState()
+            .models.find(models => models.nodeId === nodeId && models.engineType === 'lm-studio')
+            ?.models ?? []
+    return { state, supervisor, discoveryNode, hasProcess, call, rows }
+}
+
+async function flush(): Promise<void> {
+    await Promise.resolve()
+    await Promise.resolve()
+}
+
+beforeEach(() => {
+    fixtureId++
+    vi.useFakeTimers()
+    getModularBridgeState().setLocalDiscoveryModelRefresher(() => {})
+})
+
+afterEach(() => {
+    const supervisor = getModularSupervisor()
+    vi.spyOn(supervisor, 'hasProcess').mockReturnValue(false)
+    supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
+    getModularBridgeState().setLocalDiscoveryModelRefresher(() => {})
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+})
+
+describe('canonical engine model wire formats', () => {
+    it('selects engine-attributed canonical names and refuses raw router inventories', () => {
         expect(
-            parseListModelNames({
-                data: [
-                    { id: 'ggml-org/gemma-3-1b-it-GGUF:Q4_K_M', status: { value: 'loaded' } },
-                    { id: 'bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M' }
-                ]
-            })
-        ).toEqual([
-            'ggml-org/gemma-3-1b-it-GGUF:Q4_K_M',
-            'bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M'
-        ])
-        expect(parseListModelNames({ data: [] })).toEqual([])
-        expect(() => parseListModelNames({ data: null })).toThrow('missing its model array')
-        expect(() => parseListModelNames({ data: [{}] })).toThrow('no usable model names')
+            parseModelsResult({ models: ['ready'], modelsByEngine: { llamacpp: ['ready'] } })
+                .modelsByEngine
+        ).toEqual({ llamacpp: ['ready'] })
         expect(() =>
-            parseListModelNames({ models: null, data: [{ id: 'must-not-mask-malformed-models' }] })
-        ).toThrow('missing its model array')
+            parseModelsResult({ data: [{ id: 'partial', status: { value: 'downloading' } }] })
+        ).toThrow('malformed inventory')
+        expect(() => parseModelsResult({ models: [{ key: 'native-name' }] })).toThrow(
+            'malformed inventory'
+        )
     })
 
-    it('uses the manifest model field for llama.cpp pulls', () => {
+    it('distinguishes a successfully queried empty engine from an unqueryable one', () => {
+        expect(parseModelsResult(inventory([])).modelsByEngine).toEqual({ lmstudio: [] })
+        expect(parseModelsResult({ models: [] }).modelsByEngine).toBeUndefined()
+        expect(() =>
+            parseModelsResult({ models: [], modelsByEngine: { lmstudio: [null] } })
+        ).toThrow('malformed inventory')
+    })
+
+    it('uses the manifest model field for pulls', () => {
         expect(pullModelParams('ollama', 'demo')).toEqual({ name: 'demo' })
         expect(pullModelParams('lmstudio', 'demo')).toEqual({ model: 'demo' })
         expect(pullModelParams('llamacpp', 'demo')).toEqual({ model: 'demo' })
     })
 })
 
-describe('LM Studio model reconciliation', () => {
-    it('parses the native inventory and distinguishes explicit empty from unknown', () => {
-        expect(
-            parseListModelNames({
-                models: [
-                    { key: 'lmstudio-community/phi-3', loaded_instances: [] },
-                    { key: 'lmstudio-community/gemma-2b', loaded_instances: [] }
-                ]
-            })
-        ).toEqual(['lmstudio-community/phi-3', 'lmstudio-community/gemma-2b'])
-        expect(parseListModelNames({ models: [] })).toEqual([])
-        expect(() => parseListModelNames({ models: null })).toThrow('missing its model array')
-        expect(() => parseListModelNames({ models: [{}] })).toThrow('no usable model names')
+describe('LM Studio canonical inventory reconciliation', () => {
+    it('retains successful empty inventory after a failure instead of resurrecting discovery names', async () => {
+        const { supervisor, call, rows } = setup(['stale-discovery-model'])
+        call.mockResolvedValueOnce(inventory([])).mockRejectedValueOnce(new Error('offline'))
+        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        await flush()
+        expect(rows()).toEqual([])
+        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        await flush()
+        expect(rows()).toEqual([])
+        expect(call).toHaveBeenNthCalledWith(1, 'broker', 'engine:models')
+        expect(call).toHaveBeenCalledTimes(2)
     })
 
-    it('keeps a successful empty local inventory instead of reviving discovery data', () => {
-        const state = getModularBridgeState()
-        const nodeId = 'lmstudio-reconciliation-local'
+    it('retains last-good names with unavailable readiness when a current query fails', async () => {
+        const { supervisor, call, rows } = setup(['last-good'])
+        expect(rows()[0]?.downloaded).toBe(true)
+        call.mockRejectedValueOnce(new Error('offline'))
+        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        await flush()
+        expect(rows()).toMatchObject([
+            { name: 'last-good', downloaded: false, downloadStateCurrent: false }
+        ])
+    })
 
-        state.setSelfId(nodeId)
+    it('preserves last-good inventory across stop and a malformed restart query', async () => {
+        const { supervisor, call, rows } = setup(['last-good'])
+        const stopped = { ...inventory([]), modelsByEngine: {} }
+        call.mockResolvedValueOnce(stopped).mockResolvedValueOnce({ models: null })
+        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
+        expect(rows()).toMatchObject([{ name: 'last-good', downloaded: false }])
+        await flush()
+        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        await flush()
+        expect(rows()).toMatchObject([
+            { name: 'last-good', downloaded: false, downloadStateCurrent: false }
+        ])
+        expect(call).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not let an older running refresh restore readiness after a later stop', async () => {
+        const { supervisor, hasProcess, call, rows } = setup(['last-good'])
+        const delayed = Promise.withResolvers<JsonObject>()
+        call.mockReturnValueOnce(delayed.promise)
+        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        hasProcess.mockReturnValue(false)
+        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
+        delayed.resolve(inventory(['late-model']))
+        await flush()
+        expect(rows()).toMatchObject([{ name: 'last-good', downloaded: false }])
+        expect(call).toHaveBeenCalledOnce()
+    })
+
+    it('refreshes a deleted final model through the broker while its proxy is unavailable', async () => {
+        const { state, supervisor, discoveryNode, call, rows } = setup(['deleted-model'])
+        state.setLocalDiscoveryModelRefresher(engine =>
+            supervisor.refreshDiscoveryEngineModels(engine)
+        )
+        call.mockResolvedValueOnce(inventory(['deleted-model']))
+        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        await flush()
+        call.mockResolvedValueOnce(inventory([]))
         state.handleNotification({
             source: 'broker',
             method: 'discovery:nodes-changed',
-            params: {
-                nodes: [
-                    {
-                        hostUuid: nodeId,
-                        name: 'lmstudio-reconciliation-host',
-                        ipAddress: '127.0.0.1',
-                        port: 14318,
-                        models: ['stale-model'],
-                        modelsByEngine: { lmstudio: ['stale-model'] }
-                    }
-                ]
-            }
+            params: { nodes: [discoveryNode([])] }
         })
-        state.applyEngineManagerStatus({
-            engine: 'lmstudio',
-            installed: true,
-            running: true,
-            healthy: true,
-            port: 1235
-        })
-
-        const localNames = (): string[] =>
-            state
-                .getEngineInitialState()
-                .models.find(
-                    models => models.nodeId === nodeId && models.engineType === 'lm-studio'
-                )
-                ?.models.map(model => model.name) ?? []
-
-        expect(localNames()).toEqual(['stale-model'])
-
-        state.setLocalEngineModels('lm-studio', [])
-        expect(localNames()).toEqual([])
-
-        state.fallbackLocalEngineModelsToDiscovery('lm-studio')
-        expect(localNames()).toEqual(['stale-model'])
+        await flush()
+        expect(call).toHaveBeenCalledTimes(2)
+        expect(rows()).toEqual([])
     })
 
     it('refreshes only the engine whose attribution changed when the union did not', () => {
-        const state = getModularBridgeState()
-        const nodeId = 'shared-model-local'
-        const refresh = vi.fn()
-
-        state.setSelfId(nodeId)
-        state.setLocalDiscoveryModelRefresher(refresh)
-        state.handleNotification({
-            source: 'ollama-proxy',
-            method: 'node/discovered',
-            params: { id: nodeId, port: 11434 }
-        })
-        state.handleNotification({
-            source: 'lmstudio-proxy',
-            method: 'node/discovered',
-            params: { id: nodeId, port: 1234 }
-        })
-        state.handleNotification({
-            source: 'broker',
-            method: 'discovery:nodes-changed',
-            params: {
-                nodes: [
-                    {
-                        hostUuid: nodeId,
-                        name: 'shared-model-host',
-                        ipAddress: '127.0.0.1',
-                        port: 14318,
-                        models: ['shared-model'],
-                        modelsByEngine: {
-                            ollama: ['shared-model'],
-                            lmstudio: ['shared-model']
-                        }
-                    }
-                ]
-            }
-        })
-        refresh.mockClear()
-
-        state.handleNotification({
-            source: 'broker',
-            method: 'discovery:nodes-changed',
-            params: {
-                nodes: [
-                    {
-                        hostUuid: nodeId,
-                        name: 'shared-model-host',
-                        ipAddress: '127.0.0.1',
-                        port: 14318,
-                        models: ['shared-model'],
-                        modelsByEngine: {
-                            ollama: ['shared-model'],
-                            lmstudio: []
-                        }
-                    }
-                ]
-            }
-        })
-
-        expect(refresh).toHaveBeenCalledOnce()
-        expect(refresh).toHaveBeenCalledWith('lm-studio')
-    })
-
-    it('refreshes a deleted final model while the LM Studio proxy is unavailable', async () => {
-        const state = getModularBridgeState()
-        const supervisor = getModularSupervisor()
-        const nodeId = 'lmstudio-proxy-down-deletion-local'
-        const discoveryNode = (models: string[]) => ({
-            hostUuid: nodeId,
-            name: 'lmstudio-proxy-down-deletion-host',
-            ipAddress: '127.0.0.1',
-            port: 14318,
-            models,
-            modelsByEngine: { lmstudio: models }
-        })
-
-        state.setSelfId(nodeId)
-        state.handleNotification({
-            source: 'broker',
-            method: 'discovery:nodes-changed',
-            params: { nodes: [discoveryNode(['deleted-model'])] }
-        })
+        const { state, discoveryNode } = setup(['shared-model'])
         state.applyEngineManagerStatus({
-            engine: 'lmstudio',
+            engine: 'ollama',
             installed: true,
             running: true,
-            healthy: true,
-            port: 1235
+            healthy: true
         })
-        state.setLocalEngineModels('lm-studio', ['deleted-model'])
-        state.setLocalDiscoveryModelRefresher(engine =>
-            supervisor.refreshDiscoveryEngineModels(engine)
-        )
-
-        const hasProcess = vi.spyOn(supervisor, 'hasProcess').mockReturnValue(true)
-        const call = vi.spyOn(supervisor, 'callProcess').mockResolvedValueOnce({ models: [] })
-
-        state.handleNotification({
-            source: 'broker',
-            method: 'discovery:nodes-changed',
-            params: { nodes: [discoveryNode([])] }
-        })
-
-        await vi.waitFor(() => expect(call).toHaveBeenCalledOnce())
-        await vi.waitFor(() =>
-            expect(
-                state
-                    .getEngineInitialState()
-                    .models.find(
-                        models => models.nodeId === nodeId && models.engineType === 'lm-studio'
-                    )?.models
-            ).toEqual([])
-        )
-
-        call.mockRestore()
-        hasProcess.mockRestore()
-    })
-
-    it('releases the stopped-state empty cache when the first restart query fails', async () => {
-        const state = getModularBridgeState()
-        const supervisor = getModularSupervisor()
-        const nodeId = 'lmstudio-restart-local'
-
-        state.setSelfId(nodeId)
-        state.handleNotification({
-            source: 'lmstudio-proxy',
-            method: 'node/discovered',
-            params: { id: nodeId, port: 1234 }
-        })
-        state.handleNotification({
-            source: 'broker',
-            method: 'discovery:nodes-changed',
-            params: {
-                nodes: [
-                    {
-                        hostUuid: nodeId,
-                        name: 'lmstudio-restart-host',
-                        ipAddress: '127.0.0.1',
-                        port: 14318,
-                        models: ['discovery-model'],
-                        modelsByEngine: { lmstudio: ['discovery-model'] }
-                    }
-                ]
+        const node = {
+            ...discoveryNode(['shared-model']),
+            modelsByEngine: {
+                ollama: ['shared-model'],
+                lmstudio: ['shared-model']
             }
-        })
-        state.applyEngineManagerStatus({
-            engine: 'lmstudio',
-            installed: true,
-            running: false,
-            port: 1235
-        })
-
-        const hasProcess = vi.spyOn(supervisor, 'hasProcess').mockReturnValue(true)
-        const call = vi.spyOn(supervisor, 'callProcess').mockRejectedValueOnce(new Error('offline'))
-
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
-        expect(
-            state
-                .getEngineInitialState()
-                .models.find(
-                    models => models.nodeId === nodeId && models.engineType === 'lm-studio'
-                )?.models
-        ).toEqual([])
-
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
-        await vi.waitFor(() =>
-            expect(
-                state
-                    .getEngineInitialState()
-                    .models.find(
-                        models => models.nodeId === nodeId && models.engineType === 'lm-studio'
-                    )
-                    ?.models.map(model => model.name)
-            ).toEqual(['discovery-model'])
-        )
-
-        call.mockRestore()
-        hasProcess.mockRestore()
-    })
-
-    it('retains a successful empty inventory across a later transient query failure', async () => {
-        const state = getModularBridgeState()
-        const supervisor = getModularSupervisor()
-        const nodeId = 'lmstudio-last-good-empty-local'
-
-        state.setSelfId(nodeId)
-        state.handleNotification({
-            source: 'lmstudio-proxy',
-            method: 'node/discovered',
-            params: { id: nodeId, port: 1234 }
-        })
+        }
         state.handleNotification({
             source: 'broker',
             method: 'discovery:nodes-changed',
-            params: {
-                nodes: [
-                    {
-                        hostUuid: nodeId,
-                        name: 'lmstudio-last-good-empty-host',
-                        ipAddress: '127.0.0.1',
-                        port: 14318,
-                        models: ['stale-discovery-model'],
-                        modelsByEngine: { lmstudio: ['stale-discovery-model'] }
-                    }
-                ]
-            }
+            params: [node]
         })
-
-        const hasProcess = vi.spyOn(supervisor, 'hasProcess').mockReturnValue(true)
-        const call = vi
-            .spyOn(supervisor, 'callProcess')
-            .mockResolvedValueOnce({ models: [] })
-            .mockRejectedValueOnce(new Error('temporary failure'))
-
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
-        await vi.waitFor(() =>
-            expect(
-                state
-                    .getEngineInitialState()
-                    .models.find(
-                        models => models.nodeId === nodeId && models.engineType === 'lm-studio'
-                    )?.models
-            ).toEqual([])
-        )
-
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
-        await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(2))
-        expect(
-            state
-                .getEngineInitialState()
-                .models.find(
-                    models => models.nodeId === nodeId && models.engineType === 'lm-studio'
-                )?.models
-        ).toEqual([])
-
-        call.mockRestore()
-        hasProcess.mockRestore()
-    })
-
-    it('releases the stopped-state empty cache when restart returns malformed inventory', async () => {
-        const state = getModularBridgeState()
-        const supervisor = getModularSupervisor()
-        const nodeId = 'lmstudio-malformed-restart-local'
-
-        state.setSelfId(nodeId)
-        state.handleNotification({
-            source: 'lmstudio-proxy',
-            method: 'node/discovered',
-            params: { id: nodeId, port: 1234 }
-        })
+        const refresh = vi.fn<Parameters<typeof state.setLocalDiscoveryModelRefresher>[0]>()
+        state.setLocalDiscoveryModelRefresher(refresh)
         state.handleNotification({
             source: 'broker',
             method: 'discovery:nodes-changed',
-            params: {
-                nodes: [
-                    {
-                        hostUuid: nodeId,
-                        name: 'lmstudio-malformed-restart-host',
-                        ipAddress: '127.0.0.1',
-                        port: 14318,
-                        models: ['discovery-after-malformed'],
-                        modelsByEngine: { lmstudio: ['discovery-after-malformed'] }
-                    }
-                ]
-            }
+            params: [{ ...node, modelsByEngine: { ollama: ['shared-model'], lmstudio: [] } }]
         })
-
-        const hasProcess = vi.spyOn(supervisor, 'hasProcess').mockReturnValue(true)
-        const call = vi.spyOn(supervisor, 'callProcess').mockResolvedValueOnce({ models: null })
-
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
-
-        await vi.waitFor(() =>
-            expect(
-                state
-                    .getEngineInitialState()
-                    .models.find(
-                        models => models.nodeId === nodeId && models.engineType === 'lm-studio'
-                    )
-                    ?.models.map(model => model.name)
-            ).toEqual(['discovery-after-malformed'])
-        )
-
-        call.mockRestore()
-        hasProcess.mockRestore()
-    })
-
-    it('does not let an older running refresh overwrite a later stop', async () => {
-        const state = getModularBridgeState()
-        const supervisor = getModularSupervisor()
-        const nodeId = 'lmstudio-delayed-refresh-local'
-        let resolveInventory: ((value: { models: { key: string }[] }) => void) | undefined
-        const delayedInventory = new Promise<{ models: { key: string }[] }>(resolve => {
-            resolveInventory = resolve
-        })
-
-        state.setSelfId(nodeId)
-        const hasProcess = vi
-            .spyOn(supervisor, 'hasProcess')
-            .mockReturnValueOnce(true)
-            .mockReturnValue(false)
-        const call = vi.spyOn(supervisor, 'callProcess').mockReturnValueOnce(delayedInventory)
-
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
-        resolveInventory?.({ models: [{ key: 'late-model' }] })
-        await delayedInventory
-        await Promise.resolve()
-
-        expect(
-            state
-                .getEngineInitialState()
-                .models.find(
-                    models => models.nodeId === nodeId && models.engineType === 'lm-studio'
-                )?.models
-        ).toEqual([])
-
-        call.mockRestore()
-        hasProcess.mockRestore()
+        expect(refresh).toHaveBeenCalledExactlyOnceWith('lm-studio')
     })
 
     it('retries a failed discovery refresh without another discovery event', async () => {
-        const state = getModularBridgeState()
-        const supervisor = getModularSupervisor()
-        const nodeId = 'lmstudio-discovery-retry-local'
-        const discoveryNode = (models: string[]) => ({
-            hostUuid: nodeId,
-            name: 'lmstudio-discovery-retry-host',
-            ipAddress: '127.0.0.1',
-            port: 14318,
-            models,
-            modelsByEngine: { lmstudio: models }
-        })
-
-        state.setSelfId(nodeId)
-        state.handleNotification({
-            source: 'lmstudio-proxy',
-            method: 'node/discovered',
-            params: { id: nodeId, port: 1234 }
-        })
-        state.handleNotification({
-            source: 'broker',
-            method: 'discovery:nodes-changed',
-            params: { nodes: [discoveryNode(['deleted-model'])] }
-        })
-        state.setLocalDiscoveryModelRefresher(engine =>
-            supervisor.refreshDiscoveryEngineModels(engine)
-        )
-
-        const hasProcess = vi.spyOn(supervisor, 'hasProcess').mockReturnValue(true)
-        const call = vi
-            .spyOn(supervisor, 'callProcess')
-            .mockResolvedValueOnce({ models: [{ key: 'deleted-model' }] })
-            .mockRejectedValueOnce(new Error('temporary discovery refresh failure'))
-            .mockResolvedValueOnce({ models: [] })
-
+        const { supervisor, call, rows } = setup(['deleted-model'])
         supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
-        await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(1))
-
-        state.handleNotification({
-            source: 'broker',
-            method: 'discovery:nodes-changed',
-            params: { nodes: [discoveryNode([])] }
-        })
-        await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(2))
-        await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(3), { timeout: 2_000 })
-        await vi.waitFor(() =>
-            expect(
-                state
-                    .getEngineInitialState()
-                    .models.find(
-                        models => models.nodeId === nodeId && models.engineType === 'lm-studio'
-                    )?.models
-            ).toEqual([])
+        await flush()
+        call.mockRejectedValueOnce(new Error('temporary failure')).mockResolvedValueOnce(
+            inventory([])
         )
-
-        call.mockRestore()
-        hasProcess.mockRestore()
+        supervisor.refreshDiscoveryEngineModels('lm-studio')
+        await flush()
+        expect(call).toHaveBeenCalledTimes(2)
+        await vi.advanceTimersByTimeAsync(1_000)
+        expect(call).toHaveBeenCalledTimes(3)
+        expect(rows()).toEqual([])
     })
 
     it('cancels a pending discovery retry when the engine stops', async () => {
-        const supervisor = getModularSupervisor()
-        const hasProcess = vi.spyOn(supervisor, 'hasProcess').mockReturnValue(true)
-        const call = vi
-            .spyOn(supervisor, 'callProcess')
-            .mockResolvedValueOnce({ models: [{ key: 'model-before-stop' }] })
-            .mockRejectedValueOnce(new Error('schedule retry'))
-
+        const { supervisor, call } = setup(['ready'])
         supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
-        await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(1))
+        await flush()
+        call.mockRejectedValueOnce(new Error('schedule retry'))
         supervisor.refreshDiscoveryEngineModels('lm-studio')
-        await vi.waitFor(() => expect(call).toHaveBeenCalledTimes(2))
-
+        await flush()
         supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
-        await new Promise(resolve => setTimeout(resolve, 1_100))
-        expect(call).toHaveBeenCalledTimes(2)
-
-        call.mockRestore()
-        hasProcess.mockRestore()
+        await flush()
+        expect(call).toHaveBeenCalledTimes(3)
+        await vi.advanceTimersByTimeAsync(2_000)
+        expect(call).toHaveBeenCalledTimes(3)
     })
 })

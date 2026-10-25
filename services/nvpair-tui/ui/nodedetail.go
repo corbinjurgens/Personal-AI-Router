@@ -5,6 +5,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"nvpair-shared/engineintent"
 	"nvpair-shared/engines"
 	"nvpair-shared/enginesettings"
+	"nvpair-shared/modeldownload"
 	"nvpair-tui/rpc"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -85,11 +87,14 @@ type nodeDetail struct {
 	// model operations offered for an engine and labels one the engine list
 	// has not named. Read once per screen: engine-manager loads its manifests
 	// at startup.
-	descriptors engineDescriptors
-	models      modelsResult
-	modelTable  table.Model
-	modelRows   []detailModelRow
-	pane        detailPane
+	descriptors            engineDescriptors
+	models                 modelsResult
+	modelsGeneration       int
+	downloadsCurrent       bool
+	retiredDownloadSources map[string]bool
+	modelTable             table.Model
+	modelRows              []detailModelRow
+	pane                   detailPane
 	// proxy carries the client-facing endpoint ports for this machine, so the
 	// port a client connects to sits beside the engine it reaches. Left nil for
 	// a peer, whose proxies we do not configure.
@@ -214,6 +219,8 @@ type detailModelRow struct {
 	// loadKnown is whether the engine reports what it has in memory at all.
 	// One with no way to say leaves loaded meaningless, not false.
 	loadKnown bool
+	ready     bool
+	download  *modeldownload.Entry
 }
 
 type detailEnginesMsg struct {
@@ -222,8 +229,9 @@ type detailEnginesMsg struct {
 }
 
 type detailModelsMsg struct {
-	models modelsResult
-	err    error
+	models     modelsResult
+	err        error
+	generation int
 }
 
 var (
@@ -281,7 +289,10 @@ func newNodeDetail(client *rpc.Client, node nodeRow) *nodeDetail {
 		Models:         node.models,
 		ModelsByEngine: node.modelsByEngine,
 		LoadedByEngine: node.loadedByEngine,
+		DownloadState:  node.downloadState,
+		current:        !node.self && node.downloadState != nil && node.downloadStateCurrent != nil && *node.downloadStateCurrent,
 	}
+	d.downloadsCurrent = d.models.current
 	d.refreshModels()
 	d.adoptProbedTelemetry()
 	return d
@@ -329,6 +340,7 @@ func detailModelColumns(w int) []table.Column {
 		flexCol("MODEL", 12, 2),
 		fixedCol("ENGINE", 10),
 		fixedCol("LOADED", 6),
+		flexCol("DOWNLOAD", 23, 1),
 	})
 }
 
@@ -553,6 +565,17 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 	if found {
 		d.adoptProbedTelemetry()
 	}
+	if d.remote() {
+		if !found || d.node.presence == presenceOffline {
+			d.models.current = false
+			d.downloadsCurrent = false
+			d.refreshModels()
+		} else {
+			d.applyModels(modelsResult{Models: row.models, ModelsByEngine: row.modelsByEngine,
+				LoadedByEngine: row.loadedByEngine, DownloadState: row.downloadState,
+				current: row.downloadState != nil && row.downloadStateCurrent != nil && *row.downloadStateCurrent}, true)
+		}
+	}
 	if d.hardwareHeight() != hardwareWas {
 		d.sizeEngineTable()
 	}
@@ -584,20 +607,128 @@ func (d *nodeDetail) enginesQueryable() bool {
 	return !d.remote() || d.node.membership == membershipMember
 }
 
-// modelsCmd asks the engine manager for this machine's inventory. A remote
-// node's models come from discovery instead, so there is nothing to request.
+// modelsCmd subscribes before fetching the canonical baseline. Both calls use
+// the same transport generation, including after reconnect.
 func (d *nodeDetail) modelsCmd() tea.Cmd {
+	method, subscribe := "engine:models", "engine:subscribe"
 	if d.remote() {
-		return nil
+		method, subscribe = "discovery:get-nodes", "discovery:subscribe"
 	}
-	return d.own(call(d.client, "engine:models", nil, func(msg *rpc.Message, err error) tea.Msg {
+	client, generation, visit := d.client, clientGeneration(d.client), d.modelsGeneration
+	node, remote := d.node.key, d.remote()
+	return d.own(func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+		defer cancel()
+		if _, err := client.CallGeneration(ctx, generation, subscribe, nil); err != nil {
+			return detailModelsMsg{err: err, generation: visit}
+		}
+		msg, err := client.CallGeneration(ctx, generation, method, nil)
 		if err != nil {
-			return detailModelsMsg{err: err}
+			return detailModelsMsg{err: err, generation: visit}
+		}
+		if remote {
+			var result struct {
+				Nodes []availableNode `json:"nodes"`
+			}
+			if err := json.Unmarshal(msg.Result, &result); err != nil {
+				return detailModelsMsg{err: errors.New("invalid discovery inventory"), generation: visit}
+			}
+			for _, n := range result.Nodes {
+				if n.HostUUID == node || n.ID == node {
+					return detailModelsMsg{models: n.modelSnapshot(), generation: visit}
+				}
+			}
+			return detailModelsMsg{err: errors.New("node inventory unavailable"), generation: visit}
 		}
 		var r modelsResult
-		decodeOrLog("engine:models", msg.Result, &r)
-		return detailModelsMsg{models: r}
-	}))
+		if err := json.Unmarshal(msg.Result, &r); err != nil {
+			return detailModelsMsg{err: errors.New("invalid model inventory"), generation: visit}
+		}
+		return detailModelsMsg{models: r, generation: visit}
+	})
+}
+
+// applyModels fences whole snapshots, preserving observed residency separately.
+// Only current canonical reads or discovery observations select an incarnation.
+// Generic engine notifications may only update an already selected source.
+func (d *nodeDetail) applyModels(next modelsResult, canonical bool) bool {
+	previous, incoming := d.models.DownloadState, next.DownloadState
+	if incoming != nil && incoming.Validate() != nil {
+		incoming, next.DownloadState, next.current = nil, nil, false
+	}
+	if !canonical && !d.acceptDownloadNotification(incoming) {
+		return false
+	}
+	if canonical && !next.current {
+		d.models.current, d.downloadsCurrent = false, false
+		d.refreshModels()
+	}
+	if incoming != nil {
+		if d.retiredDownloadSources[incoming.SourceID] {
+			return false
+		}
+		if previous != nil {
+			if previous.SourceID == incoming.SourceID {
+				oldRevision, _ := strconv.ParseUint(previous.Revision, 10, 64)
+				newRevision, _ := strconv.ParseUint(incoming.Revision, 10, 64)
+				if newRevision < oldRevision {
+					return false
+				}
+				if newRevision == oldRevision && !previous.Equal(*incoming) {
+					d.models.current, d.downloadsCurrent = false, false
+					d.refreshModels()
+					return false
+				}
+			} else {
+				if canonical && !next.current {
+					d.models.current = false
+					d.downloadsCurrent = false
+					d.refreshModels()
+					return false
+				}
+				if d.retiredDownloadSources == nil {
+					d.retiredDownloadSources = map[string]bool{}
+				}
+				d.retiredDownloadSources[previous.SourceID] = true
+			}
+		}
+		copy := incoming.Clone()
+		next.DownloadState = &copy
+	}
+	if canonical {
+		// Missing/malformed support invalidates readiness, retaining lifecycle
+		// rows as last-known presentation rather than an empty success.
+		if incoming == nil {
+			next.DownloadState, next.current = previous, false
+		}
+		d.models = next
+		d.downloadsCurrent = next.current
+	} else {
+		unchanged := previous != nil && incoming != nil && previous.Equal(*incoming)
+		d.models.DownloadState = next.DownloadState
+		d.downloadsCurrent = incoming != nil
+		// A progress frame contains no current inventory. Even complete must
+		// wait for a canonical read before it enables an action.
+		if !unchanged {
+			d.models.current = false
+		}
+	}
+	d.refreshModels()
+	return true
+}
+
+// acceptDownloadNotification cannot identify the currently bound worker from
+// a generic broker event. An unfamiliar source requires a new canonical read;
+// it never retires the source selected by the last authenticated observation.
+func (d *nodeDetail) acceptDownloadNotification(snapshot *modeldownload.Snapshot) bool {
+	if snapshot != nil && snapshot.Validate() == nil && d.models.DownloadState != nil &&
+		snapshot.SourceID == d.models.DownloadState.SourceID && d.downloadsCurrent {
+		return true
+	}
+	d.modelsGeneration++
+	d.models.current, d.downloadsCurrent = false, false
+	d.refreshModels()
+	return false
 }
 
 func (d *nodeDetail) SetSize(w, h int) {
@@ -734,6 +865,8 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		return nil, true
 
 	case DisconnectedMsg:
+		d.modelsGeneration++
+		d.downloadsCurrent = false
 		d.retireSwitch()
 		if d.status.sticky && d.status.kind == toastInfo {
 			d.status.info("service disconnected; operation interrupted; outcome unknown")
@@ -757,7 +890,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		for i, engine := range d.engines {
 			d.engines[i] = engineStatus{Engine: engine.Engine, DisplayName: engine.DisplayName}
 		}
-		d.models = modelsResult{}
+		d.models.current = false
 		d.enginesStale = true
 		d.descriptors = nil
 		d.pending, d.settingsWanted, d.settingsConfirm, d.settingsAwaited = nil, nil, nil, nil
@@ -861,12 +994,17 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		return nil, true
 
 	case detailModelsMsg:
+		if msg.generation != d.modelsGeneration || d.policyDisconnected {
+			return nil, true
+		}
 		if msg.err != nil {
+			d.models.current = false
+			d.downloadsCurrent = false
+			d.refreshModels()
 			d.status.error("load models failed: %s", msg.err)
 			return nil, true
 		}
-		d.models = msg.models
-		d.refreshModels()
+		d.applyModels(msg.models, true)
 		return nil, true
 
 	case engineOpMsg:
@@ -1042,7 +1180,16 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		d.policyRoute++
 		d.policyFresh = false
 		return d.policyCmd()
-	case "engine:intent-changed", "engine:ready":
+	case "engine:ready":
+		if !d.remote() && !d.policyDisconnected {
+			d.modelsGeneration++
+			d.models.current, d.downloadsCurrent = false, false
+			d.refreshModels()
+			d.invalidateIntent()
+			return tea.Batch(d.intentCmd(), d.modelsCmd())
+		}
+		return nil
+	case "engine:intent-changed":
 		if !d.remote() && !d.policyDisconnected {
 			d.invalidateIntent()
 			return d.intentCmd()
@@ -1058,6 +1205,10 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		return nil
 
 	case "service/broker-restarted":
+		d.modelsGeneration++
+		d.downloadsCurrent = false
+		d.models.current = false
+		d.refreshModels()
 		d.retireSwitch()
 		d.engineSwitch.brokerRestart = true
 		d.remotePermissionFresh = false
@@ -1071,10 +1222,11 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		d.engineSwitch.brokerRestart = false
 		d.policyDisconnected = false
 		d.policyRefresh = true
+		cmds := []tea.Cmd{d.modelsCmd()}
 		if d.performanceLease == nil {
-			return d.startPerformance()
+			cmds = append(cmds, d.startPerformance())
 		}
-		return nil
+		return tea.Batch(cmds...)
 
 	case "engine:state-changed":
 		var e engineStatus
@@ -1123,11 +1275,19 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		clear(d.settings)
 
 	case "engine:models-changed":
-		// The manager polls each running engine's resident set and pushes this
-		// on any change — explicit load/unload, LM Studio's JIT auto-load, and
-		// idle eviction alike. Re-reading is cheaper than merging the delta.
 		if !d.remote() {
-			return d.modelsCmd()
+			var p struct {
+				Models json.RawMessage `json:"models"`
+			}
+			var models modelsResult
+			if json.Unmarshal(msg.Params, &p) != nil || json.Unmarshal(p.Models, &models) != nil {
+				d.acceptDownloadNotification(nil)
+				return d.modelsCmd()
+			}
+			if !d.acceptDownloadNotification(models.DownloadState) {
+				return d.modelsCmd()
+			}
+			d.applyModels(models, true)
 		}
 
 	case "discovery:nodes-changed":
@@ -1142,20 +1302,23 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 			return nil
 		}
 		var nodes []availableNode
-		decodeOrLog(msg.Method, msg.Params, &nodes)
+		if !decodeOrLog(msg.Method, msg.Params, &nodes) {
+			d.models.current = false
+			d.downloadsCurrent = false
+			d.refreshModels()
+			return nil
+		}
+		found := false
 		for _, n := range nodes {
 			if n.HostUUID != d.node.key && n.ID != d.node.key {
 				continue
 			}
+			found = true
 			d.node.models = n.Models
 			d.node.modelsByEngine = n.ModelsByEngine
 			d.node.loadedByEngine = n.LoadedByEngine
-			d.models = modelsResult{
-				Models:         n.Models,
-				ModelsByEngine: n.ModelsByEngine,
-				LoadedByEngine: n.LoadedByEngine,
-			}
-			d.refreshModels()
+			d.node.downloadState, d.node.downloadStateCurrent = n.DownloadState, n.DownloadStateCurrent
+			d.applyModels(n.modelSnapshot(), true)
 
 			// Adopt an address learned since the screen opened, and start
 			// polling if there was nothing to poll before. A manual entry is
@@ -1179,6 +1342,11 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 				return d.telemetryCmd()
 			}
 			break
+		}
+		if !found {
+			d.models.current = false
+			d.downloadsCurrent = false
+			d.refreshModels()
 		}
 
 	case "engine:install-progress":
@@ -1218,17 +1386,7 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		if d.remote() {
 			return nil
 		}
-		// An in-progress frame keeps the note sticky, so a download that stalls
-		// leaves its last reported percentage on screen instead of the line
-		// quietly expiring and making a stuck pull look like nothing happened.
-		// Only the terminal frames — done, failed — go back to expiring.
-		kind, format, args := progressToast(msg.Params, d.engineLabel)
-		if kind == toastInfo {
-			d.status.busy(format, args...)
-			return nil
-		}
-		d.status.set(kind, format, args...)
-
+		return d.applyDownloadProgress(msg.Params)
 	case "engine:remote-progress":
 		var p struct {
 			Node    string `json:"node"`
@@ -1240,6 +1398,9 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		}
 		decodeOrLog(msg.Method, msg.Params, &p)
 		if p.Node == d.node.key {
+			if p.Op == engines.OperationPull {
+				return d.applyDownloadProgress(msg.Params)
+			}
 			d.status.busy("%s %s: %s%s", p.Op, d.engineLabel(p.Engine), p.Stage, progressPercent(p.Percent))
 		}
 
@@ -1254,30 +1415,41 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 	return nil
 }
 
-// progressToast renders an engine:pull-progress frame. Terminal stages carry no
-// meaningful percent (success is implicitly complete, error uses -1), so they
-// read as outcomes rather than a misleading "success (0%)". A late failure that
-// arrives after the synchronous call timed out still surfaces here.
-func progressToast(params []byte, label func(string) string) (toastKind, string, []any) {
+func (d *nodeDetail) applyDownloadProgress(data []byte) tea.Cmd {
 	var p struct {
-		Engine  string `json:"engine"`
-		Stage   string `json:"stage"`
-		Percent *int   `json:"percent"`
-		Message string `json:"message"`
+		ID            string          `json:"id"`
+		Engine        string          `json:"engine"`
+		Model         string          `json:"model"`
+		DownloadState json.RawMessage `json:"downloadState"`
 	}
-	decodeOrLog("engine:pull-progress", params, &p)
-	switch p.Stage {
-	case "success":
-		return toastOK, "download %s: done", []any{label(p.Engine)}
-	case "error":
-		detail := p.Message
-		if detail == "" {
-			detail = "failed"
+	if json.Unmarshal(data, &p) != nil {
+		d.acceptDownloadNotification(nil)
+		return d.modelsCmd()
+	}
+	snapshot := parseDownloadState(p.DownloadState)
+	if snapshot != nil {
+		for _, entry := range snapshot.Entries {
+			if entry.ID == p.ID && entry.Engine == p.Engine && entry.Model == p.Model {
+				if d.applyModels(modelsResult{DownloadState: snapshot}, false) {
+					label := downloadLabel(&entry, true)
+					switch entry.Phase {
+					case modeldownload.PhaseQueued, modeldownload.PhaseInProgress:
+						d.status.busy("%s: %s", entry.Model, label)
+					case modeldownload.PhaseFailed:
+						d.status.error("%s: %s", entry.Model, label)
+					case modeldownload.PhaseComplete:
+						d.status.ok("%s: %s", entry.Model, label)
+					default:
+						d.status.info("%s: %s", entry.Model, label)
+					}
+				}
+				return d.modelsCmd()
+			}
 		}
-		return toastError, "download %s failed: %s", []any{label(p.Engine), detail}
-	default:
-		return toastInfo, "download %s: %s%s", []any{label(p.Engine), p.Stage, progressPercent(p.Percent)}
 	}
+	// Unattributed advisory frames cannot establish ready content.
+	d.acceptDownloadNotification(nil)
+	return d.modelsCmd()
 }
 
 // progressPercent renders a progress frame's percentage, or nothing when the
@@ -1819,7 +1991,48 @@ func (d *nodeDetail) engineLocked(engine string) bool {
 
 // modelCmd issues a model operation against this screen's node.
 func (d *nodeDetail) modelCmd(engine string, act modelAction, model string) tea.Cmd {
+	if act.op == engines.OperationDelete && d.refuseActiveDownloadDelete(engine, model) {
+		return nil
+	}
+	if (act.op == engines.OperationLoad || act.op == "copy") && !d.modelReady(engine, model) {
+		d.status.error("%s: content readiness unknown or download blocks readiness", model)
+		return nil
+	}
 	return d.own(modelCmd(d.client, d.nodeArg(), engine, d.descriptors.family(engine), act, model))
+}
+
+func (d *nodeDetail) modelReady(engine, model string) bool {
+	snapshot := d.models.DownloadState
+	if d.policyDisconnected || !d.models.current || snapshot == nil || snapshot.Validate() != nil || snapshot.RecoveryRequired ||
+		!slices.Contains(d.models.ModelsByEngine[engine], model) {
+		return false
+	}
+	for _, entry := range snapshot.Entries {
+		if entry.Engine == engine && entry.BlocksReadiness && d.sameModelContent(engine, entry.Model, model) {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *nodeDetail) sameModelContent(engine, a, b string) bool {
+	naming := d.descriptors[engine].ModelNaming
+	return a == b || naming != "" && engines.NormalizeModelName(a, naming) == engines.NormalizeModelName(b, naming)
+}
+
+func (d *nodeDetail) refuseActiveDownloadDelete(engine, model string) bool {
+	snapshot := d.models.DownloadState
+	if d.policyDisconnected || !d.downloadsCurrent || snapshot == nil || snapshot.Validate() != nil {
+		return false
+	}
+	for _, entry := range snapshot.Entries {
+		if entry.Engine == engine && (entry.Phase == modeldownload.PhaseQueued || entry.Phase == modeldownload.PhaseInProgress) &&
+			d.sameModelContent(engine, entry.Model, model) {
+			d.status.error("Download in progress - wait before deleting %s", model)
+			return true
+		}
+	}
+	return false
 }
 
 func (d *nodeDetail) modelOp(op string) tea.Cmd {
@@ -1979,6 +2192,9 @@ func (d *nodeDetail) deleteSelectedModel() tea.Cmd {
 	if d.refuseModelOp(row.engine, modelActions["delete"]) {
 		return nil
 	}
+	if d.refuseActiveDownloadDelete(row.engine, row.model) {
+		return nil
+	}
 	target := *row
 	return d.arm(fmt.Sprintf("delete %s from %s?", target.model, d.engineLabel(target.engine)), func() tea.Cmd {
 		d.status.busy("delete %s...", target.model)
@@ -2097,28 +2313,43 @@ func (d *nodeDetail) refreshModels() {
 	// where it already was.
 	selected := d.selectedModelKey()
 
-	engines := make([]string, 0, len(d.models.ModelsByEngine))
-	for name := range d.models.ModelsByEngine {
-		engines = append(engines, name)
+	type modelKey struct{ engine, model string }
+	byKey := map[modelKey]*detailModelRow{}
+	get := func(engine, model string) *detailModelRow {
+		key := modelKey{engine, model}
+		if byKey[key] == nil {
+			_, known := d.models.LoadedByEngine[engine]
+			byKey[key] = &detailModelRow{engine: engine, model: model, loadKnown: known && !d.policyDisconnected, ready: d.modelReady(engine, model)}
+		}
+		return byKey[key]
 	}
-	sort.Strings(engines)
-
+	for engine, models := range d.models.ModelsByEngine {
+		for _, model := range models {
+			get(engine, model)
+		}
+	}
+	for engine, residents := range d.models.LoadedByEngine {
+		for _, model := range residents {
+			get(engine, model).loaded = true
+		}
+	}
+	if snapshot := d.models.DownloadState; snapshot != nil {
+		for _, entry := range snapshot.Entries {
+			entry := entry
+			get(entry.Engine, entry.Model).download = &entry
+		}
+	}
 	d.modelRows = d.modelRows[:0]
-	for _, engine := range engines {
-		// An engine with no loaded endpoint is left out of LoadedByEngine
-		// altogether, where an empty entry means nothing is in memory.
-		residents, known := d.models.LoadedByEngine[engine]
-		loaded := make(map[string]bool, len(residents))
-		for _, m := range residents {
-			loaded[m] = true
-		}
-		models := append([]string(nil), d.models.ModelsByEngine[engine]...)
-		sort.Strings(models)
-		for _, m := range models {
-			d.modelRows = append(d.modelRows,
-				detailModelRow{engine: engine, model: m, loaded: loaded[m], loadKnown: known})
-		}
+	for _, row := range byKey {
+		d.modelRows = append(d.modelRows, *row)
 	}
+	sort.Slice(d.modelRows, func(i, j int) bool {
+		a, b := d.modelRows[i], d.modelRows[j]
+		if a.engine != b.engine {
+			return a.engine < b.engine
+		}
+		return a.model < b.model
+	})
 
 	// A node can report models without saying which engine serves each one —
 	// noderec documents the unattributed case as live, for a peer that predates
@@ -2145,7 +2376,14 @@ func (d *nodeDetail) refreshModels() {
 		if r.loadKnown {
 			loaded = yesNo(r.loaded)
 		}
-		rows = append(rows, table.Row{r.model, engine, loaded})
+		state := downloadLabel(r.download, d.downloadsCurrent)
+		if r.download != nil && d.downloadsCurrent && r.download.Phase == modeldownload.PhaseComplete && !r.ready {
+			state += "; readiness unknown"
+		}
+		if r.download == nil && r.ready {
+			state = "Downloaded"
+		}
+		rows = append(rows, table.Row{r.model, engine, loaded, state})
 	}
 	// Put the cursor back on whatever was highlighted. This list is sorted and
 	// rebuilt wholesale on every engine:models-changed and every discovery
@@ -2157,6 +2395,29 @@ func (d *nodeDetail) refreshModels() {
 	d.modelTable.SetRows(rows)
 	d.restoreModelSelection(selected)
 	restoreCursor(&d.modelTable, len(rows))
+}
+
+func downloadLabel(entry *modeldownload.Entry, current bool) string {
+	if entry == nil || !current {
+		return "Download status unknown"
+	}
+	var label string
+	switch entry.Phase {
+	case modeldownload.PhaseQueued:
+		label = "Download queued"
+	case modeldownload.PhaseInProgress:
+		label = "Downloading" + progressPercent(entry.Percent)
+	case modeldownload.PhaseFailed:
+		label = "Download failed"
+	case modeldownload.PhaseComplete:
+		label = "Download complete"
+	default:
+		label = "Download status unknown"
+	}
+	if entry.Persistence == modeldownload.PersistenceUncertain {
+		label += " (persistence uncertain)"
+	}
+	return label
 }
 
 // engineLabel is an engine key in the vocabulary the rest of the screen uses.

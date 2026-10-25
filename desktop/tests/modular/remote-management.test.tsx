@@ -75,6 +75,7 @@ const mocks = vi.hoisted(() => ({
         setLocalDiscoveryModelRefresher: vi.fn<BridgeState['setLocalDiscoveryModelRefresher']>(),
         applyEngineIntent: vi.fn<BridgeState['applyEngineIntent']>(),
         invalidateEngineLocks: vi.fn<BridgeState['invalidateEngineLocks']>(),
+        invalidateModelObservations: vi.fn<BridgeState['invalidateModelObservations']>(),
         beginEngineIntentRead: vi.fn<BridgeState['beginEngineIntentRead']>(() => 0),
         getEngineIntent: vi.fn<BridgeState['getEngineIntent']>(() => null),
         prunePendingInvite: vi.fn<BridgeState['prunePendingInvite']>()
@@ -602,7 +603,13 @@ describe('permission and pairing API contracts', () => {
             ).rejects.toBe(refusal)
             const invoke = vi.fn<PreloadServiceTransport['invoke']>()
             invoke.mockResolvedValue({ success: false, error: 'service refused', code })
-            const preload = { ...mockTransport(), invoke } satisfies PreloadServiceTransport
+            const preload = {
+                ...mockTransport(),
+                invoke,
+                invokeHistory: vi.fn<PreloadServiceTransport['invokeHistory']>(() => {
+                    throw new Error('Unexpected history invoke in ordinary transport fixture')
+                })
+            } satisfies PreloadServiceTransport
             const result = createPairApi(
                 serviceTransport(preload)
             ).cluster.getRemoteManagementForNode('target')

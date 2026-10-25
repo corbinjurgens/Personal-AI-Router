@@ -361,7 +361,23 @@ describe('model operations use the typed engine-manager methods', () => {
         state.setSelfId('typed-ops-local')
         const send = vi.spyOn(supervisor, 'sendProcess').mockImplementation(() => {})
         vi.spyOn(supervisor, 'hasProcess').mockReturnValue(true)
-        const call = vi.spyOn(supervisor, 'callProcess').mockResolvedValue({ data: [] })
+        const call = vi.spyOn(supervisor, 'callProcess').mockImplementation(
+            async (_name, method): Promise<JsonValue> =>
+                method === 'engine:models'
+                    ? {
+                          models: [],
+                          modelsByEngine: { 'llamacpp-custom': [] },
+                          loadedByEngine: {},
+                          downloadState: {
+                              version: 1,
+                              sourceId: 'd'.repeat(32),
+                              revision: '1',
+                              recoveryRequired: false,
+                              entries: []
+                          }
+                      }
+                    : {}
+        )
         const fork = engineId('llamacpp-custom')
 
         const commands: EngineCommandType[] = ['loadModel', 'unloadModel']
@@ -390,6 +406,7 @@ describe('model operations use the typed engine-manager methods', () => {
             'engine:delete-model',
             { engine: 'llamacpp-custom', model: 'org/model:Q4' }
         ])
+        expect(call).toHaveBeenNthCalledWith(2, 'broker', 'engine:models')
     })
 
     it('spells a pull by the engine family, which has no typed method yet', () => {

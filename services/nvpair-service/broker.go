@@ -78,24 +78,38 @@ type brokerRun struct {
 }
 
 func (r *brokerRun) writeFrame(frame []byte) error {
+	_, err := r.writeFrameProgress(frame)
+	return err
+}
+
+// Progress lets the history control owner distinguish a request never sent
+// from one that may produce a late response or leave stdin mid-frame. The
+// existing complete-frame writer remains the only owner of broker stdin.
+// Zero proves no transmission; -1 denotes an invalid Writer count whose
+// transmission cannot be established from the io.Writer contract.
+func (r *brokerRun) writeFrameProgress(frame []byte) (int, error) {
 	r.wmu.Lock()
 	defer r.wmu.Unlock()
 	select {
 	case <-r.exited:
-		return errors.New("broker has exited")
+		return 0, errors.New("broker has exited")
 	default:
 	}
-	for off := 0; off < len(frame); {
+	off := 0
+	for off < len(frame) {
 		n, err := r.proc.stdin.Write(frame[off:])
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
+		if n < 0 || n > len(frame)-off {
+			return -1, io.ErrShortWrite
 		}
 		off += n
+		if err != nil {
+			return off, err
+		}
+		if n == 0 {
+			return off, io.ErrShortWrite
+		}
 	}
-	return nil
+	return off, nil
 }
 
 func (r *brokerRun) writeMessage(msg *jsonrpc.Message) error {
@@ -230,6 +244,9 @@ func (s *Service) runBroker(run *brokerRun) {
 // waits forever.
 func (s *Service) brokerExited(run *brokerRun) {
 	s.mu.Lock()
+	if s.history != nil && s.broker == run {
+		s.historyBrokerExited(run)
+	}
 	if s.broker == run {
 		s.broker = nil
 	}
@@ -282,6 +299,10 @@ func (s *Service) sleep(d time.Duration) bool {
 
 // pumpStdout reads the broker's JSON-RPC frames.
 func (s *Service) pumpStdout(run *brokerRun) {
+	if s.history != nil {
+		s.pumpHistoryStdout(run)
+		return
+	}
 	sc := bufio.NewScanner(run.proc.stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), jsonrpc.WorkerFrameBytes)
 	for sc.Scan() {

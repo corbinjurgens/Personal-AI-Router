@@ -13,6 +13,26 @@ Personal AI Router does not reimplement backend behavior in TypeScript. Electron
 process startup, translates JSON-RPC into the stable frontend contract, and
 projects backend notifications into renderer state.
 
+Routing history enters through a physical 33,558,528-byte newline frame cap on
+the service socket; ordinary messages keep their 8 MiB logical cap. Before
+generic parsing or raw trace, `routing-json.ts` checks every outer history
+method/ID candidate, rejects recursive duplicates, and strips unknown fields
+with bounded offsets and output scratch. Generated history calls use a disjoint
+`jh:` ordinal namespace; stale responses cannot resolve a later call. Invalid
+history quarantines/refetches history on the same connection without failing
+ordinary calls. Physical overflow closes through the existing reconnect owner.
+History request refusals have one outstanding reply slot, retained until the
+native write callback completes. Another history request requiring a refusal
+while that slot is occupied is a protocol violation: the client closes and
+reconnects through the same owner. Refusals never form an output backlog ahead
+of ordinary calls.
+
+The main history owner coalesces accepted records into packed bounded banks.
+History data bypasses ordinary push fanout and reaches a renderer only through
+its sender-validated pull/ack lease (see [Architecture](architecture.md)). Busy
+history initial loads retry with one bounded timer and remain loading. Routing
+diagnostics never alter inference, cancellation or accounting ownership.
+
 ## Runtime ownership
 
 `nvpair-service` is the only backend process Electron ever starts, and only when
@@ -259,6 +279,50 @@ resolve to one node and lets workload/error attribution land on the right node.
 
 Local model state comes from `nvpair-engine-manager`; remote model state comes
 from scanner enrichment of each peer's engine-manager `/v1/models` endpoint.
+Local inventory reads use `engine:models` and select `modelsByEngine`, including
+startup, reconnect, lifecycle/discovery refresh and post-pull/delete refresh.
+Electron does not extract ready names from raw `list_models` actions.
+
+`engine:models`, `/v1/models`, and the full result inside
+`engine:models-changed {engine,models}` carry the optional `downloadState`:
+`{version:1,sourceId,revision,recoveryRequired,entries}`. Source and download IDs
+are target-minted lowercase hexadecimal identifiers; revisions are decimal
+uint64 strings ordered only within a source. Each entry contains
+`{id,engine,model,phase,blocksReadiness,percent?,reason?,persistence?}`. Phases are
+`queued`, `in_progress`, `failed`, `complete`, and `unknown`; percent is an
+optional measured integer from 0 through 100. Reasons are bounded codes:
+`busy`, `capacity`, `download_failed`, `interrupted`, `progress_timeout`,
+`acceptance_unknown`, `cleanup_unknown`, `persistence_error`, or `unsupported`.
+`persistence:"uncertain"` qualifies a terminal marker removal whose replacement
+landed without confirmed directory durability; it does not certify model files.
+
+Local `engine:pull-progress` carries `engine`, `op`, `stage`, optional `percent`,
+the exact `id` and `model`, and the full `downloadState`. Remote progress adds
+`node` and request `opId`; `opId` is distinct from the target download ID.
+Electron projects snapshots without an initiator association. Subscribe before
+fetching; reject lower revisions and retired sources, and fence in-flight reads
+against newer notifications. RPC settlement clears only request-local progress.
+Notifications cannot select a source incarnation, including a previously unseen
+retired worker: only a current local `engine:models` read or authenticated
+discovery observation establishes or replaces that baseline. A mismatching local
+notification revokes currentness and coalesces a rehydration read. Remote
+notifications wait for discovery to establish their source. Worker-ready and
+broker-session generations fence outstanding local reads.
+
+Discovery adds `downloadStateCurrent`: true after a successful current fetch,
+false after failure/source retirement, absent for unsupported data. Last-good
+inventory and lifecycle facts remain available for display, independently of
+currentness. A same-revision successful read can restore currentness. Other
+observers converge through the scanner's existing refresh cadence (normally
+15 seconds plus preceding refresh work and request budget), without per-row
+polling. The target and origin use immediate lifecycle pushes.
+
+The lifecycle extension is bounded to 256 KiB and 64 entries; unsafe attempts
+and recent nonblocking outcomes each have a limit of 32. The target's separate
+64 KiB unresolved-content journal survives restart without replaying downloads.
+Unreadable recovery state sets `recoveryRequired` and blocks readiness. Missing,
+malformed, unsupported or stale state never grants ready content. A coordinated
+fleet update is required. Loaded residency remains an independent observation.
 
 Model copy control uses `engine:copy-model`, `engine:cancel-model-copy`,
 `engine:active-model-copies` and `engine:model-copy-capabilities` through the

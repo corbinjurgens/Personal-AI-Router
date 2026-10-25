@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/jsonrpc"
 )
 
 // discardWriter drops writes; these tests only exercise the read side.
@@ -75,5 +77,39 @@ func TestRunSkipsUnparseableFrame(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out; a malformed frame stalled the loop")
+	}
+}
+
+func TestHistoryPhysicalOverflowUsesBrokenStream(t *testing.T) {
+	c := historyTestClient(t, strings.NewReader(strings.Repeat(" ", jsonrpc.HistoryFrameBytes)+"x\n"), discardWriter{}, func(uint64, bool, []byte) error { return nil })
+	if err := c.Run(context.Background()); !errors.Is(err, ErrStreamBroken) {
+		t.Fatalf("overflow = %v", err)
+	}
+}
+
+func TestHistoryPhysicalMaximumUnknownInitialBeforeMaterialization(t *testing.T) {
+	c, server, wire := historyPair(t)
+	request := historyRequest(t, c, server)
+	prefix := `{"requests":[],"unknown":"`
+	suffix := `"}`
+	value := prefix + strings.Repeat("x", jsonrpc.HistoryInitialBytes-len(prefix)-len(suffix)) + suffix
+	frame := `{"jsonrpc":"2.0","id":` + string(*request.ID) + `,"result":` + value + `}` + "\n"
+	if len(frame) > jsonrpc.HistoryFrameBytes {
+		t.Fatal("fixture exceeded physical H")
+	}
+	if _, err := wire.Write([]byte(frame)); err != nil {
+		t.Fatal(err)
+	}
+	historyBarrier(t, c, server)
+	if c.HistoryState().Loading {
+		t.Fatal("legal maximum initial rejected")
+	}
+}
+
+func TestHistoryOrdinaryLogicalCapRemainsEightMiB(t *testing.T) {
+	frame := `{"jsonrpc":"2.0","method":"ordinary","params":"` + strings.Repeat("x", maxFrame) + `"}` + "\n"
+	c := historyTestClient(t, strings.NewReader(frame), discardWriter{}, func(uint64, bool, []byte) error { return nil })
+	if err := c.Run(context.Background()); !errors.Is(err, ErrStreamBroken) {
+		t.Fatalf("ordinary over-cap = %v", err)
 	}
 }

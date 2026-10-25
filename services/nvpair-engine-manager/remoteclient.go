@@ -10,6 +10,7 @@ package main
 // server side enforces with a 403.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/noderec"
 )
 
@@ -29,6 +31,10 @@ const (
 	remoteResponseHeaderTimeout      = 30 * time.Second
 	remoteReadyResponseHeaderTimeout = 11 * time.Minute
 )
+
+// Room for the existing 1 MiB native result, the bounded lifecycle snapshot
+// and its envelope. Pull frames are bounded before any JSON decoding.
+const maxPullStreamFrameBytes = 2 << 20
 
 // Typed JSON-RPC error codes both remote families carry end to end: the node
 // policy relay and the engine routes.
@@ -339,15 +345,56 @@ func (c *remoteClient) stream(ctx context.Context, path string, body any, onProg
 	}
 
 	dec := json.NewDecoder(resp.Body)
+	decodeFrame := func(frame *streamFrame) error { return dec.Decode(frame) }
+	var pullIdentity *pullStreamIdentity
+	if path == controlPullPath {
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 64*1024), maxPullStreamFrameBytes+1)
+		decodeFrame = func(frame *streamFrame) error {
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				if len(line) > maxPullStreamFrameBytes {
+					return fmt.Errorf("pull frame exceeds %d-byte limit", maxPullStreamFrameBytes)
+				}
+				if len(bytes.TrimSpace(line)) == 0 {
+					continue
+				}
+				return json.Unmarshal(line, frame)
+			}
+			if errors.Is(scanner.Err(), bufio.ErrTooLong) {
+				return fmt.Errorf("pull frame exceeds %d-byte limit", maxPullStreamFrameBytes)
+			}
+			if err := scanner.Err(); err != nil {
+				return err
+			}
+			return io.EOF
+		}
+		var expected pullRequest
+		if err := json.Unmarshal(b, &expected); err != nil {
+			return streamFrame{}, fmt.Errorf("remote pull: invalid request identity")
+		}
+		if expected.Model == "" {
+			expected.Model = modelFromParams(expected.Params)
+		}
+		pullIdentity = &pullStreamIdentity{request: expected}
+	}
 	var result streamFrame
 	haveResult := false
 	for {
 		var f streamFrame
-		if derr := dec.Decode(&f); derr != nil {
+		if derr := decodeFrame(&f); derr != nil {
 			if derr == io.EOF {
 				break
 			}
 			return streamFrame{}, fmt.Errorf("remote %s: decode frame: %w", path, derr)
+		}
+		if pullIdentity != nil {
+			if haveResult {
+				return streamFrame{}, fmt.Errorf("remote pull: frame after terminal result")
+			}
+			if err := pullIdentity.validate(f); err != nil {
+				return streamFrame{}, err
+			}
 		}
 		switch f.Type {
 		case "progress":
@@ -359,13 +406,63 @@ func (c *remoteClient) stream(ctx context.Context, path string, body any, onProg
 			haveResult = true
 		case "error":
 			if code, ok := codeOfWire(f.Code); ok {
-				return streamFrame{}, &codedError{code: code, message: f.Message}
+				return f, &codedError{code: code, message: f.Message}
 			}
-			return streamFrame{}, fmt.Errorf("%s", f.Message)
+			return f, fmt.Errorf("%s", f.Message)
 		}
 	}
 	if !haveResult {
 		return streamFrame{}, fmt.Errorf("remote %s: stream ended without a result", path)
 	}
 	return result, nil
+}
+
+// pullStreamIdentity binds the caller's correlation to one target-owned
+// download. Installs and file hashing retain their separate stream contracts.
+type pullStreamIdentity struct {
+	request pullRequest
+	id      string
+	last    *modeldownload.Snapshot
+}
+
+func (v *pullStreamIdentity) validate(f streamFrame) error {
+	if v.request.OpID == "" || v.request.Model == "" || f.OpID != v.request.OpID ||
+		f.Engine != v.request.Engine || f.Op != "pull" || f.Model != v.request.Model {
+		return errors.New("remote pull: mismatched request identity")
+	}
+	if f.Type != "progress" && f.Type != "result" && f.Type != "error" {
+		return errors.New("remote pull: unsupported frame type")
+	}
+	if f.DownloadState == nil || f.DownloadState.Validate() != nil {
+		return errors.New("remote pull: missing or invalid download state")
+	}
+	state := f.DownloadState
+	var entry *modeldownload.Entry
+	for i := range state.Entries {
+		if state.Entries[i].ID == f.ID && state.Entries[i].Engine == f.Engine && state.Entries[i].Model == f.Model {
+			entry = &state.Entries[i]
+			break
+		}
+	}
+	if entry == nil || v.id != "" && f.ID != v.id {
+		return errors.New("remote pull: mismatched target download identity")
+	}
+	if v.last != nil {
+		if state.SourceID != v.last.SourceID {
+			return errors.New("remote pull: target source changed")
+		}
+		// Validate established canonical decimal uint64s, so conversion cannot fail.
+		revision, _ := strconv.ParseUint(state.Revision, 10, 64)
+		previous, _ := strconv.ParseUint(v.last.Revision, 10, 64)
+		if revision < previous || revision == previous && !state.Equal(*v.last) {
+			return errors.New("remote pull: inconsistent download revision")
+		}
+	}
+	if f.Type == "result" && entry.Phase != modeldownload.PhaseComplete ||
+		f.Type == "error" && entry.Phase != modeldownload.PhaseFailed && entry.Phase != modeldownload.PhaseUnknown {
+		return errors.New("remote pull: terminal outcome does not match download state")
+	}
+	copy := state.Clone()
+	v.last, v.id = &copy, f.ID
+	return nil
 }

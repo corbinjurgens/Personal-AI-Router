@@ -8,4 +8,6 @@ export type IncomingSyncRow = {
     percent?: number
     completed?: number
     total?: number
+    current?: boolean
+    persistence?: 'uncertain'
 }

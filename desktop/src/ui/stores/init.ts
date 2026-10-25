@@ -78,26 +78,20 @@ async function initializeAllStores(): Promise<void> {
     await useClusterInvitationsStore.getState().initialize(clusterInitial)
     useMetricsStore.getState().initialize()
 
-    let engineInitial: EngineInitialState | undefined
-    if (window.pairApi) {
-        try {
-            engineInitial = await window.pairApi.engines.getInitialState()
-        } catch {
-            console.error('Failed to fetch engine initial state')
-            engineInitial = {
-                descriptors: [],
-                statuses: [],
-                models: [],
-                activeProgress: [],
-                updateAvailable: []
-            }
-        }
-    }
-    await useEngineStatusStore.getState().initialize(engineInitial)
+    const engineInitial = fetchEngineInitial()
+    // Subscribe while the shared snapshot is in flight, including first startup.
+    const modelsReady = overviewStores
+        ? useEngineModelsStore.getState().initialize(engineInitial)
+        : Promise.resolve()
+    const progressReady = overviewStores
+        ? useEngineProgressStore.getState().initialize(engineInitial)
+        : Promise.resolve()
+    const snapshot = await engineInitial
+    await useEngineStatusStore.getState().initialize(snapshot)
     if (overviewStores) {
-        await useEngineModelsStore.getState().initialize(engineInitial)
-        await useEngineProgressStore.getState().initialize(engineInitial)
-        await useEngineUpdateAvailableStore.getState().initialize(engineInitial)
+        await modelsReady
+        await progressReady
+        await useEngineUpdateAvailableStore.getState().initialize(snapshot)
         usePendingActionsStore.getState().initialize()
     }
     await useWorkloadsStore.getState().initialize()
@@ -153,26 +147,35 @@ async function resyncAllStores(): Promise<void> {
     if (overviewStores) useErrorsStore.getState().refresh()
     useMetricsStore.getState().clearAll()
 
-    let engineInitial: EngineInitialState | undefined
-    if (window.pairApi) {
-        try {
-            engineInitial = await window.pairApi.engines.getInitialState()
-        } catch {
-            engineInitial = {
-                descriptors: [],
-                statuses: [],
-                models: [],
-                activeProgress: [],
-                updateAvailable: []
-            }
-        }
-    }
-    useEngineStatusStore.getState().initialize(engineInitial)
+    const engineInitial = fetchEngineInitial()
+    const modelsReady = overviewStores
+        ? useEngineModelsStore.getState().initialize(engineInitial)
+        : Promise.resolve()
+    const progressReady = overviewStores
+        ? useEngineProgressStore.getState().initialize(engineInitial)
+        : Promise.resolve()
+    const snapshot = await engineInitial
+    useEngineStatusStore.getState().initialize(snapshot)
     if (overviewStores) {
-        useEngineModelsStore.getState().initialize(engineInitial)
-        useEngineProgressStore.getState().initialize(engineInitial)
-        useEngineUpdateAvailableStore.getState().initialize(engineInitial)
+        await modelsReady
+        await progressReady
+        useEngineUpdateAvailableStore.getState().initialize(snapshot)
         usePendingActionsStore.getState().initialize()
+    }
+}
+
+async function fetchEngineInitial(): Promise<EngineInitialState> {
+    try {
+        return await window.pairApi.engines.getInitialState()
+    } catch {
+        console.error('Failed to fetch engine initial state')
+        return {
+            descriptors: [],
+            statuses: [],
+            models: [],
+            activeProgress: [],
+            updateAvailable: []
+        }
     }
 }
 

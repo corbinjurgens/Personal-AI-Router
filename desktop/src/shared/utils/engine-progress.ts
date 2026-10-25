@@ -72,5 +72,22 @@ export function isEnginePullInProgress(
     if (!p || p.operation !== 'pull') return false
     if (p.status === 'idle') return false
     const s = p.status.toLowerCase()
-    return s !== 'complete' && s !== 'error'
+    return s !== 'complete' && s !== 'error' && s !== 'failed' && s !== 'unknown'
+}
+
+/** Bridge observations are source-fenced; preserve their revision order in renderer hydration too. */
+export function shouldApplyEngineProgress(
+    next: EngineProgress,
+    previous?: EngineProgress
+): boolean {
+    if (!previous?.downloadState) return true
+    if (!next.downloadState) return false
+    if (next.downloadSourceId !== previous.downloadSourceId) return true
+    if (!next.downloadRevision || !previous.downloadRevision) return false
+    const revision = BigInt(next.downloadRevision)
+    const baseline = BigInt(previous.downloadRevision)
+    return (
+        revision > baseline ||
+        (revision === baseline && next.downloadState.id === previous.downloadState.id)
+    )
 }

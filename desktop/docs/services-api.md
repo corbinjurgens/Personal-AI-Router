@@ -329,6 +329,9 @@
 | `nodes/list` | request (we call) | ✅ yes |
 | `routing/active` | request (we call) | ➖ ignored |
 | `routing/cancel` | request (we call) | ➖ ignored |
+| `routing/history-window` | request (we call) | ✅ yes |
+| `routing/history-window-end` | request (we call) | ✅ yes |
+| `routing/request` | request (we call) | ✅ yes |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
 - `n.method (var)  (admission.go)`
@@ -365,6 +368,10 @@
 | `nodes:changed` | request (we call) | ✅ yes |
 | `performance:changed` | request (we call) | ✅ yes |
 | `policy:changed` | request (we call) | ✅ yes |
+| `routing:changed` | request (we call) | ✅ yes |
+| `routing:get-initial` | request (we call) | ✅ yes |
+| `routing:subscribe` | request (we call) | ✅ yes |
+| `routing:unsubscribe` | request (we call) | ✅ yes |
 | `service/broker-restarted` | request (we call) | ✅ yes |
 | `workloads:remove` | request (we call) | ✅ yes |
 | `workloads:upsert` | request (we call) | ✅ yes |
@@ -446,8 +453,14 @@
 | `policy:request` | request (we call) | ➖ ignored |
 | `policy:set` | request (we call) | ✅ yes |
 | `ready` | request (we call) | ✅ yes |
+| `routing/history-window` | request (we call) | ✅ yes |
+| `routing/history-window-end` | request (we call) | ✅ yes |
+| `routing/request` | request (we call) | ✅ yes |
 | `routing:active` | request (we call) | ✅ yes |
 | `routing:cancel` | request (we call) | ✅ yes |
+| `routing:get-initial` | request (we call) | ✅ yes |
+| `routing:subscribe` | request (we call) | ✅ yes |
+| `routing:unsubscribe` | request (we call) | ✅ yes |
 | `workloads:cancel` | request (we call) | ✅ yes |
 | `workloads:get-initial` | request (we call) | ✅ yes |
 | `workloads:subscribe` | request (we call) | ✅ yes |

@@ -4,10 +4,81 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 
 	"nvpair-shared/noderec"
 )
+
+func TestModelDownloadDirectoryLifecycleOnlyChanges(t *testing.T) {
+	d := newDirectory()
+	node := noderec.DirectoryNode{HostUUID: "target", IP: "127.0.0.1", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineManager: {Port: 14317}}}
+	d.upsert(node)
+	current := true
+	inv := modelInventory{models: []string{"ready"}, loadedByEngine: map[string][]string{"llamacpp": {"org/model"}},
+		downloadObservation: downloadObservation{snapshot: scannerDownloadSnapshot("1"), current: &current}}
+	apply := func(wantChanged bool) noderec.DirectoryNode {
+		t.Helper()
+		got, changed, valid := d.applyModels(node.HostUUID, node.IP, 14317, inv)
+		if !valid || changed != wantChanged {
+			t.Fatalf("apply changed/valid = %v/%v, want %v/true", changed, valid, wantChanged)
+		}
+		if got.DownloadState == nil || !got.DownloadState.Equal(*inv.snapshot) || !reflect.DeepEqual(got.Models, inv.models) || !reflect.DeepEqual(got.LoadedByEngine, inv.loadedByEngine) {
+			t.Fatalf("inventory/lifecycle/residency changed: %+v", got)
+		}
+		return got
+	}
+	apply(true)
+	apply(false)
+	inv.snapshot = scannerDownloadSnapshot("2")
+	*inv.snapshot.Entries[0].Percent = 22
+	apply(true)
+	apply(false)
+	if _, changed, valid := d.markDownloadsStale(node.HostUUID, node.IP, 14317); !valid || !changed {
+		t.Fatalf("freshness loss not reported: %v/%v", changed, valid)
+	}
+	apply(true)
+}
+
+func TestModelDownloadDirectoryCopiesAreIndependent(t *testing.T) {
+	d := newDirectory()
+	current := true
+	node := noderec.DirectoryNode{HostUUID: "target", DownloadState: scannerDownloadSnapshot("1"), DownloadStateCurrent: &current}
+	d.upsert(node)
+	*node.DownloadState.Entries[0].Percent = 99
+	current = false
+	first, present := d.get("target")
+	if !present || *first.DownloadState.Entries[0].Percent != 21 || !*first.DownloadStateCurrent {
+		t.Fatal("upsert retained caller-owned snapshot/percent/current pointers")
+	}
+	*first.DownloadState.Entries[0].Percent = 88
+	*first.DownloadStateCurrent = false
+	rows := d.snapshot("")
+	if len(rows) != 1 || *rows[0].DownloadState.Entries[0].Percent != 21 || !*rows[0].DownloadStateCurrent {
+		t.Fatal("get exposed directory-owned download fields")
+	}
+	*rows[0].DownloadState.Entries[0].Percent = 77
+	last, _ := d.get("target")
+	if *last.DownloadState.Entries[0].Percent != 21 {
+		t.Fatal("snapshot exposed directory-owned download fields")
+	}
+}
+
+func TestModelDownloadDirectoryRejectsLowerRevision(t *testing.T) {
+	d := newDirectory()
+	current := true
+	node := noderec.DirectoryNode{HostUUID: "target", IP: "127.0.0.1", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineManager: {Port: 14317}},
+		DownloadState: scannerDownloadSnapshot("10"), DownloadStateCurrent: &current, Models: []string{"ready"}}
+	d.upsert(node)
+	inv := modelInventory{models: []string{"obsolete"}, downloadObservation: downloadObservation{snapshot: scannerDownloadSnapshot("9"), current: &current}}
+	if _, changed, valid := d.applyModels(node.HostUUID, node.IP, 14317, inv); changed || valid {
+		t.Fatalf("lower revision accepted: %v/%v", changed, valid)
+	}
+	got, _ := d.get(node.HostUUID)
+	if !got.DownloadState.Equal(*node.DownloadState) || !reflect.DeepEqual(got.Models, node.Models) || !*got.DownloadStateCurrent {
+		t.Fatalf("lower revision changed canonical inventory or lifecycle: %+v", got)
+	}
+}
 
 func TestDirectoryAuthenticatedClaimResistsBrowseSupersedeEviction(t *testing.T) {
 	d := newDirectory()

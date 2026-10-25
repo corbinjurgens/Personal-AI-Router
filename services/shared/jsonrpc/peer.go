@@ -116,6 +116,10 @@ func (p *Peer) RespondErrorData(id *json.RawMessage, code int, message string, d
 // the peer reported separately; a non-nil error means the call itself couldn't
 // complete (transport gone, ctx cancelled/deadline). Callers wanting a fixed
 // timeout should pass a ctx with a deadline.
+// Projected history responses borrow codec storage and are unsupported here:
+// Call receives the fixed -32603 "borrowed history response unsupported" error,
+// never a borrowed result or ID. History transfer owners use their own guarded
+// synchronous consumption boundary instead of Peer.Call/RelayRequest.
 func (p *Peer) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, *RPCError, error) {
 	ch, id, err := p.register()
 	if err != nil {
@@ -208,6 +212,11 @@ func (p *Peer) deliverResponse(msg *Message) {
 	if err := json.Unmarshal(*msg.ID, &id); err != nil {
 		return
 	}
+	if msg.borrowedRead {
+		// Correlate while the read lease is held, then send only owned fixed
+		// control. Neither the waiter nor a relay goroutine may retain this frame.
+		msg = &Message{JSONRPC: "2.0", Error: &RPCError{Code: -32603, Message: "borrowed history response unsupported"}}
+	}
 	p.mu.Lock()
 	ch := p.pending[id]
 	delete(p.pending, id)
@@ -219,6 +228,9 @@ func (p *Peer) deliverResponse(msg *Message) {
 
 // Close marks the peer closed and wakes all pending Calls with ErrPeerClosed.
 // Idempotent; safe to call from Serve and from a process-exit watcher.
+// Opted-in read retirement starts after waking pending calls. Close does not
+// await its completion; owners must join Codec.RetireRead before reusing backing.
+// Call outside source-authority locks because retirement may interrupt Read.
 func (p *Peer) Close() {
 	p.closeOnce.Do(func() {
 		p.mu.Lock()
@@ -227,6 +239,8 @@ func (p *Peer) Close() {
 		p.mu.Unlock()
 		close(p.closedCh)
 	})
+	// Outside closeOnce too: the actual transport interrupt may itself Close.
+	p.codec.RetireRead()
 }
 
 // Serve runs the read pump until the underlying stream returns a terminal
@@ -252,39 +266,151 @@ func (p *Peer) Serve(onRequest func(*Message), onNotify func(method string, para
 // requested. It must not perform I/O or wait on this peer's Call. Correlation
 // and retired transfer lifetime remain owned by HistoryCorrelation's caller;
 // this callback neither releases leases nor settles Peer.Call waiters.
-// Request/notification handlers must finish using borrowed history frame data
-// before returning, or retain it under an owner-provided lease.
+// Request/notification/failure handlers must finish using borrowed history data
+// before returning (including refusal ReplyID). With read retirement enabled,
+// the pump holds the explicit read lease through that synchronous consumption.
 func (p *Peer) ServeWithHistoryFailures(onRequest func(*Message), onNotify func(method string, params json.RawMessage), onHistoryFailure func(HistoryFailure)) {
+	if p.codec.ReadRetirementEnabled() {
+		if p.setHistoryFailureHandler(onHistoryFailure) != nil {
+			p.Close()
+			return
+		}
+		onHistoryFailure = nil
+	}
 	p.serve(onRequest, onNotify, onHistoryFailure)
+}
+
+// SetHistoryReadHandlers installs only raw-validated history handlers in the
+// fixed read role before publication. Serve's onRequest remains the baseline
+// ordinary handler. These J handlers are never copied for owned ordinary
+// requests and are detached at actual read retirement.
+func (p *Peer) SetHistoryReadHandlers(onRequest func(*Message), onHistoryFailure func(HistoryFailure)) error {
+	r := p.codec.history.Load()
+	if r == nil || r == sharedTerminalReader || r.readControl == nil {
+		return ErrHistoryInvalid
+	}
+	s := r.readControl
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.codec != p.codec || s.reader != r || s.retired || s.active || s.borrowed {
+		return ErrHistoryInvalid
+	}
+	s.onRequest, s.onHistoryFailure = onRequest, onHistoryFailure
+	return nil
+}
+
+func (p *Peer) setHistoryFailureHandler(handler func(HistoryFailure)) error {
+	r := p.codec.history.Load()
+	if r == nil || r == sharedTerminalReader || r.readControl == nil {
+		return ErrHistoryInvalid
+	}
+	s := r.readControl
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.codec != p.codec || s.reader != r || s.retired || s.active || s.borrowed {
+		return ErrHistoryInvalid
+	}
+	s.onHistoryFailure = handler
+	return nil
 }
 
 func (p *Peer) serve(onRequest func(*Message), onNotify func(method string, params json.RawMessage), onHistoryFailure func(HistoryFailure)) {
 	defer p.Close()
-	for {
-		msg, err := p.codec.Read()
-		if err != nil {
-			var de *DecodeError
-			if errors.As(err, &de) {
-				continue // recoverable: skip the bad frame
-			}
-			var failure *HistoryFailure
-			if onHistoryFailure != nil && errors.As(err, &failure) {
-				onHistoryFailure(*failure)
-				continue
-			}
-			return // terminal (EOF / transport): stop and close
-		}
-		switch {
-		case msg.IsResponse():
-			p.deliverResponse(msg)
-		case msg.IsRequest():
-			if onRequest != nil {
-				onRequest(msg)
-			}
-		case msg.IsNotification():
-			if onNotify != nil {
-				onNotify(msg.Method, msg.Params)
-			}
+	// Controlled failure handlers were transferred to the fixed role by the
+	// public entry point. Only baseline ordinary callbacks live in this frame.
+	for p.serveRead(onRequest, onNotify, onHistoryFailure) {
+	}
+}
+
+func (p *Peer) serveRead(onRequest func(*Message), onNotify func(method string, params json.RawMessage), onHistoryFailure func(HistoryFailure)) bool {
+	// Preserve the ordinary, unopted pump's Close behavior. Opted-in pumps
+	// stop here before touching a retired/rebound role, including buffered input.
+	if p.codec.ReadRetirementEnabled() {
+		select {
+		case <-p.closedCh:
+			return false
+		default:
 		}
 	}
+	msg, release, err := p.codec.ReadWithRelease()
+	if release != nil {
+		defer release()
+	}
+	if err != nil {
+		var de *DecodeError
+		if errors.As(err, &de) {
+			return true // recoverable: skip the bad frame
+		}
+		var failure *HistoryFailure
+		if errors.As(err, &failure) {
+			if onHistoryFailure != nil {
+				onHistoryFailure(*failure)
+				return true
+			}
+			return release != nil && p.dispatchHistoryFailure(*failure)
+		}
+		return false // terminal (EOF / transport): stop and close
+	}
+	switch {
+	case msg.IsResponse():
+		p.deliverResponse(msg)
+	case msg.IsRequest():
+		if msg.borrowedRead && release != nil && p.dispatchHistoryRequest(msg) {
+			break
+		}
+		if onRequest != nil {
+			onRequest(msg)
+		}
+	case msg.IsNotification():
+		if onNotify != nil {
+			onNotify(msg.Method, msg.Params)
+		}
+	}
+	return true
+}
+
+// These helper frames end before any ordinary notification callback starts.
+// A borrowed message/refusal holds its release through the synchronous handler;
+// an owned ordinary message has already relinquished the reader before dispatch.
+func (p *Peer) dispatchHistoryRequest(msg *Message) bool {
+	if !msg.borrowedRead {
+		return false
+	}
+	r := p.codec.history.Load()
+	if r == nil || r == sharedTerminalReader || r.readControl == nil {
+		return true
+	}
+	s := r.readControl
+	s.mu.Lock()
+	var handler func(*Message)
+	if s.codec != p.codec || s.reader != r || s.retired || !s.borrowed {
+		s.mu.Unlock()
+		return true
+	}
+	handler = s.onRequest
+	s.mu.Unlock()
+	if handler != nil {
+		handler(msg)
+		return true
+	}
+	return false
+}
+
+func (p *Peer) dispatchHistoryFailure(failure HistoryFailure) bool {
+	r := p.codec.history.Load()
+	if r == nil || r == sharedTerminalReader || r.readControl == nil {
+		return false
+	}
+	s := r.readControl
+	s.mu.Lock()
+	var handler func(HistoryFailure)
+	if s.codec == p.codec && s.reader == r && !s.retired && s.borrowed {
+		handler = s.onHistoryFailure
+	}
+	s.mu.Unlock()
+	if handler == nil {
+		return false
+	}
+	handler(failure)
+	return true
 }

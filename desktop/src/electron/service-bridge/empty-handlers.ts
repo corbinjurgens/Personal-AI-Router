@@ -46,7 +46,8 @@ import {
     routingActiveParams,
     routingCancelParams,
     parseRoutingActiveResult,
-    parseRoutingCancelResult
+    parseRoutingCancelResult,
+    historySenderRequired
 } from './routing'
 
 import type { JsonObject, JsonValue } from './json-rpc-client'
@@ -969,6 +970,11 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
             await getModularSupervisor().callProcess('broker', 'routing:active', params)
         )
     },
+    'routing:subscribe': historySenderRequired,
+    'routing:unsubscribe': historySenderRequired,
+    'routing:get-initial': historySenderRequired,
+    'routing-history:pull': historySenderRequired,
+    'routing-history:consumed': historySenderRequired,
 
     'policy:get': async payload =>
         parsePolicyDocument(

@@ -148,7 +148,7 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	f.inventory = &serviceProcessInventory{paths: []string{f.servicePath, f.brokerPath, f.scannerPath}, known: make(map[int32]serviceProcessIdentity)}
 	// One plan for the fixture's lifetime: a restarted broker reuses it.
 	f.ports = reserveFixtureServicePorts(t)
-	f.env = append(os.Environ(), "HOME="+f.configDir, "XDG_CONFIG_HOME="+f.configDir, "APPDATA="+f.configDir, "LOCALAPPDATA="+f.configDir, servicectl.EndpointEnv+"="+f.endpoint)
+	f.env = append(privateEngineEnv(t, f.configDir), servicectl.EndpointEnv+"="+f.endpoint)
 	return f
 }
 

@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { EngineStatusData, EngineType, ModelItem } from '@/shared/types/engines'
+import type { EngineModels, EngineStatusData, EngineType, ModelItem } from '@/shared/types/engines'
+import type { ModelDownloadSnapshot } from '@/shared/types/model-download'
 import type { NodeItemMetrics } from '@/shared/types/metrics'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { NodePolicyAdvertisement } from '@/shared/types/node-roles'
@@ -12,6 +13,7 @@ import { parseServiceBuildId } from '@/shared/utils/service-build'
 import { parsePolicyAdvertisement, samePolicyAdvertisement } from '@/shared/utils/node-roles'
 import { currentPlatform, platformDisplayName } from '@/shared/utils/platform'
 import type { JsonObject, JsonValue } from './json-rpc-client'
+import { parseModelDownloadSnapshot } from './model-download'
 import {
     PROXY_ENGINES,
     proxySourceForEngine,
@@ -99,7 +101,7 @@ interface ModularNode {
     // peer's engine-manager `/v1/models` (models-http) and carried on
     // `AvailableNode.models`. It replaces the retired per-engine proxy
     // `models=` TXT as the remote-node model source; the local node still prefers
-    // engine-manager `list_models`. Kept as the flat node-level union for the
+    // canonical engine-manager inventory. Kept as the flat node-level union for the
     // fallback path (a peer that sends no per-engine attribution).
     models: string[]
     // Per-engine attribution of the enriched model list, keyed by engine-manager
@@ -120,6 +122,8 @@ interface ModularNode {
     // reported. Drives {@link ModelItem.status} `'loaded'`. Empty object when no
     // engine reports loaded state. Mirrors noderec.DirectoryNode.LoadedByEngine.
     loadedByEngine: Record<string, string[]>
+    downloadState?: ModelDownloadSnapshot
+    downloadStateCurrent?: boolean
     // The node's policy advertisement (declared roles, pause origin), carried
     // on `AvailableNode.policy` from the same inventory fetch as the models.
     // Absent when the node published none, which declares nothing. Only the
@@ -224,7 +228,12 @@ function parseModelsByEngine(value: JsonValue | undefined): Record<string, strin
     // Engine IDs are data keys, including names inherited by ordinary objects.
     // fromEntries defines own members faithfully, including __proto__.
     return Object.fromEntries(
-        Object.entries(obj).map(([engine, list]) => [engine, stringArrayValue(list)])
+        Object.entries(obj).map(([engine, list]) => [
+            engine,
+            Array.isArray(list) && list.every((name): name is string => typeof name === 'string')
+                ? list
+                : []
+        ])
     )
 }
 
@@ -247,7 +256,9 @@ function optionalStringArrayValue(value: JsonValue | undefined): string[] | unde
  */
 function loadedNamesForEngine(node: ModularNode | undefined, engineType: EngineType): Set<string> {
     const engine = engineManagerName(engineType)
-    return new Set(node && Object.hasOwn(node.loadedByEngine, engine) ? node.loadedByEngine[engine] : [])
+    return new Set(
+        node && Object.hasOwn(node.loadedByEngine, engine) ? node.loadedByEngine[engine] : []
+    )
 }
 
 function sameStringList(left: string[], right: string[]): boolean {
@@ -451,7 +462,7 @@ function modelItem(name: string, loaded = false): ModelItem {
     return {
         name,
         size: 0,
-        downloaded: true,
+        downloaded: false,
         status: loaded ? 'loaded' : 'idle',
         parameterSize: '',
         quantization: '',
@@ -461,6 +472,43 @@ function modelItem(name: string, loaded = false): ModelItem {
         expiresAt: null,
         expiry: '10m',
         capabilities: []
+    }
+}
+
+/** Union content, residency and operation observations without deriving one from another. */
+function projectEngineModels(
+    engineType: EngineType,
+    nodeId: string,
+    names: string[],
+    loaded: Set<string>,
+    snapshot: ModelDownloadSnapshot | undefined,
+    current: boolean | undefined,
+    inventoryCurrent: boolean
+): EngineModels {
+    const entries =
+        snapshot?.entries.filter(entry => entry.engine === engineManagerName(engineType)) ?? []
+    const ready = new Set(names)
+    const rows = new Set([...names, ...loaded, ...entries.map(entry => entry.model)])
+    return {
+        engineType,
+        nodeId,
+        downloadState: snapshot,
+        downloadStateCurrent: current,
+        models: Array.from(rows, name => {
+            const downloadState = entries.find(entry => entry.model === name)
+            return {
+                ...modelItem(name, loaded.has(name)),
+                downloaded:
+                    inventoryCurrent &&
+                    current === true &&
+                    snapshot !== undefined &&
+                    !snapshot.recoveryRequired &&
+                    ready.has(name) &&
+                    !downloadState?.blocksReadiness,
+                downloadState,
+                downloadStateCurrent: current
+            }
+        })
     }
 }
 
@@ -647,6 +695,7 @@ function parseBrokerNode(params: JsonValue | undefined): ModularNode | null {
     // when it published a single address (where it would only repeat ipAddress).
     const ipAddresses = stringArrayValue(obj.ipAddresses)
     const brokerAddresses = ipAddresses.length > 0 ? ipAddresses : ipAddress ? [ipAddress] : []
+    const downloadState = parseModelDownloadSnapshot(obj.downloadState)
     return {
         id: hostUuid,
         sources: ['broker'],
@@ -682,6 +731,15 @@ function parseBrokerNode(params: JsonValue | undefined): ModularNode | null {
         // `/v1/models`. `omitempty` on the wire — absent for a peer that reports
         // no loaded state, which stamps every model `idle`.
         loadedByEngine: parseModelsByEngine(obj.loadedByEngine) ?? {},
+        downloadState,
+        downloadStateCurrent:
+            obj.downloadState === undefined
+                ? undefined
+                : downloadState
+                  ? typeof obj.downloadStateCurrent === 'boolean'
+                      ? obj.downloadStateCurrent
+                      : undefined
+                  : false,
         // Broker `AvailableNode.policy`: `omitempty` on the wire, absent until
         // the node's broker has published one.
         policy: parsePolicyAdvertisement(obj.policy),
@@ -739,6 +797,8 @@ function sameNode(left: ModularNode, right: ModularNode): boolean {
         // A residency-only change (a model loaded/evicted with the installed set
         // unchanged) must still count as a node change so the loaded dot updates.
         sameModelsByEngine(left.loadedByEngine, right.loadedByEngine) &&
+        JSON.stringify(left.downloadState) === JSON.stringify(right.downloadState) &&
+        left.downloadStateCurrent === right.downloadStateCurrent &&
         // A role edit changes nothing else on the node, so it must count alone.
         samePolicyAdvertisement(left.policy, right.policy) &&
         sameEngines(left.engines, right.engines) &&
@@ -786,7 +846,7 @@ export {
     cpuValue,
     memoryValue,
     sameHardware,
-    modelItem,
+    projectEngineModels,
     toNodeItem,
     toMetrics,
     toEngineStatus,

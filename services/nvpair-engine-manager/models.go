@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
 )
@@ -48,23 +49,34 @@ const modelsTimeout = 5 * time.Second
 // (nodeprojection.go). It is omitted until the first push, and an older peer
 // never sends it; either way a reader treats the node as declaring nothing. The
 // engine:models-changed notification carries no Policy.
+// DownloadState is the current target-owned lifecycle, captured with the ready
+// inventory mask. This producer always supplies it; nil means unsupported when
+// reading an older or malformed extension. It never establishes residency.
 type ModelsResult struct {
 	Models         []string                        `json:"models"`
 	ByEngine       map[string][]string             `json:"modelsByEngine,omitempty"`
 	LoadedByEngine map[string][]string             `json:"loadedByEngine,omitempty"`
 	Policy         *nodepolicy.Advertisement       `json:"policy,omitempty"`
 	MemoryEvidence *performancewire.MemoryEvidence `json:"memoryEvidence,omitempty"`
+	DownloadState  *modeldownload.Snapshot         `json:"downloadState,omitempty"`
+
+	// Local observation fences survive until the notification's publication.
+	observations map[string]observedDigests
+	sweep        uint64
 }
 
-// UnmarshalJSON keeps optional memory evidence from invalidating the model
-// inventory. The evidence decoder remains strict; rejected evidence is absent.
+// UnmarshalJSON rejects malformed download readiness without discarding real
+// residency. Optional memory evidence remains independent of content inventory.
 func (m *ModelsResult) UnmarshalJSON(data []byte) error {
 	type inventory ModelsResult
 	next := inventory(*m)
 	next.MemoryEvidence = nil
+	next.DownloadState = nil
+	next.observations, next.sweep = nil, 0
 	wire := struct {
 		*inventory
 		MemoryEvidence json.RawMessage `json:"memoryEvidence"`
+		DownloadState  json.RawMessage `json:"downloadState"`
 	}{inventory: &next}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
@@ -73,6 +85,16 @@ func (m *ModelsResult) UnmarshalJSON(data []byte) error {
 		var evidence performancewire.MemoryEvidence
 		if err := json.Unmarshal(wire.MemoryEvidence, &evidence); err == nil {
 			next.MemoryEvidence = &evidence
+		}
+	}
+	if len(wire.DownloadState) != 0 && !bytes.Equal(bytes.TrimSpace(wire.DownloadState), []byte("null")) {
+		snapshot, err := modeldownload.Parse(wire.DownloadState)
+		if err != nil {
+			// An invalid extension cannot certify content from its accompanying
+			// names. Residency remains an independent observation.
+			next.Models, next.ByEngine = []string{}, nil
+		} else {
+			next.DownloadState = &snapshot
 		}
 	}
 	*m = ModelsResult(next)
@@ -106,6 +128,7 @@ func (e *Executor) Models(ctx context.Context) []string {
 func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
 	res := e.modelsSweep(ctx, true)
 	res.Policy = e.nodeProjection.advertisement()
+	res.observations, res.sweep = nil, 0
 	return res
 }
 
@@ -126,7 +149,7 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 	ctx, cancel := context.WithTimeout(ctx, modelsTimeout)
 	defer cancel()
 	sweep := e.sweeps.Add(1)
-	cached := e.cachedInventory()
+	cached, cachedObservations := e.cachedInventoryObservation()
 	memoryCapture := e.captureMemoryEvidence()
 
 	engineNames := e.reg.Names()
@@ -179,6 +202,7 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 			if listSpec != nil && reuseInv {
 				perEngine[i] = inv
 				listOK[i] = true
+				digests[i] = cachedObservations[name]
 			} else if listSpec != nil {
 				e.inventoryMu.Lock()
 				epoch := e.inventoryDigests[name].epoch
@@ -188,12 +212,21 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 				if listErr != nil {
 					category, status := inventoryFailureCategory(listErr)
 					slog.Debug("engine:models list_models failed", "engine", name, "action", "list_models", "category", category, "status", status)
-				} else if models, ok := extractStringsResult(listRaw, listSpec); ok {
+				} else if models, ok := extractReadyStringsResult(listRaw, listSpec, mf); ok {
 					perEngine[i] = models
 					listOK[i] = true
 					// Digests are labelled with the run read before the request,
 					// so a run that changed meanwhile never inherits them.
 					digests[i] = observedDigests{runID: run, models: extractDigests(listRaw, listSpec), epoch: epoch}
+					listed := make(map[string]bool, len(models))
+					for _, model := range models {
+						listed[model] = true
+					}
+					for model := range digests[i].models {
+						if !listed[model] {
+							delete(digests[i].models, model)
+						}
+					}
 				} else {
 					slog.Debug("engine:models list_models returned an invalid inventory", "engine", name)
 				}
@@ -227,8 +260,6 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 	for i, ok := range listOK {
 		if ok {
 			fresh[engineNames[i]] = perEngine[i]
-		}
-		if digests[i].models != nil {
 			freshDigests[engineNames[i]] = digests[i]
 		}
 	}
@@ -244,26 +275,8 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 	}
 	memoryEntries = e.finalizeMemoryEvidence(memoryCapture, memoryEntries)
 
-	res := ModelsResult{Models: []string{}, MemoryEvidence: boundedMemoryEvidence(memoryEntries)}
-	seen := map[string]bool{}
-	for i, models := range perEngine {
-		if listOK[i] {
-			if res.ByEngine == nil {
-				res.ByEngine = make(map[string][]string)
-			}
-			// Normalize nil -> [] so the wire distinguishes a successful empty
-			// inventory from a missing/not-queryable engine.
-			if models == nil {
-				models = []string{}
-			}
-			res.ByEngine[engineNames[i]] = models
-			for _, m := range models {
-				if m != "" && !seen[m] {
-					seen[m] = true
-					res.Models = append(res.Models, m)
-				}
-			}
-		}
+	res := ModelsResult{ByEngine: fresh, MemoryEvidence: boundedMemoryEvidence(memoryEntries), observations: freshDigests, sweep: sweep}
+	for i := range perEngine {
 		if loadedOK[i] {
 			if res.LoadedByEngine == nil {
 				res.LoadedByEngine = make(map[string][]string)
@@ -277,7 +290,99 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 			res.LoadedByEngine[engineNames[i]] = ld
 		}
 	}
+	return e.currentModelsResult(res)
+}
+
+// currentModelsResult fences the inventory and captures its readiness mask and
+// lifecycle together. The gate is innermost: no I/O, notify, or owner acquisition
+// occurs while it is held. LoadedByEngine is deliberately never masked.
+func (e *Executor) currentModelsResult(res ModelsResult) ModelsResult {
+	engineNames, naming := e.inventoryModelNaming()
+	e.inventoryMu.Lock()
+	defer e.inventoryMu.Unlock()
+	for name := range res.ByEngine {
+		if !e.inventoryObservationCurrent(name, res.observations[name]) {
+			delete(res.ByEngine, name)
+			continue
+		}
+		if res.sweep < e.digestSweep {
+			// A later accepted sweep owns the inventory, but completing an
+			// earlier same-run read does not make that usable inventory unknown.
+			models, ok := e.inventory[name]
+			observed := e.inventoryDigests[name]
+			if !ok || !e.inventoryObservationCurrent(name, observed) {
+				delete(res.ByEngine, name)
+				continue
+			}
+			res.ByEngine[name] = append([]string{}, models...)
+			res.observations[name] = observed
+		}
+	}
+	res.Models = []string{}
+	if e.downloads == nil {
+		res.ByEngine = nil
+		res.DownloadState = nil
+		return res
+	}
+	e.downloads.mu.Lock()
+	defer e.downloads.mu.Unlock()
+	snapshot := e.downloads.snapshotLocked()
+	res.DownloadState = &snapshot
+	seen := make(map[string]bool)
+	for _, name := range engineNames {
+		models, ok := res.ByEngine[name]
+		if !ok {
+			continue
+		}
+		models = e.readyModelNamesLocked(name, models, naming[name])
+		res.ByEngine[name] = models
+		for _, model := range models {
+			if !seen[model] {
+				seen[model] = true
+				res.Models = append(res.Models, model)
+			}
+		}
+	}
 	return res
+}
+
+// The named SSE adapter's router can expose a first shard or a transient
+// downloaded status after either success or failure. Only stable producer
+// statuses contribute ready names; repeated identities are ambiguous.
+func extractReadyStringsResult(raw json.RawMessage, spec *ActionResult, mf *Manifest) ([]string, bool) {
+	if mf.Actions["pull_model"].ProgressProtocol != pullProgressProtocolLlamaCPPModelsSSE {
+		return extractStringsResult(raw, spec)
+	}
+	if _, ok := extractStringsResult(raw, spec); !ok {
+		return nil, false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, false
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(obj[spec.Array], &rows); err != nil {
+		return nil, false
+	}
+	counts := make(map[string]int)
+	for _, row := range rows {
+		var model string
+		if json.Unmarshal(row[spec.Field], &model) == nil {
+			counts[model]++
+		}
+	}
+	ready := make([]string, 0, len(rows))
+	stable := &ResultMatch{Field: "status.value", In: []string{"unloaded", "loading", "loaded", "sleeping"}}
+	for _, row := range rows {
+		var model string
+		if json.Unmarshal(row[spec.Field], &model) != nil || counts[model] != 1 ||
+			nodepolicy.ValidateModelIdentifierJSON(row[spec.Field]) != nil ||
+			!matchRow(row, stable) || spec.Match != nil && !matchRow(row, spec.Match) {
+			continue
+		}
+		ready = append(ready, model)
+	}
+	return ready, true
 }
 
 // Inventory failures can retain response bodies, credentials or transport URLs.
@@ -417,13 +522,68 @@ func sameReadRequest(a, b Action) bool {
 
 // cachedInventory returns a copy of the last installed inventory per engine.
 func (e *Executor) cachedInventory() map[string][]string {
+	models, _ := e.cachedInventoryObservation()
+	return models
+}
+
+func (e *Executor) cachedInventoryObservation() (map[string][]string, map[string]observedDigests) {
+	_, naming := e.inventoryModelNaming()
 	e.inventoryMu.Lock()
 	defer e.inventoryMu.Unlock()
 	out := make(map[string][]string, len(e.inventory))
+	observations := make(map[string]observedDigests, len(e.inventory))
 	for name, models := range e.inventory {
-		out[name] = validModelIdentifiers(models)
+		observed := e.inventoryDigests[name]
+		if e.inventoryObservationCurrent(name, observed) {
+			out[name] = validModelIdentifiers(models)
+			observations[name] = observed
+		}
 	}
-	return out
+	if e.downloads == nil {
+		return nil, nil
+	}
+	e.downloads.mu.Lock()
+	defer e.downloads.mu.Unlock()
+	for name, models := range out {
+		out[name] = e.readyModelNamesLocked(name, models, naming[name])
+	}
+	return out, observations
+}
+
+// inventoryObservationCurrent is called with inventoryMu held and without the
+// download gate. Lifecycle percentage revisions are intentionally irrelevant.
+func (e *Executor) inventoryObservationCurrent(engine string, observed observedDigests) bool {
+	current := e.inventoryDigests[engine]
+	return !current.suppressed && observed.epoch == current.epoch && observed.runID == e.engineRunID(engine)
+}
+
+func (e *Executor) inventoryModelNaming() ([]string, map[string]string) {
+	names := e.reg.Names()
+	naming := make(map[string]string, len(names))
+	for _, name := range names {
+		if manifest, ok := e.reg.Get(name); ok {
+			naming[name] = manifest.ModelNamingOrDefault()
+		}
+	}
+	return names, naming
+}
+
+func (e *Executor) modelReadyLocked(engine, model, naming string) bool {
+	if e.downloads == nil {
+		return false
+	}
+	key, err := downloadKey(engine, model, naming)
+	return err == nil && !e.downloads.blockedLocked(key)
+}
+
+func (e *Executor) readyModelNamesLocked(engine string, models []string, naming string) []string {
+	ready := make([]string, 0, len(models))
+	for _, model := range models {
+		if e.modelReadyLocked(engine, model, naming) {
+			ready = append(ready, model)
+		}
+	}
+	return ready
 }
 
 func validModelIdentifiers(models []string) []string {
@@ -442,24 +602,51 @@ func validModelIdentifiers(models []string) []string {
 // installed lists and content digests are both replaced only when no sweep that
 // began later has stored its own: an older listing never replaces a newer one.
 func (e *Executor) storeInventory(fresh map[string][]string, digests map[string]observedDigests, sweep uint64) {
+	_, naming := e.inventoryModelNaming()
 	e.inventoryMu.Lock()
 	defer e.inventoryMu.Unlock()
-	if sweep > e.digestSweep {
-		e.inventory = fresh
-		e.digestSweep = sweep
-		if e.inventoryDigests == nil {
-			e.inventoryDigests = make(map[string]observedDigests)
+	for name, observed := range digests {
+		if !e.inventoryObservationCurrent(name, observed) {
+			delete(fresh, name)
+			delete(digests, name)
 		}
-		for name, current := range e.inventoryDigests {
-			current.models = nil
-			current.runID = ""
-			e.inventoryDigests[name] = current
+	}
+	for name := range fresh {
+		if _, ok := digests[name]; !ok {
+			delete(fresh, name)
 		}
-		for name, observed := range digests {
-			current := e.inventoryDigests[name]
-			if !current.suppressed && observed.epoch == current.epoch {
-				e.inventoryDigests[name] = observed
+	}
+	if sweep <= e.digestSweep {
+		return
+	}
+	if e.downloads != nil {
+		e.downloads.mu.Lock()
+		defer e.downloads.mu.Unlock()
+	}
+	for name, models := range fresh {
+		fresh[name] = e.readyModelNamesLocked(name, models, naming[name])
+	}
+	e.inventory = make(map[string][]string, len(fresh))
+	for name, models := range fresh {
+		e.inventory[name] = append([]string{}, models...)
+	}
+	e.digestSweep = sweep
+	if e.inventoryDigests == nil {
+		e.inventoryDigests = make(map[string]observedDigests)
+	}
+	for name, current := range e.inventoryDigests {
+		current.models = nil
+		current.runID = ""
+		e.inventoryDigests[name] = current
+	}
+	for name, observed := range digests {
+		ready := make(map[string]string, len(observed.models))
+		for model, digest := range observed.models {
+			if e.modelReadyLocked(name, model, naming[name]) {
+				ready[model] = digest
 			}
 		}
+		observed.models = ready
+		e.inventoryDigests[name] = observed
 	}
 }

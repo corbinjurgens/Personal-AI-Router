@@ -299,7 +299,9 @@ func TestServingRelocationWithRenewedBindingPreservesContent(t *testing.T) {
 func TestServingIdentityIgnoresNativeInventoryDigests(t *testing.T) {
 	f := ownedServingFixture(t)
 	before := f.ex.modelIdentity().Engines["fake"]
-	f.ex.storeInventory(nil, map[string]observedDigests{"fake": {runID: before.EngineRunID, models: map[string]string{"medium": strings.Repeat("f", 64), "undeclared": strings.Repeat("e", 64)}}}, f.ex.sweeps.Add(1))
+	observed := modelInventoryObservation(t, f.ex, "fake")
+	observed.models = map[string]string{"medium": strings.Repeat("f", 64), "undeclared": strings.Repeat("e", 64)}
+	f.ex.storeInventory(nil, map[string]observedDigests{"fake": observed}, f.ex.sweeps.Add(1))
 	after := f.ex.modelIdentity().Engines["fake"]
 	if !reflect.DeepEqual(after.ModelDigests, before.ModelDigests) {
 		t.Fatalf("inventory replaced declaration identity: %v", after.ModelDigests)

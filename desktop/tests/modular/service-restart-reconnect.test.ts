@@ -55,6 +55,26 @@ function baseline(model: string, includeRemoved = false): JsonValue {
     return { workloads }
 }
 
+let modelIncarnation = 0
+
+function modelBaseline(
+    names: string[],
+    source = modelIncarnation.toString(16).padStart(32, '0')
+): JsonValue {
+    return {
+        models: names,
+        modelsByEngine: { ollama: names },
+        loadedByEngine: { ollama: [] },
+        downloadState: {
+            version: 1,
+            sourceId: source,
+            revision: '1',
+            recoveryRequired: false,
+            entries: []
+        }
+    }
+}
+
 const supervisor = getModularSupervisor()
 const state = getModularBridgeState()
 let client: JsonRpcSocketClient
@@ -72,12 +92,13 @@ function refreshCount(): number {
 }
 
 async function flush(): Promise<void> {
-    // Drain the finite hydration chain without advancing periodic poll timers.
-    for (let turn = 0; turn < 100; turn++) await Promise.resolve()
+    // Drain hydration promises without advancing periodic poll timers.
+    await vi.advanceTimersByTimeAsync(0)
 }
 
 describe('broker session hydration', () => {
     beforeEach(() => {
+        modelIncarnation++
         const userData = process.env.PAIR_USER_DATA
         if (!userData) throw new Error('Isolated user data was not configured')
         initPlatform({
@@ -90,6 +111,8 @@ describe('broker session hydration', () => {
         response = async method => {
             if (method === 'workloads:get-initial') return baseline('fresh')
             if (method === 'cluster:get-node-id') return { nodeUuid: 'self' }
+            if (method === 'engine:models') return modelBaseline([])
+            if (method === 'engine:active-model-copies') return { operations: [] }
             if (method === 'nodes:get-initial') return { nodes: [] }
             if (method === 'engine:get-installed' || method === 'engine:descriptors')
                 return { engines: [] }
@@ -192,41 +215,141 @@ describe('broker session hydration', () => {
     it('obsolete discovery inventory does not apply after replacement', async () => {
         const old = deferred()
         const defaultResponse = response
-        response = method => (method === 'engine:action' ? old.promise : defaultResponse(method))
         ready()
         await flush()
+        let pending = true
+        response = method => {
+            if (method === 'engine:models' && pending) {
+                pending = false
+                return old.promise
+            }
+            return defaultResponse(method)
+        }
         supervisor.refreshDiscoveryEngineModels('ollama')
         await flush()
-        expect(methods.filter(method => method === 'engine:action')).toHaveLength(1)
+        expect(methods.filter(method => method === 'engine:models')).toHaveLength(2)
         client.emit('disconnected')
         ready()
         await flush()
-        const applied = vi.spyOn(state, 'setLocalEngineModels')
-        old.resolve({ models: [{ name: 'obsolete' }] })
+        const applied = vi.spyOn(state, 'applyLocalModelsResult')
+        old.resolve(modelBaseline(['obsolete']))
         await flush()
         expect(applied).not.toHaveBeenCalled()
     })
 
-    it('obsolete discovery rejection does not schedule retries or change fallback after replacement', async () => {
+    it('obsolete discovery rejection does not schedule retries or invalidate fresh models after replacement', async () => {
         const old = Promise.withResolvers<JsonValue>()
         const defaultResponse = response
-        response = method => (method === 'engine:action' ? old.promise : defaultResponse(method))
         ready()
         await flush()
+        let pending = true
+        response = method => {
+            if (method === 'engine:models' && pending) {
+                pending = false
+                return old.promise
+            }
+            return defaultResponse(method)
+        }
         supervisor.refreshDiscoveryEngineModels('ollama')
         await flush()
-        expect(methods.filter(method => method === 'engine:action')).toHaveLength(1)
+        expect(methods.filter(method => method === 'engine:models')).toHaveLength(2)
         client.emit('disconnected')
         ready()
         await flush()
-        const fallback = vi.spyOn(state, 'fallbackLocalEngineModelsToDiscovery')
+        const invalidate = vi.spyOn(state, 'invalidateLocalModels')
         const timers = vi.getTimerCount()
         const calls = methods.length
-        old.reject(new Error('old engine:action failed'))
+        old.reject(new Error('old engine:models failed'))
         await flush()
         expect(vi.getTimerCount()).toBe(timers)
-        expect(fallback).not.toHaveBeenCalled()
+        expect(invalidate).not.toHaveBeenCalled()
         expect(methods).toHaveLength(calls)
+    })
+
+    it('coalesces current reads instead of adopting an unseen retired notification source', async () => {
+        const defaultResponse = response
+        response = method =>
+            method === 'engine:models'
+                ? Promise.resolve(modelBaseline(['ready']))
+                : defaultResponse(method)
+        ready()
+        await flush()
+        const currentSource = modelIncarnation.toString(16).padStart(32, '0')
+        const refresh = deferred()
+        response = method =>
+            method === 'engine:models' ? refresh.promise : defaultResponse(method)
+        client.emit('notification', {
+            source: 'broker',
+            method: 'engine:models-changed',
+            params: { engine: 'ollama', models: modelBaseline(['obsolete'], 'e'.repeat(32)) }
+        })
+        client.emit('notification', {
+            source: 'broker',
+            method: 'engine:pull-progress',
+            params: {
+                engine: 'ollama',
+                op: 'pull',
+                id: '1'.repeat(32),
+                model: 'obsolete',
+                stage: 'done',
+                downloadState: {
+                    version: 1,
+                    sourceId: 'e'.repeat(32),
+                    revision: '999',
+                    recoveryRequired: false,
+                    entries: [
+                        {
+                            id: '1'.repeat(32),
+                            engine: 'ollama',
+                            model: 'obsolete',
+                            phase: 'complete',
+                            blocksReadiness: false
+                        }
+                    ]
+                }
+            }
+        })
+        await flush()
+        const local = () =>
+            state
+                .getEngineInitialState()
+                .models.find(models => models.nodeId === 'self' && models.engineType === 'ollama')
+        expect(local()?.downloadState?.sourceId).toBe(currentSource)
+        expect(local()?.models).toMatchObject([{ name: 'ready', downloaded: false }])
+        expect(methods.filter(method => method === 'engine:models')).toHaveLength(2)
+        refresh.resolve(modelBaseline(['ready']))
+        await flush()
+        expect(local()?.models).toMatchObject([{ name: 'ready', downloaded: true }])
+        expect(local()?.downloadState?.sourceId).toBe(currentSource)
+    })
+
+    it('retires an in-flight inventory read when engine-ready replaces the worker within the same broker', async () => {
+        ready()
+        await flush()
+        const old = deferred()
+        const defaultResponse = response
+        let pending = true
+        response = method => {
+            if (method !== 'engine:models') return defaultResponse(method)
+            if (pending) {
+                pending = false
+                return old.promise
+            }
+            return Promise.resolve(modelBaseline(['fresh'], 'f'.repeat(32)))
+        }
+        supervisor.refreshDiscoveryEngineModels('ollama')
+        await flush()
+        client.emit('notification', { source: 'broker', method: 'engine:ready' })
+        await flush()
+        const applied = vi.spyOn(state, 'applyLocalModelsResult')
+        old.resolve(modelBaseline(['obsolete']))
+        await flush()
+        expect(applied).not.toHaveBeenCalled()
+        const models = state
+            .getEngineInitialState()
+            .models.find(models => models.nodeId === 'self' && models.engineType === 'ollama')
+        expect(models?.downloadState?.sourceId).toBe('f'.repeat(32))
+        expect(models?.models).toMatchObject([{ name: 'fresh', downloaded: true }])
     })
 
     it('drops an old baseline released after replacement hydration and removes absent rows', async () => {

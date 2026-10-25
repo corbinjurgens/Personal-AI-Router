@@ -19,12 +19,461 @@ import (
 	"nvpair-shared/engineintent"
 	"nvpair-shared/engines"
 	"nvpair-shared/enginesettings"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/noderec"
 	"nvpair-tui/rpc"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+func tuiDownloadInventory(snapshot *modeldownload.Snapshot) modelsResult {
+	return modelsResult{ModelsByEngine: map[string][]string{"ollama": {"exact/model"}},
+		LoadedByEngine: map[string][]string{"ollama": {}}, DownloadState: snapshot, current: true}
+}
+
+func tuiDownloadProgress(t *testing.T, method, node string, snapshot *modeldownload.Snapshot, entry modeldownload.Entry) NotificationMsg {
+	t.Helper()
+	return NotificationMsg{Msg: &rpc.Message{Method: method, Params: tuiDownloadJSON(t, map[string]any{
+		"node": node, "op": "pull", "id": entry.ID, "engine": entry.Engine, "model": entry.Model, "downloadState": snapshot,
+	})}}
+}
+
+func TestModelDownloadRowsUniteLifecycleInventoryAndResidency(t *testing.T) {
+	d := localDetail()
+	snapshot := tuiDownloadSnapshot()
+	percent := 21
+	snapshot.Entries[0].Percent = &percent
+	queued := snapshot.Entries[0]
+	queued.ID, queued.Model, queued.Phase, queued.Percent = strings.Repeat("c", 32), "second/model", modeldownload.PhaseQueued, nil
+	failed := queued
+	failed.ID, failed.Model, failed.Phase = strings.Repeat("d", 32), "failed/model", modeldownload.PhaseFailed
+	unknown := queued
+	unknown.ID, unknown.Model, unknown.Phase = strings.Repeat("e", 32), "unknown/model", modeldownload.PhaseUnknown
+	snapshot.Entries = append(snapshot.Entries, queued, failed, unknown)
+	inventory := tuiDownloadInventory(snapshot)
+	inventory.LoadedByEngine["ollama"] = []string{"exact/model", "resident-only"}
+	d.applyModels(inventory, true)
+	rows := map[string]detailModelRow{}
+	labels := map[string]string{}
+	for i, row := range d.modelRows {
+		rows[row.model], labels[row.model] = row, d.modelTable.Rows()[i][3]
+	}
+	if len(rows) != 5 || len(d.modelRows) != len(rows) {
+		t.Fatalf("union rows = %+v", d.modelRows)
+	}
+	if row := rows["exact/model"]; !row.loaded || !row.loadKnown || row.ready || row.download.ID != snapshot.Entries[0].ID {
+		t.Fatalf("loaded unsafe model = %+v", row)
+	}
+	if row := rows["resident-only"]; !row.loaded || row.ready {
+		t.Fatalf("residency certified content: %+v", row)
+	}
+	want := map[string]string{"exact/model": "Downloading (21%)", "second/model": "Download queued", "failed/model": "Download failed", "unknown/model": "Download status unknown"}
+	for model, label := range want {
+		if labels[model] != label {
+			t.Errorf("%s label = %q, want %q", model, labels[model], label)
+		}
+	}
+}
+
+func TestModelDownloadDispatcherRequiresCurrentCanonicalReadyContent(t *testing.T) {
+	test := func(name string, mutate func(*modelsResult), ready bool) {
+		t.Run(name, func(t *testing.T) {
+			d := localDetail()
+			snapshot := tuiDownloadSnapshot()
+			snapshot.Entries[0].Phase, snapshot.Entries[0].BlocksReadiness = modeldownload.PhaseComplete, false
+			inventory := tuiDownloadInventory(snapshot)
+			mutate(&inventory)
+			d.applyModels(inventory, true)
+			for _, op := range []string{"load", "copy"} {
+				act := modelActions["load"]
+				act.op = op
+				if got := d.modelCmd("ollama", act, "exact/model") != nil; got != ready {
+					t.Fatalf("%s dispatcher returned command = %v, want %v", op, got, ready)
+				}
+			}
+			if d.modelCmd("ollama", modelActions["unload"], "exact/model") == nil {
+				t.Fatal("readiness changed eject authority")
+			}
+		})
+	}
+	test("ready completed content", func(r *modelsResult) {}, true)
+	test("complete before inventory", func(r *modelsResult) { r.ModelsByEngine = nil }, false)
+	test("unsupported lifecycle", func(r *modelsResult) { r.DownloadState = nil }, false)
+	test("stale canonical inventory", func(r *modelsResult) { r.current = false }, false)
+	test("recovery required", func(r *modelsResult) { r.DownloadState.RecoveryRequired = true }, false)
+	test("listed partial", func(r *modelsResult) {
+		r.DownloadState.Entries[0].Phase, r.DownloadState.Entries[0].BlocksReadiness = modeldownload.PhaseInProgress, true
+	}, false)
+	test("loaded unsafe", func(r *modelsResult) {
+		r.LoadedByEngine["ollama"] = []string{"exact/model"}
+		r.DownloadState.Entries[0].Phase, r.DownloadState.Entries[0].BlocksReadiness = modeldownload.PhaseFailed, true
+	}, false)
+	test("pre-effect failure keeps ready content", func(r *modelsResult) { r.DownloadState.Entries[0].Phase = modeldownload.PhaseFailed }, true)
+}
+
+func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *testing.T) {
+	test := func(name, phase, requested, reported string) {
+		t.Run(name, func(t *testing.T) {
+			f := newReconnectUIFixture(t)
+			f.serve(t, nil)
+			d := newNodeDetail(f.client, nodeRow{key: "self", self: true, presence: presenceOnline})
+			d.SetSize(120, 30)
+			d.pane = detailModels
+			d.descriptors = engineDescriptors{"ollama": {
+				Version: engines.DescriptorVersion, Engine: "ollama", Family: "ollama", Label: "Ollama",
+				ModelNaming: engines.ModelNamingImpliedLatestTag,
+				Operations:  map[string]engines.OperationCapability{engines.OperationDelete: {}, engines.OperationUnload: {}},
+			}}
+			snapshot := tuiDownloadSnapshot()
+			snapshot.Entries = []modeldownload.Entry{}
+			if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"ollama": {requested}}, DownloadState: snapshot, current: true}, true) {
+				t.Fatal("initial canonical inventory rejected")
+			}
+			press := func(k string) {
+				t.Helper()
+				if cmd := d.handleKeyForTest(t, k); cmd != nil {
+					d.update(cmd())
+				}
+			}
+			press("d")
+			if d.pending == nil || f.count("engine:delete-model") != 0 {
+				t.Fatal("initial Delete did not wait for confirmation")
+			}
+			active := tuiDownloadSnapshot()
+			active.Revision, active.Entries[0].Model, active.Entries[0].Phase = "8", reported, phase
+			d.update(tuiDownloadProgress(t, "engine:pull-progress", "", active, active.Entries[0]))
+			// Confirm a Delete armed before the pull started. Any mistakenly
+			// returned command runs against the pipe fixture and is counted.
+			press("y")
+			if d.pending != nil || f.count("engine:delete-model") != 0 || !strings.Contains(d.status.text, "Download in progress") {
+				t.Fatal("stale confirmation dispatched Delete during an active pull")
+			}
+			press("d")
+			if d.pending != nil || f.count("engine:delete-model") != 0 || !strings.Contains(d.status.text, "Download in progress") {
+				t.Fatal("Delete key armed or dispatched during an active pull")
+			}
+			if cmd := d.modelCmd("ollama", modelActions["delete"], requested); cmd != nil {
+				d.update(cmd())
+			}
+			if f.count("engine:delete-model") != 0 {
+				t.Fatal("direct dispatcher bypassed the active-pull guard")
+			}
+			complete := active.Clone()
+			complete.Revision, complete.Entries[0].Phase, complete.Entries[0].BlocksReadiness = "9", modeldownload.PhaseComplete, false
+			d.update(tuiDownloadProgress(t, "engine:pull-progress", "", &complete, complete.Entries[0]))
+			press("d")
+			if d.pending == nil {
+				t.Fatal("Delete did not arm after the active pull finished")
+			}
+			press("y")
+			if d.pending != nil || f.count("engine:delete-model") != 1 {
+				t.Fatal("confirmed Delete did not dispatch once after the active pull finished")
+			}
+		})
+	}
+	test("queued exact model", modeldownload.PhaseQueued, "exact/model", "exact/model")
+	test("in progress implied latest", modeldownload.PhaseInProgress, "demo", "demo:latest")
+	test("queued explicit latest", modeldownload.PhaseQueued, "demo:latest", "demo")
+}
+
+func TestModelDownloadDeleteOutsideMatchingActivePullKeepsAuthority(t *testing.T) {
+	test := func(name string, mutate func(*modelsResult)) {
+		t.Run(name, func(t *testing.T) {
+			d := localDetail()
+			snapshot := tuiDownloadSnapshot()
+			inventory := tuiDownloadInventory(snapshot)
+			mutate(&inventory)
+			if !d.applyModels(inventory, true) {
+				t.Fatal("canonical inventory rejected")
+			}
+			if d.modelCmd("ollama", modelActions["delete"], "exact/model") == nil {
+				t.Fatal("non-active download state changed Delete authority")
+			}
+		})
+	}
+	test("failed unresolved content", func(r *modelsResult) { r.DownloadState.Entries[0].Phase = modeldownload.PhaseFailed })
+	test("unknown unresolved content", func(r *modelsResult) { r.DownloadState.Entries[0].Phase = modeldownload.PhaseUnknown })
+	test("different model is active", func(r *modelsResult) { r.DownloadState.Entries[0].Model = "other/model" })
+	test("different engine is active", func(r *modelsResult) { r.DownloadState.Entries[0].Engine = "llamacpp" })
+	test("unsupported lifecycle", func(r *modelsResult) { r.DownloadState = nil })
+	test("last known active snapshot is stale", func(r *modelsResult) { r.current = false })
+}
+
+func TestModelDownloadProgressHydratesWithoutInitiatorAndFencesReorderedIdentity(t *testing.T) {
+	d := localDetail()
+	snapshot := tuiDownloadSnapshot()
+	cmd, _ := d.update(tuiDownloadProgress(t, "engine:pull-progress", "", snapshot, snapshot.Entries[0]))
+	if cmd == nil || d.models.DownloadState != nil || d.modelsGeneration == 0 {
+		t.Fatal("unseeded notification selected a source instead of requesting hydration")
+	}
+	d.update(detailModelsMsg{models: tuiDownloadInventory(snapshot), generation: d.modelsGeneration})
+	if len(d.modelRows) != 1 || d.modelRows[0].download.ID != snapshot.Entries[0].ID || d.modelRows[0].ready {
+		t.Fatalf("unseeded progress = %+v", d.modelRows)
+	}
+	newer := snapshot.Clone()
+	newer.Revision, newer.Entries[0].ID = "8", strings.Repeat("c", 32)
+	d.update(tuiDownloadProgress(t, "engine:pull-progress", "", &newer, newer.Entries[0]))
+	d.update(tuiDownloadProgress(t, "engine:pull-progress", "", snapshot, snapshot.Entries[0]))
+	if got := d.modelRows[0].download.ID; got != newer.Entries[0].ID {
+		t.Fatalf("late old operation replaced %s", got)
+	}
+	// A queued second model retains its own identity and indeterminate percent.
+	queued := newer.Entries[0]
+	queued.ID, queued.Model, queued.Phase = strings.Repeat("d", 32), "second/model", modeldownload.PhaseQueued
+	newer.Revision, newer.Entries = "9", append(newer.Entries, queued)
+	d.update(tuiDownloadProgress(t, "engine:pull-progress", "", &newer, newer.Entries[0]))
+	if len(d.modelRows) != 2 || d.modelRows[1].download.ID != queued.ID || d.modelRows[1].download.Percent != nil {
+		t.Fatalf("queued model inherited another download: %+v", d.modelRows)
+	}
+	// A frame's envelope must identify an entry in its full snapshot.
+	wrong := queued
+	wrong.Model = "wrong/model"
+	d.update(tuiDownloadProgress(t, "engine:pull-progress", "", &newer, wrong))
+	if d.models.current || d.downloadsCurrent {
+		t.Fatal("wrong identity established current state")
+	}
+}
+
+func TestModelDownloadSourceReplacementRequiresCurrentCanonicalObservation(t *testing.T) {
+	d := localDetail()
+	original := tuiDownloadSnapshot()
+	d.applyModels(tuiDownloadInventory(original), true)
+	replacement := original.Clone()
+	replacement.SourceID, replacement.Revision = strings.Repeat("f", 32), "0"
+	stale := tuiDownloadInventory(&replacement)
+	stale.current = false
+	if d.applyModels(stale, true) || d.models.DownloadState.SourceID != original.SourceID || d.models.current {
+		t.Fatal("stale source replaced baseline or retained ready state")
+	}
+	if !d.applyModels(tuiDownloadInventory(&replacement), true) {
+		t.Fatal("current replacement rejected")
+	}
+	if d.applyModels(tuiDownloadInventory(original), true) || d.models.DownloadState.SourceID != replacement.SourceID {
+		t.Fatal("retired in-flight source replaced current manager")
+	}
+}
+
+func TestModelDownloadDiscoveryStalenessAndSameRevisionRecovery(t *testing.T) {
+	d := remoteDetail()
+	snapshot := tuiDownloadSnapshot()
+	snapshot.Entries = []modeldownload.Entry{}
+	current := true
+	peer := availableNode{HostUUID: "peer", DownloadState: snapshot, DownloadStateCurrent: &current,
+		ModelsByEngine: map[string][]string{"ollama": {"exact/model"}}}
+	d.update(discoveryPush(peer))
+	if !d.modelReady("ollama", "exact/model") {
+		t.Fatal("current peer inventory did not become ready")
+	}
+	current = false
+	d.update(discoveryPush(peer))
+	if d.modelCmd("ollama", modelActions["load"], "exact/model") != nil {
+		t.Fatal("stale peer dispatched Load")
+	}
+	current = true
+	d.update(discoveryPush(peer))
+	if !d.modelReady("ollama", "exact/model") {
+		t.Fatal("same-revision current read did not restore readiness")
+	}
+	d.update(DisconnectedMsg{})
+	if d.modelReady("ollama", "exact/model") {
+		t.Fatal("disconnect retained readiness")
+	}
+	if len(d.modelRows) == 0 || d.modelTable.Rows()[0][3] != "Download status unknown" {
+		t.Fatal("disconnect hid last-known model or claimed readiness")
+	}
+}
+
+func TestModelDownloadHydrationSubscribesBeforeCanonicalFetch(t *testing.T) {
+	test := func(name string, remote bool, subscribe, fetch string) {
+		t.Run(name, func(t *testing.T) {
+			client, broker := nodeInfoRPCFixture(t)
+			d := newNodeDetail(client, nodeRow{key: "target", self: !remote, presence: presenceOnline})
+			for _, reconnect := range []bool{false, true} {
+				if reconnect {
+					d.update(DisconnectedMsg{})
+					d.policyDisconnected = false
+				}
+				done := make(chan tea.Msg, 1)
+				go func() { done <- d.modelsCmd()() }()
+				for _, method := range []string{subscribe, fetch} {
+					request, err := broker.Read()
+					if err != nil {
+						t.Fatalf("read hydration request: %v", err)
+					}
+					if request.Method != method {
+						t.Fatalf("hydration requested %q, want %q", request.Method, method)
+					}
+					result := tuiDownloadJSON(t, map[string]bool{"subscribed": true})
+					if method == fetch {
+						snapshot := tuiDownloadSnapshot()
+						snapshot.Entries = []modeldownload.Entry{}
+						result = tuiDownloadJSON(t, tuiDownloadInventory(snapshot))
+						if remote {
+							current := true
+							result = tuiDownloadJSON(t, map[string][]availableNode{"nodes": {{HostUUID: "target", ModelsByEngine: map[string][]string{"ollama": {"exact/model"}}, DownloadState: snapshot, DownloadStateCurrent: &current}}})
+						}
+					}
+					if err := broker.Write(&rpc.Message{JSONRPC: "2.0", ID: request.ID, Result: result}); err != nil {
+						t.Fatalf("reply hydration: %v", err)
+					}
+				}
+				select {
+				case msg := <-done:
+					d.update(msg)
+				case <-time.After(time.Second):
+					t.Fatal("hydration did not finish")
+				}
+				if !d.modelReady("ollama", "exact/model") {
+					t.Fatal("canonical hydration did not establish readiness")
+				}
+			}
+		})
+	}
+	test("local", false, "engine:subscribe", "engine:models")
+	test("discovery peer", true, "discovery:subscribe", "discovery:get-nodes")
+}
+
+func TestModelDownloadModelsChangedUsesCanonicalNestedInventory(t *testing.T) {
+	d := localDetail()
+	snapshot := tuiDownloadSnapshot()
+	d.applyModels(tuiDownloadInventory(snapshot), true)
+	complete := snapshot.Clone()
+	complete.Revision, complete.Entries[0].Phase, complete.Entries[0].BlocksReadiness = "8", modeldownload.PhaseComplete, false
+	d.update(tuiDownloadProgress(t, "engine:pull-progress", "", &complete, complete.Entries[0]))
+	if d.modelCmd("ollama", modelActions["load"], "exact/model") != nil {
+		t.Fatal("completion without inventory dispatched Load")
+	}
+	params := tuiDownloadJSON(t, map[string]any{"engine": "ollama", "models": tuiDownloadInventory(&complete)})
+	cmd, _ := d.update(NotificationMsg{Msg: &rpc.Message{Method: "engine:models-changed", Params: params}})
+	if cmd != nil || !d.modelReady("ollama", "exact/model") || d.modelRows[0].loaded {
+		t.Fatal("nested full inventory was not used independently of residency")
+	}
+	// A malformed extension must revoke readiness while retaining the last
+	// authenticated observation until canonical hydration succeeds.
+	bad := `{"models":{"modelsByEngine":{"ollama":["exact/model"]},"loadedByEngine":{"ollama":["exact/model"]},"downloadState":{"version":2}}}`
+	d.update(NotificationMsg{Msg: &rpc.Message{Method: "engine:models-changed", Params: []byte(bad)}})
+	if d.modelReady("ollama", "exact/model") || d.modelRows[0].loaded || d.modelTable.Rows()[0][3] != "Download status unknown" {
+		t.Fatal("malformed support promoted content or replaced the authenticated observation")
+	}
+	canonical := tuiDownloadInventory(&complete)
+	canonical.LoadedByEngine["ollama"] = []string{"exact/model"}
+	d.update(detailModelsMsg{models: canonical, generation: d.modelsGeneration})
+	if !d.modelRows[0].loaded || !d.modelReady("ollama", "exact/model") {
+		t.Fatal("canonical read did not restore residency and readiness independently")
+	}
+}
+
+func tuiSourceNotification(t *testing.T, method string, snapshot *modeldownload.Snapshot) NotificationMsg {
+	t.Helper()
+	if method == "engine:pull-progress" {
+		return tuiDownloadProgress(t, method, "", snapshot, snapshot.Entries[0])
+	}
+	return NotificationMsg{Msg: &rpc.Message{Method: method, Params: tuiDownloadJSON(t,
+		map[string]any{"models": tuiDownloadInventory(snapshot)})}}
+}
+
+func TestModelDownloadModelsChangedCannotSelectInitialSource(t *testing.T) {
+	d := localDetail()
+	snapshot := tuiDownloadSnapshot()
+	oldGeneration := d.modelsGeneration
+	cmd, _ := d.update(tuiSourceNotification(t, "engine:models-changed", snapshot))
+	if cmd == nil || d.models.DownloadState != nil || d.modelsGeneration != oldGeneration+1 {
+		t.Fatal("initial models notification selected an incarnation instead of requesting a canonical read")
+	}
+	d.update(detailModelsMsg{models: tuiDownloadInventory(snapshot), generation: oldGeneration})
+	if d.models.DownloadState != nil {
+		t.Fatal("pre-notification read selected the initial incarnation")
+	}
+	d.update(detailModelsMsg{models: tuiDownloadInventory(snapshot), generation: d.modelsGeneration})
+	if d.models.DownloadState == nil || !d.models.DownloadState.Equal(*snapshot) || !d.downloadsCurrent {
+		t.Fatal("current canonical read did not establish the initial incarnation")
+	}
+}
+
+func TestModelDownloadUnseenRetiredNotificationCannotReplaceCanonicalSource(t *testing.T) {
+	for _, method := range []string{"engine:pull-progress", "engine:models-changed"} {
+		t.Run(method, func(t *testing.T) {
+			d := localDetail()
+			current := tuiDownloadSnapshot()
+			current.Entries[0].Phase, current.Entries[0].BlocksReadiness = modeldownload.PhaseComplete, false
+			if !d.applyModels(tuiDownloadInventory(current), true) || !d.modelReady("ollama", "exact/model") {
+				t.Fatal("current canonical baseline was not ready")
+			}
+			// This source belonged to a worker retired before this client attached.
+			// It is deliberately absent from the client's retired-source set.
+			unseen := tuiDownloadSnapshot()
+			unseen.SourceID, unseen.Revision = strings.Repeat("f", 32), "999"
+			oldGeneration := d.modelsGeneration
+			cmd, _ := d.update(tuiSourceNotification(t, method, unseen))
+			if cmd == nil || d.modelsGeneration != oldGeneration+1 || d.models.current || d.downloadsCurrent {
+				t.Fatal("unseen-source notification did not revoke currentness and request fresh hydration")
+			}
+			if !d.models.DownloadState.Equal(*current) || d.retiredDownloadSources[current.SourceID] {
+				t.Fatal("unseen retired notification replaced or retired the authenticated source")
+			}
+			d.update(detailModelsMsg{models: tuiDownloadInventory(unseen), generation: oldGeneration})
+			if !d.models.DownloadState.Equal(*current) || d.models.current {
+				t.Fatal("in-flight pre-notification read selected a different worker")
+			}
+			d.update(detailModelsMsg{models: tuiDownloadInventory(current), generation: d.modelsGeneration})
+			if !d.modelReady("ollama", "exact/model") || !d.models.DownloadState.Equal(*current) {
+				t.Fatal("real current RPC source was rejected after an unseen retired notification")
+			}
+		})
+	}
+}
+
+func TestModelDownloadWorkerReplacementRequiresNewCanonicalRead(t *testing.T) {
+	for _, method := range []string{"engine:pull-progress", "engine:models-changed"} {
+		t.Run(method, func(t *testing.T) {
+			d := localDetail()
+			original := tuiDownloadSnapshot()
+			if !d.applyModels(tuiDownloadInventory(original), true) {
+				t.Fatal("original canonical baseline rejected")
+			}
+			replacement := tuiDownloadSnapshot()
+			replacement.SourceID, replacement.Revision = strings.Repeat("e", 32), "0"
+			replacement.Entries[0].Phase, replacement.Entries[0].BlocksReadiness = modeldownload.PhaseComplete, false
+			cmd, _ := d.update(tuiSourceNotification(t, method, replacement))
+			if cmd == nil || !d.models.DownloadState.Equal(*original) || d.retiredDownloadSources[original.SourceID] {
+				t.Fatal("replacement notification selected a worker before canonical hydration")
+			}
+			// Even a matching old-source notification cannot restore currentness
+			// while the worker selection requires canonical hydration.
+			d.update(tuiSourceNotification(t, method, original))
+			if d.models.current || d.downloadsCurrent {
+				t.Fatal("old-source notification restored currentness before hydration")
+			}
+			d.update(detailModelsMsg{models: tuiDownloadInventory(replacement), generation: d.modelsGeneration})
+			if !d.models.DownloadState.Equal(*replacement) || !d.retiredDownloadSources[original.SourceID] || !d.modelReady("ollama", "exact/model") {
+				t.Fatal("new current canonical read did not select the replacement worker")
+			}
+			if d.applyModels(tuiDownloadInventory(original), true) || !d.models.DownloadState.Equal(*replacement) {
+				t.Fatal("retired worker read replaced the selected incarnation")
+			}
+		})
+	}
+}
+
+func TestModelDownloadReadyLoadDispatchesExactTypedRequest(t *testing.T) {
+	client, broker := nodeInfoRPCFixture(t)
+	d := newNodeDetail(client, nodeRow{key: "self", self: true, presence: presenceOnline})
+	snapshot := tuiDownloadSnapshot()
+	snapshot.Entries = []modeldownload.Entry{}
+	d.applyModels(tuiDownloadInventory(snapshot), true)
+	request, _ := terminalControlsReply(t, broker, d.modelOp("load"), &rpc.Message{Result: []byte(`{}`)})
+	var params struct {
+		Engine string `json:"engine"`
+		Model  string `json:"model"`
+	}
+	if err := json.Unmarshal(request.Params, &params); err != nil {
+		t.Fatalf("decode Load params: %v", err)
+	}
+	if request.Method != "engine:load-model" || params.Engine != "ollama" || params.Model != "exact/model" {
+		t.Fatalf("Load request = %s %+v", request.Method, params)
+	}
+}
 
 func TestNodeDetailSwitchExitCancelsPendingRPC(t *testing.T) {
 	for _, action := range []string{"reset", "close", "escape"} {
@@ -1570,20 +2019,23 @@ func TestInstallProgressStaysOnThisMachine(t *testing.T) {
 // "(0%)" and "(-1%)".
 func TestProgressWithoutAPercentShowsNone(t *testing.T) {
 	peer := remoteDetail()
-	peer.update(progressPush("engine:remote-progress",
-		map[string]any{"node": "peer", "engine": "ollama", "op": "pull", "stage": "pulling manifest"}))
-	if got := peer.status.render(); !strings.Contains(got, "pulling manifest") || strings.Contains(got, "%") {
+	snapshot := tuiDownloadSnapshot()
+	peer.applyModels(tuiDownloadInventory(snapshot), true)
+	peer.update(tuiDownloadProgress(t, "engine:remote-progress", "peer", snapshot, snapshot.Entries[0]))
+	if got := peer.status.render(); !strings.Contains(got, "Downloading") || strings.Contains(got, "%") {
 		t.Errorf("indeterminate remote progress rendered as %q", got)
 	}
-	peer.update(progressPush("engine:remote-progress",
-		map[string]any{"node": "peer", "engine": "ollama", "op": "pull", "stage": "downloading", "percent": 25}))
-	if got := peer.status.render(); !strings.Contains(got, "downloading (25%)") {
+	percent := 25
+	snapshot.Revision, snapshot.Entries[0].Percent = "8", &percent
+	peer.update(tuiDownloadProgress(t, "engine:remote-progress", "peer", snapshot, snapshot.Entries[0]))
+	if got := peer.status.render(); !strings.Contains(got, "Downloading (25%)") {
 		t.Errorf("a reported percent was dropped: %q", got)
 	}
 
 	local := localDetail()
-	local.update(progressPush("engine:pull-progress",
-		map[string]any{"engine": "ollama", "stage": "pulling manifest"}))
+	snapshot.Entries[0].Percent = nil
+	local.applyModels(tuiDownloadInventory(snapshot), true)
+	local.update(tuiDownloadProgress(t, "engine:pull-progress", "", snapshot, snapshot.Entries[0]))
 	if got := local.status.render(); strings.Contains(got, "%") {
 		t.Errorf("indeterminate pull progress rendered as %q", got)
 	}
@@ -2124,8 +2576,11 @@ func TestUndeclaredModelOperationIsRefusedBeforeArming(t *testing.T) {
 			Operations:  map[string]engines.OperationCapability{engines.OperationLoad: {}},
 		},
 	}
-	d.models = modelsResult{ModelsByEngine: map[string][]string{"strata": {"victim"}}}
-	d.refreshModels()
+	snapshot := tuiDownloadSnapshot()
+	snapshot.Entries = []modeldownload.Entry{}
+	if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"strata": {"victim"}}, DownloadState: snapshot, current: true}, true) {
+		t.Fatal("ready canonical inventory rejected")
+	}
 	d.pane = detailModels
 
 	if cmd := d.deleteSelectedModel(); cmd != nil || d.pending != nil {

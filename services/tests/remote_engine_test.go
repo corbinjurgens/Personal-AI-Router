@@ -257,6 +257,7 @@ func startEngineManagerServer(t *testing.T, clusterDir string, controlPort int) 
 		"--cluster-dir", clusterDir,
 		"--log-level", "warn",
 	)
+	cmd.Env = privateEngineEnv(t, t.TempDir())
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -296,6 +297,7 @@ func startEngineManagerServer(t *testing.T, clusterDir string, controlPort int) 
 func startEngineManagerStdio(t *testing.T, clusterDir string) (io.WriteCloser, <-chan jsonrpc.Message) {
 	t.Helper()
 	cmd := exec.Command(engineMgrBin, "--cluster-dir", clusterDir, "--log-level", "warn")
+	cmd.Env = privateEngineEnv(t, t.TempDir())
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

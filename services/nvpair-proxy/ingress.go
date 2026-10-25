@@ -264,7 +264,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	owner.deadline, _ = ctx.Value(routingDeadlineContextKey{}).(time.Time)
 	owner.sink = sink
 	defer owner.finish()
-	stopCancellation := context.AfterFunc(ctx, func() { owner.cancelWithReason("destination request cancelled") })
+	stopCancellation := context.AfterFunc(ctx, func() { owner.cancelWithCause("destination request cancelled", factClientGone) })
 	defer stopCancellation()
 	owner.watchPreOutput(ctx)
 	// The execution's own context, so cancelActive can stop it without the
@@ -480,9 +480,21 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 // exists yet; even an HTTP EOF is conservatively uncertain until the
 // reconciliation owner proves termination. It must never be interpreted as
 // engine-idle evidence.
-func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool) {
+func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool, origin ...*routingSpend) {
 	admissionStarted := time.Now()
+	var observed *routingFactAttempt
+	if len(origin) != 0 {
+		observed = origin[0].strictFactAttempt(destinationDescriptor(model, origin[0].key.OriginNodeID, f.profile.Name, false))
+	}
+	rejectObservation := func(cause routingFactReason, status int) {
+		if observed == nil {
+			return
+		}
+		observed.observeAdmission(time.Since(admissionStarted))
+		observed.observeTerminal(routingIngressResult{factFailed, cause, status}, factRejected)
+	}
 	if _, err := parseOriginStreamRequest(r.URL.Path, body); err != nil {
+		rejectObservation(factRequestInvalid, bufferRequestStatus(err))
 		writeOriginStreamRequestError(w, err)
 		return
 	}
@@ -493,45 +505,56 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	validated, err := f.host.admission.qualifyStrict(f.profile.Name, model, r.URL.Path, body, req.Identity, prepareCtx)
 	err = inferencePreparationRefusal(err)
 	if errors.Is(err, errAmbiguousModel) {
+		rejectObservation(factRequestInvalid, http.StatusBadRequest)
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
 	}
 	var invalid *strictQualificationError
 	if errors.As(err, &invalid) {
+		rejectObservation(factRequestInvalid, http.StatusBadRequest)
 		writeIngressError(w, http.StatusBadRequest, "strict-qualification", err.Error())
 		return
 	}
 	if err != nil {
 		var capacity interface{ HTTPStatus() int }
 		if errors.As(err, &capacity) {
+			rejectObservation(failureFactReason(err), capacity.HTTPStatus())
 			writeIngressError(w, capacity.HTTPStatus(), "inference-buffer", "inference request could not be prepared")
 			return
 		}
+		rejectObservation(failureFactReason(err), http.StatusServiceUnavailable)
 		writeStrictAdmissionError(w, err)
 		return
 	}
 	body = validated.body
 	streamRequest, err := parseOriginStreamRequest(r.URL.Path, body)
 	if err != nil {
+		rejectObservation(factRequestInvalid, bufferRequestStatus(err))
 		writeInferencePreparationError(w, err)
 		return
 	}
 	if !bodyModelMatches(body, model) {
+		rejectObservation(factRequestInvalid, http.StatusBadRequest)
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
 	}
 	preparedCtx, releasePreparation, err := preparePerformanceBuffers(prepareCtx, body, streamRequest, f.performancePreparationMode(r.URL.Path))
 	if err != nil {
+		rejectObservation(failureFactReason(err), bufferRequestStatus(err))
 		writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
 		return
 	}
 	defer releasePreparation()
 	ticket, err := f.host.admission.AdmitStrict(prepareCtx, f.profile.Name, model, req, validated.generation)
 	if err != nil {
+		rejectObservation(failureFactReason(err), http.StatusServiceUnavailable)
 		writeStrictAdmissionError(w, err)
 		return
 	}
 	performanceWait := time.Since(admissionStarted)
+	if observed != nil {
+		observed.observeAdmission(performanceWait)
+	}
 	evidence := strictNotDispatched
 	defer func() { ticket.Finish(evidence) }()
 	t := ticket.(*strictTicket)
@@ -546,10 +569,12 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	defer stop()
 	target, ok := f.localBackendTarget()
 	if !ok {
+		rejectObservation(factEngineNotRunning, http.StatusServiceUnavailable)
 		writeStrictAdmissionError(w, errStrictUnavailable)
 		return
 	}
 	if err = ticket.BeforeStrictDispatch(); err != nil {
+		rejectObservation(failureFactReason(err), http.StatusServiceUnavailable)
 		writeStrictAdmissionError(w, err)
 		return
 	}
@@ -566,11 +591,12 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	p := f.newLocalReverseProxy(target)
 	performance, err := f.newPerformanceAttemptOwned(preparedCtx, model, r.URL.Path, body, performanceWait)
 	if err != nil {
+		rejectObservation(failureFactReason(err), bufferRequestStatus(err))
 		writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
 		return
 	}
 	p.Transport = performanceTransport{RoundTripper: p.Transport, attempt: performance}
-	p.ErrorHandler = func(ew http.ResponseWriter, _ *http.Request, _ error) {
+	p.ErrorHandler = func(ew http.ResponseWriter, _ *http.Request, transportErr error) {
 		f.host.admission.mu.Lock()
 		exhausted := !f.host.admission.strict.now().Before(t.deadline)
 		f.host.admission.mu.Unlock()
@@ -578,13 +604,28 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 			exhausted = exhausted || !time.Now().Before(deadline)
 		}
 		if exhausted {
+			rejectObservation(factDeadline, http.StatusServiceUnavailable)
 			writeStrictAdmissionError(ew, context.DeadlineExceeded)
 			return
 		}
+		cause := factTransport
+		if errors.Is(transportErr, errFirstBodyTimeout) {
+			cause = factNoContent
+		}
+		rejectObservation(cause, http.StatusBadGateway)
 		writeIngressError(ew, http.StatusBadGateway, "backend-error", "local inference backend error")
 	}
 	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
+	var nativeReader *streamFrameReader
 	p.ModifyResponse = func(resp *http.Response) error {
+		if observed != nil {
+			observed.observeStatus(resp.StatusCode)
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				observed.observeTerminal(routingIngressResult{factFailed, factUpstreamStatus, resp.StatusCode}, factRejected)
+			} else {
+				resp.Body = &routingStrictFactBody{ReadCloser: resp.Body, attempt: observed}
+			}
+		}
 		if peer {
 			setPeerStreamFraming(resp, streamRequest)
 		} else {
@@ -607,6 +648,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		stopRequestDeadline()
 		stop()
 		reader, err := installResponseStream(resp, streamRequest, rebasePerformancePreparation(r.Context(), preparedCtx), 0, performance)
+		nativeReader = reader
 		if err != nil {
 			sink := responseSinkFrom(r.Context())
 			if !errors.Is(err, errStreamFrameBudget) || sink == nil {
@@ -633,6 +675,14 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 			_ = sc.upstreamBody.Close()
 		}
 		performance.finish(sc, returned)
+		if observed != nil {
+			observed.observeSink(strictRoutingResult(sc, nativeReader, returned, ctx))
+			// The existing delayed-flush collaborator may retain statusCapture.
+			// It never reads upstreamBody. Drop this completed body graph after
+			// performance/native reads, so it cannot retain the strict observer.
+			sc.upstreamBody = nil
+			nativeReader = nil
+		}
 	}()
 	p.ServeHTTP(sc, out)
 	_ = sc.FlushError()

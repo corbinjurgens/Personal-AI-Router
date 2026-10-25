@@ -224,19 +224,15 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		if err := os.MkdirAll(manifestDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		for _, engine := range []string{"ollama", "lmstudio", "llamacpp"} {
-			port := temporaryClusterPort(t)
-			if engine == "ollama" {
-				port = f.engines[n.uuid].port
-			}
-			task1WriteJSON(t, filepath.Join(manifestDir, engine+".json"), map[string]any{
-				"engine":  engine,
-				"runtime": map[string]any{"port": port, "env": map[string]string{"OLLAMA_MODELS": f.stores[n.uuid]}, "ready": map[string]any{"http": "http://127.0.0.1:{port}/api/version", "status": 200}},
-				"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
-					"detect": []string{nodeInfoBin}, "models_dir": filepath.Join(n.base, engine+"-models"), "runtime": map[string]any{"bin": nodeInfoBin, "port": port},
-				}},
-			})
-		}
+		writeDisabledBuiltinEngineOverrides(t, n.base, filepath.Dir(manifestDir))
+		port := f.engines[n.uuid].port
+		task1WriteJSON(t, filepath.Join(manifestDir, "ollama.json"), map[string]any{
+			"engine":  "ollama",
+			"runtime": map[string]any{"port": port, "env": map[string]string{"OLLAMA_MODELS": f.stores[n.uuid]}, "ready": map[string]any{"http": "http://127.0.0.1:{port}/api/version", "status": 200}},
+			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
+				"detect": []string{nodeInfoBin}, "models_dir": filepath.Join(n.base, "ollama-models"), "runtime": map[string]any{"bin": nodeInfoBin, "port": port},
+			}},
+		})
 		var members []task1Member
 		for _, peer := range nodes {
 			members = append(members, task1Member{ID: peer.uuid, NodeUUID: peer.uuid, Name: peer.uuid, IPAddress: "127.0.0.1", Port: f.control.directory(peer).Services[noderec.ServiceCluster].Port, ClusterID: task1ClusterID, AdmissionEpoch: 1, State: "member"})

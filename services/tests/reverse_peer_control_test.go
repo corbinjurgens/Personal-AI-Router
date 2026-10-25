@@ -64,6 +64,9 @@ func startTask1Process(t *testing.T, base, binary string, args ...string) *task1
 	t.Helper()
 	p := &task1Process{t: t, cmd: exec.Command(binary, args...), done: make(chan struct{}), readDone: make(chan struct{}), nextID: 1}
 	p.cmd.Env = append(os.Environ(), "HOME="+base, "XDG_CONFIG_HOME="+base, "APPDATA="+base, "LOCALAPPDATA="+base, "USERPROFILE="+base)
+	if binary == brokerBin || binary == engineMgrBin {
+		p.cmd.Env = privateEngineEnv(t, base)
+	}
 	var err error
 	p.in, err = p.cmd.StdinPipe()
 	if err != nil {

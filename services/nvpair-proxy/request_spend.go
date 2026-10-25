@@ -22,11 +22,7 @@ var errRoutingSpend = errors.New("routing request allowance refused")
 type routingSpend struct {
 	mu             sync.Mutex
 	ceiling        int64
-	limited        bool
 	granted        int64
-	uncertain      bool
-	cancelled      bool
-	committed      bool
 	active         *publicAttemptLifecycle
 	key            nodepolicy.RoutingRequestKey
 	deadline       time.Time
@@ -34,15 +30,21 @@ type routingSpend struct {
 	sink           *responseSink
 	firstBodyDone  <-chan struct{} // The peek's actual byte borrower, including post-read callbacks.
 	ordinal        uint64
-	state          routingState
 	reason         string
 	lastNode       string
 	excluded       map[string]bool
-	done           bool
 	onCancel       func(string)
 	workload       *workloadKey
-	detachWorkload func()      // Immutable registry cleanup hook; never called under mu.
-	stopPreOutput  func() bool // Set once under mu; timer collaborator, not transition state.
+	detachWorkload func()              // Immutable registry cleanup hook; never called under mu.
+	stopPreOutput  func() bool         // Set once under mu; timer collaborator, not transition state.
+	facts          *routingNativeFacts // Detached at actual unregister, after all body borrowers join.
+	// Immutable entry contexts duplicate existing onCancel/registry-owner
+	// reachability, not body or fact ownership. Cleared at actual unregister.
+	observationContext                             context.Context
+	processContext                                 context.Context
+	state                                          routingState
+	limited, uncertain, cancelled, committed, done bool
+	cancelCause                                    routingFactReason
 }
 
 type accountReserveDurability string
@@ -81,23 +83,22 @@ type publicAttemptTerminal struct {
 // production. bindCancel, associated, firstSuccessfulByte and finished require
 // no caller-held lock and never enter G, admission, D or transport themselves.
 type publicAttemptLifecycle struct {
-	request     *routingSpend
-	cancel      context.CancelFunc
-	ctx         context.Context
-	ordinal     uint64
-	nodeID      string
-	ticket      *admissionTicket // Released after transport/body borrowers unwind.
-	state       routingState
-	reason      string
-	aborted     bool
-	redispatch  bool
-	reservation accountReservation
-	accepted    bool
-	committed   bool
-	terminal    *publicAttemptTerminal
+	routingFactAttempt
+	cancel             context.CancelFunc
+	ctx                context.Context
+	nodeID             string
+	ticket             *admissionTicket // Released after transport/body borrowers unwind.
+	reservation        accountReservation
+	terminal           *publicAttemptTerminal
+	accountObservation accountAttemptObservation
+	// The D baseline reuses the original state/reason headers and boolean
+	// padding: this object remains 176B, including arbitrary old callback tails.
+	// Reason text has one owner, request.reason, at the same transition sites.
+	state                                    routingState
+	aborted, redispatch, accepted, committed bool
 }
 
-func (r *routingSpend) newAttempt() (*publicAttemptLifecycle, error) {
+func (r *routingSpend) newAttempt(descriptor ...*routingDestinationDescriptor) (*publicAttemptLifecycle, error) {
 	if r == nil {
 		return nil, errRoutingSpend
 	}
@@ -117,13 +118,14 @@ func (r *routingSpend) newAttempt() (*publicAttemptLifecycle, error) {
 	if detach != nil {
 		detach()
 	}
+	started := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.newAttemptLocked()
+	return r.newAttemptLocked(started, descriptor...)
 }
 
 // newAttemptLocked requires the request mutex and publishes one attempt slot.
-func (r *routingSpend) newAttemptLocked() (*publicAttemptLifecycle, error) {
+func (r *routingSpend) newAttemptLocked(started time.Time, descriptor ...*routingDestinationDescriptor) (*publicAttemptLifecycle, error) {
 	if r.done || r.cancelled || r.uncertain || r.committed || r.active != nil {
 		return nil, errRoutingSpend
 	}
@@ -131,9 +133,12 @@ func (r *routingSpend) newAttemptLocked() (*publicAttemptLifecycle, error) {
 		return nil, errRoutingSpend
 	}
 	r.ordinal++
-	a := &publicAttemptLifecycle{request: r, ordinal: r.ordinal, state: routingPrepared}
+	a := &publicAttemptLifecycle{routingFactAttempt: routingFactAttempt{request: r, ordinal: r.ordinal}, state: routingPrepared}
 	r.active = a
 	r.transitionLocked(routingPrepared, "attempt prepared")
+	if len(descriptor) != 0 {
+		r.nativeAttemptLocked(&a.routingFactAttempt, descriptor[0], started)
+	}
 	return a, nil
 }
 
@@ -157,7 +162,18 @@ func (a *publicAttemptLifecycle) tryAccount(account nodepolicy.Account) (int64, 
 		}
 		if !r.limited || ceiling < r.ceiling {
 			r.ceiling, r.limited = ceiling, true
+			if f := r.facts; f.begin() {
+				f.ceiling.Store(uint64(ceiling))
+				f.granted.Store(uint64(r.granted))
+				f.flags.Store(f.flags.Load() | factMoneyApplicable | factCeilingKnown)
+				f.end()
+			}
 		}
+	}
+	if f := r.facts; f != nil && f.flags.Load()&factMoneyApplicable == 0 && f.begin() {
+		f.granted.Store(uint64(r.granted))
+		f.flags.Store(f.flags.Load() | factMoneyApplicable)
+		f.end()
 	}
 	if r.cancelled || r.uncertain {
 		return 0, errRoutingSpend
@@ -169,6 +185,7 @@ func (a *publicAttemptLifecycle) tryAccount(account nodepolicy.Account) (int64, 
 		if account.Billing != nodepolicy.BillingPaid {
 			return 0, nil // A zero-cost free/trial hold can still fit.
 		}
+		a.observeAttemptLocked(routingAttemptResult{factRejected, factRequestCeiling, 0, true})
 		return 0, errRoutingSpend
 	}
 	return r.ceiling - r.granted, nil
@@ -201,8 +218,8 @@ func (a *publicAttemptLifecycle) associated(reservation accountReservation) erro
 	}
 	a.reservation = reservation
 	if !r.cancelled && !r.done && !a.aborted {
-		a.state, a.reason = routingPreSend, "account reservation completed"
-		r.transitionLocked(a.state, a.reason)
+		a.state = routingPreSend
+		r.transitionLocked(a.state, "account reservation completed")
 	}
 	if reservation.Durability == accountReserveUncertain {
 		r.uncertain = true
@@ -219,6 +236,11 @@ func (a *publicAttemptLifecycle) associated(reservation accountReservation) erro
 			return err
 		}
 		r.granted = total
+		if f := r.facts; f.begin() {
+			f.granted.Store(uint64(total))
+			f.flags.Store(f.flags.Load() | factMoneyApplicable)
+			f.end()
+		}
 	}
 	return nil
 }
@@ -240,12 +262,12 @@ func (a *publicAttemptLifecycle) acceptedByGuard(ctx context.Context) error {
 		// Timer delivery may be late. Record the refusal while G/admission
 		// still hold their locks; the caller's unwind cancels transport only
 		// after those locks and this mutex have been released.
-		r.cancelLocked(routingDeadlineReason)
+		r.cancelLockedCause(routingDeadlineReason, factDeadline)
 		return errRoutingSpend
 	}
 	a.accepted = true
-	a.state, a.reason = routingAwaitBody, "public final acceptance"
-	r.transitionLocked(routingAwaitBody, a.reason)
+	a.state = routingAwaitBody
+	r.transitionLocked(routingAwaitBody, "public final acceptance")
 	return nil
 }
 
@@ -261,6 +283,15 @@ func (a *publicAttemptLifecycle) finished(terminal publicAttemptTerminal) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if a.terminal == nil {
+		r.foldCancellationLocked()
+		result := routingAttemptResult{outcome: factAttemptFailed, ended: true}
+		if a.committed {
+			result.outcome = factInterrupted
+		}
+		if terminal.Err != nil {
+			result.reason = failureFactReason(terminal.Err)
+		}
+		a.observeAttemptLocked(result)
 		a.terminal = &terminal
 		a.state = routingTerminal
 		if r.active == a {
@@ -274,7 +305,7 @@ func (a *publicAttemptLifecycle) finished(terminal publicAttemptTerminal) {
 }
 
 func (r *routingSpend) cancelRequest() {
-	r.cancelWithReason("cancelled by request")
+	r.cancelWithCause("cancelled by request", factCancel)
 }
 
 // The continuation runs under the permission owner's lock. A nil continuation

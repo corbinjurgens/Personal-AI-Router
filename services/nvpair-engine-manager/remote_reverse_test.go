@@ -23,6 +23,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/clustertrusttest"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/noderec"
 )
 
@@ -199,6 +200,12 @@ func TestRemoteControlPrefersDirectAndClosesEachConnection(t *testing.T) {
 }
 
 func TestRemoteReverseReadsAndEveryControlRoute(t *testing.T) {
+	const (
+		downloadID = "22222222222222222222222222222222"
+		sourceID   = "11111111111111111111111111111111"
+		pullOpID   = "pull-route-operation"
+		pullModel  = "fixture-model"
+	)
 	var mu sync.Mutex
 	seen := map[string]int{}
 	f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
@@ -218,6 +225,8 @@ func TestRemoteReverseReadsAndEveryControlRoute(t *testing.T) {
 			}
 			var body struct {
 				Engine string `json:"engine"`
+				OpID   string `json:"opId"`
+				Model  string `json:"model"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
@@ -226,7 +235,31 @@ func TestRemoteReverseReadsAndEveryControlRoute(t *testing.T) {
 			if body.Engine != "fixture" {
 				t.Errorf("engine = %q", body.Engine)
 			}
-			if r.URL.Path == controlInstallPath || r.URL.Path == controlPullPath {
+			if r.URL.Path == controlPullPath {
+				if body.OpID != pullOpID || body.Model != pullModel {
+					t.Errorf("pull request identity = %+v", body)
+				}
+				percent := 37
+				snapshot := modeldownload.Snapshot{
+					Version: modeldownload.Version, SourceID: sourceID, Revision: "1",
+					Entries: []modeldownload.Entry{{ID: downloadID, Engine: body.Engine, Model: body.Model, Phase: modeldownload.PhaseInProgress, BlocksReadiness: true, Percent: &percent}},
+				}
+				remoteFixtureEncode(t, w, streamFrame{
+					Type: "progress", OpID: body.OpID, Engine: body.Engine, Op: "pull", ID: downloadID, Model: body.Model,
+					Stage: "fixture-stage", Percent: percent, DownloadState: &snapshot,
+				})
+				terminal := snapshot.Clone()
+				terminal.Revision = "2"
+				terminal.Entries[0].Phase = modeldownload.PhaseComplete
+				terminal.Entries[0].BlocksReadiness = false
+				terminal.Entries[0].Percent = nil
+				remoteFixtureEncode(t, w, streamFrame{
+					Type: "result", OpID: body.OpID, Engine: body.Engine, Op: "pull", ID: downloadID, Model: body.Model,
+					DownloadState: &terminal, Result: json.RawMessage(`{"ok":true}`),
+				})
+				return
+			}
+			if r.URL.Path == controlInstallPath {
 				remoteFixtureEncode(t, w, streamFrame{Type: "progress", Stage: "fixture-stage"})
 				remoteFixtureEncode(t, w, streamFrame{Type: "result", Result: json.RawMessage(`{"ok":true}`)})
 				return
@@ -258,10 +291,38 @@ func TestRemoteReverseReadsAndEveryControlRoute(t *testing.T) {
 	}
 	for _, path := range []string{controlInstallPath, controlPullPath} {
 		t.Run(path, func(t *testing.T) {
+			assertPullFrame := func(frame streamFrame, revision, phase string) {
+				t.Helper()
+				if frame.OpID != pullOpID || frame.Engine != "fixture" || frame.Op != "pull" || frame.ID != downloadID || frame.Model != pullModel {
+					t.Fatalf("pull frame identity = %+v", frame)
+				}
+				state := frame.DownloadState
+				if state == nil || state.Version != modeldownload.Version || state.SourceID != sourceID || state.Revision != revision || state.RecoveryRequired || len(state.Entries) != 1 {
+					t.Fatalf("pull frame download state = %+v", state)
+				}
+				entry := state.Entries[0]
+				if entry.ID != downloadID || entry.Engine != "fixture" || entry.Model != pullModel || entry.Phase != phase || entry.BlocksReadiness != (phase == modeldownload.PhaseInProgress) {
+					t.Fatalf("pull frame entry = %+v", entry)
+				}
+				if phase == modeldownload.PhaseInProgress {
+					if frame.Percent != 37 || entry.Percent == nil || *entry.Percent != 37 {
+						t.Fatalf("pull progress percent = %d/%v", frame.Percent, entry.Percent)
+					}
+				} else if entry.Percent != nil {
+					t.Fatalf("terminal retained a measured progress percent: %+v", entry)
+				}
+			}
 			progress := 0
-			result, err := client.stream(ctx, path, map[string]string{"engine": "fixture"}, func(frame streamFrame) {
+			var request any = installRequest{OpID: "install-route-operation", Engine: "fixture"}
+			if path == controlPullPath {
+				request = pullRequest{OpID: pullOpID, Engine: "fixture", Model: pullModel}
+			}
+			result, err := client.stream(ctx, path, request, func(frame streamFrame) {
 				if frame.Type != "progress" || frame.Stage != "fixture-stage" {
 					t.Errorf("progress = %+v", frame)
+				}
+				if path == controlPullPath {
+					assertPullFrame(frame, "1", modeldownload.PhaseInProgress)
 				}
 				progress++
 			})
@@ -270,6 +331,18 @@ func TestRemoteReverseReadsAndEveryControlRoute(t *testing.T) {
 			}
 			if result.Type != "result" || progress != 1 {
 				t.Fatalf("result/progress = %+v/%d", result, progress)
+			}
+			if path == controlPullPath {
+				assertPullFrame(result, "2", modeldownload.PhaseComplete)
+			}
+			var outcome struct {
+				OK bool `json:"ok"`
+			}
+			if err := json.Unmarshal(result.Result, &outcome); err != nil {
+				t.Fatalf("decode streamed result: %v", err)
+			}
+			if !outcome.OK {
+				t.Fatal("missing successful streamed result")
 			}
 		})
 	}
@@ -476,7 +549,7 @@ func TestRemoteDispatchedDirectMutationDoesNotFallBack(t *testing.T) {
 		return err
 	})
 	test("pull stream", func(ctx context.Context, c *remoteClient) error {
-		_, err := c.stream(ctx, controlPullPath, pullRequest{Engine: "fixture", Model: "model"}, nil)
+		_, err := c.stream(ctx, controlPullPath, pullRequest{OpID: "pull-dispatch-operation", Engine: "fixture", Model: "model"}, nil)
 		return err
 	})
 }

@@ -121,6 +121,9 @@ func extractDigests(raw json.RawMessage, spec *ActionResult) map[string]string {
 	out := make(map[string]string, len(rows))
 	conflicting := map[string]bool{}
 	for _, row := range rows {
+		if spec.Match != nil && !matchRow(row, spec.Match) {
+			continue
+		}
 		var name, digest string
 		if nodepolicy.ValidateModelIdentifierJSON(row[spec.Field]) != nil || json.Unmarshal(row[spec.Field], &name) != nil ||
 			json.Unmarshal(row[spec.Digest], &digest) != nil || !contentDigest.MatchString(digest) {
@@ -141,6 +144,7 @@ func extractDigests(raw json.RawMessage, spec *ActionResult) map[string]string {
 // its run id, launch digest and the digests its inventory listed under that
 // same run (none when the last listing belonged to another run).
 func (e *Executor) modelIdentity() modelIdentityParams {
+	engineNames, naming := e.inventoryModelNaming()
 	e.inventoryMu.Lock()
 	defer e.inventoryMu.Unlock()
 	digests := e.inventoryDigests
@@ -153,7 +157,7 @@ func (e *Executor) modelIdentity() modelIdentityParams {
 			out.epochs[name] = observed.epoch
 		}
 	}
-	for _, name := range e.reg.Names() {
+	for _, name := range engineNames {
 		if digests[name].suppressed {
 			continue
 		}
@@ -180,6 +184,18 @@ func (e *Executor) modelIdentity() modelIdentityParams {
 			}
 		}
 		out.Engines[name] = id
+	}
+	if e.downloads != nil {
+		e.downloads.mu.Lock()
+		defer e.downloads.mu.Unlock()
+	}
+	for name, id := range out.Engines {
+		for model := range id.ModelDigests {
+			if !e.modelReadyLocked(name, model, naming[name]) {
+				delete(id.ModelDigests, model)
+				delete(id.Serving, model)
+			}
+		}
 	}
 	return out
 }

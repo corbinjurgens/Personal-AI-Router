@@ -699,6 +699,9 @@ describe('copy supervisor and typed API', () => {
         const preload: PreloadServiceTransport = {
             connected: true,
             invoke,
+            invokeHistory: () => {
+                throw new Error('Unexpected history invocation')
+            },
             subscribePush: () => () => {},
             onConnect: () => () => {},
             onDisconnect: () => () => {},
@@ -731,6 +734,9 @@ describe('copy supervisor and typed API', () => {
         const preload: PreloadServiceTransport = {
             connected: true,
             invoke,
+            invokeHistory: () => {
+                throw new Error('Unexpected history invocation')
+            },
             subscribePush: () => () => {},
             onConnect: () => () => {},
             onDisconnect: () => () => {},

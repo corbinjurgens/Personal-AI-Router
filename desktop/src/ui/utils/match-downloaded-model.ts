@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { BuiltinEngineType } from '@/shared/types/engines'
-import type { ModelItem } from '@/ui/types/engine-info'
+import type { ModelItem } from '@/shared/types/engines'
 import type { ModelEntry } from '@/ui/types/model-hub'
 
 /**
@@ -58,7 +58,8 @@ export function isHubEntryDownloaded(
     if (downloaded.length === 0 || !adapterType) return false
     const matcher = MATCHERS[adapterType]
     for (const d of downloaded) {
-        if (!d.downloaded) continue
+        if (!d.downloaded || d.downloadStateCurrent !== true || d.downloadState?.blocksReadiness)
+            continue
         if (matcher(hubEntry, d)) return true
     }
     return false

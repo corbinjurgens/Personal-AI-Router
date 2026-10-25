@@ -267,6 +267,11 @@ func bufferBodyAndModel(w http.ResponseWriter, r *http.Request, limit int64) ([]
 }
 
 type Proxy struct {
+	// Demand-only diagnostics owner. No production caller starts it before the
+	// atomic history integration. Inference never acquires this mutex.
+	routingHistoryMu sync.Mutex
+	routingHistory   *proxyRoutingHistory
+
 	// routingSnapshot bounds snapshot copying and response encoding to one operation.
 	routingSnapshot atomic.Bool
 	// facadeMu guards facades, which is empty until the broker enables one. The
@@ -363,6 +368,15 @@ type Proxy struct {
 	selfMu     sync.RWMutex
 	selfNodeID string
 	selfModels map[string][]string
+}
+
+func (p *Proxy) newRoutingHistory() *proxyRoutingHistory {
+	p.routingHistoryMu.Lock()
+	defer p.routingHistoryMu.Unlock()
+	if p.routingHistory == nil {
+		p.routingHistory = newProxyRoutingHistory(p)
+	}
+	return p.routingHistory
 }
 
 // NewProxy builds a facade-less process host. Facades arrive via

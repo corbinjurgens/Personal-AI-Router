@@ -12,6 +12,7 @@ import {
     ModelItemStatuses
 } from '@/shared/constants/engines'
 import type { ModelCopyResult } from '@/shared/types/model-copy'
+import type { ModelDownloadEntry, ModelDownloadSnapshot } from '@/shared/types/model-download'
 
 /**
  * An engine PAIR ships: a closed literal union of the `EngineTypes` tuple.
@@ -142,6 +143,10 @@ export interface EngineProgress {
     message?: string
     /** Retains setup/durability qualifications without inventing a model row. */
     copyResult?: ModelCopyResult
+    downloadState?: ModelDownloadEntry
+    downloadStateCurrent?: boolean
+    downloadSourceId?: string
+    downloadRevision?: string
 }
 
 /**
@@ -164,12 +169,16 @@ export interface EngineModels {
     engineType: EngineType
     nodeId: string
     models: ModelItem[]
+    downloadState?: ModelDownloadSnapshot
+    downloadStateCurrent?: boolean
 }
 
 export interface ModelItem {
     name: string
     size: number
     downloaded: boolean
+    downloadState?: ModelDownloadEntry
+    downloadStateCurrent?: boolean
     status: ModelItemStatus
     parameterSize: string
     quantization: string

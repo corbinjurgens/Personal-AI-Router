@@ -26,6 +26,7 @@ type routingMapStorage struct {
 	lease   *bufferLease
 	slots   int
 	inserts int
+	source  *routingSourceDirectory // Independent native lifetime; not funded by registry grants.
 }
 
 const routingMapBaseBytes int64 = 256
@@ -58,13 +59,13 @@ func (s *routingMapStorage) reserveInsertion(root *bufferBudget, live int) (*buf
 // old map is discarded and outside the request mutex. identityMu stays held.
 func (s *routingMapStorage) install(lease *bufferLease, slots, live int) *bufferLease {
 	old := s.lease
-	*s = routingMapStorage{lease: lease, slots: slots, inserts: live}
+	*s = routingMapStorage{lease: lease, slots: slots, inserts: live, source: s.source}
 	return old
 }
 
 func (s *routingMapStorage) discard() {
 	old := s.lease
-	*s = routingMapStorage{}
+	*s = routingMapStorage{source: s.source}
 	if old != nil {
 		old.close()
 	}
@@ -141,6 +142,7 @@ func (p *Proxy) unregisterRoutingRequest(request *routingRequest) {
 		return
 	}
 	p.unregisterWorkloadLocked(request)
+	request.owner.freezeFacts()
 	delete(p.requests, request.key.RequestID)
 	if len(p.requests) == 0 {
 		p.requests = nil
@@ -151,6 +153,13 @@ func (p *Proxy) unregisterRoutingRequest(request *routingRequest) {
 }
 
 func (p *Proxy) registerWorkload(request *routingRequest, key workloadKey) error {
+	// Prepare inline metadata before either registry or request lock.
+	var descriptor *routingWorkloadDescriptor
+	if factIdentifier(key.engine) && factIdentifier(key.id) {
+		descriptor = &routingWorkloadDescriptor{}
+		descriptor.engineLen = uint16(copy(descriptor.engine[:], key.engine))
+		descriptor.idLen = uint16(copy(descriptor.id[:], key.id))
+	}
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
 	if request == nil || p.requests[request.key.RequestID] != request {
@@ -185,6 +194,24 @@ func (p *Proxy) registerWorkload(request *routingRequest, key workloadKey) error
 	p.workloadRequests[key] = request.key.RequestID
 	p.workloadStorage.inserts++
 	request.owner.workload = &key
+	if f := request.owner.facts; descriptor != nil && f.begin() {
+		if old := f.workload.Load(); old != nil {
+			descriptor.generation = old.generation + 1
+		} else {
+			descriptor.generation = 1
+		}
+		f.workload.Store(descriptor)
+		f.binding.Store(factAttached) // Pending generation, not yet representable.
+		// A registration after attempt creation can bind that actual local
+		// attempt. Ordinal and engine are checked, never an assumed index zero.
+		if a := request.owner.active; a != nil {
+			c := &f.attempts[(a.ordinal-1)%32]
+			if d := c.destination.Load(); c.ordinal.Load() == a.ordinal && d != nil && d.kind == 1 && d.secondLen == descriptor.engineLen && d.second == descriptor.engine {
+				f.binding.Store(a.ordinal | factAttached)
+			}
+		}
+		f.end()
+	}
 	return nil
 }
 
@@ -208,6 +235,11 @@ func (p *Proxy) unregisterWorkloadLocked(request *routingRequest) {
 	if request.owner.workload != nil {
 		delete(p.workloadRequests, *request.owner.workload)
 		request.owner.workload = nil
+		if f := request.owner.facts; f != nil {
+			if w := f.workload.Load(); w != nil {
+				request.owner.nativeWorkloadDetachedLocked(w.generation)
+			}
+		}
 	}
 }
 

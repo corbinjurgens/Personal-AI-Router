@@ -163,6 +163,9 @@ func startInteropProcess(t *testing.T, base, binary string, port int, extraEnv [
 	}
 	p.cmd.Dir = base
 	p.cmd.Env = append(os.Environ(), "HOME="+base, "XDG_CONFIG_HOME="+base, "APPDATA="+base, "LOCALAPPDATA="+base, "USERPROFILE="+base)
+	if binary == brokerBin || binary == engineMgrBin {
+		p.cmd.Env = privateEngineEnv(t, base)
+	}
 	p.cmd.Env = append(p.cmd.Env, extraEnv...)
 	p.in, err = p.cmd.StdinPipe()
 	if err != nil {

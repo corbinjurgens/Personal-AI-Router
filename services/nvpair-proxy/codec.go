@@ -59,3 +59,12 @@ func (c *Codec) NotifyContext(ctx context.Context, method string, params any) er
 	defer cancel()
 	return c.Codec.NotifyContext(ctx, method, params)
 }
+
+// History acquisition tries once, with no gate ownership outside this one
+// frame. The shared codec borrows frame through actual Write completion and
+// uses the parent's lifetime and existing write-interrupt owner. Fully stopped
+// output still couples ordinary notifications through their existing budget;
+// history adds no gate lease across frames, acknowledgements or copier turns.
+func (c *Codec) writeRoutingFrame(frame []byte) error {
+	return c.Codec.WritePreencoded(nil, c.root, frame)
+}

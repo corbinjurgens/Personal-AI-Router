@@ -1,12 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import readline from 'readline'
 import { EventEmitter } from 'events'
 import type { Duplex } from 'stream'
 import getErrorString from '@/shared/utils/get-error-string'
 import { createStructuredLogger } from '@/shared/utils/log'
 import { redactSensitiveLogText } from '@/electron/redact-log'
+import {
+    ROUTING_FRAME_BYTES,
+    getRoutingJsonProjector,
+    type RoutingHistoryMethod
+} from './routing-json'
 
 export type JsonValue = string | number | boolean | null | JsonObject | JsonValue[]
 
@@ -69,6 +73,20 @@ interface PendingCall {
     timeout?: ReturnType<typeof setTimeout>
 }
 
+interface PendingHistory {
+    ordinal: bigint
+    method: RoutingHistoryMethod
+    consume: (raw: Uint8Array) => boolean
+    resolve: () => void
+    reject: (error: Error) => void
+    timer: ReturnType<typeof setTimeout>
+}
+interface HistoryHandlers {
+    notification: (raw: Uint8Array) => undefined
+    invalid: () => void
+    writable: () => void
+}
+
 interface JsonRpcClientEvents {
     notification: [JsonRpcNotification]
     request: [JsonRpcInboundRequest]
@@ -88,6 +106,20 @@ const SERVICE_LOG_METHOD = 'service/log'
 const SERVICE_BROKER_RESTARTED_METHOD = 'service/broker-restarted'
 
 const log = createStructuredLogger('service-bridge')
+// One fixed desktop history control writer across client/socket replacements.
+// Its active borrower survives logical cancellation and releases only on the
+// actual write callback. The wake always targets the current connection owner.
+const historyControl = new Uint8Array(4096)
+let historyControlBusy = false
+let historyWakeHandlers: HistoryHandlers | null = null
+
+function isHistoryCall(method: string): method is RoutingHistoryMethod {
+    return (
+        method === 'routing:get-initial' ||
+        method === 'routing:subscribe' ||
+        method === 'routing:unsubscribe'
+    )
+}
 
 function isJsonObject(value: JsonValue | undefined): value is JsonObject {
     return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -149,7 +181,15 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     private pending = new Map<number, PendingCall>()
     private nextId = 0
     private writeTail: Promise<void> = Promise.resolve()
+    private refusalBusy = false
     private traceProtocol = false
+    private rawFrame: Uint8Array | null = null
+    private readonly historyProjector = getRoutingJsonProjector()
+    private historyHandlers: HistoryHandlers | null = null
+    private rawLength = 0
+    private historyIssued = 0n
+    private historyPending: PendingHistory | null = null
+    private historyQuarantined = false
 
     constructor(
         name: string,
@@ -194,6 +234,9 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         params?: JsonValue,
         timeoutMs: number | null = 10_000
     ): Promise<JsonValue | undefined> {
+        if (isHistoryCall(method)) {
+            throw new Error('history-invalid')
+        }
         if (!this.socket) throw new Error(`${this.name} is not running`)
 
         const id = ++this.nextId
@@ -216,6 +259,51 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         })
     }
 
+    /** One generated call; its raw result is consumed before the receiver reuses backing. */
+    callHistory(
+        method: RoutingHistoryMethod,
+        consume: (raw: Uint8Array) => boolean
+    ): Promise<void> {
+        const socket = this.socket
+        if (!isHistoryCall(method)) return Promise.reject(new Error('history-invalid'))
+        if (!socket) return Promise.reject(new Error('history-invalid'))
+        if (this.historyPending || historyControlBusy)
+            return Promise.reject(new JsonRpcResponseError(-32096, 'routing history busy; retry'))
+        if (this.historyIssued === 18446744073709551615n)
+            return Promise.reject(new Error('history-exhausted'))
+        const ordinal = ++this.historyIssued
+        const frame = `{"jsonrpc":"2.0","id":"jh:${ordinal}","method":"${method}","params":{}}\n`
+        const length = new TextEncoder().encodeInto(frame, historyControl).written
+        historyControlBusy = true
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                if (this.historyPending?.ordinal !== ordinal || this.socket !== socket) return
+                this.historyPending = null
+                reject(new Error('history-invalid'))
+            }, 10000)
+            this.historyPending = { ordinal, method, consume, resolve, reject, timer }
+            socket.write(historyControl.subarray(0, length), error => {
+                // This fixed write slot belongs to actual completion, across
+                // logical timeout/quarantine and even socket replacement.
+                historyControlBusy = false
+                if (error && this.socket === socket) socket.destroy(error)
+                historyWakeHandlers?.writable()
+            })
+        })
+    }
+    get historyWritable(): boolean {
+        return !historyControlBusy
+    }
+    cancelHistory(): void {
+        this.rejectHistory()
+    }
+    /** Borrowed bytes must be consumed synchronously; they never enter an event queue. */
+    setHistoryHandlers(handlers: HistoryHandlers | null): void {
+        const previous = this.historyHandlers
+        this.historyHandlers = handlers
+        if (handlers || historyWakeHandlers === previous) historyWakeHandlers = handlers
+    }
+
     /**
      * Fire a request without waiting for the response. Use
      * {@link sendWithResponse} only when a caller must observe admission. The
@@ -225,6 +313,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
      * no short request timeout to fabricate a failure on long-running operations.
      */
     send(method: string, params?: JsonValue): Promise<void> {
+        if (isHistoryCall(method)) return Promise.reject(new Error('history-invalid'))
         const id = ++this.nextId
         return this.write({ jsonrpc: '2.0', id, method, params })
     }
@@ -235,6 +324,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     }
 
     notify(method: string, params?: JsonValue): Promise<void> {
+        if (isHistoryCall(method)) return Promise.reject(new Error('history-invalid'))
         return this.write({ jsonrpc: '2.0', method, params })
     }
 
@@ -258,8 +348,12 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         this.epoch++
         this.cancelReconnectWait?.()
         this.failPending(new Error(`${this.name} detached before replying`))
+        this.setHistoryHandlers(null)
         const socket = this.socket
         this.socket = null
+        this.rawFrame = null
+        this.rawLength = 0
+        this.historyIssued = 0n
         if (!socket) return
         await new Promise<void>(resolve => {
             socket.once('close', () => resolve())
@@ -312,8 +406,33 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
 
     private attach(socket: Duplex, epoch: number): void {
         this.socket = socket
-        readline.createInterface({ input: socket }).on('line', line => {
-            if (this.socket === socket) this.handleLine(line)
+        // A replacement must not wait for callbacks on the retired transport.
+        // Its queued ordinary writes still check their original socket below.
+        this.writeTail = Promise.resolve()
+        this.rawFrame = new Uint8Array(ROUTING_FRAME_BYTES)
+        this.rawLength = 0
+        this.historyIssued = 0n
+        this.historyQuarantined = false
+        socket.on('data', (chunk: Buffer) => {
+            if (this.socket !== socket || !this.rawFrame || socket.destroyed) return
+            const rawFrame = this.rawFrame
+            for (const byte of chunk) {
+                if (
+                    this.rawLength === ROUTING_FRAME_BYTES ||
+                    (byte !== 10 && this.rawLength === ROUTING_FRAME_BYTES - 1)
+                ) {
+                    // The existing close owner fails pending work and schedules
+                    // its one reconnect. No input bytes enter diagnostics.
+                    socket.destroy()
+                    return
+                }
+                rawFrame[this.rawLength++] = byte
+                if (byte === 10) {
+                    this.handleRawFrame(rawFrame.subarray(0, this.rawLength - 1))
+                    this.rawLength = 0
+                    if (this.socket !== socket || socket.destroyed) return
+                }
+            }
         })
         // An error always precedes a close that matters; handling close alone
         // keeps a single path, and the listener stops Node treating it as fatal.
@@ -326,11 +445,119 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         socket.on('close', () => {
             if (this.socket !== socket) return
             this.socket = null
+            this.rawFrame = null
+            this.rawLength = 0
+            this.historyIssued = 0n
+            this.setHistoryHandlers(null)
             this.failPending(new Error(`${this.name} connection closed before replying`))
             if (this.closed) return
             this.emit('disconnected')
             void this.reconnect(epoch)
         })
+    }
+
+    private rejectHistory(): void {
+        const pending = this.historyPending
+        this.historyPending = null
+        if (pending) {
+            clearTimeout(pending.timer)
+            pending.reject(new Error('history-invalid'))
+        }
+    }
+
+    private reportInvalidHistory(): void {
+        this.emit('log', {
+            source: this.name,
+            stream: 'stdout',
+            text: 'history-unknown history-invalid 1'
+        })
+    }
+
+    private handleRawFrame(raw: Uint8Array): void {
+        if (raw.length === 0) return
+        const selected = this.historyProjector.frame(
+            raw,
+            this.historyPending?.ordinal ?? null,
+            this.historyIssued
+        )
+        if (selected.kind === 'ordinary') {
+            if (raw.length + 1 > 8 * 1024 * 1024) {
+                this.emit('log', {
+                    source: this.name,
+                    stream: 'stdout',
+                    text: 'history-unknown limit-exceeded 1'
+                })
+                return
+            }
+            this.handleLine(new TextDecoder().decode(raw))
+            return
+        }
+        if (selected.kind === 'discard') {
+            if (selected.category !== 'history-stale') this.reportInvalidHistory()
+            return
+        }
+        if (selected.kind === 'refuse') {
+            const socket = this.socket
+            if (!socket) return
+            if (this.refusalBusy) {
+                socket.destroy()
+                return
+            }
+            this.refusalBusy = true
+            const id = new TextDecoder().decode(selected.id)
+            const frame = `{"jsonrpc":"2.0","id":${id},"error":{"code":${selected.code},"message":"${selected.message}"}}\n`
+            // One E-bounded native write, reserved before copying the raw ID.
+            // Stream writes preserve frame order without a refusal Promise
+            // backlog. Only its actual callback releases the reservation,
+            // including across connection replacement.
+            socket.write(frame, error => {
+                this.refusalBusy = false
+                if (error && this.socket === socket) socket.destroy()
+            })
+            return
+        }
+        if (selected.kind === 'quarantine') {
+            this.reportInvalidHistory()
+            this.historyQuarantined = true
+            this.rejectHistory()
+            this.historyHandlers?.invalid()
+            return
+        }
+        if (selected.kind === 'error') {
+            if (selected.code !== -32096) this.reportInvalidHistory()
+            const pending = this.historyPending
+            this.historyPending = null
+            if (pending) {
+                clearTimeout(pending.timer)
+                pending.reject(new JsonRpcResponseError(selected.code, selected.message))
+            }
+            return
+        }
+        try {
+            if (selected.kind === 'notification') {
+                if (
+                    !this.historyQuarantined &&
+                    this.historyHandlers?.notification(selected.value) !== undefined
+                )
+                    throw new Error('history-invalid')
+            } else {
+                const pending = this.historyPending
+                if (!pending) return
+                if (pending.consume(selected.value) !== true) {
+                    this.rejectHistory()
+                    return
+                }
+                this.historyPending = null
+                if (pending.method !== 'routing:unsubscribe') this.historyQuarantined = false
+                clearTimeout(pending.timer)
+                pending.resolve()
+            }
+        } catch {
+            this.reportInvalidHistory()
+            this.historyQuarantined = true
+            this.rejectHistory()
+            this.historyHandlers?.invalid()
+        }
     }
 
     private async reconnect(epoch: number): Promise<void> {
@@ -368,16 +595,26 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         const socket = this.socket
         if (!socket) throw new Error(`${this.name} is not running`)
 
+        return this.writeFrame(socket, message)
+    }
+    private writeFrame(socket: Duplex, frame: string | JsonRpcMessage): Promise<void> {
         this.writeTail = this.writeTail.then(
             () =>
                 new Promise<void>((resolve, reject) => {
-                    socket.write(`${JSON.stringify(message)}\n`, err => {
-                        if (err) {
-                            reject(err)
-                            return
+                    if (socket !== this.socket || socket.destroyed) {
+                        reject(new Error(`${this.name} connection closed before writing`))
+                        return
+                    }
+                    socket.write(
+                        typeof frame === 'string' ? frame : `${JSON.stringify(frame)}\n`,
+                        err => {
+                            if (err) {
+                                reject(err)
+                                return
+                            }
+                            resolve()
                         }
-                        resolve()
-                    })
+                    )
                 })
         )
         return this.writeTail
@@ -388,13 +625,10 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
 
         const message = parseMessage(line)
 
-        // A protocol frame is logged only while tracing, and then it is redacted
-        // first: it costs a redaction pass, a debug panel entry, and a file line
-        // per frame. A line that is not a frame is not protocol traffic, so it is
-        // always handed over. Redact only what is logged; `message` stays intact
-        // for the handling below so the pairing flow still receives the real PIN
-        // it has to display.
-        if (!message || this.traceProtocol) {
+        // Only guarded ordinary frames can reach protocol trace. A failed parse
+        // never exposes its input. Redact the trace copy while preserving the
+        // ordinary message consumed by the pairing flow.
+        if (message && this.traceProtocol) {
             this.emit('log', {
                 source: this.name,
                 stream: 'stdout',
@@ -465,6 +699,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     }
 
     private failPending(error: Error): void {
+        this.rejectHistory()
         for (const pending of Array.from(this.pending.values())) {
             if (pending.timeout) clearTimeout(pending.timeout)
             pending.reject(error)

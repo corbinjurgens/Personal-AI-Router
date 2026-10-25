@@ -42,7 +42,8 @@ func (d *directory) storeLocked(node noderec.DirectoryNode) {
 	if old, present := d.nodes[node.HostUUID]; !present || !samePeerServicesRoute(old, node) {
 		d.generations[node.HostUUID]++
 	}
-	d.nodes[node.HostUUID] = node
+	d.retireDownloadReadsLocked(node)
+	d.nodes[node.HostUUID] = cloneDownloadNode(node)
 }
 
 func (d *directory) routeGeneration(hostUUID string) uint64 {
@@ -63,9 +64,20 @@ func (d *directory) installPeerServices(claim noderec.PeerServicesClaim, node no
 	defer d.mu.Unlock()
 	old, present := d.nodes[node.HostUUID]
 	previous, authenticated := d.peerServices[node.HostUUID]
-	routeChanged = !present || !samePeerServicesRoute(old, node) || authenticated && previous.Incarnation != claim.Incarnation
+	routeChanged = !present || !samePeerServicesRoute(old, node) || !authenticated || previous.Incarnation != claim.Incarnation
 	if authenticated && previous.Incarnation != claim.Incarnation {
 		d.generations[node.HostUUID]++
+	} else if present && !authenticated && samePeerServicesRoute(old, node) {
+		// Even at the same endpoint, an authenticated claim replaces the
+		// browse authority against which outstanding enrichment began.
+		d.generations[node.HostUUID]++
+	}
+	if routeChanged {
+		observation := nodeDownloadObservation(old).stale()
+		if observation.snapshot == nil && observation.current == nil {
+			observation = nodeDownloadObservation(node).stale()
+		}
+		node.DownloadState, node.DownloadStateCurrent = observation.snapshot, observation.current
 	}
 	d.peerServices[node.HostUUID] = claim
 	d.storeLocked(node)
@@ -137,6 +149,7 @@ func (d *daemon) acceptPeerServices(claim noderec.PeerServicesClaim) bool {
 		}
 	}
 	isNew, routeChanged := d.dir.installPeerServices(claim, node)
+	node, _ = d.dir.get(hostUUID)
 	if routeChanged {
 		d.invalidatePeerServicesRoute(hostUUID)
 	}
@@ -201,23 +214,18 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 	d.dir.mu.Lock()
 	current, exists := d.dir.peerServices[node.HostUUID]
 	valid := exists && d.dir.generations[node.HostUUID] == generation && current.Incarnation == claim.Incarnation && admitted && incarnation == claim.Incarnation && peerServicesFresh(current, time.Now())
-	if valid {
-		node = d.dir.nodes[node.HostUUID]
-		if infoFetched {
-			node.GPUs, node.CPU, node.Memory = info.GPUs, info.CPU, info.Memory
-			node.ServiceBuildID = info.ServiceBuildID
-		}
-		if modelsFetched {
-			inventory.applyTo(&node)
-		}
-		d.dir.nodes[node.HostUUID] = node
-	}
-	d.dir.mu.Unlock()
 	if !valid {
+		d.dir.mu.Unlock()
 		return
 	}
+	node = d.dir.nodes[node.HostUUID]
+	previousDownload := nodeDownloadObservation(node)
+	// Cache acceptance and directory application share the final source fence.
+	// A lower revision or retired source may update neither inventory owner.
 	d.infoMu.Lock()
 	if infoFetched {
+		node.GPUs, node.CPU, node.Memory = info.GPUs, info.CPU, info.Memory
+		node.ServiceBuildID = info.ServiceBuildID
 		if d.lastInfo == nil {
 			d.lastInfo = make(map[string]NodeInfoResponse)
 		}
@@ -226,11 +234,21 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 		}
 		d.lastInfo[node.HostUUID], d.lastInfoAt[node.HostUUID] = info, time.Now()
 	}
-	if modelsFetched {
-		d.cacheInventoryLocked(node.HostUUID, inventory)
+	modelsAccepted := modelsFetched && inventory.accepts(previousDownload) && d.cacheInventoryLocked(node.HostUUID, inventory)
+	if modelsAccepted {
+		inventory.applyTo(&node)
+	} else if !modelsFetched {
+		observation := previousDownload.stale()
+		node.DownloadState, node.DownloadStateCurrent = observation.snapshot, observation.current
+		if cached, exists := d.lastDownloads[node.HostUUID]; exists {
+			d.lastDownloads[node.HostUUID] = cached.stale()
+		}
 	}
 	d.infoMu.Unlock()
-	if infoFetched || modelsFetched {
+	d.dir.retireDownloadReadsLocked(node)
+	d.dir.nodes[node.HostUUID] = cloneDownloadNode(node)
+	d.dir.mu.Unlock()
+	if infoFetched || modelsAccepted || !previousDownload.equal(nodeDownloadObservation(node)) {
 		d.emit(noderec.NotifyNodeUpdated, node)
 	}
 }
@@ -266,6 +284,19 @@ func (d *daemon) reconcilePeerServices() {
 		d.dir.generations[hostUUID]++
 		if browse, exists := d.dir.browse[hostUUID]; exists {
 			browse.Trusted = d.mesh.HasPin(browse.ClusterUUID)
+			// Retire the most recently observed manager state with this route,
+			// rather than restoring an older browse snapshot as current.
+			observation := nodeDownloadObservation(old).stale()
+			if observation.snapshot == nil && observation.current == nil {
+				observation = nodeDownloadObservation(browse).stale()
+			}
+			if old.DownloadState != nil {
+				// Browse may predate an unsafe pull. Keep the latest canonical
+				// inventory rather than restoring its superseded ready names.
+				browse.Models, browse.ModelsByEngine = old.Models, old.ModelsByEngine
+				browse.LoadedByEngine = old.LoadedByEngine
+			}
+			browse.DownloadState, browse.DownloadStateCurrent = observation.snapshot, observation.current
 			d.dir.storeLocked(browse)
 			changed = append(changed, browse)
 		} else {

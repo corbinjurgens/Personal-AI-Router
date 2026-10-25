@@ -335,6 +335,12 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	release, err := s.exec.acquireModelRead(engine, model, false)
+	if err != nil {
+		http.Error(w, "model content unavailable", http.StatusConflict)
+		return
+	}
+	defer release()
 	list, err := s.exec.modelSourceFiles(ctx, engine, model)
 	if err != nil {
 		http.Error(w, err.Error(), modelLookupStatus(err))
@@ -437,6 +443,12 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	release, err := s.exec.acquireModelRead(engine, model, false)
+	if err != nil {
+		http.Error(w, "model content unavailable", http.StatusConflict)
+		return
+	}
+	defer release()
 	rel := r.URL.Query().Get("path")
 	if !validModelRelPath(rel) {
 		http.Error(w, "invalid path", http.StatusBadRequest)

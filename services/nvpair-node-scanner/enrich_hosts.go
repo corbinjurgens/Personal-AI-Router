@@ -5,8 +5,10 @@ package main
 
 import (
 	"log/slog"
+	"strconv"
 	"sync"
 
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
@@ -19,14 +21,80 @@ type modelInventory struct {
 	byEngine       map[string][]string
 	loadedByEngine map[string][]string
 	policy         *nodepolicy.Advertisement
+	downloadObservation
+	// sourceBaseline is the last accepted source when this read began. A
+	// concurrent source replacement retires reads that started before it.
+	sourceBaseline string
+}
+
+type downloadObservation struct {
+	snapshot *modeldownload.Snapshot
+	current  *bool
+}
+
+func (o downloadObservation) clone() downloadObservation {
+	if o.snapshot != nil {
+		value := o.snapshot.Clone()
+		o.snapshot = &value
+	}
+	if o.current != nil {
+		value := *o.current
+		o.current = &value
+	}
+	return o
+}
+
+func (o downloadObservation) stale() downloadObservation {
+	o = o.clone()
+	if o.snapshot != nil || o.current != nil {
+		value := false
+		o.current = &value
+	}
+	return o
+}
+
+func (o downloadObservation) equal(other downloadObservation) bool {
+	if (o.current == nil) != (other.current == nil) || o.current != nil && *o.current != *other.current {
+		return false
+	}
+	if o.snapshot == nil || other.snapshot == nil {
+		return o.snapshot == other.snapshot
+	}
+	return o.snapshot.Equal(*other.snapshot)
+}
+
+func nodeDownloadObservation(node noderec.DirectoryNode) downloadObservation {
+	return downloadObservation{snapshot: node.DownloadState, current: node.DownloadStateCurrent}
+}
+
+func (inv modelInventory) accepts(previous downloadObservation) bool {
+	if inv.snapshot == nil || previous.snapshot == nil {
+		return true
+	}
+	if inv.snapshot.SourceID != previous.snapshot.SourceID {
+		return inv.current != nil && *inv.current && inv.sourceBaseline == previous.snapshot.SourceID
+	}
+	// Validation guarantees canonical uint64 revision strings.
+	next, _ := strconv.ParseUint(inv.snapshot.Revision, 10, 64)
+	old, _ := strconv.ParseUint(previous.snapshot.Revision, 10, 64)
+	return next >= old
 }
 
 // applyTo sets the node's inventory fields from inv.
 func (inv modelInventory) applyTo(node *noderec.DirectoryNode) {
+	previous := nodeDownloadObservation(*node)
+	if !inv.accepts(previous) {
+		return
+	}
 	node.Models = inv.models
 	node.ModelsByEngine = inv.byEngine
 	node.LoadedByEngine = inv.loadedByEngine
 	node.Policy = inv.policy
+	observation := inv.downloadObservation.clone()
+	if observation.snapshot == nil && previous.snapshot != nil {
+		observation = previous.stale()
+	}
+	node.DownloadState, node.DownloadStateCurrent = observation.snapshot, observation.current
 }
 
 // hostKey identifies one node's endpoint for one service. Node-info and the engine
