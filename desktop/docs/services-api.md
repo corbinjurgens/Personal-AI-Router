@@ -24,6 +24,7 @@
 - ⚠️ nvpair-engine-manager → engine:logs
 - ⚠️ nvpair-engine-manager → engine:preview-launch
 - ⚠️ nvpair-engine-manager → engine:remote-apply-settings
+- ⚠️ nvpair-engine-manager → engine:remote-copy-model
 - ⚠️ nvpair-engine-manager → engine:remote-get-settings
 - ⚠️ nvpair-engine-manager → engine:remote-preview-settings
 - ⚠️ nvpair-engine-manager → engine:remote-switch
@@ -136,9 +137,12 @@
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `engine:action` | request (we call) | ✅ yes |
+| `engine:active-model-copies` | request (we call) | ✅ yes |
+| `engine:cancel-model-copy` | request (we call) | ✅ yes |
 | `engine:catalog` | request (we call) | ✅ yes |
 | `engine:configure-launch` | request (we call) | ⚠️ not called |
 | `engine:configured-ports` | request (we call) | ⚠️ not called |
+| `engine:copy-model` | request (we call) | ✅ yes |
 | `engine:delete-model` | request (we call) | ✅ yes |
 | `engine:describe` | request (we call) | ⚠️ not called |
 | `engine:descriptors` | request (we call) | ✅ yes |
@@ -149,12 +153,13 @@
 | `engine:intent` | request (we call) | ✅ yes |
 | `engine:load-model` | request (we call) | ✅ yes |
 | `engine:logs` | request (we call) | ⚠️ not called |
+| `engine:model-copy-capabilities` | request (we call) | ✅ yes |
 | `engine:models` | request (we call) | ✅ yes |
 | `engine:prepare-shutdown` | request (we call) | ➖ ignored |
 | `engine:preview-launch` | request (we call) | ⚠️ not called |
 | `engine:reconcile-resident` | request (we call) | ➖ ignored |
 | `engine:remote-apply-settings` | request (we call) | ⚠️ not called |
-| `engine:remote-copy-model` | request (we call) | ✅ yes |
+| `engine:remote-copy-model` | request (we call) | ⚠️ not called |
 | `engine:remote-delete-model` | request (we call) | ✅ yes |
 | `engine:remote-get-installed` | request (we call) | ✅ yes |
 | `engine:remote-get-settings` | request (we call) | ⚠️ not called |
