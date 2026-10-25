@@ -13,11 +13,16 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"nvpair-shared/noderec"
 )
 
 // Check the argv at the launch boundary, including custom broker and service
 // starts. A reserved plan that never reaches exec is not isolation.
 func validateFixtureBrokerArgs(args []string) error {
+	if err := validateFixtureMDNSArgs(args, "scanner-"); err != nil {
+		return err
+	}
 	values := make(map[string]int)
 	required := (fixtureServicePorts{}).args()
 	for i := 0; i < len(args); i++ {
@@ -73,6 +78,78 @@ func validateFixtureBrokerArgs(args []string) error {
 		seen[port] = name
 	}
 	return nil
+}
+
+// Match flag.Bool's bare/equals syntax and last-value-wins behavior. Brokers
+// and direct scanner commands prepend multicast-off before caller overrides.
+func validateFixtureMDNSArgs(args []string, prefix string) error {
+	enabled := false
+	var namespace noderec.MDNSNamespace
+	for i := 0; i < len(args); i++ {
+		if !strings.HasPrefix(args[i], "-") || args[i] == "--" {
+			return fmt.Errorf("fixture positional argument %q", args[i])
+		}
+		name, value, hasValue := strings.Cut(strings.TrimLeft(args[i], "-"), "=")
+		if !hasValue {
+			if name == prefix+"mdns" || name == "version" {
+				value = "true"
+			} else {
+				i++
+				if i == len(args) {
+					return fmt.Errorf("fixture flag --%s has no value", name)
+				}
+				value = args[i]
+			}
+		}
+		switch name {
+		case prefix + "mdns":
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return err
+			}
+			enabled = parsed
+		case prefix + "mdns-service":
+			namespace.Service = value
+		case prefix + "mdns-domain":
+			namespace.Domain = value
+		}
+	}
+	if enabled {
+		return validateFixtureMDNSNamespace(namespace)
+	}
+	return nil
+}
+
+func fixtureScannerCommand(binary string, args ...string) (*exec.Cmd, error) {
+	if err := validateFixtureMDNSArgs(args, ""); err != nil {
+		return nil, err
+	}
+	return exec.Command(binary, append([]string{"--mdns=false"}, args...)...), nil
+}
+
+func TestFixtureLaunchRejectsProductionMulticast(t *testing.T) {
+	namespace := newFixtureMDNSNamespace(t)
+	plan := fixtureServicePorts{24001, 24002, 24003, 24004, 24005, 24006}
+	for _, extra := range [][]string{
+		{"--scanner-mdns=true"}, {"--scanner-mdns"},
+		{"--scanner-mdns=true", "--scanner-mdns-service", namespace.Service},
+		{"--scanner-mdns=true", "--scanner-mdns-domain", namespace.Domain},
+		append(fixtureMDNSBrokerArgs(namespace), "--scanner-mdns-domain=LOCAL."),
+		append(fixtureMDNSBrokerArgs(namespace), "-scanner-mdns-service=_NVPAIR-NODE._TCP."),
+	} {
+		if cmd, err := fixtureBrokerCommand("unused", append(plan.args(), extra...)...); err == nil || cmd != nil {
+			t.Fatalf("unsafe multicast argv produced command: %v, %v", cmd, err)
+		}
+	}
+	if cmd, err := fixtureBrokerCommand("unused", append(plan.args(), fixtureMDNSBrokerArgs(namespace)...)...); err != nil || cmd == nil {
+		t.Fatalf("private multicast refused: %v", err)
+	}
+	if cmd, err := fixtureScannerCommand("unused", "--mdns=true"); err == nil || cmd != nil {
+		t.Fatalf("direct scanner production multicast produced command: %v, %v", cmd, err)
+	}
+	if cmd, err := fixtureScannerCommand("unused", fixtureMDNSScannerArgs(namespace)...); err != nil || cmd == nil {
+		t.Fatalf("private direct scanner refused: %v", err)
+	}
 }
 
 func fixtureBrokerDefaults() []string {
@@ -204,6 +281,7 @@ func TestFixtureBrokerLaunchSeamsRemainGuarded(t *testing.T) {
 			}
 			guard := required[fn.Name.Name]
 			found := false
+			foundScanner := false
 			ast.Inspect(fn, func(node ast.Node) bool {
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
@@ -211,6 +289,9 @@ func TestFixtureBrokerLaunchSeamsRemainGuarded(t *testing.T) {
 				}
 				if name, ok := call.Fun.(*ast.Ident); ok && name.Name == guard {
 					found = true
+				}
+				if name, ok := call.Fun.(*ast.Ident); ok && name.Name == "fixtureScannerCommand" {
+					foundScanner = true
 				}
 				selector, ok := call.Fun.(*ast.SelectorExpr)
 				if !ok || (selector.Sel.Name != "Command" && selector.Sel.Name != "CommandContext") {
@@ -229,8 +310,8 @@ func TestFixtureBrokerLaunchSeamsRemainGuarded(t *testing.T) {
 				}
 				switch target := call.Args[index].(type) {
 				case *ast.Ident:
-					if target.Name == "brokerBin" || target.Name == "serviceBin" {
-						t.Errorf("%s: %s bypasses the fixture broker/service launch guard", path, fn.Name.Name)
+					if target.Name == "brokerBin" || target.Name == "serviceBin" || target.Name == "scannerBin" {
+						t.Errorf("%s: %s bypasses the fixture broker/service/scanner launch guard", path, fn.Name.Name)
 					}
 				case *ast.SelectorExpr:
 					if target.Sel.Name == "brokerPath" || target.Sel.Name == "servicePath" {
@@ -239,6 +320,9 @@ func TestFixtureBrokerLaunchSeamsRemainGuarded(t *testing.T) {
 				}
 				return true
 			})
+			if fn.Name.Name == "startTask1Process" && !foundScanner {
+				t.Errorf("%s: direct scanner launch no longer guarded", path)
+			}
 			if guard != "" {
 				if !found {
 					t.Errorf("%s: %s no longer calls %s", path, fn.Name.Name, guard)

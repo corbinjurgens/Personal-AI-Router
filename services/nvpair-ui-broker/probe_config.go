@@ -42,10 +42,17 @@ func (b *Broker) manualNodesArgs() []string {
 	return args
 }
 
-func (b *Broker) scannerArgs() []string {
+func (b *Broker) scannerArgs() ([]string, error) {
 	args := b.clusterDirArgs()
+	if b.scannerNamespace != nil {
+		namespace, err := b.scannerNamespace.Normalize()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "--mdns-service", namespace.Service, "--mdns-domain", namespace.Domain)
+	}
 	if b.disableMDNS {
 		args = append(args, "--mdns=false")
 	}
-	return args
+	return args, nil
 }

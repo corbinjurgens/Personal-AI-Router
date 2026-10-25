@@ -70,6 +70,13 @@ func startTask1Process(t *testing.T, base, binary string, args ...string) *task1
 			t.Fatalf("broker fixture launch: %v", err)
 		}
 	}
+	if binary == scannerBin {
+		var err error
+		p.cmd, err = fixtureScannerCommand(binary, args...)
+		if err != nil {
+			t.Fatalf("scanner fixture launch: %v", err)
+		}
+	}
 	p.cmd.Env = append(os.Environ(), "HOME="+base, "XDG_CONFIG_HOME="+base, "APPDATA="+base, "LOCALAPPDATA="+base, "USERPROFILE="+base)
 	if binary == brokerBin || binary == engineMgrBin {
 		p.cmd.Env = privateEngineEnv(t, base)

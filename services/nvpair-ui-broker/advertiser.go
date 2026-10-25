@@ -108,7 +108,7 @@ func (b *Broker) reconcileAdvertise(client *http.Client) {
 		b.setProxyLocalBackend(b.getProxy(), "ollama", 0, false)
 		return
 	}
-	enginePort, probe := b.localEnginePort("ollama", defaultOllamaPort)
+	enginePort, probe := b.localEnginePort("ollama")
 	proxyPort := b.proxyListenPort()
 	// Advertise only when the engine is healthy AND the proxy is up AND the two
 	// ports differ. Equal ports mean we can't tell the engine from the proxy
@@ -170,12 +170,10 @@ func (b *Broker) reconcileAdvertiseLMStudio(client *http.Client) {
 	if b.pendingSwitchLocked("lmstudio") != nil {
 		return
 	}
-	enginePort, probe := b.localEnginePort("lmstudio", defaultLMStudioPort)
+	enginePort, probe := b.localEnginePort("lmstudio")
 	proxyPort := b.lmstudioProxyListenPort()
 	if proxyPort != 0 && enginePort == proxyPort {
-		// engine-manager may be temporarily unavailable after managed setup.
-		// Prefer the last confirmed backend, but never hand the proxy its own
-		// listener as a local destination.
+		// Never hand the proxy its own listener as a local destination.
 		if cached := int(b.lmstudioState().backendPort.Load()); cached > 0 && cached != proxyPort {
 			enginePort = cached
 		} else {
@@ -183,14 +181,6 @@ func (b *Broker) reconcileAdvertiseLMStudio(client *http.Client) {
 			probe = false
 		}
 	}
-	// enginePort may be a stock-port fallback: localEnginePort returns one when
-	// engine-manager is unavailable, and it is indistinguishable from a real
-	// status here. Use it to advertise this tick only; never write it to
-	// lmstudioBackendPort. That cache's authoritative owners are the managed
-	// facade setup and live engine:status. Promoting the fallback poisons the
-	// cache while the proxy and engine restart together (as on the first invite),
-	// which later makes the compatibility proxy on the facade port look like the
-	// backend and wrongly disables managed mode.
 	up := probe && proxyPort != 0 && enginePort != proxyPort && checkEngineHealth(lmstudioProxyProfile, client, enginePort, "")
 	if up {
 		b.registerService(noderec.RegisterParams{Service: noderec.ServiceLMStudio, Port: proxyPort})
@@ -315,19 +305,18 @@ func (b *Broker) localEngineCredential(engine string, port int) string {
 
 // localEnginePort asks engine-manager for the port the named engine is actually
 // serving on. The bool says whether there is a port worth probing. A valid
-// running:false response is authoritative and returns false; only an unavailable
-// manager/RPC retains the legacy stock-port fallback.
-func (b *Broker) localEnginePort(engine string, fallback int) (int, bool) {
+// running:false response, missing manager or failed RPC all refuse health probes.
+func (b *Broker) localEnginePort(engine string) (int, bool) {
 	em := b.getEngineMgr()
 	if em == nil {
-		return fallback, true
+		return 0, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	params, _ := json.Marshal(map[string]string{"engine": engine})
 	result, rpcErr, err := em.Call(ctx, "engine:status", params)
 	if err != nil || rpcErr != nil {
-		return fallback, true
+		return 0, false
 	}
 	return runningEnginePort(result)
 }
@@ -337,7 +326,7 @@ func runningEnginePort(result json.RawMessage) (int, bool) {
 		Running bool `json:"running"`
 		Port    int  `json:"port"`
 	}
-	if json.Unmarshal(result, &st) != nil || !st.Running || st.Port <= 0 {
+	if json.Unmarshal(result, &st) != nil || !st.Running || st.Port <= 0 || st.Port > 65535 {
 		return 0, false
 	}
 	return st.Port, true
@@ -345,9 +334,7 @@ func runningEnginePort(result json.RawMessage) (int, bool) {
 
 // engineProxyListenPort returns an engine proxy's current listen port, or 0 if
 // it is not supervised or has not reported ready. Used to refuse advertising an
-// engine at its own proxy's port, which would be a self-forward loop, and to
-// keep the compatibility fallback from mistaking a proxy that moved onto the
-// facade port for the engine itself.
+// engine at its own proxy's port, which would be a self-forward loop.
 func (b *Broker) engineProxyListenPort(profile engineProxyProfile) int {
 	if p := b.engineProxyHandle(profile); p != nil {
 		if ready, port := p.Status(profile.Name); ready {

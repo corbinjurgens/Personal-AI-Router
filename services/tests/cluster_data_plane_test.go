@@ -31,6 +31,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/netpick"
+	"nvpair-shared/noderec"
 )
 
 // interNodeCluster is a synthetic two-node cluster for the data-plane tests.
@@ -39,10 +40,11 @@ import (
 // Both directions of the data plane are mTLS, so a test that wants to talk to the
 // node under test needs a cluster identity of its own.
 type interNodeCluster struct {
-	nodeDir  string
-	nodeUUID string
-	peerUUID string
-	peer     *clustertrust.Mesh
+	nodeDir   string
+	nodeUUID  string
+	peerUUID  string
+	peer      *clustertrust.Mesh
+	namespace noderec.MDNSNamespace
 }
 
 func newInterNodeCluster(t *testing.T) *interNodeCluster {
@@ -91,7 +93,7 @@ func newInterNodeCluster(t *testing.T) *interNodeCluster {
 	if !peer.Clustered() {
 		t.Fatal("a dir with a keypair, an admission and a pin must read as clustered")
 	}
-	return &interNodeCluster{nodeDir: nodeDir, nodeUUID: nodeUUID, peerUUID: peerUUID, peer: peer}
+	return &interNodeCluster{nodeDir: nodeDir, nodeUUID: nodeUUID, peerUUID: peerUUID, peer: peer, namespace: newFixtureMDNSNamespace(t)}
 }
 
 // clientAsPeer dials the node under test presenting the stub peer's leaf and
@@ -122,9 +124,9 @@ func (c *interNodeCluster) startStubClusterPeer(t *testing.T, instance, hostUUID
 	txt := []string{"v=1", "uuid=" + hostUUID, fmt.Sprintf("wl=%d", port),
 		clustertrust.ClusterUUIDTXTKey + "=" + c.peerUUID}
 	startMDNSAdvertiser(t, mdnsAdvertiserFixture{
-		Instance: instance, Service: nodeRecordService, Port: port, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
+		Instance: instance, Service: c.namespace.Service, Domain: c.namespace.Domain, Port: port, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
 	})
-	t.Logf("stub cluster peer advertising %s (wl=%d, cluster-uuid=%s)", nodeRecordService, port, c.peerUUID)
+	t.Logf("stub cluster peer advertising %s.%s (wl=%d, cluster-uuid=%s)", c.namespace.Service, c.namespace.Domain, port, c.peerUUID)
 	return received
 }
 

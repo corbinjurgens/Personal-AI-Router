@@ -106,7 +106,7 @@ func TestWorkloadDepartedRunRetired(t *testing.T) {
 		// and a cross-pinned joined cluster, outside the network sandbox.
 		cluster := newInterNodeCluster(t)
 		received := cluster.startStubClusterPeer(t, "departed-run-peer", "departed-run-peer-uuid")
-		f := startDepartedRunFixture(t, cluster.nodeDir, "--scanner-mdns=true")
+		f := startDepartedRunFixture(t, cluster.nodeDir, fixtureMDNSBrokerArgs(cluster.namespace)...)
 		pid := mustPid(t, waitForStderr(t, f.proxyLines, proxyPidRe, 10*time.Second))
 		request := f.startRequest(t)
 		running := waitDepartedRunFrame(t, f.events, "workloads:upsert", 15*time.Second, func(p departedRunParams) bool {

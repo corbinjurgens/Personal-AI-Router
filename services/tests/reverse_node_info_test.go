@@ -138,7 +138,8 @@ func newPhase04NodeInfoPeers(t *testing.T) (*task2Fixture, *atomic.Int64) {
 		node.cm.call(t, "cluster:set-local-services", map[string]any{"generation": 1, "services": []noderec.RegisterParams{{Service: noderec.ServiceCluster, Port: node.observers[noderec.ServiceCluster].port}}})
 	}
 	task1Eventually(t, "pinned reverse session", 15*time.Second, func() bool { return f.a.observers[noderec.ServiceCluster].established(f.b.uuid) > 0 })
-	responder, err := mdns.NewResponder("phase04-ni-"+filepath.Base(f.b.base), noderec.ServiceType, noderec.Domain, noderec.SRVPort, []string{"v=1", "uuid=" + phase04NodeInfoHost, "cluster-uuid=" + f.b.uuid, "ip=127.0.0.1", fmt.Sprintf("ni=%d", f.blockedPort)})
+	f.namespace = newFixtureMDNSNamespace(t)
+	responder, err := mdns.NewResponder("phase04-ni-"+filepath.Base(f.b.base), f.namespace.Service, f.namespace.Domain, noderec.SRVPort, []string{"v=1", "uuid=" + phase04NodeInfoHost, "cluster-uuid=" + f.b.uuid, "ip=127.0.0.1", fmt.Sprintf("ni=%d", f.blockedPort)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +230,7 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 
 	local := newServiceFixture(t)
 	local.clusterDir = filepath.Join(f.a.base, "cluster")
-	local.service = local.startChild(append(local.args(), "--scanner-mdns=true")...)
+	local.service = local.startChild(append(local.args(), fixtureMDNSBrokerArgs(f.namespace)...)...)
 	client := local.readyClient()
 	second := local.dial()
 	nextID := 200

@@ -131,6 +131,8 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 |---|---|---|
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
 | `--mdns` | `true` | Browse and advertise nodes over mDNS; `--mdns=false` constructs neither the browser nor the responder |
+| `--mdns-service <name>` | `_nvpair-node._tcp` | DNS-SD service used by both browser and responder (`_name._tcp`) |
+| `--mdns-domain <name>` | `local` | DNS domain used by both browser and responder, including the responder's OS-hostname SRV/A target |
 | `--cluster-dir <path>` | _(none)_ | Cluster config dir (`node.crt`/`node.key` + `trusted/`). Controls peer trust annotation, local membership advertisement, pinned direct/reverse peer transport for node information and model inventory, and the parent directory used to resolve this node's identity |
 | `--ca-bundle <path>` | _(none)_ | PEM CA bundle to trust for verifying node-info server certs (additive to the system trust store). Setting any TLS flag moves node-info enrichment onto HTTPS |
 | `--client-cert <path>` | _(none)_ | PEM client certificate to present when fetching `/v1/node-info` from TLS-enabled nodes (mTLS; requires `--client-key`) |
@@ -144,6 +146,16 @@ accepts the broker's private authenticated peer-services notifications, and runs
 periodic enrichment and maintenance. Authenticated and explicitly configured peer
 HTTP remains active under its existing transport and admission rules. This flag
 provides neither general network isolation nor an authentication bypass.
+
+For genuine multicast fixtures, give all participants the same private service
+and private domain below `local`, for example `_pair-example._tcp` and
+`pair-example.local`. The responder then uses `<OS-hostname>.pair-example.local.`
+and never answers the production hostname through that responder. Names are
+lowercased and accept one optional trailing root dot. Empty names, invalid DNS
+labels, service types other than `_name._tcp`, and overlong names fail before
+identity, IPC or discovery setup, even with `--mdns=false`. Production defaults
+are unchanged. Names separate discovery records; configured and authenticated
+peer HTTP still requires independently owned fixture endpoints.
 
 ## JSON-RPC surface
 

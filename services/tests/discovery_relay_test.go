@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/grandcat/zeroconf"
+	"nvpair-shared/noderec"
 )
 
 // TestBrokerAdvertisesNodeRecord exercises the register->advertise path
@@ -25,14 +26,15 @@ import (
 // the fixture's node-info port. This is the new consolidated discovery record
 // (distinct from node-info's own transitional _nvpair-node-info advertisement).
 //
-// An installed PAIR on the same host advertises under the same instance name,
-// so only the record carrying the fixture's own node UUID is accepted.
+// A private service/domain separates the fixture from installed PAIR. The
+// record must also carry the fixture's own node UUID.
 func TestBrokerAdvertisesNodeRecord(t *testing.T) {
+	namespace := newFixtureMDNSNamespace(t)
 	base := t.TempDir()
 	hostUUID := fixtureNodeUUID(t, base)
 	ports := reserveFixtureServicePorts(t)
 	_, msgs, stderr, cleanup := startBrokerWithPorts(t, t.TempDir(), filepath.Join(base, "cluster"), nil, ports,
-		"--scanner-mdns=true",
+		"--scanner-mdns=true", "--scanner-mdns-service", namespace.Service, "--scanner-mdns-domain", namespace.Domain,
 		"--node-info-path", nodeInfoBin)
 	t.Cleanup(cleanup)
 	// Drain the broker's stdout/stderr so it doesn't stall on a full pipe while
@@ -60,7 +62,7 @@ func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 	var entry []string
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if found := browseForNodeRecord(t, instance, hostUUID, 2*time.Second); found != nil {
+		if found := browseForNodeRecord(t, namespace, instance, hostUUID, 2*time.Second); found != nil {
 			entry = found.Text
 			if slices.Contains(entry, wantNodeInfo) {
 				break
@@ -99,7 +101,7 @@ func fixtureNodeUUID(t *testing.T, base string) string {
 
 // browseForNodeRecord is browseForInstance restricted to the record whose
 // uuid= TXT is hostUUID.
-func browseForNodeRecord(t *testing.T, instance, hostUUID string, timeout time.Duration) *zeroconf.ServiceEntry {
+func browseForNodeRecord(t *testing.T, namespace noderec.MDNSNamespace, instance, hostUUID string, timeout time.Duration) *zeroconf.ServiceEntry {
 	t.Helper()
 	resolver, err := zeroconf.NewResolver(mdnsResolverOptions(nil)...)
 	if err != nil {
@@ -119,7 +121,7 @@ func browseForNodeRecord(t *testing.T, instance, hostUUID string, timeout time.D
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := mdnsBrowse(t, resolver, ctx, "_nvpair-node._tcp", entries, nil); err != nil {
+	if err := mdnsBrowse(t, resolver, ctx, namespace.Service, namespace.Domain, entries, nil); err != nil {
 		t.Fatalf("browse: %v", err)
 	}
 	select {

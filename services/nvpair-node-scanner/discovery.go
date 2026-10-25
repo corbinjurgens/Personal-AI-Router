@@ -18,7 +18,7 @@ type (
 	Discovery      = discovery.Browser
 )
 
-// NewDiscovery builds the node browser with the shared defaults.
+// NewDiscovery builds the node browser for the scanner's configured namespace.
 var NewDiscovery = discovery.New
 
 // WithLivenessProbe re-exports the shared option so the daemon can wire its

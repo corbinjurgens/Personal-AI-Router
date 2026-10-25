@@ -269,12 +269,22 @@ and startup probe overrides; unused legs are disabled with zero. Ordinary
 broker fixtures forward `--scanner-mdns=false` before scanner startup.
 
 Tests that assert real multicast discovery explicitly retain mDNS. The real
-scanner currently uses the production discovery service and hostname, so those
-cases are not isolated from installed PAIR and need a separate discovery
-namespace change before beside-installed execution. This includes broker
-advertisement, ghost-node eviction, model enrichment/refresh, mDNS node-loss,
-workload peer discovery/rehydration, and reverse node-info/control discovery.
-Port isolation and TLS refusal alone do not establish zero ambient contact.
+scanner and each test's advertisers/browsers share a freshly generated private
+service and domain below `local`. The domain scopes the OS-hostname SRV/A target
+as well as the service record. Broker/service launch guards refuse multicast
+reenablement without private names; direct scanner launches use the same check
+and default to multicast off. This covers broker advertisement, ghost-node
+eviction, model enrichment/refresh, mDNS node-loss, workload peer discovery and
+rehydration, reverse node-info/control discovery, and standalone multicast
+fixtures. The Windows fixture's query, reply and goodbye names use that same
+domain. No global per-test registry or replacement discovery directory is used.
+
+Namespace and listener separation do not establish universal beside-installed
+isolation. Configured/authenticated peer endpoints, engine-manager's configured
+runtime checks, HTTP redirects and transport proxy settings still require their
+own endpoint evidence. Native Windows multicast and beside-installed acceptance
+must verify real discovery, identity, updates/removals and absence of ambient
+contact; TLS refusal alone is insufficient.
 
 #### Remote configuration acceptance (XA)
 

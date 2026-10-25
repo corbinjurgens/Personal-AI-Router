@@ -198,6 +198,7 @@ type Broker struct {
 	nodeID               string
 	scannerPath          string
 	disableMDNS          bool
+	scannerNamespace     *noderec.MDNSNamespace
 	manualProbePorts     *manualProbePorts
 	nodeInfoPath         string
 	proxyPath            string
@@ -459,6 +460,7 @@ type Broker struct {
 // broker won't spawn that worker because its binary couldn't be resolved).
 type workerPaths struct {
 	disableMDNS      bool
+	scannerNamespace *noderec.MDNSNamespace
 	manualProbePorts *manualProbePorts
 	scanner          string
 	nodeInfo         string
@@ -519,6 +521,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		nodeID:               nodeID,
 		scannerPath:          paths.scanner,
 		disableMDNS:          paths.disableMDNS,
+		scannerNamespace:     paths.scannerNamespace,
 		manualProbePorts:     paths.manualProbePorts,
 		nodeInfoPath:         paths.nodeInfo,
 		proxyPath:            paths.proxy,
@@ -1761,6 +1764,9 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 		return fmt.Errorf("service ports: %w", err)
 	}
 	if err := b.manualProbePorts.validate(); err != nil {
+		return err
+	}
+	if _, err := b.scannerArgs(); err != nil {
 		return err
 	}
 	if err := validateEngineManagerControlHost(b.engineMgrControlHost); err != nil {

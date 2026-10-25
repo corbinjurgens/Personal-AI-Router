@@ -69,7 +69,7 @@ func TestMDNSFixtureAddressFailureIncludesInterface(t *testing.T) {
 }
 
 func TestMDNSFixtureRecordsRetainIdentityAndLoopback(t *testing.T) {
-	fixture := mdnsAdvertiserFixture{Instance: "fixture-node", Service: "_test-disc._tcp", Port: 55555, TXT: []string{"env=test", "uuid=fixture"}}
+	fixture := mdnsAdvertiserFixture{Instance: "fixture-node", Service: "_test-disc._tcp", Domain: "fixture.local", Port: 55555, TXT: []string{"env=test", "uuid=fixture"}}
 	packet, err := fixtureMDNSRecords(fixture, false).Pack()
 	if err != nil {
 		t.Fatal(err)
@@ -88,10 +88,10 @@ func TestMDNSFixtureRecordsRetainIdentityAndLoopback(t *testing.T) {
 	if !ptrOK || !srvOK || !txtOK || !addrOK {
 		t.Fatalf("record types = %T %T %T %T", msg.Answer[0], msg.Answer[1], msg.Answer[2], msg.Answer[3])
 	}
-	if ptr.Hdr.Name != "_test-disc._tcp.local." || ptr.Ptr != "fixture-node._test-disc._tcp.local." || ptr.Hdr.Ttl != 3200 {
+	if ptr.Hdr.Name != "_test-disc._tcp.fixture.local." || ptr.Ptr != "fixture-node._test-disc._tcp.fixture.local." || ptr.Hdr.Ttl != 3200 {
 		t.Errorf("PTR = %+v", ptr)
 	}
-	if srv.Hdr.Name != ptr.Ptr || srv.Port != 55555 || srv.Target != "fixture-node.local." || srv.Hdr.Ttl != 3200 {
+	if srv.Hdr.Name != ptr.Ptr || srv.Port != 55555 || srv.Target != "fixture-node.fixture.local." || srv.Hdr.Ttl != 3200 {
 		t.Errorf("SRV = %+v", srv)
 	}
 	if txt.Hdr.Name != ptr.Ptr || !slices.Equal(txt.Txt, fixture.TXT) || txt.Hdr.Ttl != 3200 {
@@ -103,7 +103,7 @@ func TestMDNSFixtureRecordsRetainIdentityAndLoopback(t *testing.T) {
 }
 
 func TestMDNSFixtureGoodbyeWithdrawsEveryRecord(t *testing.T) {
-	fixture := mdnsAdvertiserFixture{Instance: "removable-node", Service: "_test-rmv._tcp", Port: 55556}
+	fixture := mdnsAdvertiserFixture{Instance: "removable-node", Service: "_test-rmv._tcp", Domain: "fixture.local", Port: 55556}
 	announcement, goodbye := fixtureMDNSRecords(fixture, false), fixtureMDNSRecords(fixture, true)
 	for i, rr := range goodbye.Answer {
 		if rr.Header().Ttl != 0 || rr.Header().Name != announcement.Answer[i].Header().Name || rr.Header().Rrtype != announcement.Answer[i].Header().Rrtype {
@@ -113,7 +113,7 @@ func TestMDNSFixtureGoodbyeWithdrawsEveryRecord(t *testing.T) {
 }
 
 func TestMDNSFixtureReplyScope(t *testing.T) {
-	fixture := mdnsAdvertiserFixture{Instance: "fixture", Service: "_test._tcp", Port: 55555}
+	fixture := mdnsAdvertiserFixture{Instance: "fixture", Service: "_test._tcp", Domain: "fixture.local", Port: 55555}
 	from := &net.UDPAddr{IP: net.IPv4(192, 168, 11, 45), Port: 5353}
 	test := func(name, qname string, qtype, qclass uint16, response bool, want *net.UDPAddr) {
 		t.Run(name, func(t *testing.T) {
@@ -123,18 +123,20 @@ func TestMDNSFixtureReplyScope(t *testing.T) {
 			}
 		})
 	}
-	test("browse multicast", "_test._tcp.local.", dns.TypePTR, dns.ClassINET, false, fixtureMDNSTarget)
-	test("browse unicast bit", "_test._tcp.local.", dns.TypePTR, dns.ClassINET|1<<15, false, from)
-	test("instance lookup", "fixture._test._tcp.local.", dns.TypeSRV, dns.ClassINET, false, fixtureMDNSTarget)
-	test("host address", "fixture.local.", dns.TypeA, dns.ClassINET, false, fixtureMDNSTarget)
-	test("unrelated service", "_other._tcp.local.", dns.TypePTR, dns.ClassINET, false, nil)
-	test("unrelated type", "_test._tcp.local.", dns.TypeAAAA, dns.ClassINET, false, nil)
-	test("response is not a query", "_test._tcp.local.", dns.TypePTR, dns.ClassINET, true, nil)
-	test("unrelated class", "_test._tcp.local.", dns.TypePTR, dns.ClassCHAOS, false, nil)
+	test("browse multicast", "_test._tcp.fixture.local.", dns.TypePTR, dns.ClassINET, false, fixtureMDNSTarget)
+	test("browse unicast bit", "_test._tcp.fixture.local.", dns.TypePTR, dns.ClassINET|1<<15, false, from)
+	test("instance lookup", "fixture._test._tcp.fixture.local.", dns.TypeSRV, dns.ClassINET, false, fixtureMDNSTarget)
+	test("host address", "fixture.fixture.local.", dns.TypeA, dns.ClassINET, false, fixtureMDNSTarget)
+	test("production host address", "fixture.local.", dns.TypeA, dns.ClassINET, false, nil)
+	test("production service", "_nvpair-node._tcp.local.", dns.TypePTR, dns.ClassINET, false, nil)
+	test("unrelated service", "_other._tcp.fixture.local.", dns.TypePTR, dns.ClassINET, false, nil)
+	test("unrelated type", "_test._tcp.fixture.local.", dns.TypeAAAA, dns.ClassINET, false, nil)
+	test("response is not a query", "_test._tcp.fixture.local.", dns.TypePTR, dns.ClassINET, true, nil)
+	test("unrelated class", "_test._tcp.fixture.local.", dns.TypePTR, dns.ClassCHAOS, false, nil)
 }
 
 func TestMDNSFixtureTransportUsesSelectedSourceForAllPackets(t *testing.T) {
-	fixture := mdnsAdvertiserFixture{Instance: "fixture", Service: "_test._tcp", Port: 55555}
+	fixture := mdnsAdvertiserFixture{Instance: "fixture", Service: "_test._tcp", Domain: "fixture.local", Port: 55555}
 	source := net.IPv4(192, 168, 11, 45)
 	iface := net.Interface{Name: "Wi-Fi", Index: 19}
 	test := func(name string, msg *dns.Msg, wantResponse bool) {
@@ -152,7 +154,7 @@ func TestMDNSFixtureTransportUsesSelectedSourceForAllPackets(t *testing.T) {
 				if decoded.Response != wantResponse {
 					t.Errorf("response = %v, want %v", decoded.Response, wantResponse)
 				}
-				if !wantResponse && (len(decoded.Question) != 1 || decoded.Question[0].Name != "_test._tcp.local." || decoded.Question[0].Qtype != dns.TypePTR || decoded.RecursionDesired) {
+				if !wantResponse && (len(decoded.Question) != 1 || decoded.Question[0].Name != "_test._tcp.fixture.local." || decoded.Question[0].Qtype != dns.TypePTR || decoded.RecursionDesired) {
 					t.Errorf("browse query = %+v", decoded)
 				}
 				return nil
@@ -165,7 +167,7 @@ func TestMDNSFixtureTransportUsesSelectedSourceForAllPackets(t *testing.T) {
 			}
 		})
 	}
-	test("query", fixtureMDNSQuery(fixture.Service), false)
+	test("query", fixtureMDNSQuery(fixture.Service, fixture.Domain), false)
 	test("response and announcement", fixtureMDNSRecords(fixture, false), true)
 	test("goodbye", fixtureMDNSRecords(fixture, true), true)
 }
@@ -173,7 +175,7 @@ func TestMDNSFixtureTransportUsesSelectedSourceForAllPackets(t *testing.T) {
 func TestMDNSFixtureTransportReportsWriteFailure(t *testing.T) {
 	wantErr := errors.New("write failed")
 	sender := fixtureMDNSSender{iface: net.Interface{Name: "Wi-Fi", Index: 19}, source: net.IPv4(192, 168, 11, 45), write: func([]byte, *net.Interface, net.IP, *net.UDPAddr) error { return wantErr }}
-	err := sender.send(fixtureMDNSQuery("_test._tcp"), fixtureMDNSTarget)
+	err := sender.send(fixtureMDNSQuery("_test._tcp", "fixture.local"), fixtureMDNSTarget)
 	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "source=192.168.11.45:5353") {
 		t.Fatalf("send error = %v, want wrapped write failure and source", err)
 	}
@@ -185,7 +187,7 @@ func TestMDNSFixtureTransportRejectsMalformedDNSBeforeWrite(t *testing.T) {
 		writes++
 		return nil
 	}}
-	err := sender.send(fixtureMDNSQuery(strings.Repeat("x", 64)+"._tcp"), fixtureMDNSTarget)
+	err := sender.send(fixtureMDNSQuery(strings.Repeat("x", 64)+"._tcp", "fixture.local"), fixtureMDNSTarget)
 	if err == nil || !strings.Contains(err.Error(), "pack fixture mDNS") {
 		t.Fatalf("send error = %v, want DNS packing failure", err)
 	}

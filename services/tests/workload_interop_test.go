@@ -47,11 +47,6 @@ import (
 
 const workloadMgrService = "_nvpair-workload-manager._tcp"
 
-// nodeRecordService is the consolidated discovery record. A node
-// advertises ONE of these carrying a compact TXT service map; the broker's
-// node-scanner daemon browses it and relays the directory to subscribers.
-const nodeRecordService = "_nvpair-node._tcp"
-
 // This test-only stdio adapter supplies the real worker's peer directory through
 // discovery:nodes. It preserves the broker's --port argument, so the worker's
 // listener agrees with the broker's discovery registration. Worker output is
@@ -560,9 +555,9 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	}
 	fx := newInterNodeCluster(t)
 	stdin, msgs, cleanup := startBrokerProcWithPorts(t, fx.nodeDir, ports,
-		"--scanner-mdns=true",
 		"--scanner-path", scannerBin,
 		"--workload-manager-path", workloadMgrBin,
+		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service, "--scanner-mdns-domain", fx.namespace.Domain,
 	)
 	t.Cleanup(cleanup)
 
@@ -584,9 +579,9 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	// it from colliding with this host's own record.
 	peerTXT := []string{"v=1", "uuid=" + peerUUID, "ip=127.0.0.1"}
 	stopAdv := startMDNSAdvertiser(t, mdnsAdvertiserFixture{
-		Instance: peerNode, Service: nodeRecordService, Port: 14999, TXT: peerTXT, Interface: mdnsFixtureInterface(t).Name,
+		Instance: peerNode, Service: fx.namespace.Service, Domain: fx.namespace.Domain, Port: 14999, TXT: peerTXT, Interface: mdnsFixtureInterface(t).Name,
 	})
-	t.Logf("advertising peer %q as %s", peerNode, nodeRecordService)
+	t.Logf("advertising peer %q as %s.%s", peerNode, fx.namespace.Service, fx.namespace.Domain)
 
 	// The peer must be in the broker's directory before its removal can
 	// trigger a sweep, so wait until discovery has folded it in.

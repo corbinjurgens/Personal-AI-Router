@@ -20,12 +20,15 @@ import (
 	"nvpair-shared/applog"
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/noderec"
 )
 
 func main() {
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
 	scannerPath := flag.String("scanner-path", "", "path to nvpair-node-scanner binary (default: ./nvpair-node-scanner in the current working directory)")
 	scannerMDNS := flag.Bool("scanner-mdns", true, "enable scanner multicast discovery and advertisement; false passes --mdns=false before scanner startup")
+	scannerMDNSService := flag.String("scanner-mdns-service", noderec.ServiceType, "scanner mDNS DNS-SD service (_name._tcp)")
+	scannerMDNSDomain := flag.String("scanner-mdns-domain", noderec.Domain, "scanner mDNS domain, including its advertised hostname")
 	manualOllamaPort := flag.Int("manual-ollama-port", 11434, "manual-node Ollama probe port (0 disables the probe)")
 	manualLMStudioPort := flag.Int("manual-lmstudio-port", 1234, "manual-node LM Studio probe port (0 disables the probe)")
 	manualNodeInfoPort := flag.Int("manual-node-info-port", nodeInfoHTTPPort, "manual-node plain node-info probe port (0 disables it; explicit entry TLS ports take precedence)")
@@ -50,6 +53,10 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
+	scannerNamespace, err := (noderec.MDNSNamespace{Service: *scannerMDNSService, Domain: *scannerMDNSDomain}).Normalize()
+	if err != nil {
+		log.Fatal(err)
+	}
 	manualPorts := &manualProbePorts{ollama: *manualOllamaPort, lmstudio: *manualLMStudioPort, nodeInfo: *manualNodeInfoPort}
 	if err := manualPorts.validate(); err != nil {
 		log.Fatal(err)
@@ -293,6 +300,7 @@ func main() {
 		clusterMgrPort:       *clusterMgrPort,
 		manualNodes:          resolvedManualNodes,
 		disableMDNS:          !*scannerMDNS,
+		scannerNamespace:     &scannerNamespace,
 		manualProbePorts:     manualPorts,
 		settings:             resolvedSettings,
 		clusterMgr:           resolvedClusterMgr,

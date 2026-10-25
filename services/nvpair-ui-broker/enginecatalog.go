@@ -282,7 +282,7 @@ func (b *Broker) runAutoAdvertiseDynamicEngine(ctx context.Context, profile engi
 // no stock port to fall back on: when engine-manager does not report it
 // running, its backend is unknown and it is withdrawn.
 func (b *Broker) reconcileAdvertiseDynamicEngine(profile engineProxyProfile, client *http.Client) {
-	port, running := b.localEnginePort(profile.Name, 0)
+	port, running := b.localEnginePort(profile.Name)
 	if !running {
 		port = 0
 	}

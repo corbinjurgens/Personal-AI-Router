@@ -57,6 +57,7 @@ func (s *swapModels) handler() http.HandlerFunc {
 }
 
 func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
+	namespace := newFixtureMDNSNamespace(t)
 	// Start with an empty inventory (engine present but serving no models yet).
 	stub := &swapModels{}
 	stub.set(map[string]any{"models": []string{}})
@@ -75,7 +76,7 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 	// Advertise em=<port> + ip=127.0.0.1 once and never touch the record again,
 	// so the only thing that changes during the test is the /v1/models body.
 	txt := []string{"v=1", "uuid=" + instance + "-uuid", "ip=127.0.0.1", fmt.Sprintf("em=%d", emPort)}
-	zsrv, err := mdns.NewResponder(instance, nodeRecordService, testDomain, emPort, txt)
+	zsrv, err := mdns.NewResponder(instance, namespace.Service, namespace.Domain, emPort, txt)
 	if err != nil {
 		t.Fatalf("register %s: %v", instance, err)
 	}
@@ -93,9 +94,9 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 			t.Error("model fixture advertiser did not stop")
 		}
 	})
-	t.Logf("advertising %s @ %s (em=%d), models initially empty", instance, nodeRecordService, emPort)
+	t.Logf("advertising %s @ %s.%s (em=%d), models initially empty", instance, namespace.Service, namespace.Domain, emPort)
 
-	stdin, msgs, cleanup := startBroker(t)
+	stdin, msgs, cleanup := startBroker(t, namespace)
 	t.Cleanup(cleanup)
 
 	// Phase 1: the node is discovered and enriched, but with no models.

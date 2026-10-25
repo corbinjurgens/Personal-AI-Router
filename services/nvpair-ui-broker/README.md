@@ -327,6 +327,8 @@ Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other
 | `--ipc <path>` | _(stdio)_ | IPC endpoint to dial: Unix socket path or Windows named pipe (e.g. `\\.\pipe\nvpair-ui-broker`) |
 | `--scanner-path <path>` | `./nvpair-node-scanner[.exe]` in the CWD | Explicit path to the `nvpair-node-scanner` binary the broker should spawn |
 | `--scanner-mdns <bool>` | `true` | `false` passes `--mdns=false` on every scanner spawn, disabling multicast browse and advertisement before startup while retaining self and authenticated directory behavior |
+| `--scanner-mdns-service <name>` | `_nvpair-node._tcp` | DNS-SD service forwarded to the scanner browser and responder on startup and restart |
+| `--scanner-mdns-domain <name>` | `local` | DNS domain forwarded to the scanner, including its responder hostname |
 | `--node-info-path <path>` | `./nvpair-node-info[.exe]` in the CWD | Explicit path to the `nvpair-node-info` binary the broker should spawn. When omitted and no default sibling exists, the broker runs without the local inventory server (non-fatal); when set to an invalid path, the broker exits with an error |
 | `--proxy-path <path>` | `./nvpair-proxy[.exe]` in the CWD | Explicit path to the `nvpair-proxy` binary. One process fronts every engine: the broker spawns it once and then sends a `facade/enable` per entry in `--proxy-engines`. Same optional semantics as `--node-info-path`: an absent default sibling means no local proxies (non-fatal); an invalid explicit path exits with an error |
 | `--proxy-engines <csv>` | `ollama,lmstudio,llamacpp` | Which engines to front with a proxy. An unrecognized name exits with an error rather than being skipped, so a typo cannot look like it worked. An engine left out is not started **and not prepared** — the broker will not relocate an engine whose facade nothing is going to claim |
@@ -369,6 +371,13 @@ listener plan. They accept 0 to 65535 before startup and are forwarded unchanged
 on each worker restart. They retain the existing manual status fields and TLS
 selection. `--scanner-mdns=false` prevents ambient multicast discovery; restored
 authenticated peer routes still use their configured service endpoints.
+
+Scanner namespace flags use the scanner's name validation and normalization
+before product startup. Both discovery owners receive the same normalized names
+on every scanner restart. Genuine multicast fixtures use a private service and
+private domain below `local` shared by their participants; ordinary fixtures
+keep multicast disabled. Namespace selection changes neither RPC payloads nor
+cluster identity, pins or admission, and is not a general outbound traffic fence.
 
 `--engine-manager-control-host` rejects empty, DNS, malformed, bracketed and
 zone-qualified values before product startup; there is no fallback for invalid
@@ -417,6 +426,14 @@ with the scanner daemon:
 - engine **up** and facade **ready** → register `ol` / `lm` / `lc` at the
   promoted facade port, never the private backend port;
 - engine **down** → unregister it.
+
+Ollama, LM Studio and descriptor-engine advertisers require a successful current
+`engine:status` reporting a running engine and a valid port before attempting
+health HTTP. A missing manager, failed status RPC, malformed status or
+`running:false` withdraws advertisement and marks the local destination
+unhealthy without guessing an installed engine's stock port. The manager's
+own status checks still use its configured engine endpoints. llama.cpp uses
+its configured runtime profile at its existing advertiser owner.
 
 The daemon folds those registrations into this host's single `_nvpair-node` record, so a peer discovers the engine through the shared channel. The model list is not part of that registration — it's served over HTTP by `nvpair-engine-manager` (the `em` service, `GET /v1/models`) and enriched onto each node by the peer's daemon. There is no separate advertiser subprocess and no manual-advertise RPC.
 

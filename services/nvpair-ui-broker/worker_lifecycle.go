@@ -24,6 +24,10 @@ import (
 // spawn failure returns the error without storing a handle, leaving the
 // previous (dead) handle in place until the next successful (re)start.
 func (b *Broker) spawnScanner() (supervisedHandle, error) {
+	args, err := b.scannerArgs()
+	if err != nil {
+		return nil, err
+	}
 	sp, err := startScanner(
 		b.scannerPath,
 		applog.LevelString(),
@@ -33,7 +37,7 @@ func (b *Broker) spawnScanner() (supervisedHandle, error) {
 		func(telemetry noderec.NodeTelemetry) { b.ingestTelemetry(sourceScanner, telemetry) },
 		func(hostUUID string) { b.removeTelemetry(sourceScanner, hostUUID) },
 		b.dispatchScannerErrorsNotif,
-		b.scannerArgs()...,
+		args...,
 	)
 	if err != nil {
 		return nil, err

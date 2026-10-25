@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -37,6 +36,7 @@ import (
 // Flipping that server's reported hostUuid is exactly the signal a wipe
 // produces, and is what the probe must notice.
 func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
+	namespace := newFixtureMDNSNamespace(t)
 	if testing.Short() {
 		t.Skip("multicast + miss-threshold timing; skipped under -short")
 	}
@@ -80,10 +80,10 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 		fmt.Sprintf("%s=%d", noderec.ServiceNodeInfo, niPort),
 	}
 	stopResponder := startMDNSAdvertiser(t, mdnsAdvertiserFixture{
-		Instance: peerInstance, Service: noderec.ServiceType, Port: noderec.SRVPort, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
+		Instance: peerInstance, Service: namespace.Service, Domain: namespace.Domain, Port: noderec.SRVPort, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
 	})
 
-	events := startScannerForGhostTest(t)
+	events := startScannerForGhostTest(t, namespace)
 
 	// The scanner must see the peer before there is anything to evict. A slow
 	// or lossy multicast environment is an inconclusive run, not a failure.
@@ -117,9 +117,13 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 // Without it the scanner resolves the real per-user app dir: it would read (and
 // mint into) the developer's own identity files and advertise their machine's
 // real cluster identity on the LAN while the test runs.
-func startScannerForGhostTest(t *testing.T) <-chan jsonrpc.Message {
+func startScannerForGhostTest(t *testing.T, namespace noderec.MDNSNamespace) <-chan jsonrpc.Message {
 	t.Helper()
-	cmd := exec.Command(scannerBin, "--cluster-dir", t.TempDir())
+	args := append([]string{"--cluster-dir", t.TempDir()}, fixtureMDNSScannerArgs(namespace)...)
+	cmd, err := fixtureScannerCommand(scannerBin, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()
