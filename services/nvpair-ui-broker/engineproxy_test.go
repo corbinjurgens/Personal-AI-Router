@@ -499,6 +499,9 @@ const (
 	fakeProxyAcceptsFacades = "accept-facades"
 	// fakeProxyHangs makes the child read its requests and never answer.
 	fakeProxyHangs = "hang"
+	// fakeProxyHoldsReplay holds the last replay acknowledgement until the
+	// test sends a log/set-level notification on the same input pipe.
+	fakeProxyHoldsReplay = "hold-replay"
 )
 
 func init() {
@@ -532,6 +535,26 @@ func runFakeProxy() {
 				os.Exit(2)
 			}
 			reply["result"] = nodepolicy.PolicyAck{OriginNodeID: pol.OriginNodeID, Revision: pol.Policy.Revision, RunID: "fake-run"}
+		case nodepolicy.MethodSetModelIdentity:
+			if os.Getenv(fakeProxyEnv) == fakeProxyHoldsReplay {
+				// The actual proxy reader observes this only after policy was
+				// acknowledged. The final replay RPC remains unanswered until
+				// the test has changed the listener and installed its Stop barrier.
+				if out.Encode(map[string]any{"jsonrpc": "2.0", "method": nodepolicy.NotifyAdmissionState, "params": nodepolicy.AdmissionState{}}) != nil {
+					return
+				}
+				if !in.Scan() {
+					return
+				}
+				var release struct {
+					ID     json.RawMessage `json:"id"`
+					Method string          `json:"method"`
+				}
+				if json.Unmarshal(in.Bytes(), &release) != nil || len(release.ID) != 0 || release.Method != "log/set-level" {
+					os.Exit(2)
+				}
+			}
+			reply["result"] = map[string]any{}
 		case "facade/enable":
 			if os.Getenv(fakeProxyEnv) == fakeProxyAcceptsFacades {
 				var spec enableFacadeRequest
@@ -758,15 +781,7 @@ func (s observedProxyStop) Close() error {
 func TestProxySpawnRetiresActivationWhenListenerDisabledDuringReplay(t *testing.T) {
 	sb := newSupervisedBroker(t, true)
 	b := sb.b
-	client := &stallingClient{entered: make(chan struct{}), resume: make(chan struct{})}
-	client.stall = func(frame []byte) bool {
-		var msg Message
-		return json.Unmarshal(frame, &msg) == nil && msg.Method == notifyPolicyChanged
-	}
-	b.codec = NewCodec(client)
-	var resumeOnce sync.Once
-	resume := func() { resumeOnce.Do(func() { close(client.resume) }) }
-	t.Cleanup(resume)
+	t.Setenv(fakeProxyEnv, fakeProxyHoldsReplay)
 	stopped, stopReached, releaseStop := publicationBarrier(t)
 	started := make(chan struct{})
 	go func() {
@@ -774,23 +789,37 @@ func TestProxySpawnRetiresActivationWhenListenerDisabledDuringReplay(t *testing.
 		close(started)
 	}()
 
-	// Replay has acknowledged the policy, but its final announcement holds
-	// spawn before the no-facade/no-listener decision.
-	awaitPublication(t, client.entered)
+	// The child reports admission state at the final replay RPC, after policy
+	// acknowledgement, then holds that RPC's reply on its actual input reader.
+	// Spawn cannot reach the no-facade/no-listener decision until released.
+	r := b.nodePolicyRuntime()
+	eventually(t, "the final replay RPC reaching the proxy reader", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.haveAdmission
+	})
 	pp := b.policyProxy()
 	requireProxyRunning(t, pp, "replay has not finished bring-up")
+	var releaseOnce sync.Once
+	releaseReplay := func() {
+		releaseOnce.Do(func() {
+			if err := pp.peer.Notify("log/set-level", map[string]string{"level": "info"}); err != nil {
+				t.Errorf("release final replay acknowledgement: %v", err)
+			}
+		})
+	}
+	t.Cleanup(releaseReplay)
 	if got := b.localPolicy(); got.Activation != activationActive {
 		t.Fatalf("replayed policy activation = %+v, want active", got.policyActivation)
 	}
 	// Publish the listener change at precisely this boundary. The policy
 	// persistence path sets current under this same lock before activation.
-	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.current.Routing.Listener.Enabled = false
 	r.current.Revision = "5000"
 	r.mu.Unlock()
 	pp.stdin = observedProxyStop{WriteCloser: pp.stdin, beforeClose: stopped}
-	resume()
+	releaseReplay()
 	awaitPublication(t, stopReached)
 
 	// The transport fails while Stop still owns the published process. Its

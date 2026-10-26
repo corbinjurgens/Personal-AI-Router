@@ -2663,6 +2663,7 @@ func TestAvailabilityPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 				rb := newRoutedBroker(t)
 				setClock(rb.b, 5)
 				rb.b.replayPolicyToProxy(context.Background(), rb.b.policyProxy())
+				waitBrokerLeaseAnnouncement(t, rb.b.nodePolicyRuntime())
 				if from == nodepolicy.Paused {
 					if _, err := rb.b.setAvailability(context.Background(), from, nodepolicy.PausedLocally); err != nil {
 						t.Fatalf("acknowledged %s: %v", from, err)
@@ -2846,6 +2847,7 @@ func TestAvailabilityVersion1FirstSavePublicationFaultBoundaries(t *testing.T) {
 				rb := newBrokerOnFile(t, fixture)
 				setClock(rb.b, 5)
 				rb.b.replayPolicyToProxy(context.Background(), rb.b.policyProxy())
+				waitBrokerLeaseAnnouncement(t, rb.b.nodePolicyRuntime())
 				before := rb.b.localPolicy()
 				if before.RecoveryRequired || before.Policy.Version != 2 || before.Policy.Revision != "0" || before.Policy.Idle.UnloadAfterMinutes != 4 {
 					t.Fatalf("v1 fixture did not migrate in memory: %+v", before)
@@ -2903,6 +2905,7 @@ func TestAvailabilityRelayedLandedReplacementAdoptsPolicy(t *testing.T) {
 				rb := newRoutedBroker(t)
 				setClock(rb.b, 5)
 				rb.b.replayPolicyToProxy(context.Background(), rb.b.policyProxy())
+				waitBrokerLeaseAnnouncement(t, rb.b.nodePolicyRuntime())
 				if to == nodepolicy.Available {
 					// A peer-origin pause fences every peer, including its initiator.
 					if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer); err != nil {
@@ -2953,6 +2956,7 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 			rb := newBrokerOnFile(t, fixture)
 			setClock(rb.b, 5)
 			rb.b.replayPolicyToProxy(context.Background(), rb.b.policyProxy())
+			waitBrokerLeaseAnnouncement(t, rb.b.nodePolicyRuntime())
 			r := rb.b.nodePolicyRuntime()
 			r.mu.Lock()
 			r.running["ollama"] = true
