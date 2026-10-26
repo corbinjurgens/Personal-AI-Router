@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -292,6 +293,60 @@ func TestPolicyRoutesRejectStrangersAndBadBodies(t *testing.T) {
 	}
 }
 
+func TestRemoteSettingLockedRelayCancellation(t *testing.T) {
+	var relay policyRelay
+	sent := make(chan policyRelayRequest, 1)
+	cancelled := make(chan string, 1)
+	relay.send = func(_ context.Context, method string, params any) error {
+		switch method {
+		case policyRequestMethod:
+			sent <- params.(policyRelayRequest)
+		case policyCancelMethod:
+			cancelled <- params.(map[string]string)["id"]
+		default:
+			return fmt.Errorf("unexpected method %q", method)
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := relay.call(ctx, "set", json.RawMessage(`{"policy":{},"expectedPersistedRevision":"12"}`), "peer")
+		done <- err
+	}()
+	var request policyRelayRequest
+	select {
+	case request = <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("relay request was not sent")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled relay = %v, want context cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled relay did not return")
+	}
+	select {
+	case id := <-cancelled:
+		if id != request.ID {
+			t.Fatalf("cancel id = %q, want %q", id, request.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel notification was not sent")
+	}
+	// A late target lock refusal cannot resurrect the abandoned waiter.
+	relay.reply(mustRemoteSettingJSON(t, policyRelayReply{ID: request.ID, Error: "inference settings can only be locked on the target device", ErrorCode: -32014}))
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	if len(relay.pending) != 0 {
+		t.Fatalf("cancelled relay retained %d pending calls", len(relay.pending))
+	}
+}
+
 func TestPolicyRelayCorrelatesReplies(t *testing.T) {
 	var relay policyRelay
 	sent := make(chan policyRelayRequest, 1)
@@ -443,6 +498,9 @@ func TestPolicyRoutesAnswerTypedCodesAsConflictBodies(t *testing.T) {
 	}{
 		{"revision conflict", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"11"}`, "policy conflict: the persisted revision is 12", "policy_conflict", codePolicyConflict},
 		{"local veto", controlAvailabilitySetPath, `{"state":"available"}`, "this node was paused on the node itself; resume it there", "local_veto", codeLocalVeto},
+		{"management denied", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"12"}`, "remote management denied", "remote_management_denied", codeRemoteManagementDenied},
+		{"engine locked", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"12"}`, "engine locked", "engine_locked", codeEngineLocked},
+		{"inference settings locked", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"12"}`, `inference settings are locked on the target device for engine "llamacpp" model "stored-model"`, "remote_setting_locked", -32014},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -461,9 +519,16 @@ func TestPolicyRoutesAnswerTypedCodesAsConflictBodies(t *testing.T) {
 				t.Fatalf("post policy: %v", err)
 			}
 			defer resp.Body.Close()
-			var body codedBody
-			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			var fields map[string]json.RawMessage
+			if err := json.NewDecoder(resp.Body).Decode(&fields); err != nil {
 				t.Fatalf("decode typed refusal: %v", err)
+			}
+			if len(fields) != 2 || fields["code"] == nil || fields["error"] == nil {
+				t.Fatalf("typed refusal fields = %v, want code/error only", fields)
+			}
+			var body codedBody
+			if err := json.Unmarshal(mustRemoteSettingJSON(t, fields), &body); err != nil {
+				t.Fatal(err)
 			}
 			if resp.StatusCode != http.StatusConflict || body.Code != c.wire || body.Error != c.message {
 				t.Fatalf("typed refusal = %d %+v, want 409 code %q with the broker diagnostic", resp.StatusCode, body, c.wire)
@@ -485,6 +550,10 @@ func TestRemotePolicyPreservesHTTPErrorClassification(t *testing.T) {
 		{"other broker failure", "engine:remote-policy-get", `{"nodeId":"host-peer"}`, "coordinator failed", -32603, -32000},
 		{"typed revision conflict", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"11"}`, "policy conflict: the persisted revision is 12", codePolicyConflict, codePolicyConflict},
 		{"local veto of a resume", "engine:remote-availability-set", `{"nodeId":"host-peer","state":"available"}`, "this node was paused on the node itself; resume it there", codeLocalVeto, codeLocalVeto},
+		{"management denied", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, "remote management denied", codeRemoteManagementDenied, -32012},
+		{"engine locked", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, "engine locked", codeEngineLocked, -32013},
+		{"inference settings locked", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, `inference settings are locked on the target device for engine "llamacpp" model "stored-model"`, -32014, -32014},
+		{"lock diagnostic without typed code", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, "inference settings are locked on the target device", -32000, -32000},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

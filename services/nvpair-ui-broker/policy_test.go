@@ -1803,6 +1803,111 @@ var routingLeaks = []string{
 	"deployment", `"api"`, "9223372036854775807", "allowedOrigins",
 }
 
+func remoteSettingLockedBroker(t *testing.T) *routedBroker {
+	t.Helper()
+	rb := newRoutedBroker(t)
+	p := rb.b.localPolicy().Policy
+	p.Profiles = []nodepolicy.Profile{
+		{Name: "private-display", Engine: "llamacpp", Model: "stored-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.1}`)},
+		{Name: "unlocked", Engine: "lmstudio", Model: "other-model", RequestOptions: json.RawMessage(`{"temperature":0.2}`)},
+	}
+	if _, err := setCurrent(rb.b, rmJSON(t, p)); err != nil {
+		t.Fatalf("install locked target profile: %v", err)
+	}
+	waitPushesSettled(t, rb.b)
+	return rb
+}
+
+func TestRemoteSettingLockedRefusesWholeWrite(t *testing.T) {
+	test := func(name string, edit func(*nodepolicy.PeerPolicy), wantMessage string) {
+		t.Run(name, func(t *testing.T) {
+			rb := remoteSettingLockedBroker(t)
+			p := rb.b.peerPolicy().Policy
+			edit(&p)
+			// An unrelated unlocked edit must not be partially applied.
+			p.Idle.UnloadAfterMinutes++
+			for i := range p.Profiles {
+				if p.Profiles[i].Model == "other-model" {
+					p.Profiles[i].RequestOptions = json.RawMessage(`{"temperature":0.7}`)
+				}
+			}
+			before := rb.baseline(t)
+			activation := rb.b.localPolicy()
+			r := rb.b.nodePolicyRuntime()
+			r.mu.Lock()
+			issued := r.issued
+			r.mu.Unlock()
+			_, err := rb.b.setPeerPolicyAs(rmJSON(t, p), rmJSON(t, p.Revision), "pinned-peer")
+			var locked *nodepolicy.RemoteSettingLockedError
+			if !errors.As(err, &locked) || policyErrorCode(err) != -32014 || err.Error() != wantMessage {
+				t.Fatalf("lock refusal = %v (code %d), want typed -32014 and %q", err, policyErrorCode(err), wantMessage)
+			}
+			before.requireUnchanged(t)
+			if !reflect.DeepEqual(rb.b.localPolicy(), activation) {
+				t.Fatal("refusal changed activation or recovery state")
+			}
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if r.issued != issued {
+				t.Fatal("refusal allocated a revision")
+			}
+		})
+	}
+	const stored = `inference settings are locked on the target device for engine "llamacpp" model "stored-model"`
+	test("options", func(p *nodepolicy.PeerPolicy) {
+		p.Profiles[0].RequestOptions = json.RawMessage(`{"submitted-option":"secret-value"}`)
+	}, stored)
+	test("mode", func(p *nodepolicy.PeerPolicy) {
+		p.Profiles[0].RequestOptionsMode = nodepolicy.RequestOptionsMode("enforced")
+	}, stored)
+	test("unlock", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].LocalOnly = false }, stored)
+	test("remove", func(p *nodepolicy.PeerPolicy) { p.Profiles = p.Profiles[1:] }, stored)
+	test("replace identity", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Model = "submitted-model" }, stored)
+	test("replace engine", func(p *nodepolicy.PeerPolicy) { p.Profiles[0].Engine = "ollama" }, stored)
+	test("lock existing", func(p *nodepolicy.PeerPolicy) { p.Profiles[1].LocalOnly = true }, `inference settings are locked on the target device for engine "lmstudio" model "other-model"`)
+	test("lock new profile", func(p *nodepolicy.PeerPolicy) {
+		p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "submitted-display", Engine: "ollama", Model: "submitted-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"submitted-option":"secret-value"}`)})
+	}, "inference settings can only be locked on the target device")
+}
+
+func TestRemoteSettingLockedLocalTargetCanEdit(t *testing.T) {
+	test := func(name string, localOnly bool) {
+		t.Run(name, func(t *testing.T) {
+			rb := remoteSettingLockedBroker(t)
+			p := rb.b.localPolicy().Policy
+			p.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.9}`)
+			p.Profiles[0].RequestOptionsMode = nodepolicy.RequestOptionsMode("enforced")
+			p.Profiles[0].LocalOnly = localOnly
+			if _, err := setCurrent(rb.b, rmJSON(t, p)); err != nil {
+				t.Fatalf("local owner edit: %v", err)
+			}
+			got := rb.b.localPolicy().Policy
+			if got.Revision == p.Revision || !reflect.DeepEqual(got.Profiles, p.Profiles) {
+				t.Fatal("local owner edit was not applied")
+			}
+		})
+	}
+	test("edit while locked", true)
+	test("edit and unlock", false)
+}
+
+func TestRemoteSettingLockedAllowsUnprotectedEdits(t *testing.T) {
+	rb := remoteSettingLockedBroker(t)
+	p := rb.b.peerPolicy().Policy
+	p.Profiles[0].Name = "new-display"
+	p.Profiles[0].RequestOptionsMode = nodepolicy.RequestOptionsMode("defaults")
+	p.Profiles[0].RequestOptions = json.RawMessage(`{ "temperature": 0.10 }`)
+	p.Profiles[1].RequestOptions = json.RawMessage(`{"temperature":0.8}`)
+	p.Profiles[0], p.Profiles[1] = p.Profiles[1], p.Profiles[0]
+	if _, err := rb.b.setPeerPolicyAs(rmJSON(t, p), rmJSON(t, p.Revision), "pinned-peer"); err != nil {
+		t.Fatalf("unprotected edit: %v", err)
+	}
+	got := rb.b.localPolicy().Policy
+	if got.Revision == p.Revision || got.Profiles[0].Model != "other-model" || string(got.Profiles[0].RequestOptions) != `{"temperature":0.8}` || got.Profiles[1].Name != "new-display" || !got.Profiles[1].LocalOnly {
+		t.Fatalf("unprotected edit was not applied: %+v", got.Profiles)
+	}
+}
+
 func TestPeerPolicyGetReturnsTheProjection(t *testing.T) {
 	rb := newRoutedBroker(t)
 	result, errText := rb.relay(t, "get", map[string]any{})
