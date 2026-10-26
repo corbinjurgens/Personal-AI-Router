@@ -1724,13 +1724,20 @@ from entry and clamped to the request's remaining deadline. The private
 across attempts. Missing means the normal bound; excess is clamped to 90000;
 malformed, repeated, noncanonical, overflowing or nonpositive values permit no
 preparation. This header supplies time only, never activation authority.
-Refresh, dwell and failover cannot restart the bound. Unbound and already-ready
-inference retain their existing deadlines.
+Refresh, dwell and failover cannot restart the bound. For a cold pinned peer,
+the same remaining allowance bounds acquisition of its existing peer-service
+slot and the wait for response headers. Expiry refuses with preparation 503
+before any output. The header timer ends when headers arrive in time; an
+accepted healthy stream can continue beyond the preparation deadline. Unbound
+and already-ready inference retain their existing deadlines.
 
 Self and terminal pinned-peer ingress use the same correlated
 `admission/prepare-bound-engine` notification owner. Peer authority consists only
-of the `VerifyClientPin` principal and a freshly read `PeerServiceIncarnation`;
-caller-supplied identity headers/body members are ignored. A destination prepares
+of the `VerifyClientPin` principal and its peer-service incarnation captured
+together at authenticated entry, before body or storage waits. Preparation
+and final dispatch reject a changed relationship rather than rebinding the
+old request to a new incarnation. Caller-supplied identity headers/body members
+are ignored. A destination prepares
 only its own engine and never routes onward. A ready engine can serve an
 inference-only peer without management permission. No execution, strict or
 resident ticket, placement/admission lock, or IPC reader is held while waiting.
@@ -1744,7 +1751,9 @@ candidate eligibility, serving permission, availability, protocol, model and
 tier capability/context constraints. Receipt success alone is insufficient.
 Pre-switch request transformations are discarded; ordinary admission rebuilds
 the final engine/model's profile defaults and revalidates policy/backend/identity
-after storage or queue waits and before dispatch. E4 retains drain, ownership,
+after storage or queue waits and before dispatch. Bound requests that lose
+readiness during these waits refuse explicitly before the legacy wake path;
+they never borrow local wake authority. E4 retains drain, ownership,
 strict-generation and protected-resident responsibility. Old streams drain
 normally; new source work cannot extend a drain. No provisional output, SSE
 heartbeat or stream splice is emitted during preparation.
@@ -1759,8 +1768,10 @@ Internal RPC codes remain on the correlated reply; engine/native error text
 is not forwarded. Refusal can fail over only before output within original
 eligibility and time bounds. No eligible inventory or supported offer retains
 the ordinary no-owner 502 (a concrete tier retains its existing no-model 404).
-The existing private-header stripping owner removes budget/activation headers
-before an engine. Final `X-PAIR-Model`, `X-PAIR-Engine`, `X-PAIR-Node` identify
+Preparation metadata travels only on authenticated PAIR hops. The existing
+private-header stripping owner removes budget/activation and other PAIR headers
+before local or directly configured manual engines. Final `X-PAIR-Model`,
+`X-PAIR-Engine`, `X-PAIR-Node` identify
 actual execution. Waits feed the existing attempt/admission timing facts; no
 additional diagnostics store is introduced.
 

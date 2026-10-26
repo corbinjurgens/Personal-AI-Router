@@ -510,10 +510,15 @@ cross compatible facades only for explicit bindings. Native and unbound
 requests retain their engine domain. A conflicting old-engine ingress refuses.
 
 Preparation has one absolute 90-second total bound, clamped to caller time and
-carried as decreasing private `X-PAIR-Engine-Prepare-Budget-Ms` milliseconds.
+carried on authenticated PAIR hops as decreasing private
+`X-PAIR-Engine-Prepare-Budget-Ms` milliseconds. A cold peer's slot acquisition
+and response-header wait share this bound; an accepted stream can then drain
+beyond it. Directly configured manual engines receive no private PAIR headers.
 Malformed values allow no preparation. The header grants no authority: pinned
-ingress uses its verified principal and current peer-service incarnation and
-never routes onward. Ready inference does not require management permission.
+ingress retains the principal and incarnation captured together before body
+waits and rejects a changed relationship. It never routes onward. Ready
+inference does not require management permission; loss of readiness during
+admission refuses instead of issuing a legacy local wake.
 Waiting holds no execution, strict or resident ticket. A receipt is followed
 by actual backend/inventory, binding, policy, identity and candidate readback,
 then ordinary admission with fresh final-engine defaults. Output starts only

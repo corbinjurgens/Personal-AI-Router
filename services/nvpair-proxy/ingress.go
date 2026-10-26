@@ -174,6 +174,17 @@ func (f *facade) handleClusterIngress(w http.ResponseWriter, r *http.Request) {
 			"client certificate is not a pinned member of this node's cluster")
 		return
 	}
+	incarnation, current := f.host.mesh.PeerServiceIncarnation(peer)
+	// Match the captured relationship to the currently pinned certificate,
+	// rather than accepting a replacement pin between those two reads.
+	f.host.mesh.Refresh()
+	verified, pinned := f.host.mesh.VerifyClientPin(r)
+	latest, live := f.host.mesh.PeerServiceIncarnation(peer)
+	if !current || !pinned || verified != peer || !live || latest != incarnation {
+		writeIngressError(w, http.StatusForbidden, "cluster-auth", "peer relationship changed during authentication")
+		return
+	}
+	r = r.WithContext(context.WithValue(r.Context(), boundEnginePeerKey{}, boundEnginePeer{id: peer, incarnation: incarnation}))
 	f.serveIngress(w, r, peer)
 }
 
@@ -259,6 +270,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		writeBoundEngineRefusal(w, boundEngineRefusal("model-unavailable"))
 		return
 	}
+	if !f.boundIngressPeerCurrent(ctx) {
+		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
+		return
+	}
 	if strict != nil {
 		f.serveStrictLocal(w, r, body, model, *strict, true)
 		return
@@ -280,6 +295,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	releaseBody, releasePreparation := func() {}, func() {}
 	defer func() { releasePreparation(); releaseBody() }()
 	admissionStarted := time.Now()
+	bound := f.boundModel(f.host.admission.currentPolicy(), model)
 	var bindingEvidence *boundEngineEvidence
 	if f.needsBoundPreparation(model) {
 		if parseAdmissionWait(r.Header) == 0 {
@@ -299,6 +315,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	decision := f.host.admission.admit(prepareCtx, admissionRequest{
 		engine:     f.profile.Name,
 		model:      model,
+		bound:      bound,
 		waitCap:    parseAdmissionWait(r.Header),
 		cancel:     cancel,
 		revalidate: func() bool { return f.boundEvidenceCurrentLocked(bindingEvidence) },
@@ -434,6 +451,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		}
 		performance.finish(sc, returned)
 	}()
+	if !f.boundIngressPeerCurrent(ctx) {
+		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
+		return
+	}
 	if !f.beforeBoundDispatch(decision.ticket, bindingEvidence) {
 		writeBoundEngineRefusal(w, boundEngineRefusal("model-unavailable"))
 		return
@@ -512,6 +533,10 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 // reconciliation owner proves termination. It must never be interpreted as
 // engine-idle evidence.
 func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool, origin ...*routingSpend) {
+	if !f.boundIngressPeerCurrent(r.Context()) {
+		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
+		return
+	}
 	if !f.localBindingConsistent(f.host.admission.currentPolicy(), model) {
 		writeBoundEngineRefusal(w, boundEngineRefusal("model-unavailable"))
 		return
@@ -583,6 +608,10 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		return
 	}
 	defer func() { buffers.releaseAfterPendingBody(releasePreparation) }()
+	if !f.boundIngressPeerCurrent(r.Context()) {
+		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
+		return
+	}
 	ticket, err := f.host.admission.AdmitStrict(prepareCtx, f.profile.Name, model, req, validated.generation)
 	if err != nil {
 		rejectObservation(failureFactReason(err), http.StatusServiceUnavailable)
@@ -609,6 +638,10 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	if !ok {
 		rejectObservation(factEngineNotRunning, http.StatusServiceUnavailable)
 		writeStrictAdmissionError(w, errStrictUnavailable)
+		return
+	}
+	if !f.boundIngressPeerCurrent(r.Context()) {
+		writeBoundEngineRefusal(w, boundEngineRefusal("management-denied"))
 		return
 	}
 	if err = ticket.BeforeStrictDispatch(); err != nil {

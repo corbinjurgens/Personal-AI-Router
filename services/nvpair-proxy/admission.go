@@ -290,6 +290,9 @@ func (a *admissionController) backendChanged() {
 type admissionRequest struct {
 	engine string
 	model  string
+	// Bound requests never borrow the legacy local wake path, including when
+	// readiness or policy changes during request storage or queue waits.
+	bound bool
 	// Only the existing routing owner may attest a resolved inventory model.
 	// Terminal ingress can forward arbitrary names without minting timestamps.
 	resolvedInventory bool
@@ -385,9 +388,13 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 		if req.revalidate != nil && !req.revalidate() {
 			return reject(nodepolicy.RejectReason("model-unavailable"))
 		}
+		bound := req.bound
 		for _, binding := range pol.EngineBindings {
-			if binding.Engine != req.engine && a.normalize(binding.Engine, binding.Model) == a.normalize(binding.Engine, req.model) {
-				return reject(nodepolicy.RejectReason("model-unavailable"))
+			if a.normalize(binding.Engine, binding.Model) == a.normalize(binding.Engine, req.model) {
+				if binding.Engine != req.engine {
+					return reject(nodepolicy.RejectReason("model-unavailable"))
+				}
+				bound = true
 			}
 		}
 		// Admission is the serving linearization point under the policy mutex.
@@ -432,6 +439,9 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 		// 2. Is the engine running? Health is what node/set-local-backend
 		// reports, which is also what a wake waits for.
 		if !a.healthy(req.engine) {
+			if bound {
+				return reject(nodepolicy.RejectReason("model-unavailable"))
+			}
 			// An engine with no saved intent is unmanaged, or the broker has not
 			// said yet; either way nothing would start it, so waiting for a wake
 			// would only add the wake timeout to a rejection.

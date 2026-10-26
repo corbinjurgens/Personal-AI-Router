@@ -31,11 +31,12 @@ type bindingRequestFixture struct {
 	f        *facade
 	requests chan nodepolicy.PrepareBoundEngineRequest
 	cancels  chan nodepolicy.CancelBoundEngineRequest
+	wakes    chan nodepolicy.WakeRequest
 }
 
 func newBindingRequestFixture(t *testing.T) *bindingRequestFixture {
 	t.Helper()
-	fx := &bindingRequestFixture{requests: make(chan nodepolicy.PrepareBoundEngineRequest, 8), cancels: make(chan nodepolicy.CancelBoundEngineRequest, 8)}
+	fx := &bindingRequestFixture{requests: make(chan nodepolicy.PrepareBoundEngineRequest, 8), cancels: make(chan nodepolicy.CancelBoundEngineRequest, 8), wakes: make(chan nodepolicy.WakeRequest, 8)}
 	w := bufferAckWriter(func(raw []byte) (int, error) {
 		var msg Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
@@ -54,6 +55,12 @@ func newBindingRequestFixture(t *testing.T) *bindingRequestFixture {
 				return 0, err
 			}
 			fx.cancels <- in
+		case nodepolicy.NotifyAdmissionWake:
+			var in nodepolicy.WakeRequest
+			if err := json.Unmarshal(msg.Params, &in); err != nil {
+				return 0, err
+			}
+			fx.wakes <- in
 		}
 		return len(raw), nil
 	})
@@ -162,6 +169,9 @@ func newBindingEngine(t *testing.T, model string, inventoryRelease <-chan struct
 	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
+			e.mu.Lock()
+			e.header = r.Header.Clone()
+			e.mu.Unlock()
 			e.listOnce.Do(func() { close(e.inventoryEntered) })
 			if e.inventoryRelease != nil {
 				select {
@@ -525,7 +535,7 @@ func TestEngineBindingRequestsReadyAlternativeBeatsSchedulerCold(t *testing.T) {
 	}
 }
 
-func pinnedBindingClient(t *testing.T, fx *bindingRequestFixture) (*http.Client, string, string) {
+func pinnedBindingClient(t *testing.T, fx *bindingRequestFixture, decorate ...func(*http.Request)) (*http.Client, string, string) {
 	t.Helper()
 	selfDir, peerDir := t.TempDir(), t.TempDir()
 	clustertrusttest.Join(t, selfDir, "fixture-cluster", "destination")
@@ -533,7 +543,12 @@ func pinnedBindingClient(t *testing.T, fx *bindingRequestFixture) (*http.Client,
 	proxyReversePin(t, selfDir, peerDir, "authenticated-origin")
 	proxyReversePin(t, peerDir, selfDir, "destination")
 	fx.p.mesh = clustertrust.Open(selfDir)
-	server := httptest.NewUnstartedServer(http.HandlerFunc(fx.f.handleClusterIngress))
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, apply := range decorate {
+			apply(r)
+		}
+		fx.f.handleClusterIngress(w, r)
+	}))
 	server.TLS = fx.p.mesh.ServerTLSConfig()
 	server.StartTLS()
 	t.Cleanup(server.Close)
@@ -544,6 +559,76 @@ func pinnedBindingClient(t *testing.T, fx *bindingRequestFixture) (*http.Client,
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
 	t.Cleanup(transport.CloseIdleConnections)
 	return &http.Client{Transport: transport, Timeout: 3 * time.Second}, server.URL, selfDir
+}
+
+// Wire-protocol tests record at a pinned PAIR receiving boundary. A directly
+// configured manual engine is no longer allowed to receive these headers.
+func pinRecordingPairPeer(t *testing.T, f *facade, id string, receiver *recordingEngine) {
+	t.Helper()
+	p := f.host
+	if p.mesh == nil {
+		p.baseConfigDir = t.TempDir()
+		selfDir := filepath.Join(p.baseConfigDir, "cluster")
+		clustertrusttest.Join(t, selfDir, "fixture-cluster", p.originNodeID)
+		p.mesh = clustertrust.Open(selfDir)
+		t.Cleanup(p.closeIdleTransports)
+	}
+	selfDir := filepath.Join(p.baseConfigDir, "cluster")
+	peerDir, uuid := t.TempDir(), "recording-"+id
+	clustertrusttest.Join(t, peerDir, "fixture-cluster", uuid)
+	var members []map[string]any
+	data, err := os.ReadFile(filepath.Join(selfDir, "members.json"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err == nil {
+		if err := json.Unmarshal(data, &members); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proxyReversePin(t, selfDir, peerDir, uuid)
+	proxyReversePin(t, peerDir, selfDir, p.originNodeID)
+	members = append(members, map[string]any{"nodeUuid": uuid, "state": "member", "clusterId": "fixture-cluster", "admissionEpoch": 1})
+	data, err = json.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selfDir, "members.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.mesh.Refresh()
+	mesh := clustertrust.Open(peerDir)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := mesh.VerifyClientPin(r)
+		if !ok || principal != p.originNodeID {
+			t.Error("recording PAIR receiver lacks authenticated origin")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		stream, err := parseOriginStreamRequest(r.URL.Path, body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		w.Header().Set(peerStreamFramingHeader, stream.peerMetadata())
+		setReplayBody(r, body)
+		receiver.Config.Handler.ServeHTTP(w, r)
+	}))
+	server.TLS = mesh.ServerTLSConfig()
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	n, ok := discoveredNode(f, id)
+	if !ok {
+		t.Fatalf("missing recording node %s", id)
+	}
+	endpoint := nodeFor(t, id, server.URL)
+	n.Addresses, n.Port, n.ClusterUUID = endpoint.Addresses, endpoint.Port, uuid
+	f.discovery.AddManual(n)
 }
 
 func TestEngineBindingRequestsPinnedPrincipalAndReadyPermission(t *testing.T) {
@@ -619,11 +704,28 @@ func TestEngineBindingRequestsPinnedPrincipalAndReadyPermission(t *testing.T) {
 }
 
 func TestEngineBindingRequestsTotalBudgetAcrossFailover(t *testing.T) {
-	fx := newBindingRequestFixture(t)
-	fx.f.discovery.RemoveManual("self")
+	fx := newProxyReverseFixture(t, "ollama", http.NotFoundHandler())
+	fx.directHealthy.Store(true)
+	// Preparation metadata belongs to pinned PAIR endpoints. These facade
+	// fixtures verify the certificate before recording the received allowance.
+	peer := func(handler http.Handler) *httptest.Server {
+		t.Helper()
+		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := fx.peer.mesh.VerifyClientPin(r); !ok {
+				t.Error("budget reached unauthenticated peer")
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			handler.ServeHTTP(w, r)
+		}))
+		server.TLS = fx.peer.mesh.ServerTLSConfig()
+		server.StartTLS()
+		t.Cleanup(server.Close)
+		return server
+	}
 	var budgets []time.Duration
 	var mu sync.Mutex
-	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	first := peer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		budgets = append(budgets, nodepolicy.EnginePrepareBudget(r.Header.Values(nodepolicy.EnginePrepareBudgetHeader)))
 		mu.Unlock()
@@ -639,8 +741,7 @@ func TestEngineBindingRequestsTotalBudgetAcrossFailover(t *testing.T) {
 		}
 		writeBoundEngineRefusal(w, boundEngineRefusal("engine-switch-cooldown"))
 	}))
-	defer first.Close()
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	second := peer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		budgets = append(budgets, nodepolicy.EnginePrepareBudget(r.Header.Values(nodepolicy.EnginePrepareBudgetHeader)))
 		mu.Unlock()
@@ -656,17 +757,24 @@ func TestEngineBindingRequestsTotalBudgetAcrossFailover(t *testing.T) {
 		}
 		writeBoundEngineRefusal(w, boundEngineRefusal("engine-switch-timeout"))
 	}))
-	defer second.Close()
-	fx.f.discovery.AddManual(nodeForModel(t, "a-ready", first.URL, "fixture"))
+	oll := fx.p.soleFacade()
+	ready := nodeForModel(t, "a-ready", first.URL, "fixture")
+	ready.ClusterUUID = "uuid-peer"
+	oll.discovery.SetSubscribed([]Node{ready})
+	lm := newFacade(fx.p, lmstudioCase(t).profile, NewDiscovery(), lmstudioCase(t).profile.FacadePort)
+	fx.p.facades[lm.profile.Name] = lm
 	cold := nodeFor(t, "b-cold", second.URL)
-	cold.PolicyRevision = "1"
-	cold.EngineBindingOffers = bindingOffer("ollama", "fixture")
-	fx.f.discovery.AddManual(cold)
-	req := bindingRequest("fixture", "/api/generate")
+	cold.PolicyRevision, cold.ClusterUUID = "1", "uuid-peer"
+	cold.EngineBindingOffers = bindingOffer("lmstudio", "fixture")
+	lm.discovery.SetSubscribed([]Node{cold})
+	pol := nodepolicy.Default()
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "fixture"}, {Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "fixture"}}}
+	fx.p.admission.setPolicy(pol)
+	req := bindingRequest("weak", routeChatCompletions)
 	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "250")
 	w := httptest.NewRecorder()
 	started := time.Now()
-	fx.f.handleHTTP(w, req)
+	oll.handleHTTP(w, req)
 	assertBindingRefusal(t, w, "engine-switch-timeout")
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("total preparation wait reset: %v", elapsed)
@@ -953,4 +1061,346 @@ func TestEngineBindingRequestsRemovedBindingCannotBorrowStaleOffer(t *testing.T)
 		t.Fatalf("removed binding submitted activation: %+v", in)
 	default:
 	}
+}
+
+func coldBindingPeer(fx *proxyReverseFixture) {
+	fx.node.Models, fx.node.PolicyRevision = nil, "1"
+	fx.node.EngineBindingOffers = bindingOffer("ollama", "fixture-model")
+	fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})
+	fx.directHealthy.Store(true)
+}
+
+func TestEngineBindingRequestsReviewColdPinnedSlotBudget(t *testing.T) {
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	var held, inference atomic.Int32
+	fx := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			held.Add(1)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		} else {
+			inference.Add(1)
+		}
+		_, _ = io.WriteString(w, `{"done":true}`)
+	}))
+	t.Cleanup(unblock)
+	coldBindingPeer(fx)
+	cand := fx.candidate(t)
+	transport := fx.p.candidateTransport(cand)
+	var occupying sync.WaitGroup
+	for range 8 {
+		req := proxyReverseRequest(t, http.MethodGet, cand.url.String()+"/api/tags", nil)
+		occupying.Add(1)
+		go func() {
+			defer occupying.Done()
+			resp, err := transport.RoundTrip(req)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+		}()
+	}
+	t.Cleanup(occupying.Wait)
+	// Unblock before joining requests and before the fixture closes servers.
+	t.Cleanup(unblock)
+	waitForCond(t, 3*time.Second, "all pinned peer slots occupied", func() bool { return held.Load() == 8 })
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	req := bindingRequest("fixture-model", "/api/generate").WithContext(ctx)
+	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "80")
+	started := time.Now()
+	w, done := runBindingHTTP(t, fx.p.soleFacade(), req)
+	waitChan(t, done, "cold pinned slot refusal")
+	if elapsed := time.Since(started); elapsed < 60*time.Millisecond || elapsed > 350*time.Millisecond {
+		t.Errorf("cold slot refusal outside preparation bound: %v", elapsed)
+	} else {
+		t.Logf("cold slot preparation refusal after %v", elapsed)
+	}
+	assertBindingRefusal(t, w.ResponseRecorder, "engine-switch-timeout")
+	if inference.Load() != 0 {
+		t.Fatal("expired cold request reached peer engine")
+	}
+}
+
+func TestEngineBindingRequestsReviewColdPinnedHeaderBudgetAndStream(t *testing.T) {
+	streamEntered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	var calls atomic.Int32
+	var streamCancelled atomic.Bool
+	fx := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
+			return
+		}
+		if calls.Add(1) == 1 {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, "{\"response\":\"first\",\"done\":false}\n")
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+			return
+		}
+		close(streamEntered)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			streamCancelled.Store(true)
+			return
+		}
+		_, _ = io.WriteString(w, "{\"response\":\"tail\",\"done\":true}\n")
+	}))
+	t.Cleanup(unblock)
+	coldBindingPeer(fx)
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	req := bindingRequest("fixture-model", "/api/generate").WithContext(ctx)
+	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "80")
+	started := time.Now()
+	w, done := runBindingHTTP(t, fx.p.soleFacade(), req)
+	waitChan(t, done, "cold peer header refusal")
+	if elapsed := time.Since(started); elapsed < 60*time.Millisecond || elapsed > 350*time.Millisecond {
+		t.Errorf("cold header refusal outside preparation bound: %v", elapsed)
+	} else {
+		t.Logf("cold header preparation refusal after %v", elapsed)
+	}
+	assertBindingRefusal(t, w.ResponseRecorder, "engine-switch-timeout")
+	// A later cold request that produces its headers in time owns its healthy
+	// stream beyond that preparation bound. The header timer must be retired.
+	streamReq := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"fixture-model","stream":true}`))
+	streamReq.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "150")
+	stream, streamDone := runBindingHTTP(t, fx.p.soleFacade(), streamReq)
+	waitChan(t, streamEntered, "accepted stream")
+	waitChan(t, stream.wrote, "origin stream output")
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	<-timer.C
+	select {
+	case <-streamDone:
+		t.Fatal("preparation deadline killed accepted stream")
+	default:
+	}
+	unblock()
+	waitChan(t, streamDone, "stream after preparation deadline")
+	if stream.Code != http.StatusOK || streamCancelled.Load() {
+		t.Fatalf("accepted stream status=%d cancelled=%v", stream.Code, streamCancelled.Load())
+	}
+	var last struct {
+		Response string
+		Done     bool
+	}
+	decoder := json.NewDecoder(strings.NewReader(stream.Body.String()))
+	for decoder.More() {
+		if err := decoder.Decode(&last); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !last.Done || last.Response != "tail" {
+		t.Fatalf("stream tail=%+v body=%s", last, stream.Body)
+	}
+}
+
+type bindingBodyReadBarrier struct {
+	io.ReadCloser
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (b *bindingBodyReadBarrier) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return b.ReadCloser.Read(p)
+}
+
+func TestEngineBindingRequestsReviewPinnedRelationshipBeforeBodyWait(t *testing.T) {
+	fx := newBindingRequestFixture(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	client, ingressURL, selfDir := pinnedBindingClient(t, fx, func(r *http.Request) {
+		r.Body = &bindingBodyReadBarrier{ReadCloser: r.Body, entered: entered, release: release}
+	})
+	t.Cleanup(unblock)
+	old, ok := fx.p.mesh.PeerServiceIncarnation("authenticated-origin")
+	if !ok {
+		t.Fatal("missing initial relationship")
+	}
+	req, err := http.NewRequest(http.MethodPost, ingressURL+"/api/generate", strings.NewReader(`{"model":"fixture","stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-PAIR-Peer-Id", "authenticated-origin")
+	req.Header.Set("X-PAIR-Peer-Incarnation", old)
+	type result struct {
+		status int
+		body   []byte
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := client.Do(req)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		done <- result{status: resp.StatusCode, body: body, err: err}
+	}()
+	waitChan(t, entered, "authenticated body read")
+	replacement := t.TempDir()
+	clustertrusttest.Join(t, replacement, "fixture-cluster", "authenticated-origin")
+	proxyReversePin(t, selfDir, replacement, "authenticated-origin")
+	fx.p.mesh.Refresh()
+	fresh, ok := fx.p.mesh.PeerServiceIncarnation("authenticated-origin")
+	if !ok || fresh == old {
+		t.Fatal("replacement did not change relationship incarnation")
+	}
+	unblock()
+	var got result
+	select {
+	case in := <-fx.requests:
+		fx.reply(t, in, nodepolicy.BoundEnginePrepared{Reason: "management-denied"})
+		got = <-done
+		t.Errorf("old authenticated body rebound to new relationship: request=%+v", in)
+	case got = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("relationship refusal did not finish")
+	}
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	var refusal struct{ Reason string }
+	if err := json.Unmarshal(got.body, &refusal); err != nil {
+		t.Fatal(err)
+	}
+	if got.status != http.StatusServiceUnavailable || refusal.Reason != "management-denied" {
+		t.Fatalf("old relationship response=%d %+v", got.status, refusal)
+	}
+}
+
+func TestEngineBindingRequestsReviewBoundReadyPeerCannotLegacyWake(t *testing.T) {
+	fx := newBindingRequestFixture(t)
+	e := newBindingEngine(t, "fixture", nil)
+	setBackend(t, fx.f, e.URL, true)
+	fx.p.noteSelf("self", "ollama", []string{"fixture"})
+	pol := fx.p.admission.currentPolicy()
+	pol.Admission.MaxConcurrentPerModel = 1
+	pol.Idle.StartOnDemand = true
+	pol.Idle.WakeTimeoutSeconds = 1
+	fx.p.admission.setPolicy(pol)
+	fx.p.admission.setIntent(map[string]bool{"ollama": true})
+	first := fx.p.admission.admit(context.Background(), admissionRequest{engine: "ollama", model: "fixture", waitCap: 0})
+	if first.ticket == nil {
+		t.Fatalf("first admission=%+v", first)
+	}
+	defer first.ticket.release()
+	client, ingressURL, _ := pinnedBindingClient(t, fx)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ingressURL+"/api/generate", strings.NewReader(`{"model":"fixture","stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		status int
+		body   []byte
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := client.Do(req)
+		if err != nil {
+			done <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		done <- result{status: resp.StatusCode, body: body, err: err}
+	}()
+	waitForCond(t, time.Second, "ready bound peer queued", func() bool {
+		fx.p.admission.mu.Lock()
+		defer fx.p.admission.mu.Unlock()
+		return fx.p.admission.queued == 1
+	})
+	b := fx.f.currentLocalBackend()
+	b.Healthy = false
+	if err := fx.f.setLocalBackend(b); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case wake := <-fx.wakes:
+		cancel()
+		<-done
+		t.Fatalf("inference-only bound peer issued legacy wake: %+v", wake)
+	case in := <-fx.requests:
+		fx.reply(t, in, nodepolicy.BoundEnginePrepared{Reason: "management-denied"})
+		<-done
+		t.Fatalf("ready-check race issued unexpected activation: %+v", in)
+	case got := <-done:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		var refusal struct{ Reason string }
+		if err := json.Unmarshal(got.body, &refusal); err != nil {
+			t.Fatal(err)
+		}
+		if got.status != http.StatusServiceUnavailable || refusal.Reason != "model-unavailable" {
+			t.Fatalf("health withdrawal response=%d %+v", got.status, refusal)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("health withdrawal left admission waiting")
+	}
+	if e.hits.Load() != 0 {
+		t.Fatal("withdrawn engine received inference")
+	}
+}
+
+func TestEngineBindingRequestsReviewManualEngineStripsPrivateHeaders(t *testing.T) {
+	test := func(name, method, path string) {
+		t.Run(name, func(t *testing.T) {
+			fx := newBindingRequestFixture(t)
+			fx.f.discovery.RemoveManual("self")
+			e := newBindingEngine(t, "fixture", nil)
+			fx.f.discovery.AddManual(nodeForModel(t, "manual", e.URL, "fixture"))
+			req := bindingRequest("fixture", path)
+			if method == http.MethodGet {
+				req = httptest.NewRequest(method, path, nil)
+			}
+			for _, name := range []string{nodepolicy.EnginePrepareBudgetHeader, nodepolicy.AdmissionWaitHeader, peerStreamFramingHeader, "X-PAIR-Activation-Identity", "X-PAIR-Peer-Id", nodepolicy.SwitchRequestIDHeader} {
+				req.Header.Set(name, "spoofed-private")
+			}
+			req.Header.Set("X-Ordinary-Option", "keep")
+			w := httptest.NewRecorder()
+			fx.f.handleHTTP(w, req)
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			if w.Code != http.StatusOK || e.header == nil {
+				t.Fatalf("manual status=%d header=%v", w.Code, e.header)
+			}
+			for key := range e.header {
+				if strings.HasPrefix(strings.ToLower(key), "x-pair-") {
+					t.Errorf("private header reached direct manual engine: %s", key)
+				}
+			}
+			if e.header.Get("X-Ordinary-Option") != "keep" {
+				t.Fatal("ordinary option stripped")
+			}
+		})
+	}
+	test("inference", http.MethodPost, "/api/generate")
+	test("control", http.MethodGet, "/api/version")
+	test("model inventory", http.MethodGet, "/api/tags")
 }

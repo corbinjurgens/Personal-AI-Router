@@ -1005,7 +1005,7 @@ func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, s
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 		proxy := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
-				if cand.self {
+				if cand.peerUUID == "" {
 					stripInternalRoutingHeaders(req.Header)
 					req.Header.Del(peerStreamFramingHeader)
 				}

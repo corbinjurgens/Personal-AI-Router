@@ -80,6 +80,10 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 			continue
 		}
 		upstream.Header = cors.FanoutHeaders(r.Header)
+		if cand.peerUUID == "" {
+			stripInternalRoutingHeaders(upstream.Header)
+			upstream.Header.Del(peerStreamFramingHeader)
+		}
 		upstream.Header.Del("Content-Length")
 		if upstream.Header.Get("Accept") == "" {
 			upstream.Header.Set("Accept", "application/json")

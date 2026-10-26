@@ -17,10 +17,66 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/nodepolicy"
 )
 
 type boundEngineDeadlineKey struct{}
+
+// This value is captured with the pinned certificate at authenticated ingress,
+// before any request body or storage wait. HTTP fields never populate it.
+type boundEnginePeerKey struct{}
+type boundEnginePeer struct{ id, incarnation string }
+
+func (f *facade) boundIngressPeerCurrent(ctx context.Context) bool {
+	peer, ok := ctx.Value(boundEnginePeerKey{}).(boundEnginePeer)
+	if !ok {
+		return true
+	} // Local requests and internal terminal callers.
+	incarnation, current := f.host.mesh.PeerServiceIncarnation(peer.id)
+	return current && incarnation == peer.incarnation
+}
+
+var errBoundEnginePrepareTimeout = errors.New("bound engine preparation deadline expired")
+
+// Only cold pinned hops use this header-phase timer. A context deadline would
+// also kill an accepted stream. Retire the timer on headers, then retain the
+// same cancellation owner until the transport body closes normally.
+type boundEnginePreparationTransport struct{ http.RoundTripper }
+
+func (t boundEnginePreparationTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	remaining := boundEngineRemaining(r.Context())
+	if remaining < time.Millisecond {
+		return nil, errBoundEnginePrepareTimeout
+	}
+	ctx, cancel := context.WithCancelCause(r.Context())
+	expired := make(chan struct{})
+	timer := time.AfterFunc(remaining, func() { cancel(errBoundEnginePrepareTimeout); close(expired) })
+	resp, err := t.RoundTripper.RoundTrip(r.WithContext(ctx))
+	if !timer.Stop() {
+		<-expired
+	}
+	if errors.Is(context.Cause(ctx), errBoundEnginePrepareTimeout) || boundEngineRemaining(r.Context()) < time.Millisecond || errors.Is(err, clustertrust.ErrPeerSlotOccupied) {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		cancel(errBoundEnginePrepareTimeout)
+		return nil, errBoundEnginePrepareTimeout
+	}
+	if err != nil {
+		cancel(err)
+		return resp, err
+	}
+	resp.Body = &boundEnginePreparationBody{ReadCloser: resp.Body, cancel: func() { cancel(nil) }}
+	return resp, nil
+}
+
+type boundEnginePreparationBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *boundEnginePreparationBody) Close() error { defer b.cancel(); return b.ReadCloser.Close() }
 
 func withBoundEngineDeadline(r *http.Request, start time.Time) *http.Request {
 	deadline := start.Add(nodepolicy.EnginePrepareBudget(r.Header.Values(nodepolicy.EnginePrepareBudgetHeader)))
@@ -144,11 +200,11 @@ func (f *facade) prepareLocalBound(ctx context.Context, model, peer string) (*bo
 	}
 	in := nodepolicy.PrepareBoundEngineRequest{PolicyRevision: pol.Revision, Engine: f.profile.Name, Model: model, BudgetMs: budget}
 	if peer != "" {
-		incarnation, ok := p.mesh.PeerServiceIncarnation(peer)
-		if !ok {
+		authority, ok := ctx.Value(boundEnginePeerKey{}).(boundEnginePeer)
+		if !ok || authority.id != peer || !f.boundIngressPeerCurrent(ctx) {
 			return nil, boundEngineRefusal("management-denied")
 		}
-		in.PeerID, in.PeerIncarnation = peer, incarnation
+		in.PeerID, in.PeerIncarnation = authority.id, authority.incarnation
 	}
 	result, err := p.prepareBoundEngine(ctx, in)
 	if err != nil {

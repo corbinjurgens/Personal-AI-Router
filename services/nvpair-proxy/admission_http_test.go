@@ -664,6 +664,8 @@ func TestHandleHTTP_SendsAdmissionWaitHeader(t *testing.T) {
 	pol := nodepolicy.Default()
 	pol.Admission.QueueTimeoutSeconds = 17
 	p.admission.setPolicy(pol)
+	pinRecordingPairPeer(t, p.soleFacade(), "a", busy)
+	pinRecordingPairPeer(t, p.soleFacade(), "b", ok)
 
 	rec := httptest.NewRecorder()
 	p.soleFacade().handleHTTP(rec, tc.inferenceRequest())

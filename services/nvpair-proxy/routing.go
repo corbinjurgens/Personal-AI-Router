@@ -502,11 +502,19 @@ func hybridDispatchPolicy(start time.Time, limits nodepolicy.Limits, rules nodep
 }
 
 // peerSlotContext uses the remaining hybrid queue allowance for the origin's
-// peer-service slot, bounded by the shared pre-output deadline. Concrete and
-// local attempts retain their context.
+// peer-service slot, bounded by the shared pre-output deadline. A cold pinned
+// concrete candidate spends its one remaining preparation allowance here.
+// Ready, unbound and local attempts retain their existing context.
 func peerSlotContext(ctx context.Context, policy dispatchPolicy, cand candidate, queueLeft, preOutputLeft time.Duration) (context.Context, time.Duration) {
-	if !policy.hybrid || cand.self || cand.peerUUID == "" {
+	if cand.self || cand.peerUUID == "" {
 		return ctx, 0
+	}
+	if !policy.hybrid {
+		if !cand.preparation {
+			return ctx, 0
+		}
+		wait := min(boundEngineRemaining(ctx), max(preOutputLeft, 0))
+		return clustertrust.WithPeerSlotWait(ctx, wait), wait
 	}
 	wait := min(queueLeft, max(preOutputLeft, 0))
 	return clustertrust.WithPeerSlotWait(ctx, wait), wait
@@ -1569,6 +1577,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					resolvedInventory: true,
 					engine:            candEngine,
 					model:             candModel,
+					bound:             candFacade.boundModel(p.admission.currentPolicy(), candModel),
 					waitCap:           admissionTimeout,
 					cancel:            func() { ctl.abortLocalIf(att) },
 					prepare:           prepare,
@@ -1757,14 +1766,15 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			attemptReq.Header.Del(nodepolicy.AdmissionWaitHeader)
 		} else {
 			attemptReq.Header.Set(nodepolicy.AdmissionWaitHeader, strconv.Itoa(admissionWait))
-			if !policy.hybrid {
+			if !policy.hybrid && cand.peerUUID != "" {
 				setBoundEngineBudget(attemptReq.Header, r.Context())
-				if cand.peerUUID != "" {
-					attemptReq = attemptReq.WithContext(clustertrust.WithPeerSlotAcquired(requestCtx, func(out *http.Request, _ time.Duration) error {
-						setBoundEngineBudget(out.Header, r.Context())
-						return nil
-					}))
-				}
+				attemptReq = attemptReq.WithContext(clustertrust.WithPeerSlotAcquired(requestCtx, func(out *http.Request, _ time.Duration) error {
+					if cand.preparation && boundEngineRemaining(out.Context()) < time.Millisecond {
+						return errBoundEnginePrepareTimeout
+					}
+					setBoundEngineBudget(out.Header, r.Context())
+					return nil
+				}))
 			}
 		}
 		if policy.hybrid && !cand.self {
@@ -1851,11 +1861,17 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			continue
 		}
 
+		var transport http.RoundTripper = proxyResponseTransport{p.candidateTransport(cand)}
+		if cand.preparation && cand.peerUUID != "" {
+			transport = boundEnginePreparationTransport{transport}
+		}
 		proxy := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
-				if cand.self {
+				if cand.peerUUID == "" {
 					stripInternalRoutingHeaders(req.Header)
 					req.Header.Del(peerStreamFramingHeader)
+				}
+				if cand.self {
 					withLocalCredential(req.Header, candFacade.localInferenceCredential(r, target))
 				}
 				req.URL.Scheme = target.Scheme
@@ -1864,7 +1880,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			},
 			// A remote cluster peer is dialed over mTLS (per-peer pinned config);
 			// self/manual candidates use the plain transport. See candidateTransport.
-			Transport: performanceTransport{RoundTripper: proxyResponseTransport{p.candidateTransport(cand)}, attempt: performance},
+			Transport: performanceTransport{RoundTripper: transport, attempt: performance},
 			// ModifyResponse fires when the upstream's status line + headers
 			// have arrived but before the body streams. That's both the retry
 			// decision point and, on commit, the time-to-first-byte boundary.
@@ -2096,6 +2112,23 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			ErrorHandler: func(ew http.ResponseWriter, _ *http.Request, err error) {
 				if _, ok := err.(retrySignal); ok {
 					return // retryable status — the loop advances to the next candidate
+				}
+				if stderrors.Is(err, errBoundEnginePrepareTimeout) {
+					if r.Context().Err() != nil {
+						return
+					}
+					att.observeAttempt(routingAttemptResult{factRejected, factDeadline, http.StatusServiceUnavailable, true})
+					result := boundEngineRefusal("engine-switch-timeout")
+					boundFailures[boundKey(cand)], boundRefusal = true, &result
+					if !last {
+						retry = true
+						return
+					}
+					respondedWithError = true
+					servedNodeID, servedTarget, finalStatus = cand.id, target.Host, http.StatusServiceUnavailable
+					ctl.observeIngress(routingIngressResult{factFailed, factDeadline, finalStatus})
+					writeBoundEngineRefusal(ew, result)
+					return
 				}
 				if ctl.deadlineExpired() {
 					ctl.observeIngress(routingIngressResult{factFailed, factDeadline, http.StatusServiceUnavailable})
