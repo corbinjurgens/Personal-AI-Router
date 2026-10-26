@@ -629,9 +629,11 @@ Engine switching also has two internal process-scoped requests:
 request values win. In `enforced` mode, configured scalar and array values
 replace request values and objects merge recursively, without changing
 unconfigured request fields. Ambiguous configured keys refuse with HTTP `400`
-and a fixed message before engine contact. Qualification binds effective mode
-as well as options; changing either invalidates installed strict capacity. The serving
-node owns this processing: a request routed through the Mac to PC3 uses PC3's
+and a fixed message before engine contact. Qualification compares effective mode
+and options; a mismatch invalidates installed strict capacity. Its current option
+comparison decodes numbers as float64, so distinct high-precision numeric values
+can compare equal. See [qualification binding](../../docs/local-qualification.mdx#installing-strict-capacity).
+The serving node owns this processing: a request routed through the Mac to PC3 uses PC3's
 profile, not the Mac's peer-candidate defaults. See the
 [broker contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks)
 for the independent `localOnly` edit lock, desktop controls and precedence example.

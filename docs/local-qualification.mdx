@@ -139,8 +139,13 @@ itself.
 ## Installing strict capacity
 
 `requestOptionsMode` is `defaults` when omitted, and explicit `defaults`
-normalizes to omission. Qualification requires equal options and equal effective
-mode in profile and evidence. Defaults-mode requests allow client overrides;
+normalizes to omission. Qualification compares options and effective mode in
+profile and evidence. The current option comparator decodes numbers as float64:
+distinct high-precision JSON numbers can compare equal, both when matching
+evidence and when deciding whether an installed qualification changed. This is
+not an exact numeric binding and differs from the precision-preserving target
+policy lock comparison. Effective modes are compared directly.
+Defaults-mode requests allow client overrides;
 enforced-mode requests replace configured leaves recursively before strict
 validation. This path retains strict key/shape checks and
 refuses configured-key ambiguity with a fixed HTTP `400` message. Unconfigured fields
