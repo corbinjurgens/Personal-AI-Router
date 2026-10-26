@@ -780,6 +780,9 @@ func newActivatedBroker(t *testing.T) *activatedBroker {
 	attachFakeEngine(t, b)
 	pp, proxy, acks := attachAckingProxy(t, b)
 	b.replayPolicyToProxy(context.Background(), pp)
+	// Callers may replace the client codec or count later announcements. Join
+	// startup publication before handing them this already-activated fixture.
+	waitBrokerLeaseAnnouncement(t, b.nodePolicyRuntime())
 	ab := &activatedBroker{b: b, out: out, pp: pp, proxy: proxy, acks: acks, path: path}
 	ab.wantActivation(t, "0", activationActive, "")
 	return ab
@@ -1002,6 +1005,7 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	if held := acks.heldRevision(); held != "0" {
 		t.Fatalf("the restarted proxy holds revision %q, want 0", held)
 	}
+	waitBrokerLeaseAnnouncement(t, r)
 	announced, activation := lastPolicyChanged(t, out)
 	if announced.Revision != "0" || activation.Activation != activationActive || activation.ActiveRevision != "0" {
 		t.Fatalf("policy:changed after the replay = revision %q, %+v; want revision 0 active at 0", announced.Revision, activation)
@@ -3709,6 +3713,7 @@ func TestPolicyReplayAfterProxyRestartActivatesThePersistedRevision(t *testing.T
 	if held := acks2.heldRevision(); held != "5000" {
 		t.Fatalf("the restarted proxy holds revision %q, want 5000", held)
 	}
+	waitBrokerLeaseAnnouncement(t, ab.b.nodePolicyRuntime())
 	announced, activation := lastPolicyChanged(t, ab.out)
 	if announced.Revision != "5000" || activation.Activation != activationActive || activation.ActiveRevision != "5000" {
 		t.Fatalf("policy:changed after the restart = revision %q, %+v; want revision 5000 active at 5000", announced.Revision, activation)
