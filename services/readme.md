@@ -365,12 +365,12 @@ A skip is not a pass. If you are relying on a test, check it actually ran.
 
 The service path supports persisted bindings, guarded automatic E4 replacement,
 stopped-engine offers and bounded HTTP preparation. The desktop editor uses the
-existing policy draft and Save/CAS flow. Joined `TestEngineBindingProcess`
-acceptance remains pending: focused Task 7 runs are reported green, but the
-combined run intermittently refuses reverse pinned target acceptance. See the
-[binding guide's pending process procedure](../docs/model-engine-bindings.mdx#client-and-process-proof-status)
-for planned Windows selectors and required drain/effect/response, authority,
-recovery and cleanup evidence. Its
+existing policy draft and Save/CAS flow. Joined Windows binding/switch checks,
+hybrid/history checks and a whole process-suite run passed on Task 7's joined
+source. See the
+[binding guide's process evidence](../docs/model-engine-bindings.mdx#joined-process-evidence-and-limits)
+for exact results, unproved boundaries and refusal-only authority diagnostics.
+The historical reverse refusal's predicate remains unestablished. Its
 [native matrix](../docs/model-engine-bindings.mdx#native-acceptance-matrix) is
 entirely pending, not observed. Component or fake-engine process results cannot establish
 installed-engine or multi-machine acceptance.

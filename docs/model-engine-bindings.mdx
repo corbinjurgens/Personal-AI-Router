@@ -11,14 +11,14 @@ then wait while that node activates the assigned engine. Saving a binding starts
 nothing. An absent or empty binding list leaves unbound routing behavior unchanged;
 removing a binding does not proactively stop an engine.
 
-The service path and desktop binding editor are implemented. Joined
-service-process proof remains pending below. Native engine and multi-machine
+The service path and desktop binding editor are implemented. Joined Windows
+service-process checks passed within the boundaries below. Native engine and multi-machine
 acceptance is pending, not observed, for every matrix row.
 
 ## Configure the Destination Policy
 
-The destination broker stores bindings in its existing `node-policy.json` under
-policy version 2. They are device configuration, separate from the request
+The destination broker stores bindings in its existing `node-policy.json`.
+They are device configuration, separate from the request
 origin's private routing, provider accounts and tier configuration.
 
 This JSON is a **policy fragment**, not a complete `policy:set` document. The
@@ -54,9 +54,8 @@ destination preserves its protected private routing/accounts, tiers, availabilit
 and pause provenance through the existing peer policy writer.
 
 Clear bindings with `engineBindings: []` in that edited document. New local and
-peer readbacks emit an explicit empty array. If an older target drops a requested
-binding field, including an explicit clear, the relay reports model-control edits
-as unsupported. A successful transport response alone is insufficient. See the
+peer readbacks emit an explicit empty array. Confirm the saved value in readback;
+a successful transport response alone is insufficient. See the
 [broker policy contract](../services/nvpair-ui-broker/README.md) for the API and
 recovery behavior; there is no separate binding save API or CLI subcommand.
 
@@ -114,7 +113,7 @@ Ready-first selection operates inside the existing policy ordering:
   Ready alternatives use zero admission wait while alternatives remain.
 
 Here, a ready selection class is inventory evidence, not a guarantee that a
-model is resident or a request will succeed. Versioned `engineBindingOffers`
+model is resident or a request will succeed. `engineBindingOffers`
 are a separate advisory signal. They neither invent inventory nor prove engine
 health, loaded state, model presence, qualification or strict capacity. A stopped
 offered engine can retain its real proxy listener in the authenticated service
@@ -253,7 +252,7 @@ the original text for correction, rather than rebuilding a policy from defaults.
 Use the same **Save** action and CAS/readback/error flow described above. The
 form guards against a changed target and clears the previous target's draft;
 obsolete reads or save replies cannot replace the new target's draft. Conflicts,
-unsupported targets, management denial, pause vetoes and uncertain saves remain
+management denial, pause vetoes and uncertain saves remain
 explicit. Saving starts nothing, and a saved binding does not establish runtime
 readiness. Existing switch controls display automatic receipt phases and errors;
 the binding editor adds no lifecycle command, progress owner or separate draft
@@ -267,33 +266,81 @@ The Mac merge gate repeated the focused suite and static checks. These are
 automated results; native GUI and assistive-technology acceptance remain
 **pending, not observed**.
 
-### Pending Joined Process Proof
+### Joined Process Evidence and Limits
 
-`TestEngineBindingProcess` remains in progress. PC3 reports focused plain runs
-repeated three times and a focused race run green at Task 7 revision `a929d3ed`.
-The combined run still intermittently refuses reverse pinned target acceptance
-with `503 management-denied`, so joined process acceptance is **pending**.
-A torn read in `Mesh.peerServiceAuthority` during cluster-manager metadata
-writes is the leading source hypothesis, not a confirmed cause. Refusal-only
-diagnostics at the authority owners are in progress. Planned coverage is local
-and pinned-remote CAS/restart readback, wrong-engine demand, held old inference,
-stop-before-start-before-response ordering, ready-peer preference, management
-denial with ready inference allowed, pause/lock/residency, contention/dwell,
-unsupported targets, model/start failure, interrupted automatic work and receipt
-cycling with manual-ID preservation. Direct and reverse paths must also prove
-terminal ingress, allowlisted cold facades, relationship removal/readmission,
-no replay, scoped cleanup and no survivors.
+Windows PC3 reported these joined results at Task 7 head `bf5974d2`, merged
+into integration at `2e48fecd`. Counts include parent and descendant tests:
 
-The following are **Windows acceptance procedures**, not a claim that the
-combined joined proof has passed. Use the final Task 7 fixture revision and
+| Invocation | Pass / fail / skip |
+| --- | --- |
+| Combined binding, switch and E4 client selectors, plain count 3 | 78 / 0 / 0 |
+| Unified dispatch and routing history selectors, plain count 3 | 69 / 0 / 0 |
+| Whole `services/tests`, plain | 851 / 0 / 7 |
+
+The whole-run skips were occupied-default-port guards, Windows zombie-state
+inspection and the opt-in desktop restart. Skips supply no acceptance evidence.
+The final fixed-path process sample had no survivors, and retained before/after
+firewall listings matched. Screen prompts were unmonitored.
+
+The actual cases in
+[`engine_binding_test.go`](../services/tests/engine_binding_test.go) and
+[`engine_switch_test.go`](../services/tests/engine_switch_test.go) establish
+local and granted pinned policy CAS/restart readback, ordinary wrong-engine
+exclusion, old inference completion and source exit before target start and
+response, and ready-peer preference verified through terminal routing history.
+They cover denial of cold activation with ready inference still allowed,
+cold lock/pause vetoes, protected source residents, competing-target refusal,
+replacement dwell, missing-model/start failure, automatic receipt cycling with
+a retained manual ID, and broker restart without replay of accepted work.
+Pinned direct and reverse cases exercise the stopped facade's real allowlist
+registration and terminal ingress. These use private synthetic engines and
+recorded process lifetimes, not installed native engines.
+
+Process coverage does **not** establish same-target waiter coalescing before
+readiness; relationship removal/readmission at acceptance; delayed scoped
+cleanup after newer manual work or delayed submissions after pruning; drain
+expiry with old inference still active, new-source rejection during that drain,
+or live Off/pause preemption. Manual-replacement dwell, concrete-tier bound
+demand, wrong-engine rejection specifically at authenticated ingress, and
+independent production-scanner convergence also remain unproved at this layer.
+Unsupported-preparation refusal is not independently established by a process
+case. Component coverage is not a substitute for these process observations.
+
+The historical reverse `management-denied` refusal did not recur in the joined
+runs. Its deciding predicate remains unestablished. The shared authority
+projection repair (`d85220d1`) independently fixes metadata-only bracket
+rewrites being mistaken for authority changes; the passes do not establish
+that this mechanism caused the earlier refusal.
+
+### Refusal Diagnostics
+
+On a bound-management refusal, the proxy, broker and engine-manager emit
+`bound engine management refused`. The `site` distinguishes the proxy peer
+incarnation check, broker peer-incarnation or remote-management check, and
+engine-manager peer-incarnation or permission check. The manager's immediate
+20 ms accepted-activation recheck uses the same diagnostic owner.
+
+The line records the deciding predicate, operational node/peer/cluster IDs,
+epoch/counter, numeric I/O error code, expected/observed relationship IDs,
+permission state and, where applicable, proxy or manager run ID. Component
+comparison flags describe whether the changed component's authority fields
+were compared and matched. Shared clustertrust supplies evidence from the exact
+deciding reads, without a later explanatory reread or a coherent-cross-file
+snapshot claim. No prompts, bodies, keys, certificate contents, paths or raw
+freeform errors are logged. Diagnostics neither retry mutations nor weaken
+authority checks or the manager's immediate cancellation.
+
+### Repeat the Windows Process Checks
+
+Use the joined Task 7 fixture revision or its integrated successor and
 run from `services/tests` in the designated serialized gate interval, using the
 installed fixed-path test wrapper and established exact executable-path firewall
 rules. A missing rule leaves the dependent run pending.
 
 ```sh
-go test -count=1 -timeout=30m -run '^TestEngineBindingProcess$' .
-go test -race -count=1 -timeout=30m -run '^TestEngineBindingProcess$' .
-go test -count=1 -timeout=30m -run 'TestEngineSwitchProcess|TestE4SwitchClient' .
+go test -p 1 -parallel 1 -count=3 -timeout=30m -run 'TestEngineBindingProcess|TestEngineSwitchProcess.*|TestE4SwitchClient.*' .
+go test -p 1 -parallel 1 -race -count=1 -timeout=30m -run '^TestEngineBindingProcess$' .
+go test -p 1 -parallel 1 -count=3 -timeout=30m -run 'TestUnifiedDispatchProcess|TestRoutingHistoryProductionChain' .
 ```
 
 Record exact source, selectors, exits, failures/skips, executable paths,
@@ -301,8 +348,7 @@ before/after firewall changes and survivor checks. Record screen observations
 as unmonitored when nobody watched; unchanged rules do not prove no dialog was
 displayed. Component tests and fake-engine process tests are source/fixture
 evidence, not native engine or installed-client acceptance. Contract, typecheck
-and SPDX checks do not replace either process or native acceptance. Final
-documentation review remains pending until Task 7 is finalized.
+and SPDX checks do not replace either process or native acceptance.
 
 ## Native Acceptance Matrix
 
@@ -315,7 +361,7 @@ permission change or network disruption.
 
 | Scenario | Status | Evidence required before recording an observed pass |
 | --- | --- | --- |
-| Persistence and remote editing | Pending | Local and granted-remote CAS writes survive service/broker restart; denied edits, conflicts and unsupported clearing stay explicit; private origin configuration is preserved. |
+| Persistence and remote editing | Pending | Local and granted-remote CAS writes survive service/broker restart; denied edits and conflicts stay explicit; private origin configuration is preserved. |
 | Real replacement | Pending | Hold old inference on A, request the exact model bound to prepared B, and capture no early output, old completion, zero-active drain proof, verified A termination, B start and final response headers in order. Observe desktop/TUI automatic phases separately. |
 | Old work exceeds drain | Pending | Bounded refusal while old work continues; no target start without zero-active proof and no forced old-request cancellation to satisfy demand. |
 | Ready destination preference | Pending | An eligible ready peer wins over a lower-pressure cold equivalent without switching it; explicit eligible node selection and tier/loaded preferences retain their documented behavior. |
