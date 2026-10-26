@@ -658,12 +658,17 @@ func strataContractNew(t *testing.T, installed bool) *strataContractFixture {
 	}
 	var manifest map[string]json.RawMessage
 	strataContractDecode(t, data, &manifest)
+	runtimeConfig := filepath.Join(f.Root, "runtime.json")
+	manifest["detect_required"], err = json.Marshal([]string{runtimeConfig})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var rt map[string]json.RawMessage
 	strataContractDecode(t, manifest["runtime"], &rt)
 	// The fake executable reads host/port from runtime.json and accepts only
 	// the dispatch marker and config path. It has no editable Python CLI.
 	for key, value := range map[string]any{
-		"bin": executable, "args": []string{strataContractRuntimeArg, filepath.Join(f.Root, "runtime.json")},
+		"bin": executable, "args": []string{strataContractRuntimeArg, runtimeConfig},
 		"editable_launch": nil,
 		"env":             map[string]string{strataContractRuntimeEnv: executable}, "port": f.Port,
 		"ready": map[string]any{"http": "http://127.0.0.1:{port}/health", "status": 200, "timeout_s": 8, "json_match": map[string]string{"field": "service", "value": "strata"}},
@@ -696,7 +701,10 @@ func strataContractNew(t *testing.T, installed bool) *strataContractFixture {
 		t.Fatal(err)
 	}
 	strataContractWriteJSON(t, filepath.Join(f.AppDir, "engines", "strata.json"), manifest)
-	f.strataContractWriteRuntime(t)
+	// Absent-install cases retain their missing executable and configuration.
+	if installed {
+		f.strataContractWriteRuntime(t)
+	}
 	// Clear inherited auth statuses as well as readiness so the disabled
 	// built-in manifests remain valid after connection-diagnosis additions.
 	writeDisabledBuiltinEngineOverrides(t, f.Root, f.AppDir)

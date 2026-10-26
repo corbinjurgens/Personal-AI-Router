@@ -33,6 +33,9 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 	assertAbsent := func(t *testing.T, f *strataContractFixture) {
 		t.Helper()
 		assertNoInstall(t, f)
+		if _, err := os.Stat(filepath.Join(f.Root, "runtime.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("absent runtime configuration: %v, want not exist", err)
+		}
 		var status strataContractStatus
 		f.Manager.strataContractOK(t, "engine:status", map[string]string{"engine": "strata"}, &status)
 		want := strataContractStatus{Engine: "strata", Port: f.Port}
@@ -44,6 +47,18 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 			t.Fatalf("absent runtime launch marker: %v, want not exist", err)
 		}
 	}
+
+	t.Run("missing required configuration is not installed", func(t *testing.T) {
+		f := strataContractNew(t, true)
+		if err := os.Remove(filepath.Join(f.Root, "runtime.json")); err != nil {
+			t.Fatalf("remove owned runtime configuration: %v", err)
+		}
+		f.strataContractStartManager(t)
+		assertAbsent(t, f)
+		response := f.Manager.strataContractCall(t, "engine:start", map[string]any{"engine": "strata", "port": f.Port, "bind": "127.0.0.1"})
+		assertError(t, response, `engine "strata" is not installed: mandatory detection files are incomplete`)
+		assertAbsent(t, f)
+	})
 
 	t.Run("absent install rejects missing install block", func(t *testing.T) {
 		f := strataContractNew(t, false)
