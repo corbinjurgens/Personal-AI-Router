@@ -22,6 +22,10 @@ const ROTATED_LOG_FILE_NAME = 'nvpair.1.jsonl'
 let logFilePath = ''
 let writer: BoundedLogWriter | null = null
 
+// Inherited console pipes can close independently of the app. Keep a listener
+// for asynchronous write errors; file logging does not depend on this mirror.
+process.stdout.on('error', () => {})
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -89,7 +93,11 @@ function writeEntry(scope: string, level: string, payload: StructuredLogPayload)
     const prefix = `(${scope})`.padEnd(24)
     const msg = payload.message ?? ''
     const dataStr = payload.data ? ` ${JSON.stringify(payload.data)}` : ''
-    process.stdout.write(`${now.toLocaleTimeString()} ${prefix} > ${msg}${dataStr}\n`)
+    try {
+        process.stdout.write(`${now.toLocaleTimeString()} ${prefix} > ${msg}${dataStr}\n`)
+    } catch {
+        // Console mirroring is best-effort, including synchronous closed writes.
+    }
 }
 
 // ---------------------------------------------------------------------------
