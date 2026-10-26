@@ -616,8 +616,13 @@ func pinRecordingPairPeer(t *testing.T, f *facade, id string, receiver *recordin
 			return
 		}
 		w.Header().Set(peerStreamFramingHeader, stream.peerMetadata())
+		w.Header().Add("Trailer", peerStreamFramingHeader)
 		setReplayBody(r, body)
 		receiver.Config.Handler.ServeHTTP(w, r)
+		// This recorder writes its complete response synchronously. A pinned
+		// receiver must attest that ending as well as its initial framing;
+		// otherwise a real HTTP origin correctly aborts on the missing trailer.
+		w.Header().Set(peerStreamFramingHeader, peerDisposition(streamFrameResult{Outcome: streamOutcomeCompleted}))
 	}))
 	server.TLS = mesh.ServerTLSConfig()
 	server.StartTLS()
