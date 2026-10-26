@@ -198,13 +198,18 @@ func (m *Manager) watchPeerSettings(ctx context.Context) {
 			m.peers.mu.RUnlock()
 			for node, cancel := range active {
 				p, exists := peers[node]
-				if !exists || !m.mesh.HasPin(p.clusterUUID) {
+				_, admitted := m.mesh.PeerServiceIncarnation(p.clusterUUID)
+				if !exists || !admitted {
 					cancel()
 					delete(active, node)
 				}
 			}
 			for node, peer := range peers {
-				if active[node] != nil || len(active) >= 64 || !m.mesh.HasPin(peer.clusterUUID) {
+				// HasPin includes self-trust. Settings subscriptions need the
+				// same peer-only authority as the transport, keyed by the cluster
+				// principal rather than the separately advertised host UUID.
+				_, admitted := m.mesh.PeerServiceIncarnation(peer.clusterUUID)
+				if active[node] != nil || len(active) >= 64 || !admitted {
 					continue
 				}
 				streamCtx, cancel := context.WithCancel(ctx)
