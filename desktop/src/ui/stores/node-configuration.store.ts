@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Role drafts for the role editor and the bulk panel, one per node, for the
- * app session.
+ * Node configuration drafts for the app session. Routing and model setup share
+ * one whole-policy draft per node; the role editor and bulk panel retain their
+ * focused role drafts alongside it. None of these drafts are persisted here.
  *
  * `policy:set` replaces the whole document and fills omitted fields with
  * defaults, so a role edit never sends a document of its own: it takes the
@@ -31,10 +32,12 @@ import {
     LOCAL_VETO_CODE,
     POLICY_CONFLICT_CODE,
     REMOTE_MANAGEMENT_DENIED_CODE,
-    REMOTE_SETTING_LOCKED_CODE
+    REMOTE_SETTING_LOCKED_CODE,
+    localVetoMessage
 } from '@/shared/constants/service-errors'
 import { getPairTransport } from '@/ui/api/bootstrap'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
+import { useConnectionStore } from '@/ui/stores/connection.store'
 import { engineLabel, engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import getErrorString from '@/shared/utils/get-error-string'
@@ -369,6 +372,15 @@ interface BulkSelection {
 }
 
 interface NodeConfigurationState {
+    /** Whole-policy drafts are session-only and have one visible editor owner. */
+    policyDrafts: Map<string, PolicyDraft>
+    claimPolicyDraft(targetId: string, owner: PolicyDraft['owner'], discard?: boolean): boolean
+    editPolicyDraft(targetId: string, owner: PolicyDraft['owner'], text: string): void
+    observePolicyDraft(targetId: string, snapshot: PolicyDraftSnapshot): void
+    observePolicyAvailability(targetId: string, availability: NodeAvailability): void
+    readPolicyDraft(targetId: string, owner: PolicyDraft['owner'], nodeId?: string): Promise<void>
+    savePolicyDraft(targetId: string, owner: PolicyDraft['owner'], nodeId?: string): Promise<void>
+    invalidatePolicyDraft(targetId: string): void
     management: Map<string, NodeManagementEntry>
     readManagement(targetId: string, nodeId: string | undefined, fresh?: boolean): Promise<void>
     disconnectManagement(targetId: string): void
@@ -414,6 +426,25 @@ interface NodeConfigurationState {
     ): Promise<void>
     bulk: BulkSelection
     setBulk(change: Partial<BulkSelection>): void
+}
+
+type PolicyDraftSnapshot = NodePolicySnapshot & {
+    availability?: NodeAvailability
+    recoveryRequired?: boolean
+}
+
+interface PolicyDraft {
+    owner: 'Routing' | 'Model Manager'
+    text: string
+    baseline?: PolicyDraftSnapshot
+    saved?: PolicyDraftSnapshot
+    phase: 'draft' | 'reading' | 'saving' | 'saved' | 'conflict' | 'error' | 'unknown'
+    message?: string
+    generation: number
+    /** Cleared on disconnect, so cached authority never enables a mutation. */
+    current: boolean
+    /** Notifications can precede the first saved policy snapshot. */
+    availabilityObservation?: { value: NodeAvailability }
 }
 
 interface NodeManagementEntry {
@@ -537,7 +568,38 @@ export function watchNodeManagement(targetId: string, nodeId: string | undefined
     }
 }
 
+/** Subscribe before the first read; closing or reconnecting invalidates late replies. */
+export function watchModelSettingsDraft(targetId: string, nodeId: string | undefined): () => void {
+    const store = () => useNodeConfigurationStore.getState()
+    const offPolicy = window.pairApi.nodePolicy.onPolicyChanged(change => {
+        if (change.nodeId === targetId) store().observePolicyDraft(targetId, change)
+    })
+    const offAvailability = window.pairApi.nodePolicy.onAvailabilityChanged(change => {
+        if (change.nodeId === targetId)
+            store().observePolicyAvailability(targetId, change.availability)
+    })
+    const offConnection = useConnectionStore.subscribe((state, previous) => {
+        if (state.connected === previous.connected) return
+        store().invalidatePolicyDraft(targetId)
+        if (state.connected) void store().readPolicyDraft(targetId, 'Model Manager', nodeId)
+    })
+    if (useConnectionStore.getState().connected)
+        void store().readPolicyDraft(targetId, 'Model Manager', nodeId)
+    return () => {
+        offPolicy()
+        offAvailability()
+        offConnection()
+        if (store().policyDrafts.get(targetId)?.owner === 'Model Manager')
+            store().invalidatePolicyDraft(targetId)
+    }
+}
+
 export const useNodeConfigurationStore = create<NodeConfigurationState>((set, get) => {
+    function putPolicy(targetId: string, entry: PolicyDraft): void {
+        const policyDrafts = new Map(get().policyDrafts)
+        policyDrafts.set(targetId, entry)
+        set({ policyDrafts })
+    }
     function update(targetId: string, change: (entry: RoleEditorEntry) => RoleEditorEntry): void {
         const entry = get().editors.get(targetId)
         if (!entry) return
@@ -551,6 +613,221 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
     }
 
     return {
+        policyDrafts: new Map(),
+
+        claimPolicyDraft: (targetId, owner, discard = false) => {
+            const entry = get().policyDrafts.get(targetId)
+            if (entry?.phase === 'saving') return false
+            if (!discard && entry) {
+                if (entry.owner === owner) return true
+                if (entry.text !== (entry.baseline?.policy ?? '')) return false
+            }
+            putPolicy(targetId, {
+                owner,
+                text: entry?.saved?.policy ?? '',
+                baseline: entry?.saved,
+                saved: entry?.saved,
+                phase: 'draft',
+                generation: (entry?.generation ?? 0) + 1,
+                current: false
+            })
+            return true
+        },
+
+        editPolicyDraft: (targetId, owner, text) => {
+            const entry = get().policyDrafts.get(targetId)
+            if (!entry || entry.owner !== owner || entry.phase === 'saving') return
+            putPolicy(targetId, { ...entry, text })
+        },
+
+        observePolicyDraft: (targetId, snapshot) => {
+            const entry = get().policyDrafts.get(targetId)
+            if (!entry || (entry.saved && isOlder(snapshot.revision, entry.saved.revision))) return
+            const dirty = entry.text !== (entry.baseline?.policy ?? '')
+            putPolicy(targetId, {
+                ...entry,
+                saved: { ...entry.saved, ...snapshot },
+                ...(dirty
+                    ? snapshot.revision !== entry.baseline?.revision
+                        ? {
+                              phase: entry.phase === 'saving' ? 'saving' : 'conflict',
+                              message:
+                                  'The saved policy changed. Discard this draft and reload before saving.'
+                          }
+                        : {}
+                    : { text: snapshot.policy, baseline: snapshot }),
+                current: true
+            })
+        },
+
+        observePolicyAvailability: (targetId, availability) => {
+            const entry = get().policyDrafts.get(targetId)
+            if (!entry) return
+            putPolicy(targetId, {
+                ...entry,
+                availabilityObservation: { value: availability },
+                saved: entry.saved ? { ...entry.saved, availability } : undefined
+            })
+        },
+
+        invalidatePolicyDraft: targetId => {
+            const entry = get().policyDrafts.get(targetId)
+            if (entry)
+                putPolicy(targetId, {
+                    ...entry,
+                    generation: entry.generation + 1,
+                    current: false,
+                    phase: entry.phase === 'saving' ? 'unknown' : 'draft',
+                    message:
+                        entry.phase === 'saving'
+                            ? 'Save outcome unknown. Read the target before deciding whether to retry.'
+                            : entry.message
+                })
+        },
+
+        readPolicyDraft: async (targetId, owner, nodeId) => {
+            if (!get().claimPolicyDraft(targetId, owner)) return
+            const entry = get().policyDrafts.get(targetId)
+            if (!entry) return
+            const generation = entry.generation + 1
+            putPolicy(targetId, { ...entry, generation, phase: 'reading' })
+            try {
+                const snapshot = await window.pairApi.nodePolicy.get(nodeId)
+                const current = get().policyDrafts.get(targetId)
+                if (current?.generation !== generation || current.owner !== owner) return
+                get().observePolicyDraft(targetId, {
+                    ...snapshot,
+                    availability:
+                        current.availabilityObservation !== entry.availabilityObservation &&
+                        current.availabilityObservation
+                            ? current.availabilityObservation.value
+                            : current.saved !== entry.saved &&
+                                current.saved?.availability !== undefined
+                              ? current.saved.availability
+                              : snapshot.availability
+                })
+                const observed = get().policyDrafts.get(targetId)
+                if (observed)
+                    putPolicy(targetId, {
+                        ...observed,
+                        phase:
+                            observed.saved?.revision !== observed.baseline?.revision &&
+                            observed.text !== (observed.baseline?.policy ?? '')
+                                ? 'conflict'
+                                : 'draft'
+                    })
+            } catch (error) {
+                const current = get().policyDrafts.get(targetId)
+                if (current?.generation === generation && current.owner === owner)
+                    putPolicy(targetId, {
+                        ...current,
+                        phase: 'error',
+                        current: false,
+                        message: getErrorString(error)
+                    })
+            }
+        },
+
+        savePolicyDraft: async (targetId, owner, nodeId) => {
+            const entry = get().policyDrafts.get(targetId)
+            if (
+                !entry ||
+                entry.owner !== owner ||
+                !entry.baseline ||
+                entry.saved?.revision !== entry.baseline.revision ||
+                !entry.current ||
+                !useConnectionStore.getState().connected ||
+                entry.phase === 'reading' ||
+                entry.phase === 'saving' ||
+                entry.phase === 'conflict' ||
+                entry.phase === 'unknown' ||
+                (nodeId !== undefined &&
+                    (get().management.get(targetId)?.state !== 'allowed' ||
+                        nodePaused(entry.saved?.policy ?? '', entry.saved?.availability)))
+            )
+                return
+            const generation = entry.generation + 1
+            putPolicy(targetId, { ...entry, generation, phase: 'saving', message: undefined })
+            try {
+                const result = await window.pairApi.nodePolicy.set({
+                    nodeId,
+                    policy: entry.text,
+                    expectedPersistedRevision: entry.baseline.revision
+                })
+                const current = get().policyDrafts.get(targetId)
+                if (current?.generation !== generation || current.owner !== owner) return
+                if (current.saved && isOlder(result.revision, current.saved.revision)) {
+                    putPolicy(targetId, {
+                        ...current,
+                        phase: 'conflict',
+                        message:
+                            'A newer policy was reported during Save. Discard and reload to review it.'
+                    })
+                    return
+                }
+                const saved = { ...current.saved, ...result }
+                putPolicy(targetId, {
+                    ...current,
+                    text: result.policy,
+                    baseline: saved,
+                    saved,
+                    phase: 'saved',
+                    message:
+                        result.activation?.state === 'pending'
+                            ? 'Saved, activation pending.'
+                            : result.activation?.state === 'error'
+                              ? `Saved, activation error: ${result.activation.error ?? 'not enforced'}`
+                              : 'Saved. Generation settings affect subsequent requests.'
+                })
+                get().adopt(targetId, saved)
+            } catch (error) {
+                const current = get().policyDrafts.get(targetId)
+                if (current?.generation !== generation || current.owner !== owner) return
+                const code = serviceErrorCode(error)
+                const refusal = policyRefusal(getErrorString(error), code)
+                const message =
+                    code === REMOTE_SETTING_LOCKED_CODE
+                        ? 'Generation settings are locked on the target. Your draft is kept.'
+                        : code === LOCAL_VETO_CODE
+                          ? `${localVetoMessage('save this policy')} ${getErrorString(error)}`
+                          : refusal === 'other'
+                            ? `Save outcome unknown. Your draft is kept. ${getErrorString(error)}`
+                            : `The target ${refusal === 'unreachable' ? 'is disconnected or unreachable' : 'refused this policy'}. Your draft is kept. ${getErrorString(error)}`
+                putPolicy(targetId, {
+                    ...current,
+                    phase:
+                        refusal === 'conflict'
+                            ? 'conflict'
+                            : refusal === 'other'
+                              ? 'unknown'
+                              : 'error',
+                    message
+                })
+                if (code === REMOTE_MANAGEMENT_DENIED_CODE)
+                    void get().readManagement(targetId, nodeId, true)
+                // Readback is observation only. A lost reply never triggers a resend.
+                try {
+                    const beforeRead = get().policyDrafts.get(targetId)?.saved
+                    const latest = await window.pairApi.nodePolicy.get(nodeId)
+                    const afterRead = get().policyDrafts.get(targetId)
+                    if (afterRead?.generation !== generation) return
+                    get().observePolicyDraft(targetId, {
+                        ...latest,
+                        availability:
+                            afterRead.saved !== beforeRead &&
+                            afterRead.saved?.availability !== undefined
+                                ? afterRead.saved.availability
+                                : latest.availability
+                    })
+                } catch {
+                    // Keep the original refusal or uncertain outcome and its draft.
+                    const unread = get().policyDrafts.get(targetId)
+                    if (unread?.generation === generation)
+                        putPolicy(targetId, { ...unread, current: false })
+                }
+            }
+        },
+
         management: new Map(),
 
         disconnectManagement: targetId => {

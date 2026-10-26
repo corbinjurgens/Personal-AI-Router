@@ -2,7 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useMemo, useState } from 'react'
-import { Checkbox, FormField, Select, Stack, Text, TextInput } from '@nvidia/foundations-react-core'
+import {
+    Button,
+    Checkbox,
+    FormField,
+    Select,
+    Stack,
+    Text,
+    TextInput
+} from '@nvidia/foundations-react-core'
+import type { NodeModelReference } from '@/shared/types/node-policy'
 import {
     applyModelSettings,
     MODEL_OPTION_FIELDS,
@@ -10,7 +19,7 @@ import {
 } from '@/shared/utils/node-policy-model-settings'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 
-/** Shares the routing editor's JSON draft, target and revision-checked Save. */
+/** Generation fields for the composed panel's exact model and policy draft. */
 export default function ModelSettingsEditor({
     text,
     onTextChange,
@@ -18,7 +27,8 @@ export default function ModelSettingsEditor({
     nodeName,
     remote,
     disabled,
-    onValidityChange
+    onValidityChange,
+    identity
 }: {
     text: string
     onTextChange: (text: string) => void
@@ -27,23 +37,28 @@ export default function ModelSettingsEditor({
     remote: boolean
     disabled: boolean
     onValidityChange: (valid: boolean) => void
+    identity: NodeModelReference
 }) {
     const draft = useMemo(() => parseModelSettings(text), [text])
     const saved = useMemo(
         () => (savedText === null ? null : parseModelSettings(savedText)),
         [savedText]
     )
-    const [picked, setPicked] = useState('')
     const [inputs, setInputs] = useState<{
         text: string
         profile: string
         fields: Record<string, { value: string; message?: string }>
     }>({ text: '', profile: '', fields: {} })
     const profiles = draft.ok ? draft.value : []
-    const profile = profiles.find(item => item.key === picked) ?? profiles[0]
+    const profile = profiles.find(
+        item => item.engine === identity.engine && item.model === identity.model
+    )
     const fields = inputs.text === text && inputs.profile === profile?.key ? inputs.fields : {}
     const hasErrors = Object.values(fields).some(field => field.message !== undefined)
-    useEffect(() => onValidityChange(!hasErrors), [hasErrors, onValidityChange])
+    useEffect(
+        () => onValidityChange(!hasErrors && draft.ok),
+        [hasErrors, draft.ok, onValidityChange]
+    )
 
     // Only target-reported settings establish a peer lock. Raw draft edits cannot lift it.
     const stored =
@@ -86,25 +101,12 @@ export default function ModelSettingsEditor({
             {!draft.ok && <InlineErrorBanner severity="warning" message={draft.error.message} />}
             {draft.ok && profiles.length === 0 && (
                 <Text kind="body/regular/sm" role="status">
-                    No supported profiles in this policy. Add a llama.cpp or LM Studio profile in
-                    Advanced policy JSON. Ollama options stay in Advanced policy JSON.
+                    No supported profiles in this policy. Create a generation profile to begin.
+                    Ollama options stay in Advanced policy JSON.
                 </Text>
             )}
             {profile && (
                 <>
-                    <FormField slotLabel="Model profile">
-                        <Select
-                            size="small"
-                            attributes={{ SelectTrigger: { 'aria-label': 'Model profile' } }}
-                            items={profiles.map(item => ({
-                                value: item.key,
-                                children: `${item.model} (${item.engine})`
-                            }))}
-                            value={profile.key}
-                            onValueChange={(value: string) => setPicked(value)}
-                            disabled={disabled}
-                        />
-                    </FormField>
                     {locked && (
                         <InlineErrorBanner
                             severity="info"
@@ -118,7 +120,7 @@ export default function ModelSettingsEditor({
                         />
                     )}
                     <Checkbox
-                        slotLabel="Only this device can edit"
+                        slotLabel="Only this device can edit generation settings"
                         checked={remote ? stored?.localOnly === true : profile.localOnly}
                         disabled={disabled || remote}
                         onCheckedChange={value => {
@@ -182,6 +184,23 @@ export default function ModelSettingsEditor({
                                     }
                                     disabled={readOnly}
                                 />
+                                {(value !== undefined || input) && (
+                                    <Button
+                                        kind="tertiary"
+                                        size="small"
+                                        disabled={readOnly}
+                                        aria-label={`Reset ${field.label} to inherited`}
+                                        onClick={() =>
+                                            apply(
+                                                { kind: 'option', key: field.key, value: '' },
+                                                field.key,
+                                                ''
+                                            )
+                                        }
+                                    >
+                                        Reset to inherited
+                                    </Button>
+                                )}
                             </FormField>
                         )
                     })}

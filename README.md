@@ -61,6 +61,9 @@ resume itself, so resume it there.
 
 ## Quick start
 
+To edit a model's generation preferences without changing native load settings,
+see [Configure model generation settings](docs/model-configuration.mdx).
+
 Download a released build and use the desktop application. That is the path we
 recommend and the one the rest of this guide assumes. Building from source and
 the terminal interface both exist for good reasons — changing PAIR, and machines

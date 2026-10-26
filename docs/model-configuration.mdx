@@ -1,0 +1,71 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Configure model generation settings
+
+Open **Configure** on a model row in Model Manager, or **Configure model** in
+Routing settings. The side panel shows the node, engine and exact native model
+identifier. Configuration is available while the engine is Off. A known row
+does not prove its model files are complete; Routing also accepts an exact
+model identifier when live inventory is unavailable.
+
+For llama.cpp and LM Studio, create a profile with a unique name, then edit the
+supported generation fields. Blank fields inherit the engine's behavior.
+Resetting a field removes its override. **Defaults** allows request values to
+override the configured defaults; **Enforced** replaces the configured keys in
+subsequent requests. Other options remain in Advanced policy JSON.
+
+Saving generation preferences does not start an engine, load or download a
+model, or change native context allocation or GPU placement. It affects
+subsequent requests on the serving node. An Off engine stays Off.
+
+## Drafts and saving
+
+Routing's panel and Advanced policy JSON share one draft and the same
+revision-checked Save. From Model Manager, the panel reads the selected target's
+saved policy and keeps a session draft for that target. Opening a panel does not
+save anything.
+
+The panel names the draft owner. If Routing or Model Manager already owns
+unsaved changes, the other editor cannot silently take them over. Use
+**Discard draft and reload** only when you intend to discard those changes.
+Invalid JSON remains available for correction in Advanced policy JSON.
+
+Typed draft edits preserve unrelated source text. The existing desktop policy
+transport still parses JSON numbers as JavaScript numbers, so saving does not
+guarantee exact preservation of opaque numbers beyond that representation's
+precision. This limitation also applies to policy readback.
+
+A reconnect or newer target policy does not overwrite dirty text. A conflict
+requires an explicit reload and review. Refused or uncertain saves retain the
+draft; a lost reply causes readback rather than an automatic retry. Persistence
+and activation are separate: a saved policy can still have activation pending
+or an activation error. Remote policy readback does not report activation.
+
+## Target permissions and generation lock
+
+Remote changes require the target's current management permission. A paused
+target refuses remote changes and must be resumed on that device.
+
+**Only this device can edit generation settings** protects the saved profile's
+generation preferences. The panel shows the saved target lock separately from
+draft edits. Removing a lock in raw draft JSON cannot unlock peer controls.
+Change the lock on the target itself. This is an inference-settings lock, not
+an engine lock or a native load-settings control.
+
+## Profile removal and readiness
+
+**Remove profile** requires an explicit confirmation and removes only the
+selected profile. It does not delete model files or silently remove routing
+references. A profile referenced by `residentModels` cannot be removed until
+that reference is resolved separately.
+
+Ordinary generation setup creates no qualification. Keep-loaded residency and
+strict readiness still require valid finite bounds, qualification and current
+target-side evidence. A saved profile alone does not establish readiness.
+
+After a positively reported model download completes, **Configure** is offered
+without automatically opening the panel or moving keyboard focus. Content copy
+and generation configuration remain separate operations.

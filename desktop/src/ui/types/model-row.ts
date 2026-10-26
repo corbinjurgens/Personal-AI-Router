@@ -27,6 +27,8 @@ export interface ModelRowProps {
     pendingAction?: EngineCommandType
     /** Copy support is independent of upstream download support. */
     canCopy?: boolean
+    /** Generation setup does not require a running engine or ready model files. */
+    canConfigure?: boolean
     displayName: (name: string) => string
     onAction: (modelName: string, action: string) => void
     onExpiryChange: (modelName: string, value: ModelExpiry) => void

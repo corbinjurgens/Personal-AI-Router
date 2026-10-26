@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { memo, useMemo, useRef } from 'react'
-import { Divider, Stack } from '@nvidia/foundations-react-core'
+import { Button, Divider, Stack } from '@nvidia/foundations-react-core'
 import { useDropdownClickable } from '@/ui/hooks/useDropdownClickable'
 import { ModelRowHeader } from './ModelRowHeader'
 import { ModelRowSecondaryRow } from './ModelRowSecondaryRow'
@@ -33,6 +33,7 @@ function ModelRowInner({
     progress,
     pendingAction,
     canCopy,
+    canConfigure,
     displayName,
     onAction,
     onExpiryChange
@@ -54,6 +55,7 @@ function ModelRowInner({
 
     const actionItems = useMemo(() => {
         const items: { id: string; children: string; disabled?: boolean; danger?: boolean }[] = []
+        if (canConfigure) items.push({ id: 'configure', children: 'Configure generation settings' })
         // A command is already in flight for this model -- lock the whole menu so
         // the user cannot fire a second conflicting op before it resolves.
         const busy = pendingAction !== undefined || activeDownload
@@ -88,6 +90,7 @@ function ModelRowInner({
         return items
     }, [
         canCopy,
+        canConfigure,
         capabilities.hasLoad,
         capabilities.hasEject,
         capabilities.hasDeleteModel,
@@ -133,6 +136,17 @@ function ModelRowInner({
                     expiryDd={expiryDd}
                     onExpiryChange={onExpiryChange}
                 />
+                {canConfigure &&
+                    model.downloadStateCurrent === true &&
+                    model.downloadState?.phase === 'complete' && (
+                        <Button
+                            kind="tertiary"
+                            size="small"
+                            onClick={() => handleAction(model.name, 'configure')}
+                        >
+                            Download complete · Configure
+                        </Button>
+                    )}
             </Stack>
             <Divider style={{ borderColor: '#ffffff22' }} />
         </Stack>

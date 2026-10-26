@@ -82,7 +82,11 @@ beforeEach(() => {
     Object.defineProperty(window, 'pairApi', { configurable: true, value: api })
     useConnectionStore.setState({ connected: true, selfId: 'self' })
     useNodesStore.setState({ nodes: new Map() })
-    useNodeConfigurationStore.setState({ editors: new Map(), management: new Map() })
+    useNodeConfigurationStore.setState({
+        editors: new Map(),
+        management: new Map(),
+        policyDrafts: new Map()
+    })
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -91,7 +95,11 @@ beforeEach(() => {
 afterEach(async () => {
     await act(async () => root.unmount())
     container.remove()
-    useNodeConfigurationStore.setState({ editors: new Map(), management: new Map() })
+    useNodeConfigurationStore.setState({
+        editors: new Map(),
+        management: new Map(),
+        policyDrafts: new Map()
+    })
     vi.unstubAllGlobals()
 })
 
