@@ -57,6 +57,8 @@ const (
 	// codeEngineLocked is a start, load or switch into an engine locked on the
 	// target node. It is distinct from codeLocalVeto.
 	codeEngineLocked = -32013
+	// codeRemoteSettingLocked is a peer edit of target-owned inference settings.
+	codeRemoteSettingLocked = -32014
 )
 
 // wireCodes names the typed codes in an ec 409 body and a stream error frame.
@@ -65,6 +67,7 @@ var wireCodes = map[int]string{
 	codeLocalVeto:              "local_veto",
 	codeRemoteManagementDenied: remoteManagementWireCode,
 	codeEngineLocked:           "engine_locked",
+	codeRemoteSettingLocked:    "remote_setting_locked",
 }
 
 // codedError reaches the JSON-RPC client with its own code: the broker's

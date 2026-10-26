@@ -5,13 +5,55 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func mustRemoteSettingJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestRemoteSettingLockedExactWireClassification(t *testing.T) {
+	if codeRemoteSettingLocked != -32014 || wireCodes[-32014] != "remote_setting_locked" {
+		t.Fatal("remote setting lock numeric/wire assignment changed")
+	}
+	test := func(name string, status int, body string, wantCode int) {
+		t.Run(name, func(t *testing.T) {
+			err := remoteStatusError("remote node policy", status, []byte(body))
+			if got := rpcCode(fmt.Errorf("wrapped: %w", err)); got != wantCode {
+				t.Fatalf("RPC code = %d, want %d", got, wantCode)
+			}
+		})
+	}
+	test("typed lock with unrelated text", http.StatusConflict, `{"code":"remote_setting_locked","error":"invalid params: unrelated diagnostic"}`, -32014)
+	test("diagnostic alone", http.StatusConflict, `inference settings are locked on the target device`, -32000)
+	test("text in unknown envelope", http.StatusConflict, `{"code":"unknown","error":"remote_setting_locked"}`, -32000)
+	test("case differs", http.StatusConflict, `{"code":"REMOTE_SETTING_LOCKED","error":"locked"}`, -32000)
+	test("numeric wire value", http.StatusConflict, `{"code":-32014,"error":"locked"}`, -32000)
+	test("wrong HTTP status", http.StatusForbidden, `{"code":"remote_setting_locked","error":"locked"}`, -32000)
+	for _, c := range []struct {
+		wire string
+		code int
+	}{
+		{"policy_conflict", -32010},
+		{"local_veto", -32011},
+		{"remote_management_denied", -32012},
+		{"engine_locked", -32013},
+	} {
+		test(c.wire, http.StatusConflict, string(mustRemoteSettingJSON(t, codedBody{Code: c.wire, Error: "inference settings are locked on the target device"})), c.code)
+	}
+}
 
 func TestRemoteClientModelFilesUseOrdinaryHeaderBudget(t *testing.T) {
 	test := func(name string, call func(context.Context, *remoteClient) error) {

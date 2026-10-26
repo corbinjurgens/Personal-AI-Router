@@ -145,6 +145,188 @@ func rmPolicyRequest(t *testing.T, rb *routedBroker) policyRelayRequest {
 	return policyRelayRequest{ID: "policy-write", Method: "set", Caller: "pinned-peer", Params: rmJSON(t, policyParams{Policy: rmJSON(t, p), ExpectedPersistedRevision: rmJSON(t, p.Revision)})}
 }
 
+func TestRemoteSettingLockedPrecedence(t *testing.T) {
+	test := func(name string, prepare func(*testing.T, *routedBroker), expected json.RawMessage, wantCode int) {
+		t.Run(name, func(t *testing.T) {
+			rb := remoteSettingLockedBroker(t)
+			p := rb.b.peerPolicy().Policy
+			p.Profiles[0].LocalOnly = false
+			prepare(t, rb)
+			before := rb.baseline(t)
+			_, err := rb.b.setPeerPolicyAs(rmJSON(t, p), expected, "pinned-peer")
+			if err == nil || policyErrorCode(err) != wantCode {
+				t.Fatalf("refusal = %v (code %d), want %d", err, policyErrorCode(err), wantCode)
+			}
+			before.requireUnchanged(t)
+		})
+	}
+	test("permission before stale revision and lock", func(t *testing.T, rb *routedBroker) {
+		grantRemoteManagement(t, rb.b.clusterDir, "cluster-1", "self-node", "pinned-peer", false)
+	}, rmJSON(t, "0"), -32012)
+	test("revision before lock", func(*testing.T, *routedBroker) {}, rmJSON(t, "0"), -32010)
+}
+
+func TestRemoteSettingLockedLocalChangeMakesDraftStale(t *testing.T) {
+	rb := remoteSettingLockedBroker(t)
+	local := rb.b.localPolicy().Policy
+	local.Profiles[0].LocalOnly = false
+	if _, err := setCurrent(rb.b, rmJSON(t, local)); err != nil {
+		t.Fatal(err)
+	}
+	p := rb.b.peerPolicy().Policy
+	local = rb.b.localPolicy().Policy
+	local.Profiles[0].LocalOnly = true
+	if _, err := setCurrent(rb.b, rmJSON(t, local)); err != nil {
+		t.Fatal(err)
+	}
+	waitPushesSettled(t, rb.b)
+	p.Profiles[0].LocalOnly = false
+	before := rb.baseline(t)
+	_, err := rb.b.setPeerPolicyAs(rmJSON(t, p), rmJSON(t, p.Revision), "pinned-peer")
+	if policyErrorCode(err) != -32010 {
+		t.Fatalf("stale draft = %v, want revision conflict", err)
+	}
+	p.Revision = rb.b.localPolicy().Policy.Revision
+	_, err = rb.b.setPeerPolicyAs(rmJSON(t, p), rmJSON(t, p.Revision), "pinned-peer")
+	if policyErrorCode(err) != -32014 {
+		t.Fatalf("current revision draft = %v, want lock refusal", err)
+	}
+	before.requireUnchanged(t)
+}
+
+func TestRemoteSettingLockedNewestStateUnderWriterLock(t *testing.T) {
+	rb := remoteSettingLockedBroker(t)
+	r := rb.b.nodePolicyRuntime()
+	p := rb.b.peerPolicy().Policy
+	p.Profiles[0].LocalOnly = false
+	p.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.9}`)
+	raw, expected := rmJSON(t, p), rmJSON(t, p.Revision)
+	before := rb.baseline(t)
+	unlock := rmHoldLock(t, &rb.b.engineConfigMu)
+	// Start with an unlocked snapshot, then install the newest local lock at
+	// the writer boundary while the peer is queued in persistPolicy. Holding
+	// engineConfigMu lets the peer pass nodePolicyRuntime's preliminary r.mu
+	// acquisition, so an incorrectly precomputed merge would see unlocked state.
+	r.mu.Lock()
+	r.current.Profiles[0].LocalOnly = false
+	r.mu.Unlock()
+	done := rmBlockedCall(t, "persistPolicy", func() error {
+		_, err := rb.b.setPeerPolicyAs(raw, expected, "pinned-peer")
+		return err
+	})
+	r.mu.Lock()
+	r.current.Profiles[0].LocalOnly = true
+	r.mu.Unlock()
+	unlock()
+	if err := rmResult(t, done); policyErrorCode(err) != -32014 {
+		t.Fatalf("queued write = %v, want newest target lock refusal", err)
+	}
+	if got := rb.b.localPolicy().Policy; !got.Profiles[0].LocalOnly || string(got.Profiles[0].RequestOptions) != `{"temperature":0.1}` || got.Revision != p.Revision {
+		t.Fatal("queued peer write replaced newest local lock")
+	}
+	before.requireUnchanged(t)
+}
+
+func TestRemoteSettingLockedRecoveryAndValidationUnchanged(t *testing.T) {
+	t.Run("recovery before lock", func(t *testing.T) {
+		rb := newBrokerOnFile(t, "not json")
+		p := rb.b.peerPolicy().Policy
+		p.Profiles = []nodepolicy.Profile{{Name: "new", Engine: "llamacpp", Model: "submitted", LocalOnly: true}}
+		_, err := rb.b.setPeerPolicyAs(rmJSON(t, p), rmJSON(t, p.Revision), "pinned-peer")
+		if policyErrorCode(err) != -32011 {
+			t.Fatalf("paused recovery refusal = %v, want local veto", err)
+		}
+		if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil {
+			t.Fatalf("local recovery resume: %v", err)
+		}
+		waitPushesSettled(t, rb.b)
+		before := rb.baseline(t)
+		_, err = rb.b.setPeerPolicyAs(rmJSON(t, p), rmJSON(t, p.Revision), "pinned-peer")
+		if err == nil || err.Error() != "this node's policy needs recovery; set it from this node" || policyErrorCode(err) != -32000 {
+			t.Fatalf("recovery refusal = %v (code %d)", err, policyErrorCode(err))
+		}
+		before.requireUnchanged(t)
+		if !rb.b.localPolicy().RecoveryRequired {
+			t.Fatal("refusal cleared recovery")
+		}
+	})
+	t.Run("duplicate identity before lock", func(t *testing.T) {
+		rb := remoteSettingLockedBroker(t)
+		p := rb.b.peerPolicy().Policy
+		p.Profiles = append(p.Profiles, p.Profiles[0])
+		p.Profiles[2].Name = "duplicate"
+		p.Profiles[0].LocalOnly = false
+		before := rb.baseline(t)
+		_, err := rb.b.setPeerPolicyAs(rmJSON(t, p), rmJSON(t, p.Revision), "pinned-peer")
+		if policyErrorCode(err) != -32602 {
+			t.Fatalf("duplicate identity = %v, want invalid params", err)
+		}
+		before.requireUnchanged(t)
+	})
+	t.Run("model list key validation before lock", func(t *testing.T) {
+		rb := remoteSettingLockedBroker(t)
+		p := rb.b.peerPolicy().Policy
+		p.Profiles[0].LocalOnly = false
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(rmJSON(t, p), &fields); err != nil {
+			t.Fatal(err)
+		}
+		fields["ServedModels"] = json.RawMessage(`[]`)
+		before := rb.baseline(t)
+		_, err := rb.b.setPeerPolicyAs(rmJSON(t, fields), rmJSON(t, p.Revision), "pinned-peer")
+		if policyErrorCode(err) != -32602 {
+			t.Fatalf("case-variant model list = %v, want invalid params", err)
+		}
+		before.requireUnchanged(t)
+	})
+}
+
+func TestRemoteSettingLockedRelayEnvelope(t *testing.T) {
+	rb := remoteSettingLockedBroker(t)
+	p := rb.b.peerPolicy().Policy
+	p.Profiles[0].Model = "submitted-identifier"
+	p.Profiles[0].RequestOptions = json.RawMessage(`{"submitted-key":"secret-value"}`)
+	before := rb.baseline(t)
+	reply := rb.relayReply(t, "set", policyParams{Policy: rmJSON(t, p), ExpectedPersistedRevision: rmJSON(t, p.Revision)})
+	if reply.ErrorCode != -32014 || reply.Error != `inference settings are locked on the target device for engine "llamacpp" model "stored-model"` || string(reply.Result) != "null" {
+		t.Fatalf("target relay refusal = %+v", reply)
+	}
+	before.requireUnchanged(t)
+}
+
+func TestRemoteSettingLockedOriginPreservesCode(t *testing.T) {
+	b, out := newPolicyBroker(t)
+	worker, codec := newTestRPCWorkerPipe(t)
+	b.setEngineMgr(worker)
+	const message = `inference settings are locked on the target device for engine "llamacpp" model "stored-model"`
+	go func() {
+		for {
+			request, err := codec.Read()
+			if err != nil {
+				return
+			}
+			if request.IsRequest() {
+				if err := codec.RespondError(request.ID, -32014, message); err != nil {
+					t.Error(err)
+				}
+				return
+			}
+		}
+	}()
+	b.handleMessage(clientRequest(1, methodPolicySet, map[string]any{"nodeId": "peer"}))
+	response := out.waitFrame(t, "origin lock refusal", isResponse(1))
+	if response.Error == nil || response.Error.Code != -32014 || response.Error.Message != message || len(response.Result) != 0 {
+		t.Fatalf("origin lock refusal = %+v", response)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rmJSON(t, response.Error), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 2 || fields["code"] == nil || fields["message"] == nil {
+		t.Fatalf("error envelope fields = %v, want code/message only", fields)
+	}
+}
+
 func TestRemoteManagementPolicyAcceptance(t *testing.T) {
 	rb := newRoutedBroker(t)
 	waitPushesSettled(t, rb.b)

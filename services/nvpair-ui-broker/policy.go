@@ -477,6 +477,8 @@ const (
 	// codeLocalVeto is a paired node's resume of a node paused on the node
 	// itself.
 	codeLocalVeto = -32011
+	// codeRemoteSettingLocked is a peer edit of target-owned inference settings.
+	codeRemoteSettingLocked = -32014
 )
 
 // policyConflictError reports a policy:set whose draft is based on a revision
@@ -626,6 +628,10 @@ func (b *Broker) setPeerPolicyAs(raw, expected json.RawMessage, caller string) (
 		}
 		policy, err := nodepolicy.MergePeerSet(stored, withoutRevision(raw))
 		if err != nil {
+			var locked *nodepolicy.RemoteSettingLockedError
+			if errors.As(err, &locked) {
+				return nodepolicy.Policy{}, err
+			}
 			return nodepolicy.Policy{}, &invalidParamsError{err}
 		}
 		return policy, nil
@@ -793,7 +799,10 @@ func policyErrorCode(err error) int {
 	var conflict *policyConflictError
 	var veto *localVetoError
 	var denied *remoteManagementDeniedError
+	var locked *nodepolicy.RemoteSettingLockedError
 	switch {
+	case errors.As(err, &locked):
+		return codeRemoteSettingLocked
 	case errors.As(err, &invalid):
 		return -32602
 	case errors.As(err, &conflict):
