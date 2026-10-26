@@ -1016,20 +1016,15 @@ proxy enforces it.
   {engine, drain:true}`, waits up to 60 s for that engine's active count to reach
   zero (releasing the settings journal lock meanwhile), applies, and clears the
   drain. See [ENGINE_SETTINGS.md](ENGINE_SETTINGS.md).
-### Model inference settings and target-owned locks (draft)
-
-The shared policy contract and remote lock-refusal path are implemented. Proxy
-request enforcement (Task 2) and the typed desktop editor (Task 4) remain
-**pending** in this draft. The runtime examples below describe the intended
-precedence contract, not observed enforcement or GUI acceptance.
+### Model inference settings and target-owned locks
 
 Each `(engine, model)` profile can contain `requestOptions`,
 `requestOptionsMode` and `localOnly`. Omitted mode means `defaults`, and explicit
 `defaults` normalizes to omission. Omitted `localOnly` means false. These
-omitted fields need no local-file rewrite. Existing options still apply as
-client-overridable defaults in the proxy at this draft's source.
+omitted fields need no local-file rewrite. In `defaults` mode, options remain
+client-overridable defaults.
 
-The shared contract defines `enforced` as recursive object merging in which
+The serving proxy implements `enforced` as recursive object merging in which
 each configured scalar or array replaces the request value at that path;
 unconfigured fields remain request-controlled. Enforced options must be a
 nonempty object. Policy validation rejects duplicate, escaped-duplicate and
@@ -1038,9 +1033,16 @@ the top-level model through options. Defaults retain their existing
 absence/null behavior. Engine-specific sampler acceptance is not established
 by policy validation.
 
-For example, with `requestOptions: {"temperature":0.1}`, the intended result
-for a request containing `temperature:0.8` is `0.8` in `defaults` mode and `0.1`
-in `enforced` mode. **Proxy enforcement of this choice is pending Task 2.**
+Ambiguous configured request keys, including duplicate, escaped-duplicate and
+case-folded names, receive HTTP `400` with code `ambiguous-options` and the fixed
+message `the request body has ambiguous configured option members`, before
+engine contact. Errors and routing facts do not retain submitted keys or values.
+
+For example, with `requestOptions: {"temperature":0.1}`, a request containing
+`temperature:0.8` reaches the engine as `0.8` in `defaults` mode and `0.1` in
+`enforced` mode. The serving node owns enforcement: routing through the Mac to
+PC3 applies PC3's profile once, without applying the Mac's profile to that peer
+request. Ordinary, strict and hybrid local dispatch use the same body owner.
 
 `localOnly:true` is an administrative restriction, not request enforcement.
 Every peer, even one granted remote management, must preserve that stored
@@ -1070,9 +1072,33 @@ names, submitted identities, keys or option values. A new-profile lock attempt
 has no stored identity and receives a fixed generic explanation. Classify by
 the numeric code or wire name, never diagnostic text.
 
-The planned desktop labels are `Allow request overrides`, `Force PAIR values`
-and `Only this device can edit`, using the existing policy draft and Save/CAS
-flow. **Task 4 is pending; these controls are not claimed present here.**
+In Routing & resources, the desktop's Model inference settings editor uses
+`Allow request overrides`, `Force PAIR values` and the profile-level checkbox
+`Only this device can edit`. It shares the policy JSON draft and Save/CAS flow
+with the binding editor and `Advanced policy JSON`; there is no separate save.
+The editor shows `Editing settings on <node>` and exact numeric inputs for
+OpenAI-compatible llama.cpp and LM Studio profiles. Typed `min_p` is limited to
+llama.cpp because LM Studio support was not established. Ollama-native and
+uncommon settings, including LM Studio `min_p`, stay in Advanced policy JSON.
+Clearing the final option removes the options object and resets the mode to
+defaults without changing the local-only flag. Untouched properties and opaque
+number tokens are preserved by source-span edits.
+
+On the local target the checkbox remains editable, including for a locked
+profile. On remote targets it is always disabled. A saved target lock also
+disables typed options and precedence controls, with `Locked on <node>. Change
+this profile's inference settings on that device.` Remote protection comes from
+the saved target snapshot keyed by engine/model, so raw draft edits cannot
+unlock these controls. The target writer remains authoritative for every save.
+Numeric `-32014` is a definite rejection in both individual and bulk saves;
+the dirty draft is retained and the existing Reload action is available.
+
+Typed fields validate numeric inputs. Advanced policy JSON does not gain
+engine-specific sampler validation: an engine-rejected enforced value can make
+every request fail until the owner corrects it. Model-card values are per-model
+starting points, not PAIR-wide defaults. Native GUI and real-engine acceptance
+remain unobserved by the component test results.
+
 The two settings remain independent: local-only defaults still permit client
 request overrides, while forced values do not prohibit granted peer edits
 when the profile is not local-only.

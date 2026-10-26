@@ -290,9 +290,10 @@ body is validated against the installed qualification (else 400
 `strict-qualification`, naming fields and bounds only). Only the
 `/v1/chat/completions` shape is supported: allowlisted top-level fields, text
 content, function tools, `json_object`/`json_schema` formats, no repeated or
-case-variant keys, nesting at most 64. The profile's `requestOptions` are merged
-as defaults for absent fields. Incoming keys and every post-merge effective key
-are checked; defaults cannot inject unknown keys or context overrides.
+case-variant keys, nesting at most 64. The profile's `requestOptions` follow its
+effective `requestOptionsMode`: defaults fill absent fields, while enforced
+configured leaves replace request values. Incoming keys and every post-merge
+effective key are checked; options cannot inject unknown keys or context overrides.
 `reasoning_effort` and `parallel_tool_calls` are refused whenever present,
 including null, false and defaults-injected values. The effective body is what
 is accounted and forwarded, preserving accepted fields except the sole
@@ -324,7 +325,7 @@ member. Existing non-shape scalar, sampling, streaming and output rules remain.
 
 PAIR accepts `store:false` as a no-op, removes it before forwarding, and applies no accounting charge; `store:true` is explicitly refused because PAIR does not store requests. Omitting `store` preserves existing behavior.
 
-Both raw and merged store values are validated with normal defaults precedence;
+Both raw and merged store values are validated under the profile's precedence;
 null and non-boolean values are refused. This local exception does not add
 `store` to the public-account adapter's allowlist. Pinned OpenCode 2.0.32 generic
 provider lowering emits false by default; `compatibility.supportsStore:false`
@@ -1662,19 +1663,23 @@ admission owner.
    (at most once per 10 s per engine) and the request waits for the engine to
    report healthy, up to `idle.wakeTimeoutSeconds` under the wait cap, then
    `wake-timeout`.
-3. **Profile** by `(engine, normalized model)`. Its `requestOptions` merge into
-   the body recursively for objects, with keys in the request winning.
-   **Inference-settings draft status:** shared policy now declares
-   `requestOptionsMode` (`defaults` when omitted, or `enforced`) and the separate
-   administrative `localOnly` flag. Task 2 proxy enforcement remains pending
-   at this draft's source. The paragraph above describes current request
-   behavior, not completed enforced-mode processing. Planned enforced mode
-   replaces configured leaves recursively, leaves unconfigured fields alone,
-   and refuses ambiguous configured keys before engine contact with a fixed
-   message. Qualification must bind the effective mode as well as option bytes;
-   that proxy binding is also pending. `localOnly` is already enforced by the
-   broker's peer policy writer and never means request precedence. See the
-   [target policy contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks-draft).
+3. **Profile** by `(engine, normalized model)`. In `requestOptionsMode:defaults`
+   (also the omitted mode), `requestOptions` merge recursively for objects with
+   request values winning. In `enforced` mode, configured scalar and array
+   values replace request values; objects merge recursively and unconfigured
+   fields remain client-controlled. Configured-key ambiguity, including exact,
+   escaped and case-folded duplicates, refuses before engine contact with HTTP
+   `400`, code `ambiguous-options` and the fixed message `the request body has ambiguous configured option members`.
+   Errors and `factRequestInvalid` facts retain no submitted keys or values.
+   One iterative merge plan measures workspace and allocates one exact-capacity
+   output; bodies needing no change retain borrowed bytes. Prepared-body
+   identity includes candidate, policy generation, options and effective mode,
+   including failover/reset paths. The destination applies its own profile;
+   origin profiles are not applied to peer-bound requests. Qualification binds
+   effective mode as well as options, and a mismatch invalidates installed
+   strict capacity. `localOnly` is the broker's independent peer policy-edit
+   lock, not request precedence. See the
+   [target policy contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks).
 4. **Concurrency**: `profile.maxConcurrent`, else
    `admission.maxConcurrentPerModel`; at the limit the request queues, then
    `busy`.

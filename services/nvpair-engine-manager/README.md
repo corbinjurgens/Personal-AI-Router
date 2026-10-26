@@ -648,7 +648,7 @@ There is no identifier payload or error data, and classification never parses
 the message. The broker, not this relay, owns the latest stored `localOnly`
 check after permission and revision checks. A refused write has no partial
 policy, persistence, activation, push or notification effects. See the
-[broker contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks-draft).
+[broker contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks).
 
 **Off, lock and pause.** Ordinary Off, whether local, peer, legacy or unknown,
 does not prohibit a new granted peer start, load or switch. Load never implicitly

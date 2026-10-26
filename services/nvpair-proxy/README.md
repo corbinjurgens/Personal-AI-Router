@@ -152,14 +152,14 @@ The capability is derived, never set: a profile's model is installed only when t
 profile names a local qualification that `local-qualification.json` in the shared
 `appdir` directory holds for the same engine and model, the broker's engine identity
 (`node/set-model-identity`) carries a launch digest and model content digest the
-qualification covers, the profile's defaults and bounds are within it, and the
-effective concurrency is finite. Without that evidence nothing is installed and
+qualification covers, the profile's options and effective mode match it, its
+bounds are within it, and effective concurrency is finite. Without that evidence nothing is installed and
 strict requests fail closed. A strict request is validated against the
 qualification (finite output bound, accounted input plus output within the served
 context, supported request shape, no request-level context override) before any
 wake, unload, slot or inference, and the engine receives it with the profile's
-defaults merged in. See `docs/local-qualification.mdx`. Concrete requests retain
-their existing admission and retry behavior.
+options applied under the profile's precedence. See `docs/local-qualification.mdx`.
+Concrete requests retain their existing admission and retry behavior.
 
 Automatic residency uses the same admission owner and qualified finite bounds.
 `servedModels` permits on-demand work; `residentModels` declares the desired
@@ -625,16 +625,16 @@ Engine switching also has two internal process-scoped requests:
 
 `spec.md` §12 is normative; in short:
 
-**Model inference settings draft:** the shared policy fields
-`requestOptionsMode` and `localOnly`, plus the broker's remote lock refusal,
-are implemented. Task 2's proxy enforcement and effective-mode qualification
-binding are pending, as is Task 4's typed desktop editor. Current profile merging
-below remains client-wins. The intended enforced mode replaces configured
-leaves recursively without changing unconfigured request fields. The serving
+**Model inference settings:** `requestOptionsMode` is `defaults` when omitted:
+request values win. In `enforced` mode, configured scalar and array values
+replace request values and objects merge recursively, without changing
+unconfigured request fields. Ambiguous configured keys refuse with HTTP `400`
+and a fixed message before engine contact. Qualification binds effective mode
+as well as options; changing either invalidates installed strict capacity. The serving
 node owns this processing: a request routed through the Mac to PC3 uses PC3's
 profile, not the Mac's peer-candidate defaults. See the
-[broker contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks-draft)
-for the landed policy/lock behavior and the pending precedence example.
+[broker contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks)
+for the independent `localOnly` edit lock, desktop controls and precedence example.
 
 - **Admission.** One controller for the whole process decides whether
   inference may run on this machine: in the cluster ingress before forwarding a

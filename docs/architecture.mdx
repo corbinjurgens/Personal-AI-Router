@@ -931,15 +931,20 @@ new acceptance, including queued broker writes, while already accepted work
 can finish or reconcile and remains visible in progress and receipt reads.
 It does not stop or unpair the device.
 
-### Per-model inference settings (draft)
+### Per-model inference settings
 
 Target policy profiles now carry `requestOptionsMode` and `localOnly`. Omitted
 mode means client-overridable `defaults`; omitted local-only means false.
-The shared `enforced` contract replaces each configured scalar/array leaf and
+The serving proxy's `enforced` mode replaces each configured scalar/array leaf and
 merges objects recursively, leaving other request fields client-controlled.
-Proxy enforcement and qualification binding are **pending Task 2**; the typed
-desktop controls are **pending Task 4**, so this draft does not claim either
-runtime or GUI acceptance.
+Configured-key ambiguity refuses with a fixed HTTP `400` before engine contact.
+Qualification binds the effective mode as well as options. A paired route uses
+only the serving node's profile, not the origin's profile for that peer.
+The desktop's `Allow request overrides`, `Force PAIR values` and profile-level
+`Only this device can edit` controls share the existing policy JSON draft and
+revision-checked Save. Remote lock state comes from the saved target snapshot;
+raw draft edits cannot unlock the typed controls. Native acceptance remains
+pending, not observed.
 
 The implemented target-owned `localOnly` lock protects the profile's complete
 options, effective mode, flag and existence at its engine/model identity from
@@ -952,7 +957,7 @@ the stored lock under the writer lock. A refused protected edit is
 from permission denial (`-32012`), local veto (`-32011`) and conflict (`-32010`).
 The existing code/message relay identifies only bounded stored engine/model,
 or uses a fixed generic explanation for a new-profile lock attempt.
-See the [broker policy contract](../services/nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks-draft).
+See the [broker policy contract](../services/nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks).
 
 The broker owns one pause fence: an accepted pause of either origin, stored
 `paused`, or live `draining`/`paused`. It projects `managementBlocked` to the
