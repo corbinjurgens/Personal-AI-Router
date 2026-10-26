@@ -149,23 +149,30 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 			i7BuffersCompletedStream(t, request)
 			i7HybridActiveCount(t, f, 0)
 			for _, c := range clients {
-				completed := row(t, c, key, terminal)
-				if completed.State != "completed" || completed.Status == nil || *completed.Status != http.StatusOK || completed.Seq <= open.Seq || completed.Served == nil || len(completed.Attempts) != 1 {
-					t.Fatalf("delivered history did not complete: %+v", completed)
-				}
-				destination := completed.Attempts[0].Destination
-				if destination.Kind != "local" || destination.NodeID == nil || *destination.NodeID != "i7-synthetic-node" || destination.Engine == nil || *destination.Engine != "llamacpp" || !reflect.DeepEqual(completed.Served, &destination) {
-					t.Fatalf("history lost its actual delivered destination: %+v", completed)
-				}
-				if route.model == "" {
-					if destination.Model != nil || completed.Workload != nil {
-						t.Fatalf("model-less delivery invented a model or workload: %+v", completed)
+				// A getInitial reply advances this subscriber's revision and may
+				// satisfy the terminal update before its push is queued. Require
+				// the independent push first, then compare the current baseline.
+				changed := push(t, c, key, open.Seq+1)
+				completed := row(t, c, key, func(record nodepolicy.RoutingHistoryRecord) bool {
+					return terminal(record) && record.Seq >= changed.Seq
+				})
+				for _, delivered := range []nodepolicy.RoutingHistoryRecord{changed, completed} {
+					if delivered.State != "completed" || delivered.Status == nil || *delivered.Status != http.StatusOK || delivered.Seq <= open.Seq || delivered.Served == nil || len(delivered.Attempts) != 1 {
+						t.Fatalf("delivered history did not complete: %+v", delivered)
 					}
-				} else if destination.Model == nil || *destination.Model != route.model {
-					t.Fatalf("concrete destination model=%v, want %q", destination.Model, route.model)
+					destination := delivered.Attempts[0].Destination
+					if destination.Kind != "local" || destination.NodeID == nil || *destination.NodeID != "i7-synthetic-node" || destination.Engine == nil || *destination.Engine != "llamacpp" || !reflect.DeepEqual(delivered.Served, &destination) {
+						t.Fatalf("history lost its actual delivered destination: %+v", delivered)
+					}
+					if route.model == "" {
+						if destination.Model != nil || delivered.Workload != nil {
+							t.Fatalf("model-less delivery invented a model or workload: %+v", delivered)
+						}
+					} else if destination.Model == nil || *destination.Model != route.model {
+						t.Fatalf("concrete destination model=%v, want %q", destination.Model, route.model)
+					}
 				}
-				changed := push(t, c, key, completed.Seq)
-				if changed.CreatedAt != completed.CreatedAt || changed.Seq < completed.Seq || changed.State != completed.State {
+				if changed.CreatedAt != completed.CreatedAt || changed.State != completed.State {
 					t.Fatalf("initial/push differ across the real relay: initial=%+v changed=%+v", completed, changed)
 				}
 				if route.model == "" {
@@ -347,10 +354,7 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 			return count == 1
 		})
 		i7HybridListenerReady(t, f.client, listener)
-		egressProcessOK(t, f.call(t, "llamacpp-proxy:node/add-manual", map[string]any{
-			"id": "i7-synthetic-node", "host": "127.0.0.1", "port": upstream.port,
-			"addresses": []string{"127.0.0.1"}, "models": []string{egressProcessModel},
-		}))
+		i7HybridDestinationReady(t, f, "i7-synthetic-node")
 		nextSlot := upstream.slot(t, "replacement-source")
 		t.Cleanup(nextSlot.release)
 		nextRequest := i7BuffersStart(t, f.client, f.port, "/v1/chat/completions", "replacement-source", i7BuffersBody(128))
