@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -65,15 +67,43 @@ func (m *Manager) boundEngineAuthority(p nodepolicy.ActivateBoundEngineRequest) 
 	}
 	if p.PeerID != "" {
 		if m.mesh == nil {
+			m.logBoundAuthorityRefusal(p, "engine_manager.peer_incarnation", "not_checked", clustertrust.PeerServiceDiagnostic{Predicate: "mesh_unavailable"})
 			return &localVetoError{code: codeRemoteManagementDenied, reason: remoteManagementDeniedMessage}
 		}
 		m.mesh.Refresh()
-		incarnation, ok := m.mesh.PeerServiceIncarnation(p.PeerID)
-		if !ok || incarnation != p.PeerIncarnation || !m.mesh.RemoteManagement(p.PeerID).Allowed {
+		incarnation, ok, diagnostic := m.mesh.PeerServiceIncarnationWithDiagnostic(p.PeerID)
+		if !ok || incarnation != p.PeerIncarnation {
+			if ok {
+				diagnostic.Predicate = "incarnation_mismatch"
+			}
+			diagnostic.ObservedIncarnation = incarnation
+			m.logBoundAuthorityRefusal(p, "engine_manager.peer_incarnation", "not_checked", diagnostic)
+			return &localVetoError{code: codeRemoteManagementDenied, reason: remoteManagementDeniedMessage}
+		}
+		permission := m.mesh.RemoteManagement(p.PeerID)
+		if !permission.Allowed {
+			m.logBoundAuthorityRefusal(p, "engine_manager.remote_management", permission.State, permission.Diagnostic)
 			return &localVetoError{code: codeRemoteManagementDenied, reason: remoteManagementDeniedMessage}
 		}
 	}
 	return m.exec.remoteVeto(p.Engine)
+}
+
+// This is also used by the accepted activation's authority watcher. Log the
+// original predicate, without re-reading authority to explain the failure.
+func (m *Manager) logBoundAuthorityRefusal(p nodepolicy.ActivateBoundEngineRequest, site, permission string, diagnostic clustertrust.PeerServiceDiagnostic) {
+	if diagnostic.ExpectedIncarnation == "" {
+		diagnostic.ExpectedIncarnation = p.PeerIncarnation
+	}
+	slog.Warn("bound engine management refused",
+		"site", site, "reason", diagnostic.Predicate,
+		"node_id", diagnostic.NodeID, "peer_id", p.PeerID, "cluster_id", diagnostic.ClusterID,
+		"epoch", diagnostic.Epoch, "counter", diagnostic.Counter, "io_error_code", diagnostic.ErrorCode,
+		"expected_incarnation", diagnostic.ExpectedIncarnation, "observed_incarnation", diagnostic.ObservedIncarnation,
+		"changed_component_authority_compared", diagnostic.ChangedComponentCompared,
+		"changed_component_authority_same", diagnostic.ChangedComponentSame,
+		"manager_run_id", m.exec.switchIncarnation,
+		"permission", permission)
 }
 
 func (m *Manager) activateBoundEngine(ctx context.Context, p nodepolicy.ActivateBoundEngineRequest) error {

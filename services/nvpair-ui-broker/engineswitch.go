@@ -682,7 +682,7 @@ func (b *Broker) acceptEngineSwitchSubmission(ctx context.Context, p settings.Sw
 		b.engineConfigMu.Unlock()
 		return settings.SwitchResult{}, err
 	}
-	if err := b.authorizeRemoteManagement(caller, "switch", p.RequestID); err != nil {
+	if err := b.authorizeRemoteManagement(caller, "switch", p.RequestID, automatic != nil); err != nil {
 		b.engineConfigMu.Unlock()
 		return settings.SwitchResult{}, err
 	}
@@ -743,7 +743,7 @@ func (b *Broker) acceptEngineSwitchSubmission(ctx context.Context, p settings.Sw
 	}
 	// Recheck after the second lock acquisition: permission can change after
 	// the first check and before receipt acceptance.
-	if err := b.authorizeRemoteManagement(caller, "switch", p.RequestID); err != nil {
+	if err := b.authorizeRemoteManagement(caller, "switch", p.RequestID, automatic != nil); err != nil {
 		return settings.SwitchResult{}, err
 	}
 	if old, ok := b.engineSwitch.store.Lookup(p.RequestID); ok {
@@ -766,7 +766,7 @@ func (b *Broker) acceptEngineSwitchSubmission(ctx context.Context, p settings.Sw
 	// new acceptance/rejection receipt share this final critical section.
 	runtime := b.nodePolicyRuntime()
 	runtime.mu.Lock()
-	if err := b.authorizeRemoteManagementLocked(runtime, caller, "switch", p.RequestID); err != nil {
+	if err := b.authorizeRemoteManagementLocked(runtime, caller, "switch", p.RequestID, automatic != nil); err != nil {
 		runtime.mu.Unlock()
 		return settings.SwitchResult{}, err
 	}
