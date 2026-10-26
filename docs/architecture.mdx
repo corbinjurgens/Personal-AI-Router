@@ -41,14 +41,16 @@ flowchart TB
 - A **node** is one machine. Nodes are peers where each runs the same services, and
   each can both serve requests and route them elsewhere.
 - An **engine** is an inference server on a node: Ollama, LM Studio, or
-  llama.cpp. A node can run any combination, and a node with no running engine
-  is not eligible to serve.
+  llama.cpp. A node can run any combination. Serving requires a running engine;
+  an explicit model binding can let a request wait for guarded activation.
 - **Models** belong to an engine on a specific node. Nothing is shared. The same
   model on two nodes is two independent copies and that duplication is what makes
   the two nodes interchangeable for a request.
 
 PAIR evaluates eligibility at the bottom of that hierarchy. A request names a
-model, so it can only be served by a node whose running engine holds it. Cluster
+model, and dispatch requires fresh evidence that the destination's running engine
+holds it. [Model engine bindings](model-engine-bindings.mdx) can additionally
+offer a stopped engine for bounded preparation before ordinary admission. Cluster
 membership admits a node to pinned peer routes; a working direct connection or
 authenticated reverse session still determines reachability. Membership alone
 does not make a node reachable or capable.
@@ -439,38 +441,44 @@ two different mechanisms, and they compose in one direction:
 - **The scheduler is model-blind.** It ranks every node by pending work and GPU
   pressure. It does not know which models exist where, and its ordering never
   mentions a model.
-- **The proxy enforces model capability.** It removes nodes that do not advertise
-  the requested model, then applies the scheduler's ordering to the remaining
-  owners.
+- **The proxy enforces model capability.** It requires matching inventory or a
+  supported explicit binding offer. Within equivalent policy classes, ready
+  owners precede preparation candidates before scheduler selection.
 
 So load balancing happens **among the nodes that can serve the request**, not
 across the cluster as a whole.
 
 #### Capability Gate
 
-When an inference request contains a non-empty model, only nodes whose current
-inventory for that engine advertises the model enter the failover list. An empty
-inventory and an inventory that lists other models are both ineligible. Ollama's
-implicit `:latest` tag is normalized; LM Studio model IDs match exactly.
+When an inference request contains a non-empty model, candidates need matching
+current engine inventory or a supported `engineBindingOffers` entry. Empty or
+nonmatching inventory alone remains ineligible. Offers are separate from
+inventory, engine health and strict readiness; a stopped offered facade can
+remain reachable without making its engine healthy. Ollama's implicit `:latest`
+tag is normalized; exact-name descriptors retain native ID matching.
 
-If no advertised owner is routable, the proxy returns an actionable local `502`
-without sending the request to an engine. It does not broaden the candidate list
-or refresh inventory synchronously; a later discovery update makes a newly
-advertised owner eligible.
+Without an eligible owner or supported offer, the proxy retains its local
+no-owner `502`. A selected offer can wait within one preparation budget, then
+must pass fresh endpoint, native inventory, policy and ordinary admission checks
+before dispatch. Known preparation refusal is a bounded `503`. Strict hybrid
+dispatch excludes cold offers. The [binding guide](model-engine-bindings.mdx)
+describes ready-first classes, explicit selection, bounds and refusal semantics.
 
 A request whose model cannot be parsed keeps the ordinary non-model ordering.
 
 Model listings are not routed at all. A `GET` of `/v1/models`, Ollama's
 `/api/tags`, or llama.cpp's `/models` is fanned out to every candidate for that
 engine concurrently and the replies are merged, which is why the answer is the
-cluster's inventory for that engine rather than one node's.
+cluster's inventory for that engine rather than one node's. Binding offers do
+not add invented models to those listings.
 
 #### Failover and Inventory Freshness
 
 An advertised owner's inventory can still become stale after candidate
 selection. If that owner answers inference with `404`, the proxy treats it as
-retryable and moves to the next advertised owner. It never fails over to an
-unknown or known-missing node. Genuine client errors such as `400` or `422` are
+retryable and moves to another eligible inventory owner or supported preparation
+candidate, inside the original request bounds. It never broadens to unknown
+nodes. Genuine client errors such as `400` or `422` are
 not retried, because they would fail identically everywhere.
 
 #### Planning Model Placement
@@ -487,8 +495,9 @@ Where you put each model decides what routing can do with it:
 - **Mixed inventories work.** Node A can hold a 70B model and node B a 7B one.
   Requests for each are steered to the node that has it, and neither blocks the
   other.
-- **A model on a node with no running engine does not count.** Eligibility needs
-  a running engine as well as the model. Refer to the earlier hierarchy.
+- **A stopped engine is not ready capacity.** An explicit supported binding can
+  offer bounded activation; it still needs fresh model and admission evidence
+  before serving. Without a binding, existing unbound wake rules are unchanged.
 - **Where work actually ran is observable.** Use the **Jobs** view rather than
   inferring routing from inventory.
 
@@ -513,11 +522,11 @@ the same node.
 are the same unit of pending work, so "fewest jobs" is not "least busy." A node
 running one enormous request looks more idle than a node running two trivial ones.
 
-**Model load state is not considered.** Eligibility asks whether a node *has* the
-model, not whether it is already loaded in memory. PAIR knows which models are
-loaded, and the interface shows it, but routing does not use it, so a request can
-be sent to a node that must cold-load the model while a node holding it warm sits
-one place lower in the order.
+**Loaded preference belongs to routing policy.** The scheduler remains
+model-blind. Concrete-tier routing applies its existing `preferLoaded` policy,
+and binding preparation is ordered within the resulting tier/warmth classes.
+Ordinary inventory eligibility does not promise that the model is loaded or
+that admission will succeed.
 
 **Only work PAIR routed contributes to pending counts.** Inference sent straight
 to an engine's own port is absent from workload events. GPU-heavy external work
