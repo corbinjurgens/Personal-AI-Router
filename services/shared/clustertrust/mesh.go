@@ -382,11 +382,33 @@ type peerServiceSnapshot struct {
 	peerEpoch uint64
 }
 
-type peerServicePin struct {
-	NodeUUID       string `json:"nodeUuid"`
-	CertPem        string `json:"certPem"`
-	ClusterID      string `json:"clusterId"`
-	AdmissionEpoch uint64 `json:"admissionEpoch"`
+// peerServicePin validates the same captured principals on each observation.
+// PEM formatting and pin metadata are excluded; the exact parsed leaf remains
+// authority, together with the nonzero admission epoch.
+func peerServicePin(data []byte, peerUUID, clusterID string) ([]byte, uint64, bool) {
+	return peerServicePinDiagnostic(data, peerUUID, clusterID, nil)
+}
+
+func peerServicePinDiagnostic(data []byte, peerUUID, clusterID string, diagnostic *PeerServiceDiagnostic) ([]byte, uint64, bool) {
+	var pin struct {
+		NodeUUID       string `json:"nodeUuid"`
+		CertPem        string `json:"certPem"`
+		ClusterID      string `json:"clusterId"`
+		AdmissionEpoch uint64 `json:"admissionEpoch"`
+	}
+	if err := json.Unmarshal(data, &pin); err != nil {
+		diagnostic.refuse("pin_decode", nil)
+		return nil, 0, false
+	}
+	if pin.ClusterID != clusterID || pin.AdmissionEpoch == 0 {
+		diagnostic.refuse("pin_admission_mismatch", nil)
+		return nil, 0, false
+	}
+	der, err := pinDER(pin.NodeUUID, pin.CertPem, peerUUID)
+	if err != nil {
+		diagnostic.refuse("pin_certificate_invalid", nil)
+	}
+	return der, pin.AdmissionEpoch, err == nil
 }
 
 func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]byte, error), diagnostic *PeerServiceDiagnostic) (peerServiceSnapshot, bool) {
@@ -421,22 +443,15 @@ func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]by
 	if err != nil {
 		return diagnostic.refuse("pin_read", err)
 	}
-	var pin peerServicePin
-	if err := json.Unmarshal(pinData, &pin); err != nil {
-		return diagnostic.refuse("pin_decode", nil)
-	}
-	if pin.ClusterID != admission.ClusterID || pin.AdmissionEpoch == 0 {
-		return diagnostic.refuse("pin_admission_mismatch", nil)
-	}
-	der, err := pinDER(pin.NodeUUID, pin.CertPem, peerUUID)
-	if err != nil {
-		return diagnostic.refuse("pin_certificate_invalid", nil)
+	der, pinEpoch, ok := peerServicePinDiagnostic(pinData, peerUUID, admission.ClusterID, diagnostic)
+	if !ok {
+		return peerServiceSnapshot{}, false
 	}
 	membersData, err := readFile(membersPath)
 	if err != nil {
 		return diagnostic.refuse("members_read", err)
 	}
-	memberEpoch, ok := peerServiceMemberDiagnostic(membersData, peerUUID, admission.ClusterID, pin.AdmissionEpoch, diagnostic)
+	memberEpoch, ok := peerServiceMemberDiagnostic(membersData, peerUUID, admission.ClusterID, pinEpoch, diagnostic)
 	if !ok {
 		return peerServiceSnapshot{}, false
 	}
@@ -444,18 +459,18 @@ func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]by
 	// Validate in reverse read order: matching admission reads bracket both
 	// pin reads, which bracket both member reads. Monotonic epochs prevent a cleared
 	// or replaced local admission from masquerading as the original tuple.
-	// No cross-file writer lock is available; a changed/partial snapshot fails
-	// closed and a subsequent complete refresh can succeed.
+	// Independently validate each observation against the captured authority.
+	// Metadata may change, but changed or invalid authority fails closed.
 	currentMembers, err := readFile(membersPath)
 	if err != nil {
 		return diagnostic.refuse("members_bracket_read", err)
 	}
-	if !bytes.Equal(currentMembers, membersData) {
+	var comparison PeerServiceDiagnostic
+	currentMemberEpoch, ok := peerServiceMemberDiagnostic(currentMembers, peerUUID, admission.ClusterID, pinEpoch, &comparison)
+	if !ok || currentMemberEpoch != memberEpoch {
 		if diagnostic != nil {
-			var comparison PeerServiceDiagnostic
-			_, valid := peerServiceMemberDiagnostic(currentMembers, peerUUID, admission.ClusterID, pin.AdmissionEpoch, &comparison)
 			diagnostic.ChangedComponentCompared = comparison.Predicate != "members_decode"
-			diagnostic.ChangedComponentSame = valid
+			diagnostic.ChangedComponentSame = false
 		}
 		return diagnostic.refuse("members_changed", nil)
 	}
@@ -463,15 +478,12 @@ func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]by
 	if err != nil {
 		return diagnostic.refuse("pin_bracket_read", err)
 	}
-	if !bytes.Equal(currentPin, pinData) {
+	comparison = PeerServiceDiagnostic{}
+	currentDER, currentPinEpoch, ok := peerServicePinDiagnostic(currentPin, peerUUID, admission.ClusterID, &comparison)
+	if !ok || currentPinEpoch != pinEpoch || !bytes.Equal(currentDER, der) {
 		if diagnostic != nil {
-			var next peerServicePin
-			if json.Unmarshal(currentPin, &next) == nil {
-				diagnostic.ChangedComponentCompared = true
-				nextDER, err := pinDER(next.NodeUUID, next.CertPem, peerUUID)
-				diagnostic.ChangedComponentSame = err == nil && next.ClusterID == pin.ClusterID &&
-					next.AdmissionEpoch == pin.AdmissionEpoch && bytes.Equal(nextDER, der)
-			}
+			diagnostic.ChangedComponentCompared = comparison.Predicate != "pin_decode"
+			diagnostic.ChangedComponentSame = false
 		}
 		return diagnostic.refuse("pin_changed", nil)
 	}
@@ -479,12 +491,12 @@ func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]by
 	if err != nil {
 		return diagnostic.refuse("admission_bracket_read", err)
 	}
-	if !bytes.Equal(currentAdmission, admissionData) {
+	comparison = PeerServiceDiagnostic{}
+	currentProjection, ok := peerServiceAdmissionDiagnostic(currentAdmission, &comparison)
+	if !ok || currentProjection != admission {
 		if diagnostic != nil {
-			var comparison PeerServiceDiagnostic
-			next, valid := peerServiceAdmissionDiagnostic(currentAdmission, &comparison)
 			diagnostic.ChangedComponentCompared = comparison.Predicate != "admission_decode"
-			diagnostic.ChangedComponentSame = valid && next == admission
+			diagnostic.ChangedComponentSame = false
 		}
 		return diagnostic.refuse("admission_changed", nil)
 	}
@@ -496,7 +508,7 @@ func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]by
 	if !m.trust.MatchDER(peerUUID, der) {
 		return diagnostic.refuse("loaded_pin_mismatch", nil)
 	}
-	return peerServiceSnapshot{admission: admission, id: id, peerDER: der, peerEpoch: memberEpoch}, true
+	return peerServiceSnapshot{admission: admission.admissionRecord, id: id, peerDER: der, peerEpoch: memberEpoch}, true
 }
 
 // matchDER is the server-side gate: accept der for uuid when it byte-for-byte

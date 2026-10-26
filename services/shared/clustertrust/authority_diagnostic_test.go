@@ -39,11 +39,12 @@ func TestPeerServiceAuthorityDiagnosticCapturesDecidingRead(t *testing.T) {
 			t.Fatalf("read refusal = %q, %v, reads=%d, %+v", incarnation, ok, reads, diagnostic)
 		}
 	})
-	t.Run("changed bracket", func(t *testing.T) {
+	t.Run("metadata bracket does not refuse", func(t *testing.T) {
 		f := newIncarnationFixture(t)
+		want := requireIncarnation(t, f.mesh)
 		var diagnostic PeerServiceDiagnostic
 		reads := 0
-		_, ok := f.mesh.peerServiceIncarnationDiagnostic("peer", func(path string) ([]byte, error) {
+		got, ok := f.mesh.peerServiceIncarnationDiagnostic("peer", func(path string) ([]byte, error) {
 			data, err := os.ReadFile(path)
 			if path == filepath.Join(f.dir, membersFileName) {
 				reads++
@@ -53,9 +54,8 @@ func TestPeerServiceAuthorityDiagnosticCapturesDecidingRead(t *testing.T) {
 			}
 			return data, err
 		}, &diagnostic)
-		if ok || reads != 2 || diagnostic.Predicate != "members_changed" || diagnostic.ErrorCode != 0 ||
-			!diagnostic.ChangedComponentCompared || !diagnostic.ChangedComponentSame {
-			t.Fatalf("changed snapshot = %v, reads=%d, %+v", ok, reads, diagnostic)
+		if !ok || got != want || reads != 2 || diagnostic.Predicate != "" || diagnostic.ErrorCode != 0 {
+			t.Fatalf("metadata snapshot = %q, %v, reads=%d, %+v", got, ok, reads, diagnostic)
 		}
 	})
 }
@@ -64,9 +64,10 @@ func TestPeerServiceAuthorityChangedComponentDiagnostic(t *testing.T) {
 	test := func(name, file, predicate string, compared, same bool, change func([]byte) []byte) {
 		t.Run(name, func(t *testing.T) {
 			f := newIncarnationFixture(t)
+			want := requireIncarnation(t, f.mesh)
 			var diagnostic PeerServiceDiagnostic
 			reads := 0
-			_, ok := f.mesh.peerServiceIncarnationDiagnostic("peer", func(path string) ([]byte, error) {
+			got, ok := f.mesh.peerServiceIncarnationDiagnostic("peer", func(path string) ([]byte, error) {
 				data, err := os.ReadFile(path)
 				if path == filepath.Join(f.dir, file) {
 					reads++
@@ -80,15 +81,21 @@ func TestPeerServiceAuthorityChangedComponentDiagnostic(t *testing.T) {
 				}
 				return data, err
 			}, &diagnostic)
-			if ok || reads != 2 || diagnostic.Predicate != predicate ||
+			if ok != (predicate == "") || (ok && got != want) || reads != 2 || diagnostic.Predicate != predicate ||
 				diagnostic.ChangedComponentCompared != compared || diagnostic.ChangedComponentSame != same {
 				t.Fatalf("changed component = %v, reads=%d, %+v", ok, reads, diagnostic)
 			}
 		})
 	}
 	metadata := func(data []byte) []byte { return append(data, '\n') }
-	test("pin metadata only", "trusted/peer.json", "pin_changed", true, true, metadata)
-	test("admission metadata only", "admission.json", "admission_changed", true, true, metadata)
+	test("pin metadata only", "trusted/peer.json", "", false, false, metadata)
+	test("admission metadata only", "admission.json", "", false, false, metadata)
+	test("admission high-water changed", "admission.json", "admission_changed", true, false, func(data []byte) []byte {
+		return bytes.Replace(data, []byte(`"counter":3`), []byte(`"counter":4`), 1)
+	})
+	test("pin authority changed", "trusted/peer.json", "pin_changed", true, false, func(data []byte) []byte {
+		return bytes.Replace(data, []byte(`"admissionEpoch":7`), []byte(`"admissionEpoch":8`), 1)
+	})
 	test("member authority changed", membersFileName, "members_changed", true, false, func(data []byte) []byte {
 		return bytes.Replace(data, []byte(`"state":"member"`), []byte(`"state":"departed"`), 1)
 	})

@@ -404,6 +404,35 @@ terminal for it, exactly as when another facade is serving.
   reach the proxy through the process, so they also reach one that serves no
   facade.
 
+### Paused-node discovery propagation
+
+The destination broker publishes the saved policy advertisement, including
+`pausedBy`, through `sendNodeProjection` in
+[`policy_notifications.go`](policy_notifications.go). Engine-manager includes
+the last received advertisement in its inventory response; the scanner fetches
+and caches it as [`DirectoryNode.Policy`](../shared/noderec/noderec.go).
+This is separate from the broker's live availability notifications and from
+mDNS service registration. It is a policy hint, not proof that draining or
+physical shutdown has completed.
+
+On the receiving node, `scannerProcess.handleNotify` in
+[`discovery.go`](discovery.go) folds each scanner node event into both the
+client-facing discovery store and the internal relay directory. It preserves
+the policy in `directoryToEnriched`; it does not hide a node because it is
+paused. [`relay.Directory.Apply`](relay/relay.go) pushes full filtered snapshots,
+and `proxyProcess.handleSubscribe` in [`proxy.go`](proxy.go) addresses each
+snapshot to its subscribing engine facade. Existing service filters still
+apply: propagating a pause does not create a missing engine service or claim
+that an engine is healthy.
+
+The proxy stores `policy.pausedBy` as internal routing metadata and excludes
+known-paused remote peers from inference eligibility. Inventory/control reads
+and broker discovery visibility are separate from that exclusion. A stale
+snapshot can still send inference to a paused destination, whose own admission
+returns a retryable `503`; failover remains bounded by the originating request.
+See the [scanner refresh limits](../nvpair-node-scanner/README.md) and
+[proxy selection and fallback contract](../nvpair-proxy/spec.md#5-request-path).
+
 ## Communication
 
 Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other NVPAIR subprocess. By default the broker reads stdin and writes stdout; with `--ipc <path>` it dials a Unix domain socket or Windows named pipe instead. The parent UI process owns the endpoint in both cases: it either spawns the broker with piped stdio, or sets up the pipe / socket beforehand and points the broker at it via `--ipc`. The broker always talks to exactly one peer.
@@ -838,10 +867,15 @@ proxy enforces it.
   a non-empty advertised `pausedBy` from its inference candidates, a request
   without a `model` included; its own node is excepted and model lists and
   control requests are not filtered. A stale hint still meets the destination's
-  veto: the paused node's admission refuses inference with HTTP 503 and
-  `X-PAIR-Admission: paused`; the origin treats that response as retryable and
-  fails over when another candidate remains. With no remaining candidate, it
-  relays the 503. Pause does not remove catalogue models or declared tier aliases.
+  veto: ordinary non-strict admission on the paused node refuses inference with
+  HTTP 503, `X-PAIR-Admission: paused` and `Retry-After: 30`. The origin treats
+  that response as retryable while another dispatch is permitted. Exhausting a
+  candidate round can lead to backoff and fresh resolution; on the final
+  permitted attempt it relays the 503, even if other candidates remain.
+  Strict hybrid admission instead uses its `strict-admission` error without
+  those ordinary pause headers. Pause does not remove catalogue models or
+  declared tier aliases. See the
+  [proxy admission contract](../nvpair-proxy/spec.md#5-request-path).
   The advertisement is snapshot evidence of saved policy. Healthy scanner
   refreshes have a nominal 15-second cadence plus preceding work, batching and
   fetch time; failed refreshes retain the last good hint indefinitely.

@@ -490,13 +490,28 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
   and dormant self (judged by their own admission), manual nodes (no hint),
   model lists, preflights and other non-inference requests are not filtered. The
   hint is a snapshot refreshed on a nominal 15-second cadence and kept when a
-  fetch fails, so the destination's admission `503`, with the header
-  `X-PAIR-Admission: paused`, wins over a stale hint and the router fails over.
+  fetch fails, so the destination's ordinary non-strict admission `503`, with
+  the header
+  `X-PAIR-Admission: paused` and `Retry-After: 30`, wins over a stale hint. The
+  router can try another candidate before committing response bytes while its
+  dispatch budget permits; on its final permitted attempt it relays the `503`.
+  This is a fast admission refusal, not a promise that another node can serve.
+  Strict hybrid admission also refuses a non-available destination, using its
+  `strict-admission` error rather than the ordinary pause headers.
   When hints exclude
   every remote candidate and no self candidate remains, a concrete request gets
   `502` and a tier request `404`. See [spec §5](spec.md#5-request-path),
   [§12.2](spec.md#122-admission) and
   [Node availability](../../docs/node-availability.mdx).
+
+  Source path: the broker's engine-addressed `discovery:nodes` snapshot enters
+  `replaceSubscribed` in [`facade.go`](facade.go); `subscribedToNode` in
+  [`proxy.go`](proxy.go) copies `DirectoryNode.Policy.PausedBy` into `Node.PausedBy`.
+  [`Discovery.SetSubscribed`](discovery.go) replaces that internal snapshot even
+  when only the hint changed. Such a change emits no outward proxy `node/updated`,
+  and it does not revoke an already-resolved attempt. Eligibility is checked by
+  `resolveRouteCandidates`; destination refusal and retry are owned by
+  [`admission.go`](admission.go) and [`routing.go`](routing.go).
 
 ### Node policy: admission, tiers, cancel (fork)
 
