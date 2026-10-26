@@ -628,10 +628,10 @@ Every error carries a JSON-RPC `errorCode`: `-32602` for invalid parameters,
 including missing `expectedPersistedRevision`, invalid policy or availability;
 `-32010` for a revision conflict; `-32011` for a resume the local veto refuses;
 `-32012` for remote-management denial; `-32013` for an engine locked on this
-node;
+node; `-32014` for target-owned profile inference settings;
 `-32000` for a save failure or other operational failure. The route maps
-`-32602` to HTTP 400, `-32010`, `-32011`, `-32012` and `-32013` to HTTP 409 with the body
-`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "engine_locked"}`, and other
+`-32602` to HTTP 400, `-32010`, `-32011`, `-32012`, `-32013` and `-32014` to HTTP 409 with the body
+`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "engine_locked" | "remote_setting_locked"}`, and other
 failures to a plain-text HTTP 409. The origin's remote-policy methods map HTTP
 400 to JSON-RPC `-32602`, a typed 409 to its code, and other HTTP failures to
 `-32000`, preserving the diagnostic. No classification depends
@@ -640,6 +640,15 @@ validated, including a draft that tries to enable remote or paid execution.
 The route abandons its wait (and sends
 `policy:cancel`) if the caller loses its pin or 15 minutes pass; a pause the broker
 already accepted still finishes.
+
+`remote_setting_locked` preserves the target broker's safe bounded explanation
+and maps back to `-32014` at the origin. It names only the stored profile's
+engine/model; a new-profile lock attempt receives a fixed generic message.
+There is no identifier payload or error data, and classification never parses
+the message. The broker, not this relay, owns the latest stored `localOnly`
+check after permission and revision checks. A refused write has no partial
+policy, persistence, activation, push or notification effects. See the
+[broker contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks).
 
 **Off, lock and pause.** Ordinary Off, whether local, peer, legacy or unknown,
 does not prohibit a new granted peer start, load or switch. Load never implicitly

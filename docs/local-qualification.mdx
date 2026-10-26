@@ -69,6 +69,7 @@ fails validation is ignored as a whole and logged; nothing is qualified from it.
 | `modelDigests` | Content identities of the model the bounds hold for. Ollama uses its `/api/tags` digest; NE uses the aggregate artifact manifest digest described below. |
 | `launchDigests` | Launches the bounds hold for (Identity, below). |
 | `requestOptions` | The profile defaults the bounds were measured with. The profile's `requestOptions` must be equal. |
+| `requestOptionsMode` | The request precedence the evidence covers: `defaults` when omitted, or `enforced`. The profile's effective mode must match. |
 | `tokenizer`, `chatTemplate` | Names of the tokenizer and template the accounting was verified against. |
 | `contextTokens` | The served context the bounds hold for, at most 16777216. Each overhead is below it. |
 | `maxOutputTokens` | The largest output a request may ask for; below `contextTokens`. |
@@ -137,6 +138,33 @@ itself.
 
 ## Installing strict capacity
 
+`requestOptionsMode` is `defaults` when omitted, and explicit `defaults`
+normalizes to omission. Qualification compares options and effective mode in
+profile and evidence. The current option comparator decodes numbers as float64:
+distinct high-precision JSON numbers can compare equal, both when matching
+evidence and when deciding whether an installed qualification changed. This is
+not an exact numeric binding and differs from the precision-preserving target
+policy lock comparison. Effective modes are compared directly.
+Defaults-mode requests allow client overrides;
+enforced-mode requests replace configured leaves recursively before strict
+validation. This path retains strict key/shape checks and
+refuses configured-key ambiguity with a fixed HTTP `400` message. Unconfigured fields
+remain request-controlled within existing strict admission bounds.
+Omitted qualification mode also means `defaults`. Changing the profile's mode
+without matching qualification evidence invalidates installed strict capacity.
+The local strict grammar additionally accepts integer `top_k >= 0` and finite
+numeric `min_p` and `repeat_penalty`; the public Chat grammar is unchanged.
+
+The separate `localOnly` flag is already a target-owned policy-edit lock. It
+does not supply qualification, force a request value or install capacity.
+See the [broker contract](../services/nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks)
+for administrative rules and the shared-draft desktop editor. Typed numeric
+fields target llama.cpp and LM Studio, with typed `min_p` only for llama.cpp.
+Advanced policy JSON preserves uncommon and Ollama-native settings but does
+not establish engine-specific sampler acceptance. An engine-rejected enforced
+value can make every request fail until corrected. Model-card values are
+per-model starting points, not product defaults or qualification evidence.
+
 The proxy derives its strict capability whenever the policy or the engine identity
 changes, and reports it to the broker. A profile's model is installed only when
 all of the following hold:
@@ -145,7 +173,8 @@ all of the following hold:
   engine and normalized model;
 - the engine has an identity, its launch digest is in `launchDigests` and the
   model's content digest is in `modelDigests`;
-- the profile's `requestOptions` equal the qualified ones, and its `contextTokens`
+- the profile's `requestOptions` and effective `requestOptionsMode` equal the
+  qualified ones, and its `contextTokens`
   and `maxOutputTokens` do not exceed the qualified ones;
 - the model's effective concurrency is finite.
 
@@ -182,9 +211,10 @@ Before any wake, unload, slot or inference, the destination:
 
 1. requires the model to be installed under exactly the identity the request
    names (otherwise 503 `strict-admission`);
-2. checks incoming keys and merges the profile's `requestOptions` as defaults
-   for absent fields, then checks every effective top-level key again, including
-   defaults-injected keys;
+2. checks incoming keys and applies the profile's `requestOptions` under its
+   effective mode (defaults fill absent fields; enforced configured leaves
+   replace request values), then checks every effective top-level key again,
+   including option-injected keys;
 3. rejects (400 `strict-qualification`) unsupported fields/shapes, repeated or
    case-variant top-level keys, images or other non-text parts, and request-level
    context overrides. `reasoning_effort` and `parallel_tool_calls` are refused

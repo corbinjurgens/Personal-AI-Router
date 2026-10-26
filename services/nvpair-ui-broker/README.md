@@ -1016,6 +1016,95 @@ proxy enforces it.
   {engine, drain:true}`, waits up to 60 s for that engine's active count to reach
   zero (releasing the settings journal lock meanwhile), applies, and clears the
   drain. See [ENGINE_SETTINGS.md](ENGINE_SETTINGS.md).
+### Model inference settings and target-owned locks
+
+Each `(engine, model)` profile can contain `requestOptions`,
+`requestOptionsMode` and `localOnly`. Omitted mode means `defaults`, and explicit
+`defaults` normalizes to omission. Omitted `localOnly` means false. These
+omitted fields need no local-file rewrite. In `defaults` mode, options remain
+client-overridable defaults.
+
+The serving proxy implements `enforced` as recursive object merging in which
+each configured scalar or array replaces the request value at that path;
+unconfigured fields remain request-controlled. Enforced options must be a
+nonempty object. Policy validation rejects duplicate, escaped-duplicate and
+case-folded object keys with a fixed ambiguity explanation. It forbids setting
+the top-level model through options. Defaults retain their existing
+absence/null behavior. Engine-specific sampler acceptance is not established
+by policy validation.
+
+Ambiguous configured request keys, including duplicate, escaped-duplicate and
+case-folded names, receive HTTP `400` with code `ambiguous-options` and the fixed
+message `the request body has ambiguous configured option members`, before
+engine contact. Errors and routing facts do not retain submitted keys or values.
+
+For example, with `requestOptions: {"temperature":0.1}`, a request containing
+`temperature:0.8` reaches the engine as `0.8` in `defaults` mode and `0.1` in
+`enforced` mode. The serving node owns enforcement: routing through the Mac to
+PC3 applies PC3's profile once, without applying the Mac's profile to that peer
+request. Ordinary, strict and hybrid local dispatch use the same body owner.
+
+`localOnly:true` is an administrative restriction, not request enforcement.
+Every peer, even one granted remote management, must preserve that stored
+profile's complete options, effective mode, true flag and existence at the
+same engine/model identity. A peer cannot unlock, delete, rename the identity,
+or lock an unlocked/new profile. Only local policy writes on the target can
+set or clear the flag. Reordering profiles and editing unrelated metadata
+such as the display name remain allowed under existing policy rules. Options
+compare structurally: object order and whitespace do not matter, arrays remain
+ordered, and numeric comparison retains precision.
+
+The peer projection carries these fields. At target acceptance, the existing
+writer checks current management permission, expected persisted revision,
+recovery/model-key and policy validation, then the stored lock while holding
+the policy writer lock. A stale draft gets `-32010` before lock comparison;
+a current-revision protected edit gets `-32014` / `remote_setting_locked`.
+An explicit peer denial remains `-32012`, and the pause veto remains `-32011`.
+Any lock refusal rejects the whole write: no unlocked portion is applied and
+no file, in-memory policy, revision, activation, push or announcement changes.
+On acceptance, persistence precedes the existing proxy activation/push and
+notification flow. Local readback reports activation separately; peer readback
+confirms saved configuration without activation fields.
+
+The error uses only the existing code/message envelope, with no error data.
+Its bounded explanation identifies only the stored engine/model, never display
+names, submitted identities, keys or option values. A new-profile lock attempt
+has no stored identity and receives a fixed generic explanation. Classify by
+the numeric code or wire name, never diagnostic text.
+
+In Routing & resources, the desktop's Model inference settings editor uses
+`Allow request overrides`, `Force PAIR values` and the profile-level checkbox
+`Only this device can edit`. It shares the policy JSON draft and Save/CAS flow
+with the binding editor and `Advanced policy JSON`; there is no separate save.
+The editor shows `Editing settings on <node>` and exact numeric inputs for
+OpenAI-compatible llama.cpp and LM Studio profiles. Typed `min_p` is limited to
+llama.cpp because LM Studio support was not established. Ollama-native and
+uncommon settings, including LM Studio `min_p`, stay in Advanced policy JSON.
+Clearing the final option removes the options object and resets the mode to
+defaults without changing the local-only flag. Untouched properties and opaque
+number tokens are preserved by source-span edits.
+
+On the local target the checkbox remains editable, including for a locked
+profile. On remote targets it is always disabled. A saved target lock also
+disables typed options and precedence controls, with `Locked on <node>. Change
+this profile's inference settings on that device.` Remote protection comes from
+the saved target snapshot keyed by engine/model, so raw draft edits cannot
+unlock these controls. The target writer remains authoritative for every save.
+Numeric `-32014` is a definite rejection in both individual and bulk saves;
+the dirty draft is retained and the existing Reload action is available.
+
+Typed fields validate numeric inputs. Advanced policy JSON does not gain
+engine-specific sampler validation: an engine-rejected enforced value can make
+every request fail until the owner corrects it. Model-card values are per-model
+starting points, not PAIR-wide defaults. Native GUI and real-engine acceptance
+remain unobserved by the component test results.
+
+The two settings remain independent: local-only defaults still permit client
+request overrides, while forced values do not prohibit granted peer edits
+when the profile is not local-only.
+
+### Remote policy relay
+
 - **Other nodes.** A `nodeId` naming another node is relayed through
   engine-manager's pinned control server (`engine:remote-policy-get`,
   `engine:remote-policy-set`, `engine:remote-availability-set`). On the target,
@@ -1026,9 +1115,11 @@ proxy enforces it.
   JSON-RPC code: invalid parameters (including a missing or malformed
   `expectedPersistedRevision`, invalid policy or invalid availability) use
   `-32602`; revision conflicts use `-32010`; a resume refused by the local veto
-  uses `-32011`; save failures and other operational failures use `-32000`.
-  Engine-manager maps `-32602` to HTTP 400, `-32010` and `-32011` to HTTP 409
-  with the body `{"error", "code": "policy_conflict" | "local_veto"}`, and other
+  uses `-32011`; management denial uses `-32012`; engine lock uses `-32013`;
+  target-owned inference settings use `-32014`; save failures and other
+  operational failures use `-32000`.
+  Engine-manager maps `-32602` to HTTP 400 and the typed codes to HTTP 409
+  with the body `{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "engine_locked" | "remote_setting_locked"}`, and other
   failures to a plain-text HTTP 409; the origin maps HTTP 400 back to `-32602`,
   a typed 409 back to its code, and other HTTP failures to `-32000`.
   Classification uses the code, never error text.

@@ -864,16 +864,26 @@ The broker's `policy:reply {id, result, error?, errorCode?}` carries a JSON-RPC
 `errorCode` on every failure. Invalid parameters, including missing or malformed
 `expectedPersistedRevision`, invalid policy and invalid availability, use
 `-32602`; revision conflicts use `-32010`; a resume the local veto refuses uses
-`-32011`; remote-management denial uses `-32012`; an engine lock uses `-32013`; save failures and other operational errors use `-32000`. Inbound
+`-32011`; remote-management denial uses `-32012`; an engine lock uses `-32013`;
+target-owned profile inference settings use `-32014`; save failures and other operational errors use `-32000`. Inbound
 policy routes return HTTP 400 for `-32602`, HTTP 409 with the JSON body
-`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "engine_locked"}`
-for `-32010`, `-32011`, `-32012` and `-32013`, and a plain-text HTTP 409 for other broker or relay errors. At the
+`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "engine_locked" | "remote_setting_locked"}`
+for `-32010`, `-32011`, `-32012`, `-32013` and `-32014`, and a plain-text HTTP 409 for other broker or relay errors. At the
 origin, HTTP 400 becomes JSON-RPC `-32602`, a typed 409 becomes its code, and
 other HTTP failures become `-32000`; diagnostics are preserved without inferring
 a code from their text. A stale policy draft conflicts before
 policy validation, even if it tries to enable remote or paid execution.
 Successful replies have no error code. Body/shape validation still returns 400,
 unpaired callers 403, non-POST calls 405 and a missing coordinator 503.
+
+The `-32014` / `remote_setting_locked` case is a target broker refusal to
+change a stored profile's protected inference settings or identity, or to
+create a remote local-only lock. The shared merge supplies the safe diagnostic:
+bounded stored engine/model only, or a fixed generic message when no stored
+identity exists. Engine-manager carries the code/message without inspecting
+policy options, adding error data or classifying by text. Permission and
+expected revision are checked before the target lock under the existing
+writer lock. Rejection leaves the entire policy and its publication unchanged.
 
 **Off, lock and pause.** Saved Off is ordinary intent, never a prohibition on a
 new granted peer start/load/switch. This includes local, peer and legacy Off and
