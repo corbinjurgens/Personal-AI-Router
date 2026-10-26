@@ -40,8 +40,11 @@ before using its eventual results as acceptance evidence.
 
 Desktop node settings expose **Switch engine**, **From**, **To**, **Switch** and
 **Refresh readback**; TUI node detail uses `w` / **switch engine**. Both expose
-existing E3 invoke/status methods and sequence notifications. The target broker
+existing E4 invoke/status methods and sequence notifications. The target broker
 owns the transaction; clients correlate receipts rather than coordinate engines.
+Marked receipts already display **Automatic engine switch** in desktop and TUI.
+The binding editor and joined Windows process checks are implemented and verified within the documented boundaries;
+see [model engine bindings](../../docs/model-engine-bindings.mdx).
 
 | Domain                     | Status                          | Current state                                                                                                                                   |
 | -------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -54,6 +57,7 @@ owns the transaction; clients correlate receipts rather than coordinate engines.
 | llama.cpp backend          | Integrated                      | Desktop and TUI expose install, lifecycle, catalog pull, inventory, load/unload, endpoints, routing, and demo traffic                            |
 | Local engine lifecycle     | Complete                        | Install, start, stop, uninstall, update, and port configuration                                                                                 |
 | Engine switching           | Integrated; native acceptance pending | Explicit source/target, revision and request correlation; typed denial/veto/conflict and recovery readback in desktop and TUI |
+| Model engine bindings      | Service path, editor and joined Windows process checks landed | Target-local CAS policy and shared-draft editor, automatic receipts, advisory cold offers and bounded preparation; process gaps documented, native matrix pending, not observed |
 | Remote engine lifecycle    | Partial                         | Remote install, start, stop, status, and model pull are supported                                                                               |
 | Engine models              | Partial                         | Core list, pull, load, unload, and supported delete actions are wired                                                                           |
 | Engine version metadata    | Backend-limited                 | The backend status surface does not provide a complete version/install-owner/update contract                                                    |
@@ -133,6 +137,37 @@ the original outcome or prevent late acceptance. See the
 Process and native client acceptance require their own execution evidence;
 static checks and mocked client tests do not establish Windows or live-engine
 acceptance.
+
+## Model engine binding limits
+
+The typed policy bridge preserves `engineBindings` through existing policy
+get/set and CAS readback. Saving a binding changes no engine intent and starts
+nothing. Ordinary bound demand can activate plain Off, subject to lock, pause,
+protected residency, current management authority and process-ownership guards.
+Plain Off is not a lock; only local Resume lifts a node pause. Removing a binding
+does not proactively stop an engine.
+
+Binding offers are distinct from inventory, loaded state, engine health and
+strict readiness. A reachable stopped-engine facade can receive/refuse/prepare
+inference. Ready-first ordering preserves tier/fallback, `preferLoaded` and
+eligible explicit selection. Strict hybrid cold activation remains excluded.
+The [binding guide](../../docs/model-engine-bindings.mdx) owns the operational
+bounds, HTTP refusal/retry semantics and native acceptance matrix.
+
+The single-node Routing & resources editor adds, edits, removes and clears
+bindings inside the existing policy JSON draft and Save/CAS/readback flow.
+It preserves unrelated fields and malformed text, guards target changes, and
+uses descriptor labels with observed-inventory suggestions. Saved bindings are
+distinct from readiness. It adds no lifecycle API, progress owner, separate
+draft store, TUI editor or bulk operation. See the
+[editor contract](frontend-api.md#model-engine-bindings-in-routing--resources).
+Task 6 automated checks are reported green; native GUI and assistive-technology
+acceptance are pending, not observed. Joined Task 7 Windows checks passed:
+combined binding/switch count 3 was 78/0/0, hybrid/history count 3 was 69/0/0,
+and the whole process suite was 851/0/7 (pass/fail/skip). The guide records
+remaining process gaps and refusal-only logs. The historical reverse refusal's
+predicate remains unestablished. These synthetic process results do not
+establish native acceptance.
 
 ## Supervision
 

@@ -18,8 +18,11 @@ are too small to carry it.
 
 Locally, each node exposes compatibility proxies — Ollama-compatible and
 OpenAI-compatible — so an unmodified client on that machine can reach any capable
-node in the cluster. Routing is automatic: the proxy picks a node that is online,
-has a compatible engine running, and holds the requested model.
+node in the cluster. Routing requires a compatible engine and the requested
+model. Explicit [model engine bindings](../docs/model-engine-bindings.mdx) also
+allow bounded preparation of a stopped engine before fresh inventory checks and
+ordinary admission. Ready equivalent candidates lead cold offers; offers do not
+establish inventory, engine health or strict readiness.
 
 Standalone, the Ollama proxy defaults to `http://localhost:11435`; under the
 broker it serves the Ollama-compatible `http://localhost:11434` when that port is
@@ -35,20 +38,27 @@ occupied. The desktop and TUI expose its managed lifecycle, downloads,
 inventory, and load/unload actions. `--proxy-engines` can still restrict the
 facades a standalone broker or TUI starts.
 
-PAIR ships a graphical UI alongside these services. The UI launches
-**`nvpair-ui-broker`** from the same directory; the broker orchestrates the
-workers and exposes a newline-delimited JSON-RPC 2.0 API over stdio (or a Unix
-socket / Windows named pipe via `--ipc`). For supported platforms and engines,
-see the [root README](../README.md#what-is-supported).
+PAIR ships a graphical UI alongside these services. The UI attaches to
+**`nvpair-service`**, starting it when needed; the service owns the broker, which
+orchestrates the workers and exposes a newline-delimited JSON-RPC 2.0 API over
+stdio (or a Unix socket / Windows named pipe via `--ipc`). For supported platforms
+and engines, see the [root README](../README.md#what-is-supported).
 
 ## Architecture
 
-This tree builds thirteen Go binaries. `nvpair-ui-broker` is the parent service and supervises the workers, all spawned at startup — only the scanner is required, and a missing binary for any other leaves the broker running without that capability. `nvpair-proxy` is one worker process that fronts every enabled engine, hosting a facade for each. `nvpair-service` is the per-user, long-running owner of the broker: clients attach to it over a local socket or named pipe and detach without stopping anything. `nvpair-tui` is a terminal client of that service, starting it when it is not running. The desktop app still launches its own broker for now. Processes communicate via newline-delimited JSON-RPC 2.0 over stdio or, optionally, a Unix socket / Windows named pipe.
+The Go binaries below share one process owner chain. `nvpair-ui-broker`
+supervises the workers, all spawned at startup; only the scanner is required,
+and a missing optional binary leaves the broker running without that capability.
+`nvpair-proxy` is one worker hosting a facade per enabled engine.
+`nvpair-service` is the per-user owner of the broker. Desktop and terminal
+clients attach over its local socket or named pipe and detach without stopping
+it. Worker communication uses newline-delimited JSON-RPC 2.0 over stdio or,
+optionally, a Unix socket / Windows named pipe.
 
 | Binary | Role |
 | --- | --- |
 | `nvpair-ui-broker` | Parent service and JSON-RPC API surface used by the bundled UI and other clients. Supervises workers, relays consolidated discovery, and coordinates routing and scheduling. |
-| `nvpair-proxy` | The engine HTTP reverse proxy: one process hosting a facade per enabled engine, each enabled over `facade/enable` after spawn. Serves each engine's own dialect (Ollama-native and OpenAI-compatible), routes only to advertised model owners, and applies owner failover and scheduler priorities. |
+| `nvpair-proxy` | The engine HTTP reverse proxy: one process hosting a facade per enabled engine, each enabled over `facade/enable` after spawn. Serves Ollama-native and OpenAI-compatible traffic, selects inventory owners or supported binding offers, and applies fresh admission, failover and scheduler priorities. |
 | `nvpair-node-info` | Local HTTP service on `:14318` exposing GPU, CPU, and memory inventory at `/v1/node-info`. |
 | `nvpair-node-scanner` | Consolidated discovery daemon. Advertises and browses `_nvpair-node._tcp`, maintains the node directory, and enriches peers with hardware and model information over HTTP. |
 | `nvpair-manual-nodes` | Manages user-added nodes that don't appear via mDNS; probes them every 10 s. |
@@ -334,8 +344,10 @@ Some tests need something the machine may not have, and skip rather than fail:
   browse and advertise a private per-test service under `local`.
 - Broker advertiser health checks require a current running endpoint from
   engine-manager; an absent manager or failed status RPC does not trigger a
-  guessed stock-port probe. Configured engine targets still need separate review
-  before beside-installed execution.
+  guessed stock-port probe. Separately, a supported binding offer can keep a real
+  stopped-engine facade registered while engine health stays false. That listener
+  permits preparation/refusal, not a readiness claim. Configured engine targets
+  still need separate review before beside-installed execution.
 - Tests needing a real mDNS responder skip when one is unavailable.
 - Live engine tests only run when you opt in:
 
@@ -348,6 +360,20 @@ Those two install, start, stop, and pull against the engines actually on your
 machine. Run them deliberately, on a machine you do not mind changing.
 
 A skip is not a pass. If you are relying on a test, check it actually ran.
+
+### Model engine binding proof status
+
+The service path supports persisted bindings, guarded automatic E4 replacement,
+stopped-engine offers and bounded HTTP preparation. The desktop editor uses the
+existing policy draft and Save/CAS flow. Joined Windows binding/switch checks,
+hybrid/history checks and a whole process-suite run passed on Task 7's joined
+source. See the
+[binding guide's process evidence](../docs/model-engine-bindings.mdx#joined-process-evidence-and-limits)
+for exact results, unproved boundaries and refusal-only authority diagnostics.
+The historical reverse refusal's predicate remains unestablished. Its
+[native matrix](../docs/model-engine-bindings.mdx#native-acceptance-matrix) is
+entirely pending, not observed. Component or fake-engine process results cannot establish
+installed-engine or multi-machine acceptance.
 
 ### Controller-selected model COPY
 
