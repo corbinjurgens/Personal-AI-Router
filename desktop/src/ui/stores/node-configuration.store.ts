@@ -30,7 +30,8 @@ import {
     INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
     POLICY_CONFLICT_CODE,
-    REMOTE_MANAGEMENT_DENIED_CODE
+    REMOTE_MANAGEMENT_DENIED_CODE,
+    REMOTE_SETTING_LOCKED_CODE
 } from '@/shared/constants/service-errors'
 import { getPairTransport } from '@/ui/api/bootstrap'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
@@ -221,6 +222,7 @@ export function policyRefusal(message: string, code?: number): Refusal {
     if (code === POLICY_CONFLICT_CODE) return 'conflict'
     if (code === LOCAL_VETO_CODE) return 'vetoed'
     if (code === REMOTE_MANAGEMENT_DENIED_CODE) return 'rejected'
+    if (code === REMOTE_SETTING_LOCKED_CODE) return 'rejected'
     if (code === INVALID_PARAMS_CODE) return 'rejected'
     if (code === undefined) {
         if (/-32010\b/.test(message) || message.includes('policy conflict')) return 'conflict'

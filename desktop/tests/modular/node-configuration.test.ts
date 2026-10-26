@@ -14,7 +14,8 @@ import {
     INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
     POLICY_CONFLICT_CODE,
-    REMOTE_MANAGEMENT_DENIED_CODE
+    REMOTE_MANAGEMENT_DENIED_CODE,
+    REMOTE_SETTING_LOCKED_CODE
 } from '@/shared/constants/service-errors'
 import { ServiceCallError } from '@/ui/api/service-transport'
 import type { EngineModels, ModelItem } from '@/shared/types/engines'
@@ -463,6 +464,10 @@ describe('conflicts', () => {
     })
 
     it('classifies a refusal by its JSON-RPC code, not by its text', () => {
+        expect(policyRefusal('device is offline -32010', REMOTE_SETTING_LOCKED_CODE)).toBe(
+            'rejected'
+        )
+        expect(policyRefusal('-32014: locked profile')).toBe('other')
         expect(policyRefusal('the persisted revision is 6', POLICY_CONFLICT_CODE)).toBe('conflict')
         expect(policyRefusal('paused on the node itself', LOCAL_VETO_CODE)).toBe('vetoed')
         expect(policyRefusal('roles[weak]: unknown engine', INVALID_PARAMS_CODE)).toBe('rejected')
@@ -527,6 +532,31 @@ describe('conflicts', () => {
         expect(entry().phase).toBe('rejected')
         expect(entry().message).toContain('Remote management permission')
         expect(entry().draft.weak).toEqual({ engine: 'ollama', model: 'qwen3:4b' })
+        expect(entry().baseline?.revision).toBe('5')
+        expect(get).not.toHaveBeenCalled()
+        expect(set).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps a whole-policy lock refusal definite and preserves the role draft and settings baseline', async () => {
+        set.mockRejectedValue(
+            new ServiceCallError('device is offline -32010', REMOTE_SETTING_LOCKED_CODE)
+        )
+        const profiles = [
+            {
+                engine: 'llamacpp',
+                model: 'm',
+                localOnly: true,
+                requestOptionsMode: 'enforced',
+                requestOptions: { temperature: 1 }
+            }
+        ]
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, snapshot('5', { profiles }))
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        await store.save(PEER, PEER)
+        expect(entry().phase).toBe('rejected')
+        expect(entry().draft.weak).toEqual({ engine: 'ollama', model: 'qwen3:4b' })
+        expect(entry().baseline?.policy).toBe(policyText('5', { profiles }))
         expect(entry().baseline?.revision).toBe('5')
         expect(get).not.toHaveBeenCalled()
         expect(set).toHaveBeenCalledTimes(1)
