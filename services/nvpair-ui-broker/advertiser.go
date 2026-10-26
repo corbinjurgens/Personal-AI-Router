@@ -94,9 +94,10 @@ func (b *Broker) runAutoAdvertise(ctx context.Context) {
 // /v1/models endpoint (registered separately), which peers fetch during
 // enrichment.
 func (b *Broker) reconcileAdvertise(client *http.Client) {
+	defer b.refreshBindingAdvertisement()
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
-	if b.pendingSwitchLocked("ollama") != nil {
+	if b.advertisementWithdrawnLocked("ollama") {
 		return
 	}
 	// During the managed bind -> backend-move transition, engine:status would
@@ -119,7 +120,9 @@ func (b *Broker) reconcileAdvertise(client *http.Client) {
 		b.registerService(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: proxyPort})
 		b.setProxyLocalBackend(b.getProxy(), "ollama", enginePort, true)
 	} else {
-		b.unregisterService(noderec.ServiceOllama)
+		if !b.registerBindingFacadeLocked(ollamaProxyProfile) {
+			b.unregisterService(noderec.ServiceOllama)
+		}
 		b.setProxyLocalBackend(b.getProxy(), "ollama", enginePort, false)
 	}
 }
@@ -165,9 +168,10 @@ func (b *Broker) runAutoAdvertiseLMStudio(ctx context.Context) {
 // promoted proxy port (never the engine) and hands the engine's loopback port to
 // the LM Studio proxy via node/set-local-backend.
 func (b *Broker) reconcileAdvertiseLMStudio(client *http.Client) {
+	defer b.refreshBindingAdvertisement()
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
-	if b.pendingSwitchLocked("lmstudio") != nil {
+	if b.advertisementWithdrawnLocked("lmstudio") {
 		return
 	}
 	enginePort, probe := b.localEnginePort("lmstudio")
@@ -186,7 +190,9 @@ func (b *Broker) reconcileAdvertiseLMStudio(client *http.Client) {
 		b.registerService(noderec.RegisterParams{Service: noderec.ServiceLMStudio, Port: proxyPort})
 		b.setProxyLocalBackend(b.getLMStudioProxy(), "lmstudio", enginePort, true)
 	} else {
-		b.unregisterService(noderec.ServiceLMStudio)
+		if !b.registerBindingFacadeLocked(lmstudioProxyProfile) {
+			b.unregisterService(noderec.ServiceLMStudio)
+		}
 		b.setProxyLocalBackend(b.getLMStudioProxy(), "lmstudio", enginePort, false)
 	}
 }
@@ -210,9 +216,10 @@ func (b *Broker) runAutoAdvertiseEngine(ctx context.Context, profile engineProxy
 }
 
 func (b *Broker) reconcileAdvertiseEngine(profile engineProxyProfile, client *http.Client) {
+	defer b.refreshBindingAdvertisement()
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
-	if b.pendingSwitchLocked(profile.Name) != nil {
+	if b.advertisementWithdrawnLocked(profile.Name) {
 		return
 	}
 
@@ -231,7 +238,9 @@ func (b *Broker) reconcileAdvertiseEngine(profile engineProxyProfile, client *ht
 		b.setProxyLocalBackendKeyed(b.engineProxyHandle(profile), profile.Name, enginePort, true, credential)
 		return
 	}
-	b.unregisterService(profile.DiscoveryService)
+	if !b.registerBindingFacadeLocked(profile) {
+		b.unregisterService(profile.DiscoveryService)
+	}
 	b.setProxyLocalBackendKeyed(b.engineProxyHandle(profile), profile.Name, enginePort, false, "")
 }
 
@@ -270,6 +279,11 @@ func (b *Broker) setProxyLocalBackend(p *proxyProcess, engine string, port int, 
 func (b *Broker) setProxyLocalBackendKeyed(p *proxyProcess, engine string, port int, healthy bool, credential string) {
 	if p == nil {
 		return
+	}
+	if healthy {
+		if profile, ok := b.frontedEngineProfile(engine); ok {
+			b.engineProxy(profile).bindingRegistered.Store(false)
+		}
 	}
 	b.callProxyManual(p, engine, "node/set-local-backend", proxyLocalBackend{
 		Engine:     engine,

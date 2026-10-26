@@ -137,6 +137,7 @@ func (b *Broker) invalidateSwitchEngines(ctx context.Context, pp *proxyProcess, 
 }
 
 func (b *Broker) releaseSwitchDrain(ctx context.Context, engine string) error {
+	defer b.refreshBindingAdvertisement()
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	draining := r.drains[engine]
@@ -173,6 +174,11 @@ func (b *Broker) switchProxySetLocal(ctx context.Context, pp *proxyProcess, engi
 	}
 	if json.Unmarshal(raw, &ack) != nil || !ack.OK {
 		return fmt.Errorf("local inference endpoint was not acknowledged")
+	}
+	if healthy {
+		if profile, ok := b.frontedEngineProfile(engine); ok {
+			b.engineProxy(profile).bindingRegistered.Store(false)
+		}
 	}
 	return nil
 }

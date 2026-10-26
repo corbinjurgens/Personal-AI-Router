@@ -74,7 +74,8 @@ type Advertisement struct {
 	PausedBy PauseOrigin `json:"pausedBy,omitempty"`
 	// StrictAdmission is absent until destination enforcement and identity
 	// reconciliation are ready. Policy.Advertisement never sets it.
-	StrictAdmission *StrictAdmissionCapability `json:"strictAdmission,omitempty"`
+	StrictAdmission     *StrictAdmissionCapability `json:"strictAdmission,omitempty"`
+	EngineBindingOffers *EngineBindingOffers       `json:"engineBindingOffers,omitempty"`
 }
 
 // StrictCapabilityState keeps old peers, future peers and usable contracts
@@ -286,6 +287,16 @@ func (a *Advertisement) UnmarshalJSON(data []byte) error {
 // peer containers before strict nested decoding. Future strict versions remain
 // opaque. The returned JSON preserves explicit empty served permission.
 func FilterAdvertisementModels(data []byte) ([]byte, error) {
+	container, err := readModelContainer(data)
+	if err != nil {
+		return nil, err
+	}
+	offerFields := 0
+	for _, member := range container.members {
+		if strings.EqualFold(member.key, "engineBindingOffers") {
+			offerFields++
+		}
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return nil, err
@@ -324,6 +335,9 @@ func FilterAdvertisementModels(data []byte) ([]byte, error) {
 		if err := d.Decode(&raw); err != nil {
 			return nil, err
 		}
+		if strings.EqualFold(key, "engineBindingOffers") && offerFields != 1 {
+			continue
+		}
 		clean, err := filterAdvertisementField(key, raw)
 		if err != nil {
 			return nil, err
@@ -351,6 +365,13 @@ func FilterAdvertisementModels(data []byte) ([]byte, error) {
 }
 
 func filterAdvertisementField(key string, raw json.RawMessage) (json.RawMessage, error) {
+	if strings.EqualFold(key, "engineBindingOffers") {
+		// This optional extension cannot cost a peer its canonical inventory.
+		var offers EngineBindingOffers
+		if key != "engineBindingOffers" || json.Unmarshal(raw, &offers) != nil {
+			return nil, nil
+		}
+	}
 	if key == "servedModels" {
 		clean, _, err := filterModelArray(raw, true, "engine", "model")
 		return clean, err

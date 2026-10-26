@@ -9,6 +9,12 @@ export interface NodeModelReference {
     model: string
 }
 
+/** Advisory preparation offers, independent of installed or loaded inventory. */
+export type EngineBindingOffers =
+    | { state: 'absent' | 'invalid' }
+    | { state: 'unsupported'; version: number }
+    | { state: 'valid'; version: 1; models: NodeModelReference[] }
+
 /** Origin-private identity shared across facades; never a conversation key. */
 export interface RoutingRequestKey {
     originNodeId: string

@@ -141,8 +141,9 @@ type policyRuntime struct {
 	// strictReadiness is the newest strict admission readiness the proxy
 	// reported (readiness.go), held until its fences match; replay clears it.
 	// strictPublished is the capability the last node projection carried.
-	strictReadiness nodepolicy.StrictAdmissionReadiness
-	strictPublished *nodepolicy.StrictAdmissionCapability
+	strictReadiness        nodepolicy.StrictAdmissionReadiness
+	strictPublished        *nodepolicy.StrictAdmissionCapability
+	bindingOffersPublished *nodepolicy.EngineBindingOffers
 	// live is the availability the node is actually in. It differs from
 	// current.Availability only while draining.
 	live         nodepolicy.Availability
