@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1030,6 +1031,19 @@ func testEngineBindingPinned(t *testing.T, reverse bool) {
 	pinned := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
 	t.Cleanup(pinned.CloseIdleConnections)
 	f := newEngineBindingServiceFixture(t, &remoteServiceFixture{serviceFixture: s, peer: pinned}, nil)
+	t.Cleanup(func() {
+		if t.Failed() {
+			logSwitchPeerAuthority(t, "binding failure before fixture teardown", mesh.a, mesh.b)
+			logSwitchPeerAuthority(t, "binding failure before fixture teardown", mesh.b, mesh.a)
+			// The production owner explicitly logs only secret-free permission
+			// metadata. Preserve those decisions before disposable logs vanish.
+			for _, line := range strings.Split(s.service.output.String(), "\n") {
+				if strings.Contains(line, "remote management decision") {
+					t.Logf("binding permission decision: %s", line)
+				}
+			}
+		}
+	})
 	f.grant(t, mesh.a.uuid, true)
 	f.targetBinding(t)
 	node := f.publish(t, true)
@@ -1059,12 +1073,18 @@ func testEngineBindingPinned(t *testing.T, reverse bool) {
 		// Reject the outer route so direct success cannot borrow reverse fallback.
 		mesh.a.observers[noderec.ServiceCluster].interrupt(mesh.b.uuid, true)
 	}
+	var refusedAuthority sync.Once
 	adapter := clustertrust.NewPeerServiceClient(mesh.a.mesh, clustertrust.PeerServiceClientOptions{
 		BaseConfigDir:     mesh.a.base,
 		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: 100 * time.Second},
 		ResolveRoute: func(peer string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
 			mesh.a.mesh.Refresh()
 			incarnation, admitted := mesh.a.mesh.PeerServiceIncarnation(peer)
+			if peer == mesh.b.uuid && !admitted {
+				refusedAuthority.Do(func() {
+					logSwitchPeerAuthority(t, "route resolver PeerServiceIncarnation returned false", mesh.a, mesh.b)
+				})
+			}
 			if peer != mesh.b.uuid || service != noderec.ServiceLlamaCPP || !admitted {
 				return clustertrust.PeerServiceRoute{}, false
 			}

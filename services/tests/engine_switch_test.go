@@ -4,8 +4,12 @@
 package tests
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -1033,6 +1037,12 @@ func testEngineSwitchPinned(t *testing.T, reverse bool) {
 	t.Helper()
 	p := newPinnedSwitchFixture(t, reverse)
 	mesh, f, origin, ec := p.mesh, p.f, p.origin, p.ec
+	t.Cleanup(func() {
+		if t.Failed() {
+			logSwitchPeerAuthority(t, "switch failure before fixture teardown", mesh.a, mesh.b)
+			logSwitchPeerAuthority(t, "switch failure before fixture teardown", mesh.b, mesh.a)
+		}
+	})
 	var initial settings.SwitchStatus
 	task2Decode(t, origin.call(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: mesh.b.uuid}).Result, &initial)
 	request := settings.SwitchRequest{NodeID: mesh.b.uuid, RequestID: "switch-pinned", SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: initial.ConfigurationRevision}
@@ -1111,4 +1121,134 @@ func testEngineSwitchPinned(t *testing.T, reverse bool) {
 	})
 	assertSwitchProcessStopped(t, f.pid(t, "ollama"))
 	f.pid(t, "llamacpp")
+}
+
+// logSwitchPeerAuthority is a diagnostic mirror of Mesh.peerServiceAuthority's
+// disk predicates, not an authority decision or a retry. It reads only this
+// fixture's public records, never node.key or certificate contents into logs.
+// The bracket reads can expose a changing snapshot. A later successful sample
+// cannot establish which predicate failed in an earlier subprocess lookup.
+func logSwitchPeerAuthority(t *testing.T, reason string, local, peer *task1Node) {
+	t.Helper()
+	dir := filepath.Join(local.base, "cluster")
+	record := map[string]any{
+		"reason": reason, "utc": time.Now().UTC().Format(time.RFC3339Nano),
+		"local": local.uuid, "peer": peer.uuid,
+		"fixtureMeshClustered": local.mesh.Clustered(), "fixtureMeshNodeUUID": local.mesh.NodeUUID(),
+		"fixtureMeshHasPin": local.mesh.HasPin(peer.uuid),
+		"cacheScope":        "fixture Mesh only; subprocess cached identity/trust and pointer stability are not observable",
+	}
+	record["fixtureMeshRemoteManagement"] = local.mesh.RemoteManagement(peer.uuid)
+	read := func(name, path string) ([]byte, error) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			record[name+"ReadError"] = err.Error()
+		} else {
+			record[name+"Bytes"] = len(data)
+			record[name+"SHA256"] = fmt.Sprintf("%x", sha256.Sum256(data))
+		}
+		return data, err
+	}
+	admissionPath := filepath.Join(dir, "admission.json")
+	pinPath := filepath.Join(dir, "trusted", peer.uuid+".json")
+	membersPath := filepath.Join(dir, "members.json")
+	admissionData, admissionErr := read("admission", admissionPath)
+	pinData, pinErr := read("pin", pinPath)
+	membersData, membersErr := read("members", membersPath)
+	var admission struct {
+		ClusterID string `json:"clusterId"`
+		Epoch     uint64 `json:"epoch"`
+		Counter   uint64 `json:"counter"`
+		Activated uint64 `json:"activated"`
+		Retired   bool   `json:"retired"`
+	}
+	admissionDecode := json.Unmarshal(admissionData, &admission)
+	activated := admission.Activated
+	if activated == 0 {
+		activated = admission.Epoch
+	}
+	record["admission"] = admission
+	record["admissionValid"] = admissionErr == nil && admissionDecode == nil &&
+		admission.ClusterID != "" && admission.Epoch != 0 && !admission.Retired &&
+		admission.Epoch <= activated && activated <= admission.Counter
+	if admissionDecode != nil {
+		record["admissionDecodeError"] = admissionDecode.Error()
+	}
+	var pin struct {
+		NodeUUID       string `json:"nodeUuid"`
+		CertPem        string `json:"certPem"`
+		ClusterID      string `json:"clusterId"`
+		AdmissionEpoch uint64 `json:"admissionEpoch"`
+	}
+	pinDecode := json.Unmarshal(pinData, &pin)
+	record["pinNodeUUID"], record["pinClusterID"], record["pinEpoch"] = pin.NodeUUID, pin.ClusterID, pin.AdmissionEpoch
+	record["pinMetadataValid"] = pinErr == nil && pinDecode == nil && pin.ClusterID == admission.ClusterID && pin.AdmissionEpoch != 0
+	if pinDecode != nil {
+		record["pinDecodeError"] = pinDecode.Error()
+	}
+	block, _ := pem.Decode([]byte(pin.CertPem))
+	pinCertificateValid := false
+	if block != nil && block.Type == "CERTIFICATE" {
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			record["pinCertificateError"] = err.Error()
+		} else {
+			principal := clustertrust.UUIDFromCert(cert)
+			record["pinCertificatePrincipal"] = principal
+			record["pinCertificateSHA256"] = fmt.Sprintf("%x", sha256.Sum256(block.Bytes))
+			pinCertificateValid = pin.NodeUUID == peer.uuid && principal == peer.uuid
+			cfg, ok := local.mesh.ClientTLSConfig(peer.uuid)
+			if ok && cfg.VerifyPeerCertificate != nil {
+				err := cfg.VerifyPeerCertificate([][]byte{block.Bytes}, nil)
+				record["fixtureMeshTrustMatchesDiskPin"] = err == nil
+				if err != nil {
+					record["fixtureMeshTrustError"] = err.Error()
+				}
+			}
+		}
+	}
+	record["pinCertificateValid"] = pinCertificateValid
+	var members []struct {
+		NodeUUID       string `json:"nodeUuid"`
+		State          string `json:"state"`
+		ClusterID      string `json:"clusterId"`
+		AdmissionEpoch uint64 `json:"admissionEpoch"`
+	}
+	membersDecode := json.Unmarshal(membersData, &members)
+	if membersDecode != nil {
+		record["membersDecodeError"] = membersDecode.Error()
+	}
+	matching := 0
+	memberValid := membersErr == nil && membersDecode == nil
+	for _, member := range members {
+		if member.NodeUUID != peer.uuid {
+			continue
+		}
+		matching++
+		record[fmt.Sprintf("peerMember%d", matching)] = member
+		if member.State != "member" || member.ClusterID != admission.ClusterID ||
+			member.AdmissionEpoch == 0 || member.AdmissionEpoch != pin.AdmissionEpoch {
+			memberValid = false
+		}
+	}
+	record["peerMemberCount"] = matching
+	record["memberValid"] = memberValid && matching == 1
+	for _, file := range []struct {
+		name, path string
+		previous   []byte
+		firstErr   error
+	}{
+		{"members", membersPath, membersData, membersErr},
+		{"pin", pinPath, pinData, pinErr},
+		{"admission", admissionPath, admissionData, admissionErr},
+	} {
+		current, err := read(file.name+"Bracket", file.path)
+		record[file.name+"Stable"] = file.firstErr == nil && err == nil && bytes.Equal(current, file.previous)
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Logf("peer authority diagnostic encode: %v", err)
+		return
+	}
+	t.Logf("peer authority diagnostic: %s", data)
 }
