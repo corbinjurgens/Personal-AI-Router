@@ -28,7 +28,81 @@ import (
 
 	"nvpair-shared/clustertrust"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/noderec"
 )
+
+func TestPeerSettingsWatchExcludesSelf(t *testing.T) {
+	f, events, closed, mutations := remoteEventFixture(t)
+	if !f.m.mesh.HasPin("uuid-self") {
+		t.Fatal("fixture must exercise clustered self-trust")
+	}
+	// Discovery includes the local registry record. Its host UUID may differ
+	// from the certificate principal, so cover both identity shapes together.
+	self := f.node
+	self.HostUUID, self.ClusterUUID = "uuid-self", "uuid-self"
+	alias := self
+	alias.HostUUID = "local-host-alias"
+	body, err := json.Marshal(noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{self, alias, f.node}})
+	if err != nil {
+		t.Fatalf("marshal discovery snapshot: %v", err)
+	}
+	f.m.applyDiscovery(&Message{Params: body})
+	for _, node := range []string{self.HostUUID, alias.HostUUID} {
+		if _, ok := f.m.peers.lookup(node); !ok {
+			t.Fatalf("self record %q must remain available to directory consumers", node)
+		}
+	}
+
+	disconnected := make(chan string, 8)
+	emit := f.m.exec.emit
+	f.m.exec.emit = func(method string, value any) {
+		emit(method, value)
+		if method != "engine:settings-disconnected" {
+			return
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Errorf("marshal disconnect notification: %v", err)
+			return
+		}
+		var notification struct {
+			NodeID string `json:"nodeId"`
+		}
+		if err := json.Unmarshal(data, &notification); err != nil {
+			t.Errorf("decode disconnect notification: %v", err)
+			return
+		}
+		select {
+		case disconnected <- notification.NodeID:
+		default:
+			t.Error("too many disconnect notifications")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("settings watcher did not stop")
+		}
+	})
+	go func() { defer close(done); f.m.watchPeerSettings(ctx) }()
+	remoteAwaitSnapshot(t, events)
+	// Span another discovery tick and the failed-stream retry interval. A
+	// genuine peer stays connected while neither local identity starts a loop.
+	select {
+	case node := <-disconnected:
+		t.Fatalf("unexpected settings disconnect for %q", node)
+	case <-time.After(3500 * time.Millisecond):
+	}
+	cancel()
+	remoteAwaitClosed(t, closed)
+	if mutations.Load() != 0 || f.reverseCalls.Load() != 1 {
+		t.Fatalf("settings operations/streams = %d/%d, want 0/1", mutations.Load(), f.reverseCalls.Load())
+	}
+}
 
 func settingsMesh(t *testing.T, id string) (string, []byte) {
 	t.Helper()

@@ -417,7 +417,12 @@ checks basic argument syntax and adapter-declared networking/CORS controls
 using [`pair-arguments-v1`](LAUNCH_TEXT.md), persists host-platform `launch_args` and `launch_env`
 with the port, and holds its operation lock through stop/rebind/start. The
 paired engine-control surface relays settings to its local broker and streams
-full authoritative snapshots to pinned peers.
+full authoritative snapshots to pinned peers. Outbound settings subscriptions
+require current peer-service admission, which excludes this node's own cluster
+principal even when discovery gives it a different host UUID. The discovery
+directory retains self for model-copy identity resolution; mesh self-trust is
+not permission to start a peer subscription. Failed peer streams retry after
+three seconds.
 
 For custom llama.cpp launches using native `--models-preset` (including the
 equals form), model presets own context, parallelism, idle retention and cache
