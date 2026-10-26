@@ -39,21 +39,22 @@ const serviceStopTimeout = 35 * time.Second
 // Keep the slots aligned with the service-bundle roles in programs/tests.txt.
 var serviceBundleSlots = struct {
 	sync.Mutex
-	used [1]bool
+	used     [1]bool
+	previous [1]*serviceProcessInventory
 }{}
 
-func acquireServiceBundle(t *testing.T) int {
+func acquireServiceBundle(t *testing.T) (int, *serviceProcessInventory) {
 	t.Helper()
 	serviceBundleSlots.Lock()
 	defer serviceBundleSlots.Unlock()
 	for slot, used := range serviceBundleSlots.used {
 		if !used {
 			serviceBundleSlots.used[slot] = true
-			return slot
+			return slot, serviceBundleSlots.previous[slot]
 		}
 	}
 	t.Fatalf("service fixture slots exhausted: manifest supports %d concurrent fixtures", len(serviceBundleSlots.used))
-	return 0
+	return 0, nil
 }
 
 type serviceOutput struct {
@@ -101,35 +102,72 @@ type serviceFixture struct {
 
 func newServiceFixture(t *testing.T) *serviceFixture {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "nvs-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir, err = canonicalServicePath(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := &serviceFixture{t: t, dir: dir, configDir: filepath.Join(dir, "config"), clusterDir: filepath.Join(dir, "cluster")}
-	slot := acquireServiceBundle(t)
-	programs := []string{"nvpair-service", "nvpair-ui-broker", "nvpair-node-scanner", "nvpair-proxy", "nvpair-cluster-manager", "nvpair-engine-manager"}
+	slot, previous := acquireServiceBundle(t)
+	f := &serviceFixture{t: t}
 	t.Cleanup(func() {
+		if err := f.cleanupChecked(); err != nil {
+			t.Error(err)
+			return // Neither deletion nor slot reuse is safe after failed cleanup.
+		}
 		if err := f.removeBundle(); err != nil {
 			t.Error(err)
 			return // Retain the slot when ownership cleanup could not be verified.
 		}
 		serviceBundleSlots.Lock()
+		serviceBundleSlots.previous[slot] = f.inventory
 		serviceBundleSlots.used[slot] = false
 		serviceBundleSlots.Unlock()
 	})
+	dir, err := os.MkdirTemp("", "nvs-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.dir = dir // Cleanup owns the directory even if canonicalization fails.
+	dir, err = canonicalServicePath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.dir, f.configDir, f.clusterDir = dir, filepath.Join(dir, "config"), filepath.Join(dir, "cluster")
+	// Retain the preceding fixture's recorded descendants through the first
+	// staging operation. A fresh inventory alone would forget a detached scanner.
+	if previous != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := previous.confirmStoppedContext(ctx)
+		cancel()
+		if err != nil {
+			// Preserve the old ownership evidence and reserve the failed slot.
+			f.inventory = previous
+			t.Fatalf("previous service bundle is not stopped: %v", err)
+		}
+	}
+	programs := []string{"nvpair-service", "nvpair-ui-broker", "nvpair-node-scanner", "nvpair-proxy", "nvpair-cluster-manager", "nvpair-engine-manager"}
 	f.binDir, f.cleanupBins, err = testbin.MainDir("tests", fmt.Sprintf("service-bundle-%d", slot+1), "nvs-bin-", programs...)
 	if err != nil {
 		t.Fatalf("allocate service fixture binaries: %v", err)
+	}
+	f.binDir, err = canonicalServicePath(f.binDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.inventory = &serviceProcessInventory{known: make(map[int32]serviceProcessIdentity)}
+	for _, program := range programs {
+		path, err := serviceExecutablePath(filepath.Join(f.binDir, testbin.Exe(program)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.inventory.bundlePaths = append(f.inventory.bundlePaths, path)
 	}
 	// A fixed bundle may contain optional workers from an earlier fixture.
 	// Remove those before the broker can discover stale siblings on startup.
 	for _, program := range programs {
 		path := filepath.Join(f.binDir, testbin.Exe(program))
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if err := f.stageExecutable(func() error {
+			err := os.Remove(path)
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}); err != nil {
 			t.Fatalf("remove previous fixture executable %q (a previous process may still be running): %v", path, err)
 		}
 	}
@@ -145,7 +183,7 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	f.servicePath = f.copyBinary(serviceBin)
 	f.brokerPath = f.copyBinary(brokerBin)
 	f.scannerPath = f.copyBinary(scannerBin)
-	f.inventory = &serviceProcessInventory{paths: []string{f.servicePath, f.brokerPath, f.scannerPath}, known: make(map[int32]serviceProcessIdentity)}
+	f.inventory.paths = []string{f.servicePath, f.brokerPath, f.scannerPath}
 	// One plan for the fixture's lifetime: a restarted broker reuses it.
 	f.ports = reserveFixtureServicePorts(t)
 	f.env = append(privateEngineEnv(t, f.configDir), servicectl.EndpointEnv+"="+f.endpoint)
@@ -161,7 +199,7 @@ func (f *serviceFixture) withInertEngineManager() {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	jointCopyExecutable(f.t, self, f.scannerPath)
+	f.copyExecutable(self, f.scannerPath)
 	enginePath := f.copyBinary(engineMgrBin)
 	f.inventory.paths = append(f.inventory.paths, enginePath)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
@@ -192,7 +230,7 @@ func newRemoteServiceFixture(t *testing.T) *remoteServiceFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jointCopyExecutable(t, self, f.scannerPath)
+	f.copyExecutable(self, f.scannerPath)
 	enginePath := f.copyBinary(engineMgrBin)
 	clusterPath := f.copyBinary(clusterMgrBin)
 	f.inventory.paths = append(f.inventory.paths, enginePath, clusterPath)
@@ -246,6 +284,11 @@ func newRemoteServiceFixture(t *testing.T) *remoteServiceFixture {
 
 func (f *serviceFixture) copyBinary(src string) string {
 	f.t.Helper()
+	return f.copyExecutable(src, filepath.Join(f.binDir, filepath.Base(src)))
+}
+
+func (f *serviceFixture) copyExecutable(src, path string) string {
+	f.t.Helper()
 	data, err := os.ReadFile(src)
 	if err != nil {
 		f.t.Fatal(err)
@@ -254,8 +297,10 @@ func (f *serviceFixture) copyBinary(src string) string {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	path := filepath.Join(f.binDir, filepath.Base(src))
-	if err := os.WriteFile(path, data, info.Mode().Perm()); err != nil {
+	if !f.inventory.owns(path) {
+		f.t.Fatalf("unregistered service fixture executable %q", path)
+	}
+	if err := f.stageExecutable(func() error { return os.WriteFile(path, data, info.Mode().Perm()) }); err != nil {
 		f.t.Fatalf("copy fixture executable to %q (a previous process may still be running): %v", path, err)
 	}
 	path, err = canonicalServicePath(path)
@@ -263,6 +308,12 @@ func (f *serviceFixture) copyBinary(src string) string {
 		f.t.Fatal(err)
 	}
 	return path
+}
+
+func (f *serviceFixture) stageExecutable(mutate func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return serviceBundleMutation(ctx, f.inventory.confirmStoppedContext, mutate, serviceImageReleasePending)
 }
 
 func (f *serviceFixture) args() []string {
@@ -306,6 +357,8 @@ func (f *serviceFixture) startChild(args ...string) *serviceChild {
 	}
 	f.children = append(f.children, child)
 	f.cleanupVerified = false
+	// Stop before resources registered between construction and launch close.
+	// The constructor's finalizer also covers failures before any Start.
 	f.t.Cleanup(f.cleanup)
 	go func() { child.err = child.cmd.Wait(); close(child.done) }()
 	f.t.Logf("fixture_started direct_pid=%d endpoint=%q inventory=%+v", child.cmd.Process.Pid, f.endpoint, f.scan())
@@ -428,7 +481,7 @@ func (f *serviceFixture) cleanup() {
 }
 
 func (f *serviceFixture) removeBundle() error {
-	if len(f.children) > 0 && !f.cleanupVerified {
+	if f.inventory != nil && !f.cleanupVerified {
 		return fmt.Errorf("retaining fixture bundle after incomplete cleanup: %s", f.dir)
 	}
 	if err := os.RemoveAll(f.dir); err != nil {
@@ -441,7 +494,18 @@ func (f *serviceFixture) removeBundle() error {
 }
 
 func (f *serviceFixture) cleanupChecked() error {
-	if len(f.children) == 0 || f.cleanupVerified {
+	if f.cleanupVerified {
+		return nil
+	}
+	if len(f.children) == 0 {
+		if f.inventory != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := f.inventory.confirmStoppedContext(ctx); err != nil {
+				return fmt.Errorf("unstarted service fixture cleanup: %w", err)
+			}
+		}
+		f.cleanupVerified = true
 		return nil
 	}
 	var failures []error
@@ -517,7 +581,7 @@ func (f *serviceFixture) cleanupChecked() error {
 			break
 		}
 		// Killing the owner first prevents it from restarting the descendants.
-		for _, path := range f.inventory.paths {
+		for _, path := range f.inventory.ownedPaths() {
 			for _, identity := range owned {
 				if cleanupCtx.Err() != nil {
 					failures = append(failures, cleanupCtx.Err())
@@ -549,13 +613,12 @@ func (f *serviceFixture) cleanupChecked() error {
 		}
 	}
 	// A second inventory catches late children before executable deletion.
-	owned, err := f.inventory.scan()
-	if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := f.inventory.confirmStoppedContext(ctx); err != nil {
 		failures = append(failures, fmt.Errorf("final cleanup inventory: %w", err))
-	} else if len(owned) != 0 {
-		failures = append(failures, fmt.Errorf("final cleanup still owns %+v", owned))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	cancel()
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
 	conn, err := servicectl.DialEndpoint(ctx, f.endpoint)
 	cancel()
 	if err == nil {
