@@ -340,6 +340,23 @@ type peerServiceSnapshot struct {
 	peerEpoch uint64
 }
 
+// peerServicePin validates the same captured principals on each observation.
+// PEM formatting and pin metadata are excluded; the exact parsed leaf remains
+// authority, together with the nonzero admission epoch.
+func peerServicePin(data []byte, peerUUID, clusterID string) ([]byte, uint64, bool) {
+	var pin struct {
+		NodeUUID       string `json:"nodeUuid"`
+		CertPem        string `json:"certPem"`
+		ClusterID      string `json:"clusterId"`
+		AdmissionEpoch uint64 `json:"admissionEpoch"`
+	}
+	if err := json.Unmarshal(data, &pin); err != nil || pin.ClusterID != clusterID || pin.AdmissionEpoch == 0 {
+		return nil, 0, false
+	}
+	der, err := pinDER(pin.NodeUUID, pin.CertPem, peerUUID)
+	return der, pin.AdmissionEpoch, err == nil
+}
+
 func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]byte, error)) (peerServiceSnapshot, bool) {
 	// Reject path components on every supported platform before constructing a
 	// filename, including Windows separators/drive names on Unix readers.
@@ -369,24 +386,15 @@ func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]by
 	if err != nil {
 		return peerServiceSnapshot{}, false
 	}
-	var pin struct {
-		NodeUUID       string `json:"nodeUuid"`
-		CertPem        string `json:"certPem"`
-		ClusterID      string `json:"clusterId"`
-		AdmissionEpoch uint64 `json:"admissionEpoch"`
-	}
-	if err := json.Unmarshal(pinData, &pin); err != nil || pin.ClusterID != admission.ClusterID || pin.AdmissionEpoch == 0 {
-		return peerServiceSnapshot{}, false
-	}
-	der, err := pinDER(pin.NodeUUID, pin.CertPem, peerUUID)
-	if err != nil {
+	der, pinEpoch, ok := peerServicePin(pinData, peerUUID, admission.ClusterID)
+	if !ok {
 		return peerServiceSnapshot{}, false
 	}
 	membersData, err := readFile(membersPath)
 	if err != nil {
 		return peerServiceSnapshot{}, false
 	}
-	memberEpoch, ok := peerServiceMember(membersData, peerUUID, admission.ClusterID, pin.AdmissionEpoch)
+	memberEpoch, ok := peerServiceMember(membersData, peerUUID, admission.ClusterID, pinEpoch)
 	if !ok {
 		return peerServiceSnapshot{}, false
 	}
@@ -394,18 +402,30 @@ func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]by
 	// Validate in reverse read order: matching admission reads bracket both
 	// pin reads, which bracket both member reads. Monotonic epochs prevent a cleared
 	// or replaced local admission from masquerading as the original tuple.
-	// No cross-file writer lock is available; a changed/partial snapshot fails
-	// closed and a subsequent complete refresh can succeed.
+	// Independently validate each observation against the captured authority.
+	// Metadata may change, but changed or invalid authority fails closed.
 	currentMembers, err := readFile(membersPath)
-	if err != nil || !bytes.Equal(currentMembers, membersData) {
+	if err != nil {
+		return peerServiceSnapshot{}, false
+	}
+	currentMemberEpoch, ok := peerServiceMember(currentMembers, peerUUID, admission.ClusterID, pinEpoch)
+	if !ok || currentMemberEpoch != memberEpoch {
 		return peerServiceSnapshot{}, false
 	}
 	currentPin, err := readFile(pinPath)
-	if err != nil || !bytes.Equal(currentPin, pinData) {
+	if err != nil {
+		return peerServiceSnapshot{}, false
+	}
+	currentDER, currentPinEpoch, ok := peerServicePin(currentPin, peerUUID, admission.ClusterID)
+	if !ok || currentPinEpoch != pinEpoch || !bytes.Equal(currentDER, der) {
 		return peerServiceSnapshot{}, false
 	}
 	currentAdmission, err := readFile(admissionPath)
-	if err != nil || !bytes.Equal(currentAdmission, admissionData) {
+	if err != nil {
+		return peerServiceSnapshot{}, false
+	}
+	currentProjection, ok := peerServiceAdmission(currentAdmission)
+	if !ok || currentProjection != admission {
 		return peerServiceSnapshot{}, false
 	}
 	m.mu.RLock()
@@ -413,7 +433,7 @@ func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]by
 	if !m.clustered || m.id != id || !m.trust.MatchDER(peerUUID, der) {
 		return peerServiceSnapshot{}, false
 	}
-	return peerServiceSnapshot{admission: admission, id: id, peerDER: der, peerEpoch: memberEpoch}, true
+	return peerServiceSnapshot{admission: admission.admissionRecord, id: id, peerDER: der, peerEpoch: memberEpoch}, true
 }
 
 // matchDER is the server-side gate: accept der for uuid when it byte-for-byte
