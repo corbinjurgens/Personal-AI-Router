@@ -1,9 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "PAIR engine manifest launch contract",
-  "description": "Validates editable_launch in shared and platform runtime blocks, and the family, protocol, model naming and operation fields. Other engine manifest fields are validated by engine-manager, which also checks operation bindings against the declared actions.",
+  "description": "Validates installation evidence, editable_launch in shared and platform runtime blocks, and the family, protocol, model naming and operation fields. Engine-manager also validates effective platform defaults and operation bindings against the declared actions.",
   "type": "object",
   "properties": {
+    "manifest_version": { "type": "integer", "minimum": 1, "maximum": 2 },
+    "detect": { "$ref": "#/definitions/detectionPaths" },
+    "detect_required": { "$ref": "#/definitions/detectionPaths" },
     "family": {
       "type": "string",
       "pattern": "^[a-zA-Z0-9._-]+$",
@@ -37,6 +40,8 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
+          "detect": { "$ref": "#/definitions/detectionPaths" },
+          "detect_required": { "$ref": "#/definitions/detectionPaths" },
           "runtime": {
             "$ref": "#/definitions/runtime"
           }
@@ -44,7 +49,21 @@
       }
     }
   },
+  "allOf": [{
+    "if": { "properties": { "manifest_version": { "const": 1 } } },
+    "then": {
+      "properties": {
+        "detect_required": { "maxItems": 0 },
+        "platforms": { "additionalProperties": { "properties": { "detect_required": { "maxItems": 0 } } } }
+      }
+    }
+  }],
   "definitions": {
+    "detectionPaths": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "\\S" },
+      "description": "detect is ordered executable alternatives; detect_required requires every regular file and manifest_version 2 when nonempty. Engine-manager validates inherited platform values and placeholders."
+    },
     "operation": {
       "type": "object",
       "additionalProperties": false,

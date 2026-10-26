@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -106,6 +110,49 @@ func TestStrataManifestDescriptor(t *testing.T) {
 	wantArgs := []string{"/REPLACE_WITH_ABSOLUTE_PATH/server.py", "--engine", "strata", "--config", "/REPLACE_WITH_ABSOLUTE_PATH/config.json", "--host", "127.0.0.1", "--port", "{port}", "--lazy"}
 	if rt.Mode != "process" || rt.Bin != "/REPLACE_WITH_ABSOLUTE_PATH/python" || rt.Bind != "127.0.0.1" || rt.Port != 18082 || !reflect.DeepEqual(rt.Args, wantArgs) {
 		t.Fatalf("runtime = %+v", rt)
+	}
+}
+
+func TestStrataManifestDetectionSelectsInterpreter(t *testing.T) {
+	data, err := os.ReadFile("testdata/strata/strata.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.ToSlash(t.TempDir())
+	interpreter := root + "/synthetic-interpreter"
+	data = bytes.ReplaceAll(data, []byte("/REPLACE_WITH_ABSOLUTE_PATH/python"), []byte(interpreter))
+	data = bytes.ReplaceAll(data, []byte("/REPLACE_WITH_ABSOLUTE_PATH"), []byte(root))
+	reg := NewRegistry()
+	if _, err := reg.addManifest("synthetic Strata template", data); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := reg.Get("strata")
+	if !ok {
+		t.Fatal("Strata template missing")
+	}
+	// These are inert regular files. No interpreter, Python import or Strata
+	// process is executed, and the launch is only resolved into argv.
+	for _, path := range []string{interpreter, root + "/server.py", root + "/config.json"} {
+		writeDetectionFile(t, path)
+	}
+	ex := newTestExecutor(t, m)
+	if installed, err := ex.Detect("strata"); err != nil || !installed {
+		t.Fatalf("complete template detection = %v, %v", installed, err)
+	}
+	st, err := ex.state("strata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := resolveProcessLaunch(st.plat.Runtime, st.binPath, map[string]string{"host": "127.0.0.1", "port": "18082"})
+	if err != nil || launch.Bin != interpreter || launch.Args[0] != root+"/server.py" {
+		t.Fatalf("resolved launch = %+v, %v", launch, err)
+	}
+	removeDetectionFile(t, root+"/config.json")
+	if installed, err := ex.Detect("strata"); err != nil || installed || st.binPath != interpreter {
+		t.Fatalf("missing config detection = %v, %v, binary %q", installed, err, st.binPath)
+	}
+	if !m.descriptor(runtime.GOOS, runtime.GOARCH).Available {
+		t.Fatal("missing config changed descriptor availability")
 	}
 }
 

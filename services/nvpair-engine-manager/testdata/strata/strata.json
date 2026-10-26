@@ -2,10 +2,12 @@
   "$schema": "../../manifest.schema.json",
   "engine": "strata",
   "display_name": "Strata",
-  "manifest_version": 1,
+  "manifest_version": 2,
   "family": "strata",
   "protocols": ["openai-chat"],
   "model_naming": "exact",
+  "detect": ["/REPLACE_WITH_ABSOLUTE_PATH/python"],
+  "detect_required": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py", "/REPLACE_WITH_ABSOLUTE_PATH/config.json"],
   "runtime": {
     "editable_launch": {
       "fixed_args": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py"],
@@ -24,9 +26,9 @@
     "stop": { "signal": "term", "grace_s": 10 }
   },
   "platforms": {
-    "windows/amd64": { "detect": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py"] },
-    "darwin/arm64": { "detect": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py"] },
-    "linux/amd64": { "detect": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py"] }
+    "windows/amd64": {},
+    "darwin/arm64": {},
+    "linux/amd64": {}
   },
   "operations": {
     "load": { "action": "load_model", "response_timeout_s": 600 },
