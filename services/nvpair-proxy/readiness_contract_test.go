@@ -375,3 +375,81 @@ func TestNEReadinessLegacyOllamaRetainsDigestSemantics(t *testing.T) {
 	f.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{f.engine: f.id})
 	f.qualify(t)
 }
+
+func TestRequestOptionsReadinessModeInvalidation(t *testing.T) {
+	f := newReadinessEnvelopeFixture(t, "llamacpp")
+	f.policy.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.1}`)
+	f.q.RequestOptions = f.policy.Profiles[0].RequestOptions
+	f.install(t)
+	validated := f.qualify(t)
+	held, err := f.a.AdmitStrict(context.Background(), f.engine, "m", f.request(), validated.generation)
+	if err != nil {
+		t.Fatalf("admit initial qualification: %v", err)
+	}
+	defer held.Finish(strictNotDispatched)
+	policy := f.a.currentPolicy()
+	policy.Profiles = append([]nodepolicy.Profile(nil), policy.Profiles...)
+	policy.Profiles[0].RequestOptionsMode = nodepolicy.RequestOptionsDefaults
+	if err := f.a.activatePolicy(policy); err != nil {
+		t.Fatalf("activate explicit defaults: %v", err)
+	}
+	if got := f.qualify(t).generation; got != validated.generation {
+		t.Fatalf("omission/defaults changed strict generation %d to %d", validated.generation, got)
+	}
+	policy = f.a.currentPolicy()
+	policy.Profiles = append([]nodepolicy.Profile(nil), policy.Profiles...)
+	policy.Profiles[0].RequestOptionsMode = nodepolicy.RequestOptionsEnforced
+	if err := f.a.activatePolicy(policy); err != nil {
+		t.Fatalf("activate enforced profile: %v", err)
+	}
+	if got := f.a.StrictReadiness(); got.Capability != nil {
+		t.Fatalf("mismatched defaults qualification still advertised: %+v", got)
+	}
+	if _, err := f.a.qualifyStrict(f.engine, "m", routeChatCompletions, []byte(strictBody("m")), f.request().Identity); !errors.Is(err, errStrictUnavailable) {
+		t.Fatalf("mismatched mode qualification error=%v", err)
+	}
+	if err := held.BeforeStrictDispatch(); !errors.Is(err, errStrictUnavailable) {
+		t.Fatalf("old ticket survived mode change: %v", err)
+	}
+	held.Finish(strictNotDispatched)
+	q := *f.q
+	q.RequestOptionsMode = nodepolicy.RequestOptionsEnforced
+	f.a.mu.Lock()
+	f.a.strict.registry[*policy.Profiles[0].Qualification] = &q
+	f.a.mu.Unlock()
+	if err := f.a.activatePolicy(policy); err != nil {
+		t.Fatalf("install matching enforced evidence: %v", err)
+	}
+	if got := f.a.StrictReadiness(); got.Capability == nil {
+		t.Fatalf("matching enforced qualification unavailable: %+v", got)
+	}
+	if got := f.qualify(t).generation; got <= validated.generation {
+		t.Fatalf("mode change generation=%d, want above %d", got, validated.generation)
+	}
+	if _, err := f.a.AdmitStrict(context.Background(), f.engine, "m", f.request(), validated.generation); !errors.Is(err, errStrictUnavailable) {
+		t.Fatalf("old validation survived reinstall: %v", err)
+	}
+	policy = f.a.currentPolicy()
+	policy.Profiles = append([]nodepolicy.Profile(nil), policy.Profiles...)
+	policy.Profiles[0].RequestOptionsMode = nodepolicy.RequestOptionsDefaults
+	if err := f.a.activatePolicy(policy); err != nil {
+		t.Fatalf("activate defaults profile: %v", err)
+	}
+	if got := f.a.StrictReadiness(); got.Capability != nil {
+		t.Fatalf("enforced qualification accepted defaults profile: %+v", got)
+	}
+}
+
+func TestRequestOptionsInstalledQualificationMode(t *testing.T) {
+	q := testQualification("mode", "ollama", "m")
+	before := installedQualification{q: q, profile: nodepolicy.Profile{RequestOptions: json.RawMessage(`{"temperature":0.1}`)}}
+	after := before
+	after.profile.RequestOptionsMode = nodepolicy.RequestOptionsDefaults
+	if !sameInstalledQualification(before, after) {
+		t.Fatal("omitted and explicit defaults differ")
+	}
+	after.profile.RequestOptionsMode = nodepolicy.RequestOptionsEnforced
+	if sameInstalledQualification(before, after) {
+		t.Fatal("identical option bytes hid changed mode")
+	}
+}

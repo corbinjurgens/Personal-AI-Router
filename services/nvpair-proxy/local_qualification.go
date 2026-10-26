@@ -67,21 +67,37 @@ var (
 // localQualification is one qualified (engine, model, content, launch,
 // defaults) combination and its bounds.
 type localQualification struct {
-	ID              string                  `json:"id"`
-	Revision        string                  `json:"revision"`
-	Engine          string                  `json:"engine"`
-	Model           string                  `json:"model"`
-	ModelDigests    []string                `json:"modelDigests"`
-	LaunchDigests   []string                `json:"launchDigests"`
-	RequestOptions  json.RawMessage         `json:"requestOptions,omitempty"`
-	Tokenizer       string                  `json:"tokenizer"`
-	ChatTemplate    string                  `json:"chatTemplate"`
-	ContextTokens   int                     `json:"contextTokens"`
-	MaxOutputTokens int                     `json:"maxOutputTokens"`
-	Routes          []string                `json:"routes"`
-	Shapes          *qualificationShapes    `json:"shapes"`
-	Accounting      qualificationAccounting `json:"accounting"`
-	Evidence        string                  `json:"evidence"`
+	ID                 string                        `json:"id"`
+	Revision           string                        `json:"revision"`
+	Engine             string                        `json:"engine"`
+	Model              string                        `json:"model"`
+	ModelDigests       []string                      `json:"modelDigests"`
+	LaunchDigests      []string                      `json:"launchDigests"`
+	RequestOptions     json.RawMessage               `json:"requestOptions,omitempty"`
+	RequestOptionsMode nodepolicy.RequestOptionsMode `json:"requestOptionsMode,omitempty"`
+	Tokenizer          string                        `json:"tokenizer"`
+	ChatTemplate       string                        `json:"chatTemplate"`
+	ContextTokens      int                           `json:"contextTokens"`
+	MaxOutputTokens    int                           `json:"maxOutputTokens"`
+	Routes             []string                      `json:"routes"`
+	Shapes             *qualificationShapes          `json:"shapes"`
+	Accounting         qualificationAccounting       `json:"accounting"`
+	Evidence           string                        `json:"evidence"`
+}
+
+func (q *localQualification) UnmarshalJSON(data []byte) error {
+	type wire localQualification
+	var next wire
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&next); err != nil {
+		return err
+	}
+	if strictNull(requestJSONField(data, "requestOptionsMode")) {
+		return errors.New("requestOptionsMode must be defaults or enforced")
+	}
+	*q = localQualification(next)
+	return nil
 }
 
 // qualificationShapes declares evidence explicitly; nil members distinguish
@@ -136,6 +152,9 @@ func (r qualificationRegistry) lookup(ref nodepolicy.QualificationRef) (*localQu
 }
 
 func (q localQualification) validate() error {
+	if mode := q.RequestOptionsMode.Effective(); mode != nodepolicy.RequestOptionsDefaults && mode != nodepolicy.RequestOptionsEnforced {
+		return errors.New("requestOptionsMode must be defaults or enforced")
+	}
 	if err := (nodepolicy.QualificationRef{ID: q.ID, Revision: q.Revision}).Validate(); err != nil {
 		return err
 	}
@@ -334,6 +353,10 @@ var chatRequestKeys = []string{
 	"stream", "stream_options", "temperature", "top_p", "stop", "seed", "frequency_penalty", "presence_penalty",
 }
 
+// The local strict sampler extensions do not expand the public Chat adapter's
+// separate grammar and qualification contract.
+var strictChatRequestKeys = append(slices.Clone(chatRequestKeys), "top_k", "min_p", "repeat_penalty")
+
 // validateRequest checks one strict request against the qualification and the
 // profile it is installed under, and returns the effective body (the request
 // with the profile's defaults merged in) with its bound. The effective body is
@@ -350,20 +373,26 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 		reason := "route " + route + " is not qualified"
 		return nil, strictBound{}, &strictQualificationError{reason: reason, message: "strict qualification: " + reason}
 	}
-	unique, err := uniqueKeysContext(body, ctx)
-	if err != nil {
-		return nil, strictBound{}, err
+	checkIncoming := func() error {
+		unique, err := uniqueKeysContext(body, ctx)
+		if err != nil {
+			return err
+		}
+		if !unique {
+			return rejectBody("the request repeats a key or is not JSON")
+		}
+		if !isJSONObject(body) {
+			return rejectBody("the request must be a JSON object")
+		}
+		return checkQualificationKeys(ctx, body)
 	}
-	if !unique {
-		return nil, strictBound{}, rejectBody("the request repeats a key or is not JSON")
+	mode := profile.RequestOptionsMode.Effective()
+	if mode != nodepolicy.RequestOptionsEnforced {
+		if err := checkIncoming(); err != nil {
+			return nil, strictBound{}, err
+		}
 	}
-	if !isJSONObject(body) {
-		return nil, strictBound{}, rejectBody("the request must be a JSON object")
-	}
-	if err := checkQualificationKeys(ctx, body); err != nil {
-		return nil, strictBound{}, err
-	}
-	effective, release, mergeErr := transformBody(ctx, body, "", false, profile.RequestOptions)
+	effective, release, mergeErr := transformBody(ctx, body, "", false, profile.RequestOptions, mode)
 	if mergeErr != nil {
 		return nil, strictBound{}, mergeErr
 	}
@@ -372,10 +401,17 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 	} else {
 		defer release()
 	}
+	if mode == nodepolicy.RequestOptionsEnforced {
+		// Configured ambiguity has a fixed refusal. Every other incoming key
+		// still passes the original strict all-key and grammar checks.
+		if err := checkIncoming(); err != nil {
+			return nil, strictBound{}, err
+		}
+	}
 	if ambiguousModelMember(effective) {
 		return nil, strictBound{}, errAmbiguousModel
 	}
-	unique, err = uniqueKeysContext(effective, ctx)
+	unique, err := uniqueKeysContext(effective, ctx)
 	if err != nil {
 		return nil, strictBound{}, err
 	}
@@ -439,7 +475,7 @@ func checkQualificationKeys(ctx context.Context, body []byte) error {
 			fieldError = checkQualificationStore(body[start:end])
 			return
 		}
-		for _, name := range chatRequestKeys {
+		for _, name := range strictChatRequestKeys {
 			if jsonStringEquals(key, name) {
 				return
 			}
@@ -607,7 +643,7 @@ func checkChatScalars(f []byte, w *bodyWorkspace) error {
 	if n, ok := strictStringLen(strictField(f, "model", false)); !ok || n == 0 {
 		return rejectBody("model must be a nonempty string")
 	}
-	for _, key := range []string{"temperature", "top_p", "frequency_penalty", "presence_penalty"} {
+	for _, key := range []string{"temperature", "top_p", "frequency_penalty", "presence_penalty", "min_p", "repeat_penalty"} {
 		if raw := strictField(f, key, false); len(raw) > 0 && !strictNull(raw) {
 			if raw[0] != '-' && (raw[0] < '0' || raw[0] > '9') {
 				return rejectBody("%s must be a number", key)
@@ -619,6 +655,23 @@ func checkChatScalars(f []byte, w *bodyWorkspace) error {
 			}
 			if _, err := strconv.ParseFloat(string(raw), 64); err != nil {
 				return rejectBody("%s must be a number", key)
+			}
+		}
+	}
+	for _, key := range []string{"min_p", "repeat_penalty"} {
+		if strictNull(strictField(f, key, false)) {
+			return rejectBody("%s must be a number", key)
+		}
+	}
+	if raw := strictField(f, "top_k", false); len(raw) > 0 {
+		// JSON validity has already excluded leading zeros and empty numbers.
+		// Keep this a grammar check rather than an engine-specific range cap.
+		if bytes.Equal(raw, []byte("-0")) {
+			raw = raw[1:]
+		}
+		for _, digit := range raw {
+			if digit < '0' || digit > '9' {
+				return rejectBody("top_k must be a nonnegative integer")
 			}
 		}
 	}
@@ -913,12 +966,21 @@ func uniqueKeys(data []byte) bool {
 // The scan has fixed parser state. Each object's exact member/key storage is
 // acquired before allocation; sorting in place needs no map or folded strings.
 // All workspace leases remain held until this scan has dropped its views.
-func uniqueKeysContext(data []byte, ctx context.Context) (bool, error) {
+func uniqueKeysContext(data []byte, ctx context.Context, configured ...[]jsonMember) (bool, error) {
 	if !ownedJSONValid(data) {
 		return false, nil
 	}
 	w := newBodyWorkspace(ctx)
 	defer w.close()
+	// Merge planning visits only configured object/object paths. In that mode
+	// check this object only, leaving unconfigured subtrees byte-for-byte alone.
+	if len(configured) > 0 {
+		members, _, _, err := w.members(data)
+		if err != nil {
+			return false, err
+		}
+		return uniqueObjectKeys(members, configured[0], true), nil
+	}
 	depth := 0
 	for i := 0; i < len(data); i++ {
 		switch data[i] {
@@ -935,11 +997,8 @@ func uniqueKeysContext(data []byte, ctx context.Context) (bool, error) {
 				if err != nil {
 					return false, err
 				}
-				slices.SortFunc(members, func(a, b jsonMember) int { return compareStrictKeys(a.key, b.key) })
-				for j := 1; j < len(members); j++ {
-					if compareStrictKeys(members[j-1].key, members[j].key) == 0 {
-						return false, nil
-					}
+				if !uniqueObjectKeys(members, nil, false) {
+					return false, nil
 				}
 			}
 		case '}', ']':
@@ -947,6 +1006,29 @@ func uniqueKeysContext(data []byte, ctx context.Context) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func uniqueObjectKeys(members, configured []jsonMember, configuredOnly bool) bool {
+	slices.SortFunc(members, func(a, b jsonMember) int { return compareStrictKeys(a.key, b.key) })
+	for i := 0; i < len(members); {
+		end := i + 1
+		for end < len(members) && compareStrictKeys(members[i].key, members[end].key) == 0 {
+			end++
+		}
+		if !configuredOnly {
+			if end-i > 1 {
+				return false
+			}
+		} else {
+			for _, d := range configured {
+				if compareStrictKeys(members[i].key, d.key) == 0 && (end-i > 1 || members[i].key != d.key) {
+					return false
+				}
+			}
+		}
+		i = end
+	}
+	return true
 }
 
 // Preserve the former strings.ToLower(strings.ToUpper(key)) duplicate rule,

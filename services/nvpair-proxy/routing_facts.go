@@ -655,7 +655,8 @@ func failureFactReason(err error) routingFactReason {
 	var qualification *strictQualificationError
 	var flag *invalidStreamFlagError
 	var framing *peerFramingMetadataError
-	if errors.As(err, &identifier) || errors.As(err, &qualification) || errors.As(err, &flag) || errors.Is(err, errAmbiguousModel) {
+	var ambiguous *ambiguousOptionsError
+	if errors.As(err, &identifier) || errors.As(err, &qualification) || errors.As(err, &flag) || errors.As(err, &ambiguous) || errors.Is(err, errAmbiguousModel) {
 		return factRequestInvalid
 	}
 	if errors.As(err, &framing) {

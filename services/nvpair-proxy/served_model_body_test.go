@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/nodepolicy"
 )
@@ -248,6 +249,203 @@ func TestReviewR2EffectiveModel(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := bodyModelMatches([]byte(c.body), c.admitted); got != c.matches {
 				t.Fatalf("effective model matches=%v, want %v", got, c.matches)
+			}
+		})
+	}
+}
+
+func TestRequestOptionsProductionRoutes(t *testing.T) {
+	for _, path := range []string{"self", "ingress", "strict self", "strict ingress", "failover"} {
+		t.Run(path, func(t *testing.T) {
+			for _, mode := range []nodepolicy.RequestOptionsMode{nodepolicy.RequestOptionsDefaults, nodepolicy.RequestOptionsEnforced} {
+				t.Run(string(mode), func(t *testing.T) {
+					strict := strings.HasPrefix(path, "strict ")
+					var p *Proxy
+					var local, busy *recordingEngine
+					if strict {
+						p, local = strictHTTPFixture(t)
+					} else {
+						p, busy, local = reviewR2TierFixture(t, path == "failover")
+					}
+					pol := p.admission.currentPolicy()
+					if !strict {
+						pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "ollama", Model: "m"}}
+					}
+					pol.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.1,"top_k":4,"min_p":0.02,"repeat_penalty":1.1}`)
+					pol.Profiles[0].RequestOptionsMode = mode
+					pol.Revision = "0"
+					if err := pol.Validate(); err != nil {
+						t.Fatalf("policy: %v", err)
+					}
+					if strict {
+						q := p.admission.strict.registry[*pol.Profiles[0].Qualification]
+						q.RequestOptions, q.RequestOptionsMode = pol.Profiles[0].RequestOptions, mode
+					}
+					p.admission.setPolicy(pol)
+					model := "m"
+					if path == "failover" {
+						model = "weak"
+					}
+					body := strings.TrimSuffix(strictBody(model), "}") + `,"temperature":0.8}`
+					r := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(body))
+					if strict {
+						r = strictHTTPRequestWith(t, body)
+					}
+					w := httptest.NewRecorder()
+					serveStrictHTTP(p, strings.TrimPrefix(path, "strict "), w, r)
+					if w.Code != http.StatusOK || local.hits() != 1 {
+						t.Fatalf("status=%d hits=%d error=%s", w.Code, local.hits(), w.Body)
+					}
+					var got struct {
+						Model         string  `json:"model"`
+						Temperature   float64 `json:"temperature"`
+						TopK          int     `json:"top_k"`
+						MinP          float64 `json:"min_p"`
+						RepeatPenalty float64 `json:"repeat_penalty"`
+						MaxTokens     int     `json:"max_tokens"`
+					}
+					if err := json.Unmarshal([]byte(local.lastBody()), &got); err != nil {
+						t.Fatalf("engine body: %v", err)
+					}
+					wantTemperature := 0.8
+					if mode == nodepolicy.RequestOptionsEnforced {
+						wantTemperature = 0.1
+					}
+					if got.Model != "m" || got.Temperature != wantTemperature || got.TopK != 4 || got.MinP != 0.02 || got.RepeatPenalty != 1.1 || got.MaxTokens != 16 {
+						t.Fatalf("engine settings=%+v", got)
+					}
+					if path == "failover" {
+						var peer map[string]json.RawMessage
+						if err := json.Unmarshal([]byte(busy.lastBody()), &peer); err != nil {
+							t.Fatalf("peer body: %v", err)
+						}
+						if busy.hits() != 1 || string(peer["temperature"]) != "0.8" || peer["top_k"] != nil {
+							t.Fatalf("origin applied local profile to peer: %s", busy.lastBody())
+						}
+					}
+					bufferAssertTotals(t, p.buffers, 0, 0, 0)
+				})
+			}
+		})
+	}
+}
+
+func TestRequestOptionsAmbiguityHTTP(t *testing.T) {
+	for _, path := range []string{"self", "ingress", "strict self", "strict ingress"} {
+		t.Run(path, func(t *testing.T) {
+			for _, tc := range []struct{ name, fields string }{
+				{"exact duplicate", `"temperature":0.8,"temperature":0.9`},
+				{"escaped duplicate", `"temperature":0.8,"tempera\u0074ure":0.9`},
+				{"folded duplicate", `"temperature":0.8,"Temperature":0.9`},
+				{"single folded variant", `"Temperature":0.9`},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					p, e := strictHTTPFixture(t)
+					pol := p.admission.currentPolicy()
+					pol.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.1}`)
+					pol.Profiles[0].RequestOptionsMode = nodepolicy.RequestOptionsEnforced
+					q := p.admission.strict.registry[*pol.Profiles[0].Qualification]
+					q.RequestOptions, q.RequestOptionsMode = pol.Profiles[0].RequestOptions, nodepolicy.RequestOptionsEnforced
+					p.admission.setPolicy(pol)
+					body := strings.TrimSuffix(strictBody("m"), "}") + "," + tc.fields + "}"
+					r := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(body))
+					if strings.HasPrefix(path, "strict ") {
+						r = strictHTTPRequestWith(t, body)
+					} else {
+						p.soleFacade().discovery.AddManual(selfNode("self", p.soleFacade().profile.FacadePort, "m"))
+					}
+					w := httptest.NewRecorder()
+					serveStrictHTTP(p, strings.TrimPrefix(path, "strict "), w, r)
+					var refusal struct {
+						Code  string `json:"code"`
+						Error string `json:"error"`
+					}
+					if err := json.Unmarshal(w.Body.Bytes(), &refusal); err != nil {
+						t.Fatalf("decode refusal: %v", err)
+					}
+					if w.Code != http.StatusBadRequest || refusal.Code != "ambiguous-options" || refusal.Error != ambiguousOptionsMessage || e.hits() != 0 || p.admission.currentActive() != 0 {
+						t.Fatalf("status=%d refusal=%+v hits=%d", w.Code, refusal, e.hits())
+					}
+					bufferAssertTotals(t, p.buffers, 0, 0, 0)
+				})
+			}
+		})
+	}
+}
+
+func TestRequestOptionsServingOwner(t *testing.T) {
+	destination, _, local := reviewR2TierFixture(t, false)
+	pol := destination.admission.currentPolicy()
+	pol.Profiles = []nodepolicy.Profile{{Name: "destination", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
+	destination.admission.setPolicy(pol)
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { destination.soleFacade().serveIngress(w, r, "origin") }))
+	defer peer.Close()
+	originPolicy := nodepolicy.Default()
+	originPolicy.Profiles = []nodepolicy.Profile{{Name: "origin", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.9,"seed":7}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
+	fx := newTierFixture(t, ollamaCase(t), originPolicy, map[string][]string{"a": {"m"}}, nil)
+	fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "a", peer.URL, "m"))
+	w := fx.do(t, routeChatCompletions, strings.TrimSuffix(strictBody("m"), "}")+`,"temperature":0.8}`)
+	if w.Code != http.StatusOK || local.hits() != 1 || fx.eng["a"].hits() != 0 {
+		t.Fatalf("status=%d destination=%d origin=%d response=%s", w.Code, local.hits(), fx.eng["a"].hits(), w.Body)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(local.lastBody()), &got); err != nil {
+		t.Fatalf("destination body: %v", err)
+	}
+	if string(got["temperature"]) != "0.1" || got["seed"] != nil {
+		t.Fatalf("serving profile lost or origin profile applied: %s", local.lastBody())
+	}
+	bufferAssertTotals(t, fx.p.buffers, 0, 0, 0)
+	bufferAssertTotals(t, destination.buffers, 0, 0, 0)
+}
+
+func TestRequestOptionsHybridSelf(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		mode         nodepolicy.RequestOptionsMode
+		invalid      bool
+		want         float64
+	}{
+		{"defaults keeps caller", `"temperature":0.8`, nodepolicy.RequestOptionsDefaults, false, 0.8},
+		{"enforced replaces caller", `"temperature":0.8`, nodepolicy.RequestOptionsEnforced, false, 0.1},
+		{"enforced ambiguity refuses self", `"temperature":0.8,"Temperature":0.9`, nodepolicy.RequestOptionsEnforced, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, f, e := hybridSelfProxy(t, true)
+			pol := p.admission.currentPolicy()
+			pol.Profiles = append([]nodepolicy.Profile(nil), pol.Profiles...)
+			pol.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.1}`)
+			pol.Profiles[0].RequestOptionsMode = tc.mode
+			q := p.admission.strict.registry[*pol.Profiles[0].Qualification]
+			q.RequestOptions, q.RequestOptionsMode = pol.Profiles[0].RequestOptions, tc.mode
+			p.admission.setPolicy(pol)
+			body := strings.TrimSuffix(hybridSelfBody, "}") + "," + tc.fields + "}"
+			w, _ := serveHybridDispatch(t, f, body, hybridTestPolicy(1, 5*time.Second))
+			if tc.invalid {
+				var refusal struct {
+					Code  string `json:"code"`
+					Error string `json:"error"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &refusal); err != nil {
+					t.Fatalf("decode refusal: %v", err)
+				}
+				if w.Code != http.StatusBadRequest || refusal.Code != "ambiguous-options" || refusal.Error != ambiguousOptionsMessage || e.hits() != 0 {
+					t.Fatalf("status=%d refusal=%+v hits=%d", w.Code, refusal, e.hits())
+				}
+				return
+			}
+			if w.Code != http.StatusOK || e.hits() != 1 {
+				t.Fatalf("status=%d hits=%d response=%s", w.Code, e.hits(), w.Body)
+			}
+			var got struct {
+				Model       string  `json:"model"`
+				Temperature float64 `json:"temperature"`
+			}
+			if err := json.Unmarshal([]byte(e.lastBody()), &got); err != nil {
+				t.Fatalf("engine body: %v", err)
+			}
+			if got.Model != "llama3:latest" || got.Temperature != tc.want {
+				t.Fatalf("rewritten effective body=%+v", got)
 			}
 		})
 	}
