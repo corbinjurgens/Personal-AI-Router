@@ -415,6 +415,13 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 		}
 	}
 	anyLoaded := pol.TierPolicy.PreferLoaded == "any"
+	selected := f.SelectedID()
+	preparationRanks := map[int]bool{}
+	for _, c := range out {
+		if c.preparation {
+			preparationRanks[c.tierRank] = true
+		}
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if anyLoaded && a.warm != b.warm {
@@ -425,6 +432,12 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 		}
 		if a.warm != b.warm {
 			return a.warm
+		}
+		if !a.warm && preparationRanks[a.tierRank] && selected != "" && (a.id == selected) != (b.id == selected) {
+			return a.id == selected
+		}
+		if a.preparation != b.preparation {
+			return !a.preparation
 		}
 		return false
 	})
@@ -456,6 +469,9 @@ func (f *facade) hybridLocalCandidates(tier string, needs requestNeeds, crossEng
 	self := Node{StrictAdmission: f.host.admission.StrictReadiness().Capability}
 	var out []hybridCandidate
 	for _, c := range f.resolveTierCandidates(tier, needs, crossEngine) {
+		if c.preparation || c.dormant {
+			continue
+		}
 		if c.tierRank >= len(order) {
 			continue
 		}
@@ -500,7 +516,7 @@ func (f *facade) reserveRound(cands []candidate, tier bool) ([]candidate, reserv
 		return f.host.reserveCandidate(f, cands)
 	}
 	n := 1
-	for n < len(cands) && cands[n].tierRank == cands[0].tierRank && cands[n].warm == cands[0].warm {
+	for n < len(cands) && cands[n].tierRank == cands[0].tierRank && cands[n].warm == cands[0].warm && cands[n].preparation == cands[0].preparation {
 		n++
 	}
 	_, held := f.host.reserveCandidate(f, cands[:n])
@@ -518,7 +534,7 @@ func (f *facade) reserveRoundPrepared(ctx context.Context, cands []candidate, ti
 		n := len(cands)
 		if tier && n > 0 {
 			n = 1
-			for n < len(cands) && cands[n].tierRank == cands[0].tierRank && cands[n].warm == cands[0].warm {
+			for n < len(cands) && cands[n].tierRank == cands[0].tierRank && cands[n].warm == cands[0].warm && cands[n].preparation == cands[0].preparation {
 				n++
 			}
 		}

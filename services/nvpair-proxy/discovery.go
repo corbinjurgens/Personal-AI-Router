@@ -108,6 +108,8 @@ type Node struct {
 	// advertisement, nil when the node publishes none. It is shared with the
 	// decoded advertisement and never modified. Read it through strictModel.
 	StrictAdmission *nodepolicy.StrictAdmissionCapability `json:"-"`
+	// Offers remain separate from real inventory and never grant strict capacity.
+	EngineBindingOffers *nodepolicy.EngineBindingOffers `json:"-"`
 }
 
 // Manual entries arrive as raw JSON too: guard model tokens before decoding

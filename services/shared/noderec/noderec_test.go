@@ -16,6 +16,22 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestEngineBindingOffersDirectoryWire(t *testing.T) {
+	node := DirectoryNode{HostUUID: "fixture", Models: []string{}, ModelsByEngine: map[string][]string{"lmstudio": {}},
+		Policy: &nodepolicy.Advertisement{Revision: "1", EngineBindingOffers: &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role{{Engine: "lmstudio", Model: "cold-model"}}}}}
+	raw, err := json.Marshal(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got DirectoryNode
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Policy, node.Policy) || len(got.Models) != 0 || len(got.EngineModels("lmstudio")) != 0 || len(got.LoadedByEngine) != 0 {
+		t.Fatalf("offers became installed inventory: %+v", got)
+	}
+}
+
 func TestModelDownloadDirectoryWire(t *testing.T) {
 	percent := 21
 	snapshot := &modeldownload.Snapshot{

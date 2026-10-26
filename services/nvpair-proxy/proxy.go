@@ -593,6 +593,9 @@ type candidate struct {
 	// dormant marks a self candidate whose engine is stopped but can be woken
 	// on demand. Its url is a placeholder until admission has woken it.
 	dormant bool
+	// preparation is an offer-only candidate, conservatively classed as needing
+	// replacement until the destination freshly prepares it. Never strict-ready.
+	preparation bool
 	// warm reports the model already loaded on the node; tierRank is the
 	// position of its tier in the search order. Both order tier candidates.
 	warm     bool
@@ -649,7 +652,8 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 	if model != "" {
 		owners := make([]Node, 0, len(nodes))
 		for _, node := range nodes {
-			if nodeAdvertisesModel(f.profile, node, model) {
+			if f.bindingConsistent(node.EngineBindingOffers, model) &&
+				(nodeAdvertisesModel(f.profile, node, model) || f.nodeOffersBinding(node, model)) {
 				owners = append(owners, node)
 			}
 		}
@@ -683,14 +687,23 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 		}
 		peerUUID := ""
 		self := false
+		preparation := model != "" && !nodeAdvertisesModel(f.profile, n, model)
 		switch {
 		case isSelfTarget(u, selfPort) || isAnyAliasSelfTarget(u, aliasBoundAddresses):
+			pol := p.admission.currentPolicy()
+			if model != "" && !f.localBindingConsistent(pol, model) {
+				return
+			}
 			// Our own advertised endpoint (ol now points at this proxy). Serve
 			// it from the explicit local backend — the loopback engine — rather
 			// than dialing our own mTLS ingress, which would recurse. Ranking
 			// still used this node's real (discovered) model list above.
 			lb, ok := f.localBackendTarget()
 			if !ok {
+				// Fresh local liveness outranks a stale positive inventory.
+				if c, supported := f.boundSelfCandidate(n, model); supported {
+					out = append(out, c)
+				}
 				slog.Debug("resolveCandidates: no local backend for self", "node_id", n.ID)
 				return
 			}
@@ -738,13 +751,14 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 				(self && p.admission.isLoaded(f.profile.Name, model))
 		}
 		out = append(out, candidate{
-			id:       n.ID,
-			url:      u,
-			peerUUID: peerUUID,
-			fac:      f,
-			engine:   f.profile.Name,
-			self:     self,
-			warm:     warm,
+			id:          n.ID,
+			url:         u,
+			peerUUID:    peerUUID,
+			fac:         f,
+			engine:      f.profile.Name,
+			self:        self,
+			warm:        warm && !preparation,
+			preparation: preparation,
 		})
 	}
 
@@ -774,6 +788,14 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 			out = append(out, c)
 		}
 	}
+	// Explicit eligible selection remains authoritative. Otherwise the whole
+	// ready class leads, including owners omitted from the scheduler snapshot.
+	sort.SliceStable(out, func(i, j int) bool {
+		if id != "" && (out[i].id == id) != (out[j].id == id) {
+			return out[i].id == id
+		}
+		return !out[i].preparation && out[j].preparation
+	})
 
 	slog.Debug("resolveCandidates resolved",
 		"selected", id, "priority", len(priority), "candidates", len(out),
@@ -905,19 +927,20 @@ func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candida
 
 func (p *Proxy) candidateChoiceLocked(candidates []candidate, selectedID string) (int, bool) {
 	if selectedID != "" {
-		for _, c := range candidates {
+		for i, c := range candidates {
 			if c.id == selectedID {
-				return 0, false
+				return i, false
 			}
 		}
 	}
 	bestIndex := -1
 	bestOrder := len(p.priority)
 	var bestLoad uint64
+	ready := slices.ContainsFunc(candidates, func(c candidate) bool { return !c.preparation })
 	for order, id := range p.priority {
 		index := -1
 		for i, c := range candidates {
-			if c.id == id {
+			if c.id == id && (!ready || !c.preparation) {
 				index = i // Preserve the previous index map's last-ID entry.
 			}
 		}
@@ -934,7 +957,11 @@ func (p *Proxy) candidateChoiceLocked(candidates []candidate, selectedID string)
 		}
 	}
 	if bestIndex < 0 {
-		return 0, false
+		for i, c := range candidates {
+			if !ready || !c.preparation {
+				return i, false
+			}
+		}
 	}
 	return bestIndex, true
 }
@@ -1367,6 +1394,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		node.PolicyRevision = n.Policy.Revision
 		node.PausedBy = n.Policy.PausedBy
 		node.StrictAdmission = n.Policy.StrictAdmission
+		node.EngineBindingOffers = n.Policy.EngineBindingOffers.Clone()
 	}
 	return node.filteredModels(), true
 }

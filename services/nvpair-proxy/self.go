@@ -86,6 +86,9 @@ func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 		return candidate{}, false
 	}
 	pol := p.admission.currentPolicy()
+	if !f.localBindingConsistent(pol, model) {
+		return candidate{}, false
+	}
 	if !modelServed(pol.ServedModels, f.profile.Name, model, p.normalizeEngineModel) {
 		return candidate{}, false
 	}
@@ -117,4 +120,50 @@ func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 		self:    true,
 		dormant: true,
 	}, true
+}
+
+func (f *facade) bindingConsistent(offers *nodepolicy.EngineBindingOffers, model string) bool {
+	if offers == nil || offers.Validate() != nil {
+		return true
+	}
+	for _, ref := range offers.Models {
+		if f.host.normalizeEngineModel(ref.Engine, ref.Model) == f.host.normalizeEngineModel(ref.Engine, model) && ref.Engine != f.profile.Name {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *facade) localBindingConsistent(pol nodepolicy.Policy, model string) bool {
+	return f.bindingConsistent(&nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role(pol.EngineBindings)}, model)
+}
+
+func (f *facade) nodeOffersBinding(n Node, model string) bool {
+	if n.EngineBindingOffers == nil || n.EngineBindingOffers.Validate() != nil || n.PolicyRevision == "" || n.PausedBy != "" ||
+		!modelServed(n.ServedModels, f.profile.Name, model, f.host.normalizeEngineModel) {
+		return false
+	}
+	for _, ref := range n.EngineBindingOffers.Models {
+		if ref.Engine == f.profile.Name && f.profile.normalizeModel(ref.Model) == f.profile.normalizeModel(model) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *facade) boundSelfCandidate(n Node, model string) (candidate, bool) {
+	pol := f.host.admission.currentPolicy()
+	if pol.Revision != n.PolicyRevision || f.host.admission.currentAvailability() != nodepolicy.Available ||
+		!f.nodeOffersBinding(n, model) || !f.localBindingConsistent(pol, model) ||
+		!modelServed(pol.ServedModels, f.profile.Name, model, f.host.normalizeEngineModel) {
+		return candidate{}, false
+	}
+	bound := slices.ContainsFunc(pol.EngineBindings, func(ref nodepolicy.Role) bool {
+		return ref.Engine == f.profile.Name && f.profile.normalizeModel(ref.Model) == f.profile.normalizeModel(model)
+	})
+	if !bound {
+		return candidate{}, false
+	}
+	return candidate{id: n.ID, fac: f, engine: f.profile.Name, self: true, dormant: true, preparation: true,
+		url: &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(f.currentLocalBackend().Port))}}, true
 }

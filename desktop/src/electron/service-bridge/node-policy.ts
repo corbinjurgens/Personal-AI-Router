@@ -3,6 +3,7 @@
 
 import type {
     NodeModelReference,
+    EngineBindingOffers,
     NodeAvailability,
     NodeAvailabilityChange,
     NodePolicyChange,
@@ -118,6 +119,58 @@ function validModelIdentifier(value: string): boolean {
             return code >= 0x20 && (code < 0x7f || code > 0x9f)
         })
     )
+}
+
+/** Optional offer errors disable preparation only; inventory stays independent. */
+export function parseAdvertisementEngineBindingOffers(
+    value: JsonValue | undefined
+): EngineBindingOffers {
+    const advertisement = objectValue(value)
+    if (!advertisement) return { state: 'invalid' }
+    const keys = Object.keys(advertisement).filter(key => /^engineBindingOffers$/iu.test(key))
+    if (keys.length === 0) return { state: 'absent' }
+    if (keys.length !== 1 || keys[0] !== 'engineBindingOffers') return { state: 'invalid' }
+    try {
+        const envelope = objectValue(advertisement.engineBindingOffers)
+        if (!envelope) return { state: 'invalid' }
+        const version = strictInteger(envelope.version, 1, 2147483647)
+        if (version !== 1) return { state: 'unsupported', version }
+        const body = strictObject(envelope, ['version', 'models'])
+        if (!Array.isArray(body.models) || body.models.length === 0 || body.models.length > 256) {
+            return { state: 'invalid' }
+        }
+        const seen = new Set<string>()
+        const models = body.models.map(value => {
+            const ref = strictObject(value, ['engine', 'model'])
+            const engine = ref.engine
+            const model = typeof ref.model === 'string' ? ref.model.toWellFormed() : null
+            if (
+                typeof engine !== 'string' ||
+                !isValidRoutingEngineId(engine) ||
+                typeof model !== 'string' ||
+                !validModelIdentifier(model) ||
+                /^(weak|medium|strong)(-api|-local)?$/.test(model) ||
+                new TextEncoder().encode(
+                    JSON.stringify({ engine, model })
+                        .replace(
+                            /[<>&]/g,
+                            character =>
+                                `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+                        )
+                        .replace(/\u2028/g, '\\u2028')
+                        .replace(/\u2029/g, '\\u2029')
+                ).byteLength > 256 ||
+                seen.has(model)
+            ) {
+                throw new Error('Invalid engine binding offer')
+            }
+            seen.add(model)
+            return { engine, model }
+        })
+        return { state: 'valid', version: 1, models }
+    } catch {
+        return { state: 'invalid' }
+    }
 }
 
 /** Decode only the inventory policy's capability. Future versions are excluded. */
