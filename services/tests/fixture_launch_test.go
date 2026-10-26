@@ -317,7 +317,7 @@ func TestFixtureBrokerLaunchSeamsRemainGuarded(t *testing.T) {
 				}
 				return true
 			})
-			if fn.Name.Name == "startTask1Process" && !foundScanner {
+			if fn.Name.Name == "startTask1ProcessWithEnv" && !foundScanner {
 				t.Errorf("%s: direct scanner launch no longer guarded", path)
 			}
 			if guard != "" {
