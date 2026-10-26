@@ -207,12 +207,12 @@ func assertProxyManualTarget(t *testing.T, raw json.RawMessage, id string, port 
 // shows up in ollama-proxy:nodes/list and can be routed to — even though it never
 // appears over mDNS.
 func TestBrokerBridgesManualNodeIntoProxy(t *testing.T) {
-	if portBusy(11435) {
-		t.Skip("ollama-proxy port 11435 already in use; skipping")
-	}
+	configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
+	proxyPort := freePort(t)
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"ollama": proxyPort})
 	ollamaPort := fakeOllama(t)
 
-	stdin, msgs, _, cleanup := startBrokerWith(t,
+	stdin, msgs, _, cleanup := startBrokerWithDirs(t, configDir, clusterDir,
 		"--manual-nodes-path", manualNodesBin,
 		"--manual-ollama-port", strconv.Itoa(ollamaPort),
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
@@ -220,6 +220,9 @@ func TestBrokerBridgesManualNodeIntoProxy(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
+	if port := waitProxyReady(t, stdin, msgs, 15*time.Second); port != proxyPort {
+		t.Fatalf("Ollama proxy port=%d want private port=%d", port, proxyPort)
+	}
 
 	const nodeName = "xproc-manual-proxy-bridge"
 	addReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":900,"method":"node/add","params":{"address":"127.0.0.1","name":%q}}`, nodeName) + "\n"
@@ -262,13 +265,13 @@ func TestBrokerBridgesManualNodeIntoProxy(t *testing.T) {
 // resolve to it. The candidate must therefore appear in ollama-proxy:nodes/list under
 // the learned hostUuid, not the user-supplied manual name.
 func TestBrokerBridgesManualNodeUnderLearnedUUID(t *testing.T) {
-	if portBusy(11435) {
-		t.Skip("ollama-proxy port 11435 already in use; skipping")
-	}
+	configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
+	proxyPort := freePort(t)
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"ollama": proxyPort})
 	ollamaPort := fakeOllama(t)
 	nodeInfoPort := fakeNodeInfo(t, "learned-host-uuid")
 
-	stdin, msgs, _, cleanup := startBrokerWith(t,
+	stdin, msgs, _, cleanup := startBrokerWithDirs(t, configDir, clusterDir,
 		"--manual-nodes-path", manualNodesBin,
 		"--manual-ollama-port", strconv.Itoa(ollamaPort), "--manual-node-info-port", strconv.Itoa(nodeInfoPort),
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
@@ -276,6 +279,9 @@ func TestBrokerBridgesManualNodeUnderLearnedUUID(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
+	if port := waitProxyReady(t, stdin, msgs, 15*time.Second); port != proxyPort {
+		t.Fatalf("Ollama proxy port=%d want private port=%d", port, proxyPort)
+	}
 
 	const nodeName = "xproc-manual-learned-uuid"
 	addReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":940,"method":"node/add","params":{"address":"127.0.0.1","name":%q}}`, nodeName) + "\n"

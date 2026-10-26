@@ -21,10 +21,6 @@ import (
 )
 
 func TestWorkloadDepartedRunRetired(t *testing.T) {
-	if portBusy(11435) {
-		t.Skip("ollama-proxy default port 11435 already in use; skipping")
-	}
-
 	t.Run("OriginRetiresAndReplacementCancels", func(t *testing.T) {
 		f := startDepartedRunFixture(t, t.TempDir())
 		pid1 := mustPid(t, waitForStderr(t, f.proxyLines, proxyPidRe, 10*time.Second))
@@ -265,6 +261,8 @@ type departedRunFixture struct {
 func startDepartedRunFixture(t *testing.T, clusterDir string, extraArgs ...string) *departedRunFixture {
 	t.Helper()
 	configDir := t.TempDir()
+	proxyPort := freePort(t)
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"ollama": proxyPort})
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	stopEngine := func() { releaseOnce.Do(func() { close(release) }) }
@@ -378,6 +376,9 @@ func startDepartedRunFixture(t *testing.T, clusterDir string, extraArgs ...strin
 		t.Fatal("workloads:subscribe did not acknowledge subscribed:true")
 	}
 	f.port = waitProxyReady(t, f.stdin, f.control, 15*time.Second)
+	if f.port != proxyPort {
+		t.Fatalf("Ollama proxy port=%d want private port=%d", f.port, proxyPort)
+	}
 	f.selectEngine(t)
 	return f
 }
