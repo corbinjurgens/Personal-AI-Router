@@ -648,6 +648,7 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 	// The live request context remains independent so accepted streams drain.
 	ctl.deadline = policy.deadline
 	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, ctl.deadline))
+	r = withBoundEngineDeadline(r, start)
 	defer ctl.finish()
 	stopCancellation := context.AfterFunc(reqCtx, func() {
 		cause := routingContextCause(reqCtx, p.serveCtx)

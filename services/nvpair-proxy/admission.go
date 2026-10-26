@@ -302,6 +302,9 @@ type admissionRequest struct {
 	// prepare admits request storage before wake, unload, or grant. It runs
 	// outside mu and is retried if the authoritative policy changes.
 	prepare func(context.Context, nodepolicy.Profile, bool, uint64) error
+	// Bound preparation supplies fresh destination evidence. This pure check
+	// runs under mu, including after every queue/storage wait before grant.
+	revalidate func() bool
 }
 
 // admissionDecision is the outcome. Exactly one of ticket, reject and err is
@@ -379,6 +382,14 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 	for {
 		pol := a.policy
 		var sends []notification
+		if req.revalidate != nil && !req.revalidate() {
+			return reject(nodepolicy.RejectReason("model-unavailable"))
+		}
+		for _, binding := range pol.EngineBindings {
+			if binding.Engine != req.engine && a.normalize(binding.Engine, binding.Model) == a.normalize(binding.Engine, req.model) {
+				return reject(nodepolicy.RejectReason("model-unavailable"))
+			}
+		}
 		// Admission is the serving linearization point under the policy mutex.
 		// Already-admitted work drains across restrictive policy activation;
 		// queued requests must recheck permission before receiving a ticket.

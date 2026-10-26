@@ -581,7 +581,7 @@ type candidate struct {
 	peerUUID string
 
 	// fac is the facade that resolved this candidate, and engine the engine it
-	// targets. They differ from the routing facade only for a tier request
+	// targets. They can differ for a tier or explicitly bound concrete request
 	// that crossed engines; failover bookkeeping (discovery watch, confirmed
 	// addresses) belongs to fac.
 	fac    *facade

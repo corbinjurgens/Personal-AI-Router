@@ -5,6 +5,7 @@ package nodepolicy
 
 import (
 	"errors"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
@@ -20,7 +21,26 @@ const (
 	MethodActivateBoundEngine  = "engine:activate-bound-engine"
 	MaxBoundEngineBudgetMs     = 90_000
 	MaxBoundEngineMessageBytes = 256
+	EnginePrepareBudgetHeader  = "X-PAIR-Engine-Prepare-Budget-Ms"
+	SwitchRequestIDHeader      = "X-PAIR-Switch-Request-Id"
 )
+
+// EnginePrepareBudget is an allowance, never activation authority. Absence
+// permits the normal bound; malformed, repeated and nonpositive values fail
+// closed. Parse before multiplying so an overflowing value cannot wrap time.
+func EnginePrepareBudget(values []string) time.Duration {
+	if len(values) == 0 {
+		return MaxBoundEngineBudgetMs * time.Millisecond
+	}
+	if len(values) != 1 {
+		return 0
+	}
+	n, err := strconv.ParseUint(values[0], 10, 64)
+	if err != nil || n == 0 || strconv.FormatUint(n, 10) != values[0] {
+		return 0
+	}
+	return time.Duration(min(n, MaxBoundEngineBudgetMs)) * time.Millisecond
+}
 
 type PrepareBoundEngineRequest struct {
 	RequestID       string `json:"requestId"`

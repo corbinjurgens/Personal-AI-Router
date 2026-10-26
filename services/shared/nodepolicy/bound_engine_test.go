@@ -95,3 +95,26 @@ func TestBoundEngineActivationAndCancellation(t *testing.T) {
 		t.Fatal("cancellation accepted an engine command")
 	}
 }
+
+func TestBoundEngineHTTPBudget(t *testing.T) {
+	test := func(name string, values []string, want time.Duration) {
+		t.Run(name, func(t *testing.T) {
+			if got := EnginePrepareBudget(values); got != want {
+				t.Fatalf("budget=%v want=%v", got, want)
+			}
+		})
+	}
+	test("absent uses total bound", nil, 90*time.Second)
+	test("remaining milliseconds", []string{"123"}, 123*time.Millisecond)
+	test("excess clamped", []string{"90001"}, 90*time.Second)
+	test("largest integer clamped before duration conversion", []string{"18446744073709551615"}, 90*time.Second)
+	test("overflow refuses", []string{"18446744073709551616"}, 0)
+	test("empty refuses", []string{""}, 0)
+	test("negative refuses", []string{"-1"}, 0)
+	test("fraction refuses", []string{"1.5"}, 0)
+	test("repeated refuses", []string{"1", "90000"}, 0)
+	test("comma joined refuses", []string{"1,90000"}, 0)
+	test("whitespace refuses", []string{" 90000"}, 0)
+	test("noncanonical refuses", []string{"00090000"}, 0)
+	test("exhausted refuses", []string{"0"}, 0)
+}

@@ -221,6 +221,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	}
 
 	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, start.Add(jobDeadline)))
+	r = withBoundEngineDeadline(r, start)
 	r, buffers := f.host.ownInferenceBuffers(r)
 	w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
 	defer buffers.close()
@@ -254,6 +255,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		writeOriginStreamRequestError(w, err)
 		return
 	}
+	if !f.localBindingConsistent(f.host.admission.currentPolicy(), model) {
+		writeBoundEngineRefusal(w, boundEngineRefusal("model-unavailable"))
+		return
+	}
 	if strict != nil {
 		f.serveStrictLocal(w, r, body, model, *strict, true)
 		return
@@ -275,12 +280,28 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	releaseBody, releasePreparation := func() {}, func() {}
 	defer func() { releasePreparation(); releaseBody() }()
 	admissionStarted := time.Now()
+	var bindingEvidence *boundEngineEvidence
+	if f.needsBoundPreparation(model) {
+		if parseAdmissionWait(r.Header) == 0 {
+			writeBoundEngineRefusal(w, boundEngineRefusal("engine-switch-busy"))
+			return
+		}
+		var result nodepolicy.BoundEnginePrepared
+		bindingEvidence, result = f.prepareLocalBound(ctx, model, peer)
+		if !result.Success {
+			if ctx.Err() == nil {
+				writeBoundEngineRefusal(w, result)
+			}
+			return
+		}
+	}
 	prepareCtx, stopPreparation := routingPreparationContext(ctx)
 	decision := f.host.admission.admit(prepareCtx, admissionRequest{
-		engine:  f.profile.Name,
-		model:   model,
-		waitCap: parseAdmissionWait(r.Header),
-		cancel:  cancel,
+		engine:     f.profile.Name,
+		model:      model,
+		waitCap:    parseAdmissionWait(r.Header),
+		cancel:     cancel,
+		revalidate: func() bool { return f.boundEvidenceCurrentLocked(bindingEvidence) },
 		prepare: func(ctx context.Context, profile nodepolicy.Profile, hasProfile bool, _ uint64) error {
 			releasePreparation()
 			releasePreparation = func() {}
@@ -376,6 +397,12 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	}
 	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 	p.ModifyResponse = func(resp *http.Response) error {
+		resp.Header.Set(nodepolicy.ModelHeader, model)
+		resp.Header.Set(nodepolicy.EngineHeader, f.profile.Name)
+		f.host.identityMu.Lock()
+		self := f.host.originNodeID
+		f.host.identityMu.Unlock()
+		resp.Header.Set(nodepolicy.NodeHeader, self)
 		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 			if !attempt.acceptResponse() {
 				return context.Canceled
@@ -407,6 +434,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		}
 		performance.finish(sc, returned)
 	}()
+	if !f.beforeBoundDispatch(decision.ticket, bindingEvidence) {
+		writeBoundEngineRefusal(w, boundEngineRefusal("model-unavailable"))
+		return
+	}
 	p.ServeHTTP(sc, out)
 	_ = sc.FlushError()
 	returned = true
@@ -481,6 +512,10 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 // reconciliation owner proves termination. It must never be interpreted as
 // engine-idle evidence.
 func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool, origin ...*routingSpend) {
+	if !f.localBindingConsistent(f.host.admission.currentPolicy(), model) {
+		writeBoundEngineRefusal(w, boundEngineRefusal("model-unavailable"))
+		return
+	}
 	admissionStarted := time.Now()
 	buffers := inferenceBuffers(r.Context())
 	var requestOwner *routingSpend
