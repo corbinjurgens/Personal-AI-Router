@@ -20,11 +20,12 @@ import type {
     RequestedAvailability
 } from '@/shared/types/node-policy'
 import getErrorString from '@/shared/utils/get-error-string'
+import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import ModelEngineBindingsEditor from './ModelEngineBindingsEditor'
-import ModelSettingsEditor from './ModelSettingsEditor'
+import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
 import RoutingHistory from '@/ui/components/RoutingSettings/RoutingHistory'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
@@ -35,7 +36,6 @@ import { useNodesStore } from '@/ui/stores/nodes.store'
 import {
     LOCAL_VETO_CODE,
     REMOTE_MANAGEMENT_DENIED_CODE,
-    REMOTE_SETTING_LOCKED_CODE,
     localVetoMessage
 } from '@/shared/constants/service-errors'
 import { serviceErrorCode } from '@/ui/api/service-transport'
@@ -86,7 +86,7 @@ export default function RoutingSettings() {
     const nodeName = peers.find(peer => peer.id === nodeId)?.name ?? THIS_PC
 
     const [availability, setAvailability] = useState<NodeAvailability | null>(null)
-    const [text, setText] = useState('')
+    const [text, setTextState] = useState('')
     const [settingsSnapshot, setSettingsSnapshot] = useState<NodePolicySnapshot | null>(null)
     const [settingsValid, setSettingsValid] = useState(true)
     const [loading, setLoading] = useState(false)
@@ -114,6 +114,22 @@ export default function RoutingSettings() {
     textRef.current = text
     // The id the broker uses for the selected node; this PC's is the self id.
     const targetId = nodeId ?? selfId
+    const policyDraft = useNodeConfigurationStore(state =>
+        targetId === null ? undefined : state.policyDrafts.get(targetId)
+    )
+    const otherDraft = policyDraft !== undefined && policyDraft.owner !== 'Routing'
+    const policyTextValid = useMemo(() => parseModelSettings(text).ok, [text])
+    const setText = useCallback(
+        (value: string) => {
+            if (targetId === null) return
+            const store = useNodeConfigurationStore.getState()
+            if (!store.claimPolicyDraft(targetId, 'Routing')) return
+            store.editPolicyDraft(targetId, 'Routing', value)
+            textRef.current = value
+            setTextState(value)
+        },
+        [targetId]
+    )
     const management = useNodeConfigurationStore(state =>
         targetId === null ? undefined : state.management.get(targetId)
     )
@@ -149,6 +165,12 @@ export default function RoutingSettings() {
 
     const load = useCallback(
         async (preserveDraft = false) => {
+            if (targetId === null) return
+            const store = useNodeConfigurationStore.getState()
+            if (!store.claimPolicyDraft(targetId, 'Routing', !preserveDraft)) return
+            const draftGeneration = useNodeConfigurationStore
+                .getState()
+                .policyDrafts.get(targetId)?.generation
             latestLoad.current += 1
             const ticket = latestLoad.current
             setLoading(true)
@@ -160,6 +182,27 @@ export default function RoutingSettings() {
                 const availabilityRead = availabilityGeneration.current
                 const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
                 if (ticket !== latestLoad.current) return
+                const entry = useNodeConfigurationStore.getState().policyDrafts.get(targetId)
+                if (entry?.owner !== 'Routing' || entry.generation !== draftGeneration) return
+                const newest = useNodeConfigurationStore
+                    .getState()
+                    .policyDrafts.get(targetId)?.saved
+                if (newest && isOlder(document.revision, newest.revision)) {
+                    // Policy content can be obsolete while this remains the only
+                    // availability read. A later availability event still wins.
+                    if (availabilityRead === availabilityGeneration.current) {
+                        latestAvailability.current = document.availability
+                        setAvailability(document.availability)
+                    }
+                    return
+                }
+                store.observePolicyDraft(targetId, {
+                    ...document,
+                    availability:
+                        availabilityRead !== availabilityGeneration.current
+                            ? (latestAvailability.current ?? document.availability)
+                            : document.availability
+                })
                 adoptRoles(document, availabilityRead)
                 setSettingsSnapshot(current =>
                     current && isOlder(document.revision, current.revision) ? current : document
@@ -173,7 +216,12 @@ export default function RoutingSettings() {
                 } else {
                     savedTextRef.current = document.policy
                     baseRevisionRef.current = document.revision
-                    setText(document.policy)
+                    if (entry && entry.text !== (entry.baseline?.policy ?? '') && preserveDraft) {
+                        savedTextRef.current = entry?.baseline?.policy ?? ''
+                        baseRevisionRef.current = entry?.baseline?.revision ?? ''
+                        textRef.current = entry?.text ?? ''
+                        setTextState(entry?.text ?? '')
+                    } else setText(document.policy)
                 }
                 setStatus({ revision: document.revision, activation: document.activation })
                 setRecoveryRequired(document.recoveryRequired)
@@ -188,31 +236,8 @@ export default function RoutingSettings() {
                 if (ticket === latestLoad.current) setLoading(false)
             }
         },
-        [nodeId, adoptRoles]
+        [nodeId, adoptRoles, targetId, setText]
     )
-
-    useEffect(() => {
-        setSaving(false)
-        setSwitching(false)
-        if (!connected) setLoading(false)
-        if (previousTarget.current !== targetId) {
-            previousTarget.current = targetId
-            latestAvailability.current = null
-            setAvailability(null)
-            savedTextRef.current = ''
-            baseRevisionRef.current = ''
-            setStatus(null)
-            setSettingsSnapshot(null)
-            setSettingsValid(true)
-            setRecoveryRequired(false)
-            setText('')
-            textRef.current = ''
-        }
-        if (connected) void load(true)
-        return () => {
-            latestLoad.current++
-        }
-    }, [connected, targetId, load])
 
     // A saved policy reported by the node. Changes can arrive out of order, so
     // the status only moves forward. The text and base revision follow only when
@@ -236,13 +261,15 @@ export default function RoutingSettings() {
         ) => {
             noteStatus(saved)
             adoptRoles(saved, availabilityRead)
+            if (targetId !== null)
+                useNodeConfigurationStore.getState().observePolicyDraft(targetId, saved)
             if (textRef.current !== savedTextRef.current) return
             if (isOlder(saved.revision, baseRevisionRef.current)) return
             baseRevisionRef.current = saved.revision
             savedTextRef.current = saved.policy
             setText(saved.policy)
         },
-        [noteStatus, adoptRoles]
+        [noteStatus, adoptRoles, targetId, setText]
     )
 
     // Live updates from the broker.
@@ -254,6 +281,12 @@ export default function RoutingSettings() {
                 latestAvailability.current = change.availability
                 setAvailability(change.availability)
                 const store = useNodeConfigurationStore.getState()
+                const saved = store.policyDrafts.get(targetId)?.saved
+                if (saved)
+                    store.observePolicyDraft(targetId, {
+                        ...saved,
+                        availability: change.availability
+                    })
                 const baseline = store.editors.get(targetId)?.baseline
                 if (baseline)
                     store.adopt(targetId, {
@@ -271,6 +304,40 @@ export default function RoutingSettings() {
             offPolicy()
         }
     }, [targetId, adopt])
+
+    // The listeners above are installed before a target read can begin.
+    useEffect(() => {
+        setSaving(false)
+        setSwitching(false)
+        if (!connected) setLoading(false)
+        if (previousTarget.current !== targetId) {
+            previousTarget.current = targetId
+            latestAvailability.current = null
+            setAvailability(null)
+            setStatus(null)
+            setSettingsSnapshot(null)
+            setSettingsValid(true)
+            setRecoveryRequired(false)
+            const cached =
+                targetId === null
+                    ? undefined
+                    : useNodeConfigurationStore.getState().policyDrafts.get(targetId)
+            const mine = cached?.owner === 'Routing' ? cached : undefined
+            savedTextRef.current = mine?.baseline?.policy ?? ''
+            baseRevisionRef.current = mine?.baseline?.revision ?? ''
+            setTextState(mine?.text ?? '')
+            textRef.current = mine?.text ?? ''
+        }
+        if (connected) void load(true)
+        return () => {
+            latestLoad.current++
+            if (
+                targetId !== null &&
+                useNodeConfigurationStore.getState().policyDrafts.get(targetId)?.owner === 'Routing'
+            )
+                useNodeConfigurationStore.getState().invalidatePolicyDraft(targetId)
+        }
+    }, [connected, targetId, load])
 
     const changeAvailability = useCallback(
         async (requested: RequestedAvailability) => {
@@ -333,77 +400,35 @@ export default function RoutingSettings() {
             !settingsValid ||
             switching ||
             conflict !== null ||
+            otherDraft ||
+            targetId === null ||
             previousTarget.current !== targetId ||
             baseRevisionRef.current === ''
         )
             return
         const ticket = latestLoad.current
-        const base = baseRevisionRef.current
         setSaving(true)
         setSaveError(null)
-        try {
-            const result = await window.pairApi.nodePolicy.set({
-                nodeId: nodeId ?? undefined,
-                policy: text,
-                expectedPersistedRevision: base
-            })
-            if (ticket !== latestLoad.current) return
-            adoptRoles(result)
-            // Show the policy as persisted: the service fills in omitted fields.
-            savedTextRef.current = result.policy
-            baseRevisionRef.current = result.revision
-            setText(result.policy)
-            // A change for a newer revision may have been announced before this reply.
-            noteStatus(result)
+        await useNodeConfigurationStore
+            .getState()
+            .savePolicyDraft(targetId, 'Routing', nodeId ?? undefined)
+        if (ticket !== latestLoad.current) return
+        const result = useNodeConfigurationStore.getState().policyDrafts.get(targetId)
+        if (result?.phase === 'saved' && result.baseline) {
+            adoptRoles(result.baseline)
+            savedTextRef.current = result.baseline.policy
+            baseRevisionRef.current = result.baseline.revision
+            setTextState(result.text)
+            textRef.current = result.text
+            noteStatus(result.baseline)
             setRecoveryRequired(false)
-        } catch (err) {
-            if (ticket !== latestLoad.current) return
-            const code = serviceErrorCode(err)
-            if (code === REMOTE_SETTING_LOCKED_CODE) {
-                const detail = getErrorString(err)
-                    .slice(0, 1024)
-                    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
-                setSaveError(
-                    `Inference settings are locked on ${nodeName}. Your policy draft is kept. Change this profile's inference settings on that device. Service message: ${detail}`
-                )
-                return
-            }
-            if (code === REMOTE_MANAGEMENT_DENIED_CODE || code === LOCAL_VETO_CODE) {
-                setSaveError(
-                    code === REMOTE_MANAGEMENT_DENIED_CODE
-                        ? 'This device refused remote management permission. Your policy draft is kept. Change the permission on that device before trying again.'
-                        : `${localVetoMessage('save this policy')} ${getErrorString(err)}`
-                )
-                if (code === REMOTE_MANAGEMENT_DENIED_CODE && targetId !== null)
-                    void useNodeConfigurationStore
-                        .getState()
-                        .readManagement(targetId, nodeId ?? undefined)
-                return
-            }
-            // Read the saved revision after errors: a durability warning means
-            // the replacement landed, and a transport failure can leave the
-            // outcome uncertain even though refusal codes survive the relay.
-            const message = getErrorString(err)
-            const latest = await window.pairApi.nodePolicy
-                .get(nodeId ?? undefined)
-                .catch(() => null)
-            if (ticket !== latestLoad.current) return
-            if (latest === null) {
-                setSaveError(
-                    `Could not confirm whether the save took effect: ${message} Reload to see the saved policy.`
-                )
-            } else if (latest.revision !== base) {
-                noteStatus(latest)
-                adoptRoles(latest)
-                setConflict({ latest, message })
-            } else {
-                setSaveError(message)
-            }
-        } finally {
-            if (ticket === latestLoad.current) setSaving(false)
+        } else if (result?.phase === 'conflict' && result.saved) {
+            setConflict({ latest: result.saved, message: result.message ?? 'Policy conflict' })
+        } else {
+            setSaveError(result?.message ?? 'Could not save this policy.')
         }
+        setSaving(false)
     }, [
-        text,
         nodeId,
         noteStatus,
         adoptRoles,
@@ -414,7 +439,7 @@ export default function RoutingSettings() {
         switching,
         conflict,
         settingsValid,
-        nodeName
+        otherDraft
     ])
 
     const nodeItems: DropdownEntry[] = useMemo(
@@ -432,6 +457,11 @@ export default function RoutingSettings() {
     // Save needs the revision the draft is based on, which a loaded policy supplies.
     const canSave =
         !permissionReadOnly &&
+        !otherDraft &&
+        policyTextValid &&
+        policyDraft?.phase !== 'conflict' &&
+        policyDraft?.phase !== 'unknown' &&
+        policyDraft?.phase !== 'saving' &&
         !switching &&
         previousTarget.current === targetId &&
         baseRevisionRef.current !== '' &&
@@ -456,6 +486,17 @@ export default function RoutingSettings() {
                             {nodeName}
                         </Dropdown>
                     </Flex>
+
+                    {otherDraft && (
+                        <InlineErrorBanner
+                            severity="warning"
+                            message="Model Manager owns an unsaved policy draft for this node. Discard it and reload explicitly to edit in Routing."
+                        >
+                            <Button size="small" onClick={() => void load()}>
+                                Discard Model Manager draft and reload
+                            </Button>
+                        </InlineErrorBanner>
+                    )}
 
                     {nodeId !== null && permissionReadOnly && (
                         <Text kind="body/regular/sm" role="status">
@@ -531,17 +572,27 @@ export default function RoutingSettings() {
                     )}
 
                     {targetId !== null && (
-                        <ModelSettingsEditor
+                        <ModelSettingsPanel
                             key={targetId}
-                            text={text}
-                            onTextChange={setText}
-                            savedText={settingsSnapshot?.policy ?? null}
+                            targetId={targetId}
+                            nodeId={nodeId ?? undefined}
                             nodeName={nodeName}
-                            remote={nodeId !== null}
-                            disabled={
-                                loading || saving || switching || permissionReadOnly || !canSave
-                            }
-                            onValidityChange={setSettingsValid}
+                            routing={{
+                                text,
+                                onTextChange: setText,
+                                savedText: settingsSnapshot?.policy ?? null,
+                                disabled:
+                                    loading ||
+                                    saving ||
+                                    switching ||
+                                    permissionReadOnly ||
+                                    !canSave,
+                                onValidityChange: setSettingsValid,
+                                onSave: save,
+                                canSave: canSave && settingsValid && !loading && !saving,
+                                message: saveError ?? policyDraft?.message,
+                                onReload: () => void load()
+                            }}
                         />
                     )}
 
@@ -583,7 +634,7 @@ export default function RoutingSettings() {
                                     resizeable="auto"
                                     rows={14}
                                     maxLength={65536}
-                                    disabled={loading || saving || permissionReadOnly}
+                                    disabled={loading || saving || permissionReadOnly || otherDraft}
                                     className="font-mono"
                                 />
                             </div>
@@ -628,7 +679,9 @@ export default function RoutingSettings() {
                                 disabled={loading || saving || switching}
                                 onClick={() => void load()}
                             >
-                                Reload
+                                {text !== savedTextRef.current
+                                    ? 'Discard draft and reload'
+                                    : 'Reload'}
                             </Button>
                             <Button
                                 kind="primary"

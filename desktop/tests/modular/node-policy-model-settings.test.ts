@@ -482,10 +482,17 @@ describe('model settings form controls', () => {
         container.remove()
         vi.unstubAllGlobals()
     })
-    async function render(text: string, savedText = text, remote = false, disabled = false) {
+    async function render(
+        text: string,
+        savedText = text,
+        remote = false,
+        disabled = false,
+        target = identity
+    ) {
         await act(async () =>
             root.render(
                 createElement(ModelSettingsEditor, {
+                    identity: target,
                     text,
                     savedText,
                     remote,
@@ -530,9 +537,8 @@ describe('model settings form controls', () => {
         await act(async () => option.click())
     }
 
-    it('chooses the profile by engine and model and hides min_p for LM Studio', async () => {
-        await render(policy())
-        await choose('Model profile', `${other.model} (${other.engine})`)
+    it('edits the bound engine/model profile and hides min_p for LM Studio', async () => {
+        await render(policy(), policy(), false, false, other)
         expect(container.querySelector('input[aria-label="Min P"]')).toBeNull()
         await type('Temperature', '0.4')
         const text = changed.mock.lastCall?.[0]
@@ -585,6 +591,7 @@ describe('model settings form controls', () => {
         function Editor() {
             const [text, setText] = useState(policy())
             return createElement(ModelSettingsEditor, {
+                identity,
                 text,
                 savedText: policy(),
                 remote: false,

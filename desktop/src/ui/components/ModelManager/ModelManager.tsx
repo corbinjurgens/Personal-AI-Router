@@ -23,10 +23,16 @@ import { TransientModelStatusRow } from './TransientModelStatusRow'
 import type { ModelEntry } from '@/ui/types/model-hub'
 import { ModelCopyModal } from './ModelCopyModal'
 import { formatCopyProgressLabel } from '@/ui/utils/formatters'
+import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
+import { useConnectionStore } from '@/ui/stores/connection.store'
 
 export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId: string }) {
     const [openModelHubModal, setOpenModelHubModal] = useState(false)
     const [modelPendingDelete, setModelPendingDelete] = useState<string | null>(null)
+    const [configureModel, setConfigureModel] = useState<string | null>(null)
+    const selfId = useConnectionStore(state => state.selfId)
+    const policyEngine = engineManagerName(backend.type)
+    const canConfigure = policyEngine === 'llamacpp' || policyEngine === 'lmstudio'
     const [copySelection, setCopySelection] = useState<{
         source: string
         model: string
@@ -219,6 +225,10 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
 
     const handleAction = useCallback(
         (modelName: string, action: string) => {
+            if (action === 'configure') {
+                if (canConfigure) setConfigureModel(modelName)
+                return
+            }
             if (!actionAllowed(modelName, action)) return
             switch (action) {
                 case 'load':
@@ -239,7 +249,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                     break
             }
         },
-        [backendType, confirmBeforeDelete, nodeId, actionAllowed]
+        [backendType, confirmBeforeDelete, nodeId, actionAllowed, canConfigure]
     )
 
     // `ConfirmModal` closes (`onOpenChange(false)`) before it calls `onConfirm`,
@@ -330,6 +340,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                                     .getState()
                                     .getModelPending(nodeId, backendType, model.name)}
                                 canCopy={caps.hasModelCopy}
+                                canConfigure={canConfigure}
                                 displayName={displayName}
                                 onAction={handleAction}
                                 onExpiryChange={handleExpiryChange}
@@ -375,6 +386,20 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                 initialModel={copySelection?.model ?? ''}
                 initialOpId={copySelection?.opId}
             />
+
+            {configureModel !== null && (
+                <ModelSettingsPanel
+                    key={`${nodeId}:${backendType}:${configureModel}`}
+                    targetId={nodeId}
+                    nodeId={nodeId === selfId ? undefined : nodeId}
+                    nodeName={nodes.get(nodeId)?.name ?? (nodeId === selfId ? 'This PC' : nodeId)}
+                    identity={{ engine: engineManagerName(backendType), model: configureModel }}
+                    open
+                    onOpenChange={open => {
+                        if (!open) setConfigureModel(null)
+                    }}
+                />
+            )}
 
             <ConfirmModal
                 open={modelPendingDelete !== null}
