@@ -42,10 +42,12 @@ Use the existing JSON-RPC policy APIs through the local service:
 3. Send the edited document as `policy` to `policy:set`, with the same target
    and `expectedPersistedRevision` equal to the `policy.revision` read for that
    draft. On conflict, read again and deliberately reconcile the draft.
-4. Read back the same target. Check the saved bindings and the reported policy
-   activation state; persistence and activation are separate outcomes. After a
-   lost or uncertain save response, read back before deciding what to do next.
-   Do not automatically resubmit the write with a new revision.
+4. Read back the same target and check the saved bindings. Local readback reports
+   persistence and policy activation separately. Peer readback confirms saved
+   configuration but provides no activation status; obtain that evidence through
+   the destination's local service when needed. After a lost or uncertain save
+   response, read back before deciding what to do next. Do not automatically
+   resubmit the write with a new revision.
 
 A remote edit requires the destination's current remote-management grant;
 pairing alone grants no mutation authority. Start from its peer-visible policy
@@ -170,10 +172,14 @@ rechecked at acceptance and effects. HTTP identity fields grant no authority.
 ### Bounds and Receipts
 
 Automatic preparation has one absolute budget of at most **90 seconds from HTTP
-entry**, clamped to the caller's remaining deadline. Candidate attempts, peer
-slot acquisition, response-header waits, refresh, dwell, drain and activation
-share it. A later waiter cannot extend an accepted operation's original deadline.
-An accepted healthy inference stream can continue beyond the preparation window.
+entry**, clamped to the caller's remaining deadline. Preparation across candidate
+attempts, refresh, dwell, drain and activation shares it. Cold pinned-peer slot
+acquisition and response-header waits also consume the remaining preparation
+allowance. After successful local preparation, ordinary inference uses its
+existing inference deadlines; the preparation budget is not a universal
+90-second first-header guarantee. A later waiter cannot extend an accepted
+operation's original deadline. An accepted healthy inference stream can continue
+beyond the preparation window.
 Manual E4 retains its separate 15-minute operation budget.
 
 One destination preparation operation is active at a time. Demand for the same
