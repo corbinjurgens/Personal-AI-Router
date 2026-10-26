@@ -1475,6 +1475,15 @@ Two relay-specific error cases:
 
 #### `ollama-proxy:set-port` / `lmstudio-proxy:set-port` / `llamacpp-proxy:set-port`
 
+Port preflight checks occupancy without dialing the occupant. On non-Windows
+hosts it probes IPv4/IPv6 wildcards and the loopback addresses used by managed
+launches and aliases (`127.0.0.1` and `::1`), immediately closing each temporary
+listener. An unsupported IPv6 family is skipped; occupied addresses and other
+probe failures refuse the port. Windows retains its exclusive wildcard bind
+probe, which also rejects concrete-address holders and aborts before native
+listen. The eventual engine/facade bind remains authoritative: preflight does
+not reserve a port across the settings operation.
+
 **Intercepted, not relayed verbatim.** For every engine profile, a port-only caller — `nvpair-tui` is the one in tree — gets to move a single port without rendering the whole launch settings form, but the change still runs through the same authoritative settings operation the desktop editor uses, so a port set from the terminal cannot diverge from one set from the UI. The namespace selects the engine. The broker reads that engine's current settings, substitutes the requested proxy port, and applies the result while preserving the server port and launch arguments. Accepted settings are saved in the settings journal.
 
 A malformed request, missing port, or port outside `1`–`65535` is refused with error `-32602 "port must be between 1 and 65535"`. A **requested port that is already in use or reserved** by a PAIR service, another configured engine/proxy, or the engine's own server port is refused with error `-32000 "resolve settings errors and port conflicts before applying"`. The broker does not pick a different port on the caller's behalf. Retry with a free port. A request that collides with an inherited `OLLAMA_HOST` alias is refused with its own message naming that alias. The response echoes the requested port (`{"port": <requested>}`) once it is bound.
