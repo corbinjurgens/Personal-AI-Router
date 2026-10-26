@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +28,10 @@ var errServiceProcessDeparted = errors.New("recorded fixture process departed")
 type serviceProcessInventory struct {
 	mu    sync.Mutex
 	paths []string
-	known map[int32]serviceProcessIdentity
+	// bundlePaths includes optional siblings even when readiness does not require
+	// them. A detached worker still owns its image after its broker has exited.
+	bundlePaths []string
+	known       map[int32]serviceProcessIdentity
 	// scanError injects a test failure without hiding inspected identities.
 	scanError error
 	// enumerationError injects an empty failed enumeration before inspection.
@@ -89,12 +93,36 @@ func serviceInspectionErrorWithProbe(ctx context.Context, pid int32, stage strin
 }
 
 func (in *serviceProcessInventory) owns(path string) bool {
-	for _, owned := range in.paths {
+	for _, owned := range in.ownedPaths() {
 		if path == owned {
 			return true
 		}
 	}
 	return false
+}
+
+func (in *serviceProcessInventory) ownedPaths() []string {
+	paths := append([]string(nil), in.paths...)
+	for _, path := range in.bundlePaths {
+		if !slices.Contains(paths, path) {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+// confirmStoppedContext checks recorded lifetimes as well as the current
+// enumeration. On Windows the stopped probe waits on the process object, not
+// merely its disappearance from an executable-path scan. This is required
+// before reusing a fixed executable path, including after partial setup.
+func (in *serviceProcessInventory) confirmStoppedContext(ctx context.Context) error {
+	owned, scanErr := in.scanContext(ctx)
+	owned, recoveryErr := in.recoveryContext(ctx, owned)
+	var liveErr error
+	if len(owned) != 0 {
+		liveErr = fmt.Errorf("fixture processes have not exited: %+v", owned)
+	}
+	return errors.Join(scanErr, recoveryErr, liveErr, ctx.Err())
 }
 
 func serviceProcessHasZombieStatus(status []string) bool {
@@ -220,17 +248,24 @@ func (in *serviceProcessInventory) scanContext(ctx context.Context) ([]servicePr
 		}
 		identity := serviceProcessIdentity{PID: pid, Path: path, Created: created}
 		in.known[pid] = identity
-		zombie := false
-		// Windows has no zombie state and gopsutil does not implement Status.
-		if runtime.GOOS != "windows" {
+		stopped := false
+		if runtime.GOOS == "windows" {
+			// An exited process can retain a queryable image while another
+			// handle is still open. Join its exit independently of enumeration.
+			stopped, err = serviceProcessStopped(ctx, pid)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("owned pid %d exit: %w", pid, err))
+				continue
+			}
+		} else {
 			status, err := p.StatusWithContext(ctx)
 			if err != nil {
 				failures = append(failures, serviceInspectionErrorWithProbe(ctx, pid, "status", err, serviceStoppedPresence(serviceProcessStopped)))
 				continue
 			}
-			zombie = serviceProcessHasZombieStatus(status)
+			stopped = serviceProcessHasZombieStatus(status)
 		}
-		if !zombie {
+		if !stopped {
 			found = append(found, identity)
 		}
 	}

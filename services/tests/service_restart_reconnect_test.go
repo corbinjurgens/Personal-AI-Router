@@ -583,7 +583,7 @@ func TestServiceRestartReconnectDesktop(t *testing.T) {
 	f := newProxyServiceFixture(t)
 	// Before first startup, replace multicast discovery with the existing empty
 	// directory scanner at its already ruled executable path. No new test image.
-	jointCopyExecutable(t, self, f.scannerPath)
+	f.copyExecutable(self, f.scannerPath)
 	privateEnv := f.env[:0]
 	for _, entry := range f.env {
 		key, _, _ := strings.Cut(entry, "=")
