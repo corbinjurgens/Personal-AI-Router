@@ -3,12 +3,15 @@
 
 import type { JsonValue } from '@/shared/types/json'
 import type { NodeModelReference } from '@/shared/types/node-policy'
+import { isValidRoutingEngineId } from '@/shared/utils/engines'
+import { ROLE_TIERS } from '@/shared/utils/node-roles'
 
 type JsonMap = { [key: string]: JsonValue }
 type SettingsError = { code: 'parse' | 'profile' | 'option' | 'mode' | 'flag'; message: string }
 type Result<T> = { ok: true; value: T } | { ok: false; error: SettingsError }
 
 interface ModelSettingsProfile extends NodeModelReference {
+    name: string
     key: string
     options: JsonMap
     mode: 'defaults' | 'enforced'
@@ -77,6 +80,38 @@ function policyDraft(text: string): Result<{ policy: JsonMap; profiles: JsonMap[
             error: { code: 'parse', message: 'The policy must be an object with a profiles list.' }
         }
     const profiles: JsonMap[] = []
+    const rootFields = objectFields(text, whitespaceEnd(text, 0))
+    const profileField = rootFields.find(field => field.key === 'profiles')
+    const spans =
+        profileField && Array.isArray(policy.profiles) ? arrayValues(text, profileField.start) : []
+    if (
+        ambiguousFields(rootFields, ['profiles', 'residentModels']) ||
+        spans.some(span => {
+            if (text[span.start] !== '{') return false
+            const fields = objectFields(text, span.start)
+            const options = fields.find(field => field.key === 'requestOptions')
+            return (
+                ambiguousFields(fields, [
+                    'name',
+                    'engine',
+                    'model',
+                    'requestOptions',
+                    'requestOptionsMode',
+                    'localOnly'
+                ]) ||
+                (options !== undefined &&
+                    text[options.start] === '{' &&
+                    ambiguousFields(objectFields(text, options.start)))
+            )
+        })
+    )
+        return {
+            ok: false,
+            error: {
+                code: 'parse',
+                message: 'Remove ambiguous duplicate policy or profile keys before editing.'
+            }
+        }
     const identities = new Set<string>()
     for (const profile of Array.isArray(policy.profiles) ? policy.profiles : []) {
         if (
@@ -148,6 +183,7 @@ export function parseModelSettings(text: string): Result<ModelSettingsProfile[]>
         if (profile.engine !== 'llamacpp' && profile.engine !== 'lmstudio') continue
         if (typeof profile.model !== 'string') continue
         profiles.push({
+            name: typeof profile.name === 'string' ? profile.name : '',
             engine: profile.engine,
             model: profile.model,
             key: JSON.stringify([profile.engine, profile.model]),
@@ -165,6 +201,174 @@ type ProfileEdit =
     | { kind: 'localOnly'; value: boolean }
 
 type ValueSpan = { start: number; end: number }
+
+function sameFieldKey(left: string, right: string): boolean {
+    const literal = left.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`^(?:${literal})$`, 'iu').exec(right)?.[0] === right
+}
+
+function ambiguousFields(fields: { key: string }[], canonical: string[] = []): boolean {
+    return fields.some(
+        (field, index) =>
+            fields.slice(0, index).some(previous => sameFieldKey(previous.key, field.key)) ||
+            canonical.some(key => key !== field.key && sameFieldKey(key, field.key))
+    )
+}
+
+function profileNameValid(name: string): boolean {
+    return name.trim() === name && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(name)
+}
+
+function profileIdentityValid(identity: NodeModelReference): boolean {
+    return (
+        isValidRoutingEngineId(identity.engine) &&
+        identity.engine.trim() === identity.engine &&
+        identity.model.length > 0 &&
+        identity.model.isWellFormed() &&
+        new TextEncoder().encode(identity.model).length <= 512 &&
+        !Array.from(identity.model).some(char => {
+            const code = char.charCodeAt(0)
+            return code < 0x20 || (code >= 0x7f && code <= 0x9f)
+        }) &&
+        !ROLE_TIERS.some(tier => [tier, `${tier}-api`, `${tier}-local`].includes(identity.model))
+    )
+}
+
+function lifecycleDraft(text: string) {
+    const draft = policyDraft(text)
+    if (!draft.ok) return draft
+    const names = new Set<string>()
+    for (const profile of draft.value.profiles) {
+        if (
+            typeof profile.name !== 'string' ||
+            !profileNameValid(profile.name) ||
+            names.has(profile.name) ||
+            typeof profile.engine !== 'string' ||
+            typeof profile.model !== 'string' ||
+            !profileIdentityValid({ engine: profile.engine, model: profile.model })
+        )
+            return {
+                ok: false,
+                error: {
+                    code: 'profile',
+                    message: 'Profiles need valid, unique names before changing the profile list.'
+                }
+            } satisfies Result<never>
+        names.add(profile.name)
+    }
+    return draft
+}
+
+/** Create only an ordinary profile; bounds, lock and evidence remain explicit choices. */
+export function createModelSettingsProfile(
+    text: string,
+    identity: NodeModelReference,
+    name: string
+): Result<string> {
+    const draft = lifecycleDraft(text)
+    if (!draft.ok) return draft
+    if (!profileNameValid(name) || !profileIdentityValid(identity))
+        return {
+            ok: false,
+            error: {
+                code: 'profile',
+                message: 'Enter a valid profile name, engine and exact native model.'
+            }
+        }
+    if (
+        draft.value.profiles.some(
+            profile =>
+                profile.name === name ||
+                (profile.engine === identity.engine && profile.model === identity.model)
+        )
+    )
+        return {
+            ok: false,
+            error: {
+                code: 'profile',
+                message: 'A profile already uses this name or engine/model identity.'
+            }
+        }
+    const raw = JSON.stringify({ name, engine: identity.engine, model: identity.model })
+    const field = objectFields(text, whitespaceEnd(text, 0)).find(item => item.key === 'profiles')
+    if (!field || !Array.isArray(draft.value.policy.profiles)) {
+        const start = whitespaceEnd(text, 0)
+        const end = valueEnd(text, start)
+        return {
+            ok: true,
+            value:
+                text.slice(0, start) +
+                replaceField(text.slice(start, end), 'profiles', `[${raw}]`) +
+                text.slice(end)
+        }
+    }
+    const last = arrayValues(text, field.start).at(-1)
+    const at = last ? last.end : field.start + 1
+    return { ok: true, value: text.slice(0, at) + (last ? ',' : '') + raw + text.slice(at) }
+}
+
+/** Remove one exact identity without altering routing references or model files. */
+export function removeModelSettingsProfile(
+    text: string,
+    identity: NodeModelReference
+): Result<string> {
+    const draft = lifecycleDraft(text)
+    if (!draft.ok) return draft
+    const index = draft.value.profiles.findIndex(
+        profile => profile.engine === identity.engine && profile.model === identity.model
+    )
+    if (index < 0)
+        return {
+            ok: false,
+            error: { code: 'profile', message: 'Select a profile in this policy.' }
+        }
+    const residents = draft.value.policy.residentModels
+    if (
+        residents !== undefined &&
+        residents !== null &&
+        (!Array.isArray(residents) ||
+            residents.some(
+                ref =>
+                    !object(ref) || typeof ref.engine !== 'string' || typeof ref.model !== 'string'
+            ))
+    )
+        return {
+            ok: false,
+            error: {
+                code: 'profile',
+                message: 'Fix the residentModels list before removing a profile.'
+            }
+        }
+    if (
+        Array.isArray(residents) &&
+        residents.some(
+            ref => object(ref) && ref.engine === identity.engine && ref.model === identity.model
+        )
+    )
+        return {
+            ok: false,
+            error: {
+                code: 'profile',
+                message: 'Remove this model from residentModels before removing its profile.'
+            }
+        }
+    const field = objectFields(text, whitespaceEnd(text, 0)).find(item => item.key === 'profiles')
+    const spans = field ? arrayValues(text, field.start) : []
+    const span = spans[index]
+    if (!span)
+        return {
+            ok: false,
+            error: { code: 'parse', message: 'Could not locate this profile in the policy draft.' }
+        }
+    const previous = spans[index - 1]
+    const next = spans[index + 1]
+    return {
+        ok: true,
+        value:
+            text.slice(0, previous ? previous.end : span.start) +
+            text.slice(!previous && next ? next.start : span.end)
+    }
+}
 
 function whitespaceEnd(text: string, start: number): number {
     while (/\s/.test(text[start] ?? '') && start < text.length) start++

@@ -6,7 +6,12 @@ import { act, createElement, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { JsonValue } from '@/shared/types/json'
-import { applyModelSettings, parseModelSettings } from '@/shared/utils/node-policy-model-settings'
+import {
+    applyModelSettings,
+    createModelSettingsProfile,
+    parseModelSettings,
+    removeModelSettingsProfile
+} from '@/shared/utils/node-policy-model-settings'
 import ModelSettingsEditor from '@/ui/components/RoutingSettings/ModelSettingsEditor'
 
 const identity = { engine: 'llamacpp', model: 'native/model' }
@@ -285,6 +290,177 @@ describe('model settings policy helpers', () => {
             applyModelSettings(text, ollama, { kind: 'option', key: 'temperature', value: '0.4' })
                 .ok
         ).toBe(false)
+    })
+})
+
+describe('typed profile lifecycle', () => {
+    const first = { name: 'first', ...identity }
+    const second = { name: 'second', ...other }
+    function success(result: ReturnType<typeof createModelSettingsProfile>): string {
+        if (!result.ok) throw new Error(result.error.message)
+        return result.value
+    }
+
+    it.each(['{}', '{"profiles":null}', '{"profiles":[]}', ' \n{ "profiles": [ ] }\n'])(
+        'creates the first minimal profile in %s',
+        text => {
+            const result = success(createModelSettingsProfile(text, identity, 'first'))
+            expect(JSON.parse(result)).toEqual({ profiles: [first] })
+            expect(parseModelSettings(result)).toMatchObject({
+                ok: true,
+                value: [{ ...identity, name: 'first' }]
+            })
+        }
+    )
+
+    it('appends without rewriting existing profiles, numeric tokens or unrelated references', () => {
+        const text = String.raw` {"opaque":9007199254740993,"profiles":[{"name":"first","engine":"llamacpp","model":"native/model","requestOptions":{"precise":1.00000000000000001,"huge":1e400,"nested":[null,{},[]]}}],"residentModels":null,"servedModels":[],"roles":{"nine":{"engine":"llamacpp","model":"native/model"}},"engineBindings":null} `
+        const escaped = { engine: 'lmstudio', model: 'owner/"model\\file/模型' }
+        const raw = JSON.stringify({ name: 'new/model', ...escaped })
+        const edited = success(createModelSettingsProfile(text, escaped, 'new/model'))
+        expect(edited).toBe(text.replace('}}],"residentModels"', `}},${raw}],"residentModels"`))
+        expect(JSON.parse(edited).profiles[1]).toEqual({ name: 'new/model', ...escaped })
+    })
+
+    it.each([
+        { label: 'first', profiles: [first, second], selected: identity, remaining: [second] },
+        { label: 'last', profiles: [second, first], selected: identity, remaining: [second] },
+        {
+            label: 'middle',
+            profiles: [second, first, { name: 'third', engine: 'ollama', model: 'm' }],
+            selected: identity,
+            remaining: [second, { name: 'third', engine: 'ollama', model: 'm' }]
+        },
+        { label: 'only', profiles: [first], selected: identity, remaining: [] }
+    ])('removes only the $label profile', ({ profiles, selected, remaining }) => {
+        const text = JSON.stringify({
+            profiles,
+            residentModels: [],
+            servedModels: [identity],
+            engineBindings: [identity],
+            roles: { nine: identity },
+            files: ['unchanged']
+        })
+        const edited = success(removeModelSettingsProfile(text, selected))
+        expect(JSON.parse(edited)).toEqual({
+            profiles: remaining,
+            residentModels: [],
+            servedModels: [identity],
+            engineBindings: [identity],
+            roles: { nine: identity },
+            files: ['unchanged']
+        })
+    })
+
+    it('removes one raw span while retaining opaque numbers and null/empty values', () => {
+        const rawFirst = JSON.stringify(first)
+        const rawSecond =
+            '{"name":"second","engine":"lmstudio","model":"native/model","requestOptions":{"nested":{"n":9007199254740993,"x":1e400}},"opaque":null}'
+        const text = ` {"profiles":[ ${rawFirst}, \n${rawSecond} ],"servedModels":null,"residentModels":[],"opaque":[] } `
+        expect(success(removeModelSettingsProfile(text, identity))).toBe(
+            text.replace(`${rawFirst}, \n`, '')
+        )
+    })
+
+    it('requires removing the exact resident reference first', () => {
+        const text = JSON.stringify({ profiles: [first, second], residentModels: [identity] })
+        expect(removeModelSettingsProfile(text, identity)).toEqual({
+            ok: false,
+            error: {
+                code: 'profile',
+                message: 'Remove this model from residentModels before removing its profile.'
+            }
+        })
+        expect(JSON.parse(success(removeModelSettingsProfile(text, other))).profiles).toEqual([
+            first
+        ])
+    })
+
+    it.each(['', 'has space', '-leading', 'a'.repeat(129), 'line\nend', 'tail\n'])(
+        'rejects invalid new name %j',
+        name => {
+            expect(createModelSettingsProfile('{}', identity, name)).toMatchObject({
+                ok: false,
+                error: { code: 'profile' }
+            })
+        }
+    )
+
+    it.each([
+        { engine: '', model: 'm' },
+        { engine: 'llamacpp', model: '' },
+        { engine: 'llamacpp', model: 'line\nbreak' },
+        { engine: 'llamacpp', model: '\ud800' },
+        { engine: 'llamacpp', model: 'é'.repeat(257) },
+        { engine: 'llamacpp', model: 'weak-local' },
+        { engine: 'bad/engine', model: 'm' },
+        { engine: 'x'.repeat(41), model: 'm' }
+    ])('rejects incomplete exact identity %j', ref => {
+        expect(createModelSettingsProfile('{}', ref, 'first').ok).toBe(false)
+    })
+
+    it('rejects duplicate names or exact identities and missing removal targets', () => {
+        const text = JSON.stringify({ profiles: [first] })
+        expect(createModelSettingsProfile(text, other, first.name).ok).toBe(false)
+        expect(createModelSettingsProfile(text, identity, 'different').ok).toBe(false)
+        expect(removeModelSettingsProfile(text, other).ok).toBe(false)
+    })
+
+    it.each([
+        '{',
+        'null',
+        '{"profiles":{}}',
+        '{"profiles":[null]}',
+        '{"profiles":[],"profi\\u006ces":[]}',
+        '{"profiles":[{"name":"a","engine":"ollama","engine":"llamacpp","model":"m"}]}',
+        '{"profiles":[{"name":"a","name":"b","engine":"llamacpp","model":"m"}]}',
+        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","requestOptions":{"temperature":1,"temperature":2}}]}',
+        JSON.stringify({ profiles: [identity] }),
+        JSON.stringify({ profiles: [first, { ...second, name: first.name }] }),
+        JSON.stringify({ profiles: [first, { ...first, name: 'other' }] }),
+        JSON.stringify({ profiles: [{ ...first, name: 'invalid name' }] }),
+        JSON.stringify({ profiles: [{ ...first, requestOptionsMode: 'enforced' }] })
+    ])('returns only an error for malformed or ambiguous draft %s', text => {
+        expect(
+            createModelSettingsProfile(text, { engine: 'llamacpp', model: 'new' }, 'new')
+        ).toMatchObject({ ok: false, error: { code: expect.any(String) } })
+        expect(removeModelSettingsProfile(text, identity)).toMatchObject({
+            ok: false,
+            error: { code: expect.any(String) }
+        })
+    })
+
+    it.each([{}, [null], [{ engine: 'llamacpp' }]])(
+        'refuses malformed residency %j',
+        residentModels => {
+            expect(
+                removeModelSettingsProfile(
+                    JSON.stringify({ profiles: [first], residentModels }),
+                    identity
+                ).ok
+            ).toBe(false)
+        }
+    )
+
+    it.each([
+        '{"Profiles":[{"name":"a","engine":"llamacpp","model":"m"}]}',
+        '{"profiles":[],"Profi\\u006ces":[]}',
+        '{"profi\\u006ceS":[]}',
+        '{"profiles":[],"ResidentModels":[]}',
+        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","Model":"shadow"}]}',
+        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","Mo\\u0064el":"shadow"}]}',
+        '{"profiles":[{"Name":"a","engine":"llamacpp","model":"m"}]}',
+        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","RequestOptions":{}}]}',
+        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","localOnly":true,"LocalOnly":false}]}',
+        '{"profiles":[{"name":"a","engine":"llamacpp","model":"m","requestOptions":{"stop":1,"ſtop":2}}]}'
+    ])('refuses service-equivalent key ambiguity without returning a draft: %s', text => {
+        for (const result of [
+            createModelSettingsProfile(text, { engine: 'llamacpp', model: 'new' }, 'new'),
+            removeModelSettingsProfile(text, { engine: 'llamacpp', model: 'm' })
+        ]) {
+            expect(result).toMatchObject({ ok: false, error: { code: 'parse' } })
+            expect(result).not.toHaveProperty('value')
+        }
     })
 })
 
