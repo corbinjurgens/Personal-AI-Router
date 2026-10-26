@@ -217,7 +217,11 @@ func TestMeshRemoteManagementUnavailableStorage(t *testing.T) {
 
 func TestMeshRemoteManagementChangingOrUnreadableSnapshot(t *testing.T) {
 	for _, file := range []string{RemoteManagementFile, RemoteManagementMigrationFile, admissionFileName, membersFileName, "peer.json"} {
-		for _, failure := range []string{"changed", "unreadable"} {
+		failures := []string{"unreadable"}
+		if file == RemoteManagementFile || file == RemoteManagementMigrationFile {
+			failures = append(failures, "changed")
+		}
+		for _, failure := range failures {
 			t.Run(file+" "+failure, func(t *testing.T) {
 				f, _, _ := managementFixture(t)
 				reads := 0
@@ -240,6 +244,43 @@ func TestMeshRemoteManagementChangingOrUnreadableSnapshot(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestMeshRemoteManagementAcceptsAuthorityMetadataDuringRead(t *testing.T) {
+	test := func(name, file string, changeRead int) {
+		t.Run(name, func(t *testing.T) {
+			f, doc, _ := managementFixture(t)
+			reads := 0
+			got := f.mesh.remoteManagement("peer", func(path string) ([]byte, error) {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return data, err
+				}
+				if filepath.Base(path) == file {
+					reads++
+					if reads == changeRead {
+						// Persist after this observation so the later authority
+						// observation sees different bytes with the same meaning.
+						for _, authority := range []string{admissionFileName, membersFileName, "trusted/peer.json"} {
+							authorityPath := filepath.Join(f.dir, authority)
+							before, readErr := os.ReadFile(authorityPath)
+							if readErr != nil {
+								t.Fatal(readErr)
+							}
+							writeIncarnationFile(t, authorityPath, append(before, '\n'))
+						}
+					}
+				}
+				return data, nil
+			})
+			if reads < changeRead || !got.Allowed || got.State != "allowed" || got.Incarnation != doc.Grants[0].Incarnation {
+				t.Fatalf("metadata permission = %+v; injection reads = %d, want at least %d", got, reads, changeRead)
+			}
+		})
+	}
+	test("inside first authority bracket", membersFileName, 1)
+	test("between authority brackets", RemoteManagementFile, 1)
+	test("inside second authority bracket", membersFileName, 3)
 }
 
 func TestMeshRemoteManagementInitializingGuardPresent(t *testing.T) {

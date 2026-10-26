@@ -121,6 +121,19 @@ including a non-self UUID. Loopback fixtures therefore prove propagation, not
 authenticated peer fetching. Availability is carried in the inventory policy,
 never in mDNS TXT data; policy changes require no mDNS record change.
 
+The scanner relays a pause declaration rather than deciding availability. The
+broker sends its policy advertisement to engine-manager, whose
+[`ModelsResult`](../nvpair-engine-manager/models.go) includes it in `/v1/models`.
+[`fetchModelsForPeer` and `refreshNodeModelsCandidates`](model_enrichment.go)
+read that document; [`directory.applyModels`](directory.go) compares the policy
+as well as the model lists, and `modelInventory.applyTo` in
+[`enrich_hosts.go`](enrich_hosts.go) carries it as `DirectoryNode.Policy`.
+Consequently, a pause-only change can reach subscribers without removing the
+node or changing its mDNS record. A missing policy supplies no pause hint; a
+failed fetch is not evidence of either pause or resume. The broker and proxy
+consume this snapshot as described in the
+[broker README](../nvpair-ui-broker/README.md#paused-node-discovery-propagation).
+
 ## Communication
 
 Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` switches to a Unix domain socket or Windows named pipe.

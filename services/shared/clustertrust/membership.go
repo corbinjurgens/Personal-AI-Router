@@ -20,6 +20,10 @@ const membersFileName = "members.json"
 // alone cannot establish a new admission when the roster still records the old
 // epoch. Only the cluster-manager writes or upgrades these records.
 func peerServiceMember(data []byte, peerUUID, clusterID string, pinEpoch uint64) (uint64, bool) {
+	return peerServiceMemberDiagnostic(data, peerUUID, clusterID, pinEpoch, nil)
+}
+
+func peerServiceMemberDiagnostic(data []byte, peerUUID, clusterID string, pinEpoch uint64, diagnostic *PeerServiceDiagnostic) (uint64, bool) {
 	var members []struct {
 		NodeUUID       string `json:"nodeUuid"`
 		State          string `json:"state"`
@@ -27,6 +31,7 @@ func peerServiceMember(data []byte, peerUUID, clusterID string, pinEpoch uint64)
 		AdmissionEpoch uint64 `json:"admissionEpoch"`
 	}
 	if err := json.Unmarshal(data, &members); err != nil {
+		diagnostic.refuse("members_decode", nil)
 		return 0, false
 	}
 	var epoch uint64
@@ -37,9 +42,13 @@ func peerServiceMember(data []byte, peerUUID, clusterID string, pinEpoch uint64)
 		}
 		if found || member.State != "member" || member.ClusterID != clusterID ||
 			member.AdmissionEpoch == 0 || member.AdmissionEpoch != pinEpoch {
+			diagnostic.refuse("member_admission_mismatch", nil)
 			return 0, false
 		}
 		found, epoch = true, member.AdmissionEpoch
+	}
+	if !found {
+		diagnostic.refuse("member_missing", nil)
 	}
 	return epoch, found
 }
@@ -59,26 +68,41 @@ type admissionRecord struct {
 // peerServiceAdmission validates the owner's high-water marks as well as the
 // active pair. Unlike the membership compatibility gate below, service-route
 // authority requires an explicit, complete admission record.
-func peerServiceAdmission(data []byte) (admissionRecord, bool) {
-	var rec struct {
-		admissionRecord
-		Counter   uint64 `json:"counter"`
-		Activated uint64 `json:"activated"`
-		Retired   bool   `json:"retired"`
-	}
+func peerServiceAdmission(data []byte) (peerServiceAdmissionProjection, bool) {
+	return peerServiceAdmissionDiagnostic(data, nil)
+}
+
+func peerServiceAdmissionDiagnostic(data []byte, diagnostic *PeerServiceDiagnostic) (peerServiceAdmissionProjection, bool) {
+	var rec peerServiceAdmissionProjection
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return admissionRecord{}, false
+		diagnostic.refuse("admission_decode", nil)
+		return peerServiceAdmissionProjection{}, false
+	}
+	if diagnostic != nil {
+		diagnostic.ClusterID, diagnostic.Epoch, diagnostic.Counter = rec.ClusterID, rec.Epoch, rec.Counter
 	}
 	// The owner loads records predating activated with epoch as the high-water
 	// mark; use the same interpretation without upgrading anything on disk.
-	if rec.Activated == 0 {
-		rec.Activated = rec.Epoch
+	rec.effectiveActivated = rec.Activated
+	if rec.effectiveActivated == 0 {
+		rec.effectiveActivated = rec.Epoch
 	}
 	if rec.ClusterID == "" || rec.Epoch == 0 || rec.Retired ||
-		rec.Epoch > rec.Activated || rec.Activated > rec.Counter {
-		return admissionRecord{}, false
+		rec.Epoch > rec.effectiveActivated || rec.effectiveActivated > rec.Counter {
+		diagnostic.refuse("admission_invalid", nil)
+		return peerServiceAdmissionProjection{}, false
 	}
-	return rec.admissionRecord, true
+	return rec, true
+}
+
+// Keep raw and effective activated values so compatibility interpretation does
+// not hide a high-water representation change between bracket observations.
+type peerServiceAdmissionProjection struct {
+	admissionRecord
+	Counter            uint64 `json:"counter"`
+	Activated          uint64 `json:"activated"`
+	Retired            bool   `json:"retired"`
+	effectiveActivated uint64
 }
 
 // hasActiveAdmission reports whether clusterDir/admission.json records a live

@@ -596,11 +596,40 @@ LAN peer is refused with no plaintext fallback. Loopback addresses use plaintext
 so a loopback fixture shows propagation, not authenticated fetching. The
 [scanner README](../nvpair-node-scanner/README.md) is the owner of that fetch.
 
-The destination wins over a stale hint. A peer that is paused while the proxy
-still holds an empty hint for it receives the request and refuses it at admission
-with `503`, `X-PAIR-Admission: paused` and `Retry-After: 30`. The router treats
+Propagation does not depend on a proxy display event. The receiving broker's
+`scannerProcess.handleNotify` in [`discovery.go`](../nvpair-ui-broker/discovery.go)
+retains the policy in its discovery store and relay directory; its
+[`proxyProcess.handleSubscribe`](../nvpair-ui-broker/proxy.go) sends an
+engine-addressed `discovery:nodes` snapshot. `facade.replaceSubscribed` in
+[`facade.go`](facade.go) projects the records through `subscribedToNode` in
+[`proxy.go`](proxy.go). `Discovery.SetSubscribed` in
+[`discovery.go`](discovery.go) replaces the node metadata even though
+`nodeEqual` deliberately ignores `PausedBy` when computing outward updates.
+The same resolver applies the pause exclusion to an explicit node selection;
+selection does not make an excluded peer eligible.
+
+The destination wins over a stale hint. For ordinary non-strict inference, a
+peer that is paused while the proxy still holds an empty hint for it receives
+the request and refuses it at admission with `503`, `X-PAIR-Admission: paused`
+and `Retry-After: 30`. The router treats
 the rejection as retryable while another dispatch is permitted. On the final
-permitted attempt it relays the peer's `503`, even if other candidates remain. A hint that outlives a resume only keeps the node out of inference routing
+permitted attempt it relays the peer's `503`, even if other candidates remain.
+`admissionController.admit` and `writeAdmissionRejection` in
+[`admission.go`](admission.go) own the destination availability check and headers;
+the ordinary branch of `serveIngress` in [`ingress.go`](ingress.go) uses that
+admission instead of routing onward. The precommit retry decision in
+[`routing.go`](routing.go) treats the status as retryable, within the existing
+request deadline and dispatch limit.
+Here "fast" means that pause refuses admission without waiting for engine
+capacity; it establishes no network latency bound or successful fallback.
+
+Strict hybrid ingress instead uses `serveStrictLocal` in `ingress.go`, calling
+`AdmitStrict` in [`readiness_contract.go`](readiness_contract.go). Non-available
+destination state also refuses strict admission, but `writeStrictAdmissionError` reports
+`503` with code `strict-admission`, without the ordinary pause or Retry-After
+headers. Neither ingress path routes the request onward.
+
+A hint that outlives a resume only keeps the node out of inference routing
 until a later fetch replaces it. Management changes never consult the hint; the
 target's own state decides them.
 

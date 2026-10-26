@@ -200,8 +200,14 @@ func (b *Broker) boundAuthorityLocked(r *policyRuntime, source *proxyProcess, in
 	}
 	if in.PeerID != "" {
 		mesh := clustertrust.Open(b.clusterDir)
-		incarnation, ok := mesh.PeerServiceIncarnation(in.PeerID)
+		incarnation, ok, diagnostic := mesh.PeerServiceIncarnationWithDiagnostic(in.PeerID)
 		if !ok || incarnation != in.PeerIncarnation {
+			if ok {
+				diagnostic.Predicate = "incarnation_mismatch"
+			}
+			diagnostic.ExpectedIncarnation = in.PeerIncarnation
+			diagnostic.ObservedIncarnation = incarnation
+			logBoundManagementRefusal("broker.peer_incarnation", in.PeerID, "not_checked", in.ProxyRunID, diagnostic)
 			return boundRefusal("management-denied", -32012)
 		}
 		if mutate {

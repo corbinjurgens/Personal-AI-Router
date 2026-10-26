@@ -964,6 +964,32 @@ older manager's proof. Recovery verifies a stored pause before opening the
 replacement's management surface. A repeated completed Pause rechecks physical
 shutdown without allocating another policy revision.
 
+Paused-node visibility and inference eligibility have different owners. The
+destination broker's
+[`sendNodeProjection`](../services/nvpair-ui-broker/policy_notifications.go)
+publishes the policy's `pausedBy` to engine-manager, which includes it in
+[`ModelsResult`](../services/nvpair-engine-manager/models.go). The scanner's
+[`model enrichment`](../services/nvpair-node-scanner/model_enrichment.go) carries
+that inventory policy into directory updates, including policy-only changes.
+The receiving broker preserves it in discovery and
+[`relays full snapshots`](../services/nvpair-ui-broker/proxy.go) to proxy facades;
+pause does not itself remove the node from the directory or mDNS.
+
+The proxy's [`resolveRouteCandidates`](../services/nvpair-proxy/proxy.go) excludes
+remote peers with a nonempty pause hint from inference, including explicit node
+selection and tier resolution. Self is judged by local admission; inventory and
+other non-inference paths do not use this pause filter. The hint is a cached
+policy snapshot, so observation requires a successful scanner refresh, with no
+fixed convergence deadline. Destination admission remains authoritative: a
+non-strict request arriving with a stale unpaused hint can receive `503`,
+`X-PAIR-Admission: paused` and `Retry-After: 30`, and the router retries only while
+its request budget permits. Strict hybrid admission also vetoes unavailable
+destinations, using its own `strict-admission` error without those ordinary
+pause headers. A cached pause can also delay reuse after Resume.
+See the [proxy contract](../services/nvpair-proxy/spec.md#5-request-path) for the
+exceptions, no-candidate responses and final-attempt behavior. These mechanisms
+do not establish physical-stop proof or native multi-machine acceptance.
+
 An old target without the permission read is unsupported; downgrading to a
 pre-PG target executable restores its unrestricted pinned-peer management.
 Authorization logs record caller/target UUID, operation family, decision,

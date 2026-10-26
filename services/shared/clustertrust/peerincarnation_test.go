@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -429,6 +430,34 @@ func TestMeshPeerServiceIncarnationRejectsAuthorityChangeDuringRead(t *testing.T
 	test("local readmission after first admission read", 1, func(t *testing.T, f *incarnationFixture) {
 		writeAdmission(t, f.dir, "cluster", 4)
 	})
+	test("same-epoch DER replacement after first pin read", 2, func(t *testing.T, f *incarnationFixture) {
+		certPEM, _, _ := genLeaf(t, "peer")
+		f.pin.CertPem = string(certPEM)
+		f.writePin(t)
+		// Even refreshing the loaded pin cannot reanchor this observation.
+		f.mesh.Refresh()
+	})
+	test("pin principal replacement after first pin read", 2, func(t *testing.T, f *incarnationFixture) {
+		f.pin.NodeUUID = "stranger"
+		f.writePin(t)
+	})
+	test("pin cluster replacement after first pin read", 2, func(t *testing.T, f *incarnationFixture) {
+		f.pin.ClusterID = "other"
+		f.writePin(t)
+	})
+	test("pin certificate principal replacement after first pin read", 2, func(t *testing.T, f *incarnationFixture) {
+		certPEM, _, _ := genLeaf(t, "stranger")
+		f.pin.CertPem = string(certPEM)
+		f.writePin(t)
+	})
+	memberChange := func(name, record string) {
+		test(name, 3, func(t *testing.T, f *incarnationFixture) {
+			writeIncarnationFile(t, filepath.Join(f.dir, membersFileName), []byte(record))
+		})
+	}
+	memberChange("member becomes pending", `[{"nodeUuid":"peer","state":"pending-inbound","clusterId":"cluster","admissionEpoch":7}]`)
+	memberChange("member changes cluster", `[{"nodeUuid":"peer","state":"member","clusterId":"other","admissionEpoch":7}]`)
+	memberChange("duplicate target member appears", `[{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":7},{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":7}]`)
 	test("same-cert peer readmission after first pin read", 2, func(t *testing.T, f *incarnationFixture) {
 		f.pin.AdmissionEpoch = 8
 		f.writePin(t)
@@ -465,6 +494,98 @@ func TestMeshPeerServiceIncarnationRejectsAuthorityChangeDuringRead(t *testing.T
 		certPEM, keyPEM, _ := genLeaf(t, "replacement-self")
 		writeIdentity(t, f.dir, certPEM, keyPEM)
 		f.mesh.Refresh()
+	})
+}
+
+func TestMeshPeerServiceAuthorityRejectsAdmissionProjectionChange(t *testing.T) {
+	test := func(name, record string) {
+		t.Run(name, func(t *testing.T) {
+			f := newIncarnationFixture(t)
+			path := filepath.Join(f.dir, admissionFileName)
+			writeIncarnationFile(t, path, []byte(`{"clusterId":"cluster","epoch":3,"counter":4,"activated":3}`))
+			requireIncarnation(t, f.mesh)
+			reads := 0
+			got, ok := f.mesh.peerServiceIncarnation("peer", func(path string) ([]byte, error) {
+				data, err := os.ReadFile(path)
+				if filepath.Base(path) == admissionFileName {
+					reads++
+					if reads == 2 {
+						return []byte(record), nil
+					}
+				}
+				return data, err
+			})
+			if reads != 2 || ok || got != "" {
+				t.Fatalf("changed admission = %q, %v; reads = %d, want empty, false, 2", got, ok, reads)
+			}
+		})
+	}
+	test("counter advances with same active pair", `{"clusterId":"cluster","epoch":3,"counter":5,"activated":3}`)
+	test("raw activated becomes implicit with same effective value", `{"clusterId":"cluster","epoch":3,"counter":4}`)
+	test("activated advances with same counter and active pair", `{"clusterId":"cluster","epoch":3,"counter":4,"activated":4}`)
+	test("retired active pair", `{"clusterId":"cluster","epoch":3,"counter":4,"activated":3,"retired":true}`)
+	test("activated exceeds counter", `{"clusterId":"cluster","epoch":3,"counter":4,"activated":5}`)
+	test("epoch exceeds activated", `{"clusterId":"cluster","epoch":3,"counter":4,"activated":2}`)
+}
+
+func TestMeshPeerServiceAuthorityAcceptsMetadataDuringRead(t *testing.T) {
+	test := func(name, file string, replacement func(*testing.T, incarnationFixture, []byte) []byte) {
+		t.Run(name, func(t *testing.T) {
+			f := newIncarnationFixture(t)
+			writeIncarnationFile(t, filepath.Join(f.dir, membersFileName), []byte(`[
+				{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":7},
+				{"nodeUuid":"other","state":"member","clusterId":"cluster","admissionEpoch":9,"name":"other"}
+			]`))
+			want := requireIncarnation(t, f.mesh)
+			order := []string{admissionFileName, "peer.json", membersFileName, membersFileName, "peer.json", admissionFileName}
+			newReader := func() func(string) ([]byte, error) {
+				reads, targetReads := 0, 0
+				return func(path string) ([]byte, error) {
+					if reads >= len(order) || filepath.Base(path) != order[reads] {
+						t.Fatalf("read %d = %s; want A/P/M/M/P/A", reads+1, path)
+					}
+					reads++
+					data, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatalf("read authority: %v", err)
+					}
+					if filepath.Base(path) == file {
+						targetReads++
+						if targetReads == 2 {
+							data = replacement(t, f, data)
+						}
+					}
+					return data, nil
+				}
+			}
+			if got, ok := f.mesh.peerServiceIncarnation("peer", newReader()); !ok || got != want {
+				t.Fatalf("metadata incarnation = %q, %v; want %q, true", got, ok, want)
+			}
+			if got, ok := f.mesh.peerAdmissionEpoch("peer", newReader()); !ok || got != 7 {
+				t.Fatalf("metadata peer epoch = %d, %v; want 7, true", got, ok)
+			}
+		})
+	}
+	test("admission formatting", admissionFileName, func(t *testing.T, f incarnationFixture, data []byte) []byte {
+		return append(data, '\n')
+	})
+	test("pin endorsement", "peer.json", func(t *testing.T, f incarnationFixture, data []byte) []byte {
+		var pin map[string]interface{}
+		if err := json.Unmarshal(data, &pin); err != nil {
+			t.Fatal(err)
+		}
+		pin["endorsements"] = []string{"new endorsement"}
+		return managementEncode(t, pin)
+	})
+	test("PEM formatting with identical DER", "peer.json", func(t *testing.T, f incarnationFixture, data []byte) []byte {
+		f.pin.CertPem = "\n" + strings.ReplaceAll(f.pin.CertPem, "\n", "\r\n")
+		return managementEncode(t, f.pin)
+	})
+	test("target and other member metadata and roster order", membersFileName, func(t *testing.T, f incarnationFixture, data []byte) []byte {
+		return []byte(`[
+			{"nodeUuid":"other","state":"member","clusterId":"cluster","admissionEpoch":9,"name":"other renamed"},
+			{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":7,"name":"renamed","ipAddress":"192.0.2.40","port":25000,"lastSeen":100}
+		]`)
 	})
 }
 

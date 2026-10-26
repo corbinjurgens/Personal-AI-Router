@@ -4,8 +4,12 @@
 package tests
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -70,19 +74,33 @@ func runSwitchEngine() error {
 	}
 	return http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/generate" {
+		if r.URL.Path == "/api/generate" || r.URL.Path == "/v1/chat/completions" {
 			if err := notify("/inflight"); err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
-			fmt.Fprintln(w, `{"model":"switch-model","done":true,"response":"finished"}`)
+			if r.URL.Path == "/v1/chat/completions" {
+				fmt.Fprintln(w, `{"id":"fixture","object":"chat.completion","model":"switch-model","choices":[{"index":0,"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]}`)
+			} else {
+				fmt.Fprintln(w, `{"model":"switch-model","done":true,"response":"finished"}`)
+			}
 			return
 		}
 		switch r.URL.Path {
 		case "/api/tags":
-			fmt.Fprintln(w, `{"models":[{"name":"switch-model"}]}`)
-		case "/v1/models":
-			fmt.Fprintln(w, `{"object":"list","data":[{"id":"switch-model"}]}`)
+			if os.Getenv("NVPAIR_TEST_SWITCH_EMPTY_MODELS") == "1" {
+				fmt.Fprintln(w, `{"models":[]}`)
+			} else {
+				fmt.Fprintln(w, `{"models":[{"name":"switch-model"}]}`)
+			}
+		case "/api/ps":
+			fmt.Fprintln(w, `{"models":[]}`)
+		case "/v1/models", "/models":
+			if os.Getenv("NVPAIR_TEST_SWITCH_EMPTY_MODELS") == "1" {
+				fmt.Fprintln(w, `{"object":"list","data":[]}`)
+			} else {
+				fmt.Fprintln(w, `{"object":"list","data":[{"id":"switch-model","status":{"value":"unloaded"}}]}`)
+			}
 		default:
 			fmt.Fprintln(w, `{"version":"fixture"}`)
 		}
@@ -90,23 +108,33 @@ func runSwitchEngine() error {
 }
 
 type switchProcessFixture struct {
-	base           string
-	p              *interopProcess
-	ports          fixtureServicePorts
-	sourcePort     int
-	targetPort     int
-	facadePort     int
-	control        *httptest.Server
-	release        chan struct{}
-	releaseOne     sync.Once
-	inflight       chan struct{}
-	mu             sync.Mutex
-	starts         map[string][]int32
-	changes        []settings.SwitchChanged
-	holdTarget     bool
-	targetStarting chan struct{}
-	scanner        string
-	scannerPort    int
+	base                string
+	p                   *interopProcess
+	ports               fixtureServicePorts
+	sourcePort          int
+	targetPort          int
+	facadePort          int
+	targetFacadePort    int
+	control             *httptest.Server
+	release             chan struct{}
+	releaseOne          sync.Once
+	targetRelease       chan struct{}
+	targetReleaseOne    sync.Once
+	inflight            chan struct{}
+	mu                  sync.Mutex
+	starts              map[string][]int32
+	identities          []serviceProcessIdentity
+	engineIdentities    map[string][]serviceProcessIdentity
+	effectError         error
+	inferences          map[string]int
+	failTarget          bool
+	checkSourceExit     bool
+	sourceAliveAtTarget bool
+	changes             []settings.SwitchChanged
+	holdTarget          bool
+	targetStarting      chan struct{}
+	scanner             string
+	scannerPort         int
 }
 
 func newSwitchProcessFixture(t *testing.T) *switchProcessFixture {
@@ -116,7 +144,23 @@ func newSwitchProcessFixture(t *testing.T) *switchProcessFixture {
 
 func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePorts) *switchProcessFixture {
 	t.Helper()
-	f := &switchProcessFixture{base: base, ports: ports, sourcePort: freePort(t), targetPort: freePort(t), facadePort: freePort(t), release: make(chan struct{}), inflight: make(chan struct{}, 1), starts: make(map[string][]int32), targetStarting: make(chan struct{}, 1)}
+	f := prepareSwitchProcessFixture(t, base, ports, "")
+	f.start(t)
+	f.rpcOK(t, "engine:start", map[string]string{"engine": "ollama"})
+	// Initialize every settings baseline before a switch revision is captured.
+	// Otherwise the periodic refresh can add an unrelated engine's revision.
+	for _, engine := range engines.Names() {
+		f.rpcOK(t, "engine:get-settings", map[string]string{"engine": engine})
+	}
+	return f
+}
+
+// Preparation is separate from launch so a service-owned broker can supervise
+// this same isolated manager/proxy stack without starting a second broker.
+// A supplied scanner is an already prepared test-image slot owned by its caller.
+func prepareSwitchProcessFixture(t *testing.T, base string, ports fixtureServicePorts, preparedScanner string) *switchProcessFixture {
+	t.Helper()
+	f := &switchProcessFixture{base: base, ports: ports, sourcePort: freePort(t), targetPort: freePort(t), facadePort: freePort(t), targetFacadePort: freePort(t), release: make(chan struct{}), targetRelease: make(chan struct{}), inflight: make(chan struct{}, 1), starts: make(map[string][]int32), engineIdentities: make(map[string][]serviceProcessIdentity), inferences: make(map[string]int), targetStarting: make(chan struct{}, 1)}
 	f.control = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pid, err := strconv.ParseInt(r.URL.Query().Get("pid"), 10, 32)
 		if err != nil {
@@ -124,41 +168,100 @@ func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 			return
 		}
 		if r.URL.Path == "/started" {
+			identity, identityErr := serviceProcessIdentityAt(r.Context(), int32(pid))
 			f.mu.Lock()
 			name := r.URL.Query().Get("engine")
+			if identityErr != nil {
+				f.effectError = identityErr
+			} else {
+				f.identities = append(f.identities, identity)
+				f.engineIdentities[name] = append(f.engineIdentities[name], identity)
+			}
 			f.starts[name] = append(f.starts[name], int32(pid))
+			if name == "llamacpp" && f.checkSourceExit {
+				for _, source := range f.engineIdentities["ollama"] {
+					stopped, err := switchProcessIdentityStopped(r.Context(), source)
+					if err != nil {
+						f.effectError = err
+					}
+					f.sourceAliveAtTarget = f.sourceAliveAtTarget || !stopped
+				}
+			}
 			hold := name == "llamacpp" && f.holdTarget
+			fail := name == "llamacpp" && f.failTarget
 			f.mu.Unlock()
+			if fail {
+				http.Error(w, "fixture startup refused", http.StatusServiceUnavailable)
+				return
+			}
 			if hold {
 				select {
 				case f.targetStarting <- struct{}{}:
 				default:
 				}
 				select {
-				case <-f.release:
+				case <-f.targetRelease:
 				case <-r.Context().Done():
 				}
 			}
 		} else if r.URL.Path == "/inflight" {
+			f.mu.Lock()
+			name := r.URL.Query().Get("engine")
+			f.inferences[name]++
+			f.mu.Unlock()
 			select {
 			case f.inflight <- struct{}{}:
 			default:
 			}
+			release := f.release
+			if name == "llamacpp" {
+				release = f.targetRelease
+			}
 			select {
-			case <-f.release:
+			case <-release:
 			case <-r.Context().Done():
 			}
 		}
 	}))
 	t.Cleanup(func() { f.unblock(); f.control.Close() })
+	t.Cleanup(func() {
+		f.unblock()
+		f.mu.Lock()
+		identities := append([]serviceProcessIdentity(nil), f.identities...)
+		effectErr := f.effectError
+		f.mu.Unlock()
+		if effectErr != nil {
+			t.Errorf("record fixture engine identity/effect: %v", effectErr)
+		}
+		// The engine image is the parent test executable. Never scan by that
+		// path: signal only controller-recorded PID/path/creation identities.
+		for _, identity := range identities {
+			stopped, err := switchProcessIdentityStopped(context.Background(), identity)
+			if err != nil {
+				t.Errorf("inspect fixture engine: %v", err)
+				continue
+			}
+			if !stopped {
+				inventory := &serviceProcessInventory{paths: []string{identity.Path}}
+				if err := inventory.kill(identity); err != nil && !errors.Is(err, errServiceProcessDeparted) {
+					t.Errorf("cleanup fixture engine: %v", err)
+					continue
+				}
+			}
+			assertSwitchProcessIdentityStopped(t, identity)
+		}
+	})
 	image, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Reuse the empty-directory scanner instead of browsing host multicast.
 	// The fixed executable role already has a Windows test-bin manifest entry.
-	f.scanner = filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
-	jointCopyExecutable(t, image, f.scanner)
+	f.scanner = preparedScanner
+	if f.scanner == "" {
+		f.scanner = filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
+		jointCopyExecutable(t, image, f.scanner)
+	}
 	f.scannerPort = freePort(t)
 	jointIsolateEngines(t, f.base, freePort(t))
 	for _, engine := range []struct {
@@ -180,7 +283,7 @@ func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 		name   string
 		server int
 		port   int
-	}{{"ollama", f.sourcePort, f.facadePort}, {"llamacpp", f.targetPort, freePort(t)}} {
+	}{{"ollama", f.sourcePort, f.facadePort}, {"llamacpp", f.targetPort, f.targetFacadePort}} {
 		// Explicit settings bypass managed default-port ownership. Never bind
 		// beside or dial an installed PAIR's default engine facade.
 		journal[facade.name] = map[string]any{"explicit": true, "snapshot": map[string]any{
@@ -191,17 +294,57 @@ func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 	// The broker keeps its settings journal beside --cluster-dir, not in the
 	// manager's application directory.
 	jointWriteJSON(t, filepath.Join(f.base, "engine-settings-operations.json"), journal)
-	f.start(t)
-	f.rpcOK(t, "engine:start", map[string]string{"engine": "ollama"})
-	// Initialize every settings baseline before a switch revision is captured.
-	// Otherwise the periodic refresh can add an unrelated engine's revision.
-	for _, engine := range engines.Names() {
-		f.rpcOK(t, "engine:get-settings", map[string]string{"engine": engine})
-	}
 	return f
 }
 
-func (f *switchProcessFixture) unblock() { f.releaseOne.Do(func() { close(f.release) }) }
+func (f *switchProcessFixture) unblockSource() { f.releaseOne.Do(func() { close(f.release) }) }
+func (f *switchProcessFixture) unblockTarget() {
+	f.targetReleaseOne.Do(func() { close(f.targetRelease) })
+}
+func (f *switchProcessFixture) unblock() { f.unblockSource(); f.unblockTarget() }
+
+// A later process may reuse a departed engine's PID, including another fixture
+// engine. Observe the recorded lifetime, just as kill revalidates it before a
+// signal; a reused PID is neither a survivor nor authority to signal its owner.
+func switchProcessIdentityStopped(ctx context.Context, expected serviceProcessIdentity) (bool, error) {
+	stopped, err := serviceProcessStopped(ctx, expected.PID)
+	if err != nil || stopped {
+		return stopped, err
+	}
+	current, err := serviceProcessIdentityAt(ctx, expected.PID)
+	if err != nil {
+		// Exit can race the metadata read. Only positive exit evidence resolves
+		// that race; an inaccessible live process remains an inspection error.
+		departed, exitErr := serviceProcessStopped(ctx, expected.PID)
+		if departed && exitErr == nil {
+			return true, nil
+		}
+		return false, errors.Join(err, exitErr)
+	}
+	return current != expected, nil
+}
+
+func assertSwitchProcessIdentityStopped(t *testing.T, identity serviceProcessIdentity) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		stopped, err := switchProcessIdentityStopped(ctx, identity)
+		if err != nil {
+			t.Fatalf("inspect engine lifetime %+v: %v", identity, err)
+		}
+		if stopped {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("engine lifetime survived: %+v", identity)
+		case <-tick.C:
+		}
+	}
+}
 
 func (f *switchProcessFixture) start(t *testing.T) {
 	t.Helper()
@@ -862,6 +1005,13 @@ func newPinnedSwitchFixture(t *testing.T, reverse bool) *pinnedSwitchFixture {
 		origin.stop()
 		mesh.stopScanner()
 		f.p.cleanup()
+		if t.Failed() {
+			for _, line := range strings.Split(f.p.output.String(), "\n") {
+				if strings.Contains(line, "bound engine management refused") {
+					t.Logf("target bound refusal: %s", line)
+				}
+			}
+		}
 	})
 	directory := mesh.directory(mesh.b)
 	ec := mesh.b.observers[noderec.ServiceEngineControl]
@@ -894,6 +1044,12 @@ func testEngineSwitchPinned(t *testing.T, reverse bool) {
 	t.Helper()
 	p := newPinnedSwitchFixture(t, reverse)
 	mesh, f, origin, ec := p.mesh, p.f, p.origin, p.ec
+	t.Cleanup(func() {
+		if t.Failed() {
+			logSwitchPeerAuthority(t, "switch failure before fixture teardown", mesh.a, mesh.b)
+			logSwitchPeerAuthority(t, "switch failure before fixture teardown", mesh.b, mesh.a)
+		}
+	})
 	var initial settings.SwitchStatus
 	task2Decode(t, origin.call(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: mesh.b.uuid}).Result, &initial)
 	request := settings.SwitchRequest{NodeID: mesh.b.uuid, RequestID: "switch-pinned", SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: initial.ConfigurationRevision}
@@ -972,4 +1128,134 @@ func testEngineSwitchPinned(t *testing.T, reverse bool) {
 	})
 	assertSwitchProcessStopped(t, f.pid(t, "ollama"))
 	f.pid(t, "llamacpp")
+}
+
+// logSwitchPeerAuthority is a diagnostic mirror of Mesh.peerServiceAuthority's
+// disk predicates, not an authority decision or a retry. It reads only this
+// fixture's public records, never node.key or certificate contents into logs.
+// The bracket reads can expose a changing snapshot. A later successful sample
+// cannot establish which predicate failed in an earlier subprocess lookup.
+func logSwitchPeerAuthority(t *testing.T, reason string, local, peer *task1Node) {
+	t.Helper()
+	dir := filepath.Join(local.base, "cluster")
+	record := map[string]any{
+		"reason": reason, "utc": time.Now().UTC().Format(time.RFC3339Nano),
+		"local": local.uuid, "peer": peer.uuid,
+		"fixtureMeshClustered": local.mesh.Clustered(), "fixtureMeshNodeUUID": local.mesh.NodeUUID(),
+		"fixtureMeshHasPin": local.mesh.HasPin(peer.uuid),
+		"cacheScope":        "fixture Mesh only; subprocess cached identity/trust and pointer stability are not observable",
+	}
+	record["fixtureMeshRemoteManagement"] = local.mesh.RemoteManagement(peer.uuid)
+	read := func(name, path string) ([]byte, error) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			record[name+"ReadError"] = err.Error()
+		} else {
+			record[name+"Bytes"] = len(data)
+			record[name+"SHA256"] = fmt.Sprintf("%x", sha256.Sum256(data))
+		}
+		return data, err
+	}
+	admissionPath := filepath.Join(dir, "admission.json")
+	pinPath := filepath.Join(dir, "trusted", peer.uuid+".json")
+	membersPath := filepath.Join(dir, "members.json")
+	admissionData, admissionErr := read("admission", admissionPath)
+	pinData, pinErr := read("pin", pinPath)
+	membersData, membersErr := read("members", membersPath)
+	var admission struct {
+		ClusterID string `json:"clusterId"`
+		Epoch     uint64 `json:"epoch"`
+		Counter   uint64 `json:"counter"`
+		Activated uint64 `json:"activated"`
+		Retired   bool   `json:"retired"`
+	}
+	admissionDecode := json.Unmarshal(admissionData, &admission)
+	activated := admission.Activated
+	if activated == 0 {
+		activated = admission.Epoch
+	}
+	record["admission"] = admission
+	record["admissionValid"] = admissionErr == nil && admissionDecode == nil &&
+		admission.ClusterID != "" && admission.Epoch != 0 && !admission.Retired &&
+		admission.Epoch <= activated && activated <= admission.Counter
+	if admissionDecode != nil {
+		record["admissionDecodeError"] = admissionDecode.Error()
+	}
+	var pin struct {
+		NodeUUID       string `json:"nodeUuid"`
+		CertPem        string `json:"certPem"`
+		ClusterID      string `json:"clusterId"`
+		AdmissionEpoch uint64 `json:"admissionEpoch"`
+	}
+	pinDecode := json.Unmarshal(pinData, &pin)
+	record["pinNodeUUID"], record["pinClusterID"], record["pinEpoch"] = pin.NodeUUID, pin.ClusterID, pin.AdmissionEpoch
+	record["pinMetadataValid"] = pinErr == nil && pinDecode == nil && pin.ClusterID == admission.ClusterID && pin.AdmissionEpoch != 0
+	if pinDecode != nil {
+		record["pinDecodeError"] = pinDecode.Error()
+	}
+	block, _ := pem.Decode([]byte(pin.CertPem))
+	pinCertificateValid := false
+	if block != nil && block.Type == "CERTIFICATE" {
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			record["pinCertificateError"] = err.Error()
+		} else {
+			principal := clustertrust.UUIDFromCert(cert)
+			record["pinCertificatePrincipal"] = principal
+			record["pinCertificateSHA256"] = fmt.Sprintf("%x", sha256.Sum256(block.Bytes))
+			pinCertificateValid = pin.NodeUUID == peer.uuid && principal == peer.uuid
+			cfg, ok := local.mesh.ClientTLSConfig(peer.uuid)
+			if ok && cfg.VerifyPeerCertificate != nil {
+				err := cfg.VerifyPeerCertificate([][]byte{block.Bytes}, nil)
+				record["fixtureMeshTrustMatchesDiskPin"] = err == nil
+				if err != nil {
+					record["fixtureMeshTrustError"] = err.Error()
+				}
+			}
+		}
+	}
+	record["pinCertificateValid"] = pinCertificateValid
+	var members []struct {
+		NodeUUID       string `json:"nodeUuid"`
+		State          string `json:"state"`
+		ClusterID      string `json:"clusterId"`
+		AdmissionEpoch uint64 `json:"admissionEpoch"`
+	}
+	membersDecode := json.Unmarshal(membersData, &members)
+	if membersDecode != nil {
+		record["membersDecodeError"] = membersDecode.Error()
+	}
+	matching := 0
+	memberValid := membersErr == nil && membersDecode == nil
+	for _, member := range members {
+		if member.NodeUUID != peer.uuid {
+			continue
+		}
+		matching++
+		record[fmt.Sprintf("peerMember%d", matching)] = member
+		if member.State != "member" || member.ClusterID != admission.ClusterID ||
+			member.AdmissionEpoch == 0 || member.AdmissionEpoch != pin.AdmissionEpoch {
+			memberValid = false
+		}
+	}
+	record["peerMemberCount"] = matching
+	record["memberValid"] = memberValid && matching == 1
+	for _, file := range []struct {
+		name, path string
+		previous   []byte
+		firstErr   error
+	}{
+		{"members", membersPath, membersData, membersErr},
+		{"pin", pinPath, pinData, pinErr},
+		{"admission", admissionPath, admissionData, admissionErr},
+	} {
+		current, err := read(file.name+"Bracket", file.path)
+		record[file.name+"Stable"] = file.firstErr == nil && err == nil && bytes.Equal(current, file.previous)
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Logf("peer authority diagnostic encode: %v", err)
+		return
+	}
+	t.Logf("peer authority diagnostic: %s", data)
 }

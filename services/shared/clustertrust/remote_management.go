@@ -242,6 +242,12 @@ type RemoteManagementPermission struct {
 	Reason      string
 	Revision    string
 	Incarnation string
+	Diagnostic  PeerServiceDiagnostic
+}
+
+func (p RemoteManagementPermission) refused(predicate string, err error) RemoteManagementPermission {
+	p.Diagnostic.refuse(predicate, err)
+	return p
 }
 
 func (m *Mesh) RemoteManagement(peerUUID string) RemoteManagementPermission {
@@ -258,58 +264,78 @@ func (m *Mesh) RemoteManagement(peerUUID string) RemoteManagementPermission {
 func (m *Mesh) remoteManagement(peerUUID string, readFile func(string) ([]byte, error)) RemoteManagementPermission {
 	unavailable := RemoteManagementPermission{State: "unavailable", Reason: "Remote management permission is unavailable."}
 	if m == nil || m.dir == "" || !remoteManagementPrincipal(peerUUID) {
-		return unavailable
+		return unavailable.refused("permission_peer_invalid", nil)
 	}
 	guardPath := filepath.Join(m.dir, RemoteManagementInitializingFile)
 	if _, err := readFile(guardPath); !os.IsNotExist(err) {
-		return unavailable
+		return unavailable.refused("permission_initializing_guard", err)
 	}
-	before, ok := m.peerServiceIncarnation(peerUUID, readFile)
+	before, ok := m.peerServiceIncarnationDiagnostic(peerUUID, readFile, &unavailable.Diagnostic)
 	if !ok {
 		return unavailable
 	}
+	unavailable.Diagnostic.ExpectedIncarnation = before
 	markerPath := filepath.Join(m.dir, RemoteManagementMigrationFile)
 	docPath := filepath.Join(m.dir, RemoteManagementFile)
 	markerData, err := readFile(markerPath)
 	if err != nil {
-		return unavailable
+		return unavailable.refused("permission_marker_read", err)
 	}
 	marker, err := DecodeRemoteManagementMigration(markerData)
-	if err != nil || marker.State != "complete" {
-		return unavailable
+	if err != nil {
+		return unavailable.refused("permission_marker_invalid", nil)
+	}
+	if marker.State != "complete" {
+		return unavailable.refused("permission_migration_incomplete", nil)
 	}
 	docData, err := readFile(docPath)
 	if err != nil {
-		return unavailable
+		return unavailable.refused("permission_document_read", err)
 	}
 	doc, err := DecodeRemoteManagementDocument(docData)
-	if err != nil || doc.MigrationID != marker.ID {
-		return unavailable
+	if err != nil {
+		return unavailable.refused("permission_document_invalid", nil)
+	}
+	if doc.MigrationID != marker.ID {
+		return unavailable.refused("permission_migration_mismatch", nil)
 	}
 	currentDoc, err := readFile(docPath)
-	if err != nil || !bytes.Equal(docData, currentDoc) {
-		return unavailable
+	if err != nil {
+		return unavailable.refused("permission_document_bracket_read", err)
+	}
+	if !bytes.Equal(docData, currentDoc) {
+		return unavailable.refused("permission_document_changed", nil)
 	}
 	currentMarker, err := readFile(markerPath)
-	if err != nil || !bytes.Equal(markerData, currentMarker) {
+	if err != nil {
+		return unavailable.refused("permission_marker_bracket_read", err)
+	}
+	if !bytes.Equal(markerData, currentMarker) {
+		return unavailable.refused("permission_marker_changed", nil)
+	}
+	after, ok := m.peerServiceIncarnationDiagnostic(peerUUID, readFile, &unavailable.Diagnostic)
+	unavailable.Diagnostic.ObservedIncarnation = after
+	if !ok {
 		return unavailable
 	}
-	after, ok := m.peerServiceIncarnation(peerUUID, readFile)
-	if !ok || before != after {
-		return unavailable
+	if before != after {
+		return unavailable.refused("permission_incarnation_changed", nil)
 	}
 	if _, err := readFile(guardPath); !os.IsNotExist(err) {
-		return unavailable
+		return unavailable.refused("permission_initializing_guard_changed", err)
 	}
-	result := RemoteManagementPermission{State: "unreviewed", Reason: "Remote management has not been granted.", Revision: doc.Revision, Incarnation: before}
+	result := RemoteManagementPermission{State: "unreviewed", Reason: "Remote management has not been granted.", Revision: doc.Revision, Incarnation: before, Diagnostic: unavailable.Diagnostic}
+	result.Diagnostic.Predicate = "permission_unreviewed"
 	for _, grant := range doc.Grants {
 		if grant.PeerUUID != peerUUID || grant.Incarnation != before {
 			continue
 		}
 		result.Allowed = grant.Allowed
 		result.State, result.Reason = "denied", "Remote management is blocked on this device."
+		result.Diagnostic.Predicate = "permission_denied"
 		if grant.Allowed {
 			result.State, result.Reason = "allowed", "Remote management is allowed."
+			result.Diagnostic.Predicate = ""
 		}
 		break
 	}

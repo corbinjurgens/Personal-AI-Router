@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"slices"
@@ -33,8 +34,27 @@ func (f *facade) boundIngressPeerCurrent(ctx context.Context) bool {
 	if !ok {
 		return true
 	} // Local requests and internal terminal callers.
-	incarnation, current := f.host.mesh.PeerServiceIncarnation(peer.id)
-	return current && incarnation == peer.incarnation
+	incarnation, current, diagnostic := f.host.mesh.PeerServiceIncarnationWithDiagnostic(peer.id)
+	if current && incarnation == peer.incarnation {
+		return true
+	}
+	if current {
+		diagnostic.Predicate = "incarnation_mismatch"
+	}
+	diagnostic.ExpectedIncarnation, diagnostic.ObservedIncarnation = peer.incarnation, incarnation
+	logBoundEngineManagementRefusal("proxy.peer_incarnation", peer.id, diagnostic)
+	return false
+}
+
+func logBoundEngineManagementRefusal(site, peer string, diagnostic clustertrust.PeerServiceDiagnostic) {
+	slog.Warn("bound engine management refused",
+		"site", site, "reason", diagnostic.Predicate,
+		"node_id", diagnostic.NodeID, "peer_id", peer, "cluster_id", diagnostic.ClusterID,
+		"epoch", diagnostic.Epoch, "counter", diagnostic.Counter, "io_error_code", diagnostic.ErrorCode,
+		"expected_incarnation", diagnostic.ExpectedIncarnation, "observed_incarnation", diagnostic.ObservedIncarnation,
+		"changed_component_authority_compared", diagnostic.ChangedComponentCompared,
+		"changed_component_authority_same", diagnostic.ChangedComponentSame,
+		"permission", "not_checked")
 }
 
 var errBoundEnginePrepareTimeout = errors.New("bound engine preparation deadline expired")
@@ -201,7 +221,15 @@ func (f *facade) prepareLocalBound(ctx context.Context, model, peer string) (*bo
 	in := nodepolicy.PrepareBoundEngineRequest{PolicyRevision: pol.Revision, Engine: f.profile.Name, Model: model, BudgetMs: budget}
 	if peer != "" {
 		authority, ok := ctx.Value(boundEnginePeerKey{}).(boundEnginePeer)
-		if !ok || authority.id != peer || !f.boundIngressPeerCurrent(ctx) {
+		if !ok || authority.id != peer {
+			reason := "peer_context_missing"
+			if ok {
+				reason = "peer_context_mismatch"
+			}
+			logBoundEngineManagementRefusal("proxy.peer_context", peer, clustertrust.PeerServiceDiagnostic{Predicate: reason})
+			return nil, boundEngineRefusal("management-denied")
+		}
+		if !f.boundIngressPeerCurrent(ctx) {
 			return nil, boundEngineRefusal("management-denied")
 		}
 		in.PeerID, in.PeerIncarnation = authority.id, authority.incarnation
