@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
@@ -334,6 +335,9 @@ func TestStrictHTTPOpenCodeQualifiedForwarding(t *testing.T) {
 			t.Run(path+"/"+tc.Name, func(t *testing.T) {
 				q := registry[nodepolicy.QualificationRef{ID: tc.Qualification, Revision: "1"}]
 				p, e, _, req := openCodeHTTPFixture(t, q, true)
+				// This tests forwarding, not storage latency. The request budget
+				// must also cover real durable capacity writes on the gate machine.
+				req.PreOutputBudgetMs = 30_000
 				// Ordinary JSON proves forwarding mechanics, not native streaming.
 				var body map[string]json.RawMessage
 				if err := json.Unmarshal(tc.Body, &body); err != nil {
@@ -345,9 +349,24 @@ func TestStrictHTTPOpenCodeQualifiedForwarding(t *testing.T) {
 					t.Fatal(err)
 				}
 				w := httptest.NewRecorder()
+				// Keep real persistence while measuring whether it consumed the
+				// fixture's strict pre-output allowance. Writes hold admission.mu.
+				var capacityWrites []time.Duration
+				writeCapacity := p.admission.strict.write
+				p.admission.strict.write = func(path string, data []byte, mode os.FileMode) error {
+					start := time.Now()
+					err := writeCapacity(path, data, mode)
+					capacityWrites = append(capacityWrites, time.Since(start))
+					return err
+				}
+				start := time.Now()
 				serveStrictHTTP(p, path, w, openCodeRequest(t, raw, req))
 				if w.Code != http.StatusOK || e.hits() != 1 {
-					t.Fatalf("status=%d hits=%d", w.Code, e.hits())
+					p.admission.mu.Lock()
+					t.Logf("strict fixture: elapsed=%v preOutputBudgetMs=%d jobDeadline=%v active=%d markers=%d queued=%d tickets=%d nextTicket=%d capacityWrites=%v storageErr=%v",
+						time.Since(start), req.PreOutputBudgetMs, jobDeadline, p.admission.active, len(p.admission.strict.markers), p.admission.queued, len(p.admission.tickets), p.admission.nextTicket, capacityWrites, p.admission.strict.storageErr)
+					p.admission.mu.Unlock()
+					t.Fatalf("status=%d hits=%d body=%q", w.Code, e.hits(), w.Body.String())
 				}
 				assertOpenCodeEffective(t, []byte(e.lastBody()), raw)
 				if w.Body.String() != openCodeJSONResponse || w.Header().Get("Content-Type") != "application/json" || w.Header().Get("X-Synthetic-Fixture") != "opencode" {

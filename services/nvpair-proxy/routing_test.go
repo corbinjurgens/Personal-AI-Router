@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1243,6 +1244,80 @@ func TestUnifiedDispatchIngressPreOutputDeadline(t *testing.T) {
 	}
 }
 
+// Preserve the original panic while retaining the attempted synthetic bytes:
+// an admission error write panics just like a forwarded stream write.
+type routingIngressPanicWriter struct {
+	*registryPanicWriter
+	attemptedBody []byte
+}
+
+func (w *routingIngressPanicWriter) Write(body []byte) (int, error) {
+	w.attemptedBody = append(w.attemptedBody, body...)
+	return w.registryPanicWriter.Write(body)
+}
+
+func TestUnifiedDispatchIngressPersistenceDeadline(t *testing.T) {
+	test := func(name string, panicOnWrite bool) {
+		t.Run(name, func(t *testing.T) {
+			p, engine := strictHTTPFixture(t)
+			clock := useStrictClock(p.admission)
+			writeCapacity := p.admission.strict.write
+			writes := 0
+			p.admission.strict.write = func(path string, data []byte, mode os.FileMode) error {
+				err := writeCapacity(path, data, mode)
+				writes++
+				if writes == 1 {
+					// Model a completed write that consumed the one-second allowance.
+					// Withhold timer delivery to isolate the post-write deadline check
+					// from the timeout callback's independent cancellation path.
+					clock.mu.Lock()
+					clock.now = clock.now.Add(2 * time.Second)
+					clock.mu.Unlock()
+				}
+				return err
+			}
+			recorder := httptest.NewRecorder()
+			var writer http.ResponseWriter = recorder
+			panicWriter := &routingIngressPanicWriter{registryPanicWriter: &registryPanicWriter{recorder}}
+			if panicOnWrite {
+				writer = panicWriter
+			}
+			var panicked interface{}
+			func() {
+				defer func() { panicked = recover() }()
+				p.soleFacade().serveIngress(writer, strictHTTPRequest(t), "peer")
+			}()
+			var wantPanic interface{}
+			if panicOnWrite {
+				wantPanic = "registry cleanup fixture"
+			}
+			if panicked != wantPanic {
+				t.Fatalf("panic=%v, want %v", panicked, wantPanic)
+			}
+			body := recorder.Body.Bytes()
+			if panicOnWrite {
+				body = panicWriter.attemptedBody
+			}
+			var refusal struct{ Code, Error string }
+			if err := json.Unmarshal(body, &refusal); err != nil {
+				t.Fatalf("decode refusal: %v; body=%q", err, body)
+			}
+			if recorder.Code != http.StatusServiceUnavailable || refusal.Code != "strict-admission" || refusal.Error != errStrictCold.Error() || engine.hits() != 0 {
+				t.Fatalf("status=%d refusal=%+v hits=%d", recorder.Code, refusal, engine.hits())
+			}
+			p.admission.mu.Lock()
+			active, markers, tickets := p.admission.active, len(p.admission.strict.markers), len(p.admission.tickets)
+			p.admission.mu.Unlock()
+			if active != 0 || markers != 0 || tickets != 0 {
+				t.Fatalf("pre-dispatch refusal retained capacity: active=%d markers=%d tickets=%d", active, markers, tickets)
+			}
+			t.Logf("deadline after persistence: status=%d refusal=%+v hits=%d panic=%v active=%d markers=%d tickets=%d", recorder.Code, refusal, engine.hits(), panicked, active, markers, tickets)
+		})
+	}
+	test("refuses before engine dispatch", false)
+	test("error write can satisfy the old panic oracle", true)
+}
+
 func TestUnifiedDispatchIngressPanicCleanup(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		name := "ordinary"
@@ -1252,7 +1327,9 @@ func TestUnifiedDispatchIngressPanicCleanup(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p, _ := strictHTTPFixture(t)
 			p.buffers = bufferTestBudget(t, (2<<20)+bufferFixtureResponseBytes, 0)
+			var hits atomic.Int32
 			engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
 					return
 				}
@@ -1263,16 +1340,52 @@ func TestUnifiedDispatchIngressPanicCleanup(t *testing.T) {
 			setBackend(t, p.soleFacade(), engine.URL, true)
 			body := strings.TrimSuffix(strictBody("m"), "}") + `,"stream":true}`
 			r := strictHTTPRequestWith(t, body)
-			if !strict {
+			if strict {
+				// Panic cleanup is a post-dispatch assertion, not a one-second
+				// deadline assertion. Include real durable capacity writes.
+				req := strictRequest()
+				req.Request.OriginNodeID = "peer"
+				req.PreOutputBudgetMs = 30_000
+				header, err := json.Marshal(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.Header.Set(nodepolicy.StrictAdmissionHeader, string(header))
+			} else {
 				r.Header.Del(nodepolicy.StrictAdmissionHeader)
 			}
+			// The real writer remains installed; timing is diagnostic only.
+			// Capacity writes and the failure snapshot hold admission.mu.
+			var capacityWrites []time.Duration
+			writeCapacity := p.admission.strict.write
+			p.admission.strict.write = func(path string, data []byte, mode os.FileMode) error {
+				start := time.Now()
+				err := writeCapacity(path, data, mode)
+				capacityWrites = append(capacityWrites, time.Since(start))
+				return err
+			}
+			writer := &routingIngressPanicWriter{registryPanicWriter: &registryPanicWriter{httptest.NewRecorder()}}
+			start := time.Now()
+			var elapsed time.Duration
+			t.Cleanup(func() {
+				if t.Failed() {
+					p.admission.mu.Lock()
+					t.Logf("panic fixture: elapsed=%v jobDeadline=%v status=%d hits=%d attemptedBody=%q nextTicket=%d capacityWrites=%v storageErr=%v",
+						elapsed, jobDeadline, writer.Code, hits.Load(), writer.attemptedBody, p.admission.nextTicket, capacityWrites, p.admission.strict.storageErr)
+					p.admission.mu.Unlock()
+				}
+			})
 			var panicked interface{}
 			func() {
 				defer func() { panicked = recover() }()
-				p.soleFacade().serveIngress(&registryPanicWriter{httptest.NewRecorder()}, r, "peer")
+				p.soleFacade().serveIngress(writer, r, "peer")
 			}()
+			elapsed = time.Since(start)
 			if panicked != "registry cleanup fixture" {
 				t.Fatalf("panic unwind=%v", panicked)
+			}
+			if hits.Load() != 1 || writer.Code != http.StatusOK || !bytes.HasPrefix(writer.attemptedBody, []byte("data:")) {
+				t.Fatalf("panic did not follow engine output: hits=%d status=%d attemptedBody=%q", hits.Load(), writer.Code, writer.attemptedBody)
 			}
 			bufferAssertTotals(t, p.buffers, 0, 0, 0)
 			p.admission.mu.Lock()
