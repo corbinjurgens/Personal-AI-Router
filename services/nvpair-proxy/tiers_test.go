@@ -598,6 +598,132 @@ func TestMergeDefaults(t *testing.T) {
 	}
 }
 
+func TestRequestOptionsBodyModes(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, options, want string
+		mode                      nodepolicy.RequestOptionsMode
+		rewrite                   bool
+	}{
+		{"caller temperature wins defaults", ` {"model":"m", "temperature": 0.8} `, `{"temperature":0.1}`, ` {"model":"m", "temperature": 0.8} `, nodepolicy.RequestOptionsDefaults, false},
+		{"omitted mode preserves defaults", `{"a":null}`, `{"a":{"n":1}}`, `{"a":null}`, "", false},
+		{"nested configured leaves and absent fields", ` {"model":"m","a":{"x":1,"untouched":1.50e2},"free":[1, 2]} `, `{"a":{"x":2,"missing":true},"new":null}`, ` {"model":"m","a":{"x":2,"untouched":1.50e2,"missing":true},"free":[1, 2],"new":null} `, nodepolicy.RequestOptionsEnforced, false},
+		{"null replaced by object", `{"a":null}`, `{"a":{"x":1}}`, `{"a":{"x":1}}`, nodepolicy.RequestOptionsEnforced, false},
+		{"array replaced by object", `{"a":[1,2]}`, `{"a":{"x":1}}`, `{"a":{"x":1}}`, nodepolicy.RequestOptionsEnforced, false},
+		{"object replaced by array", `{"a":{"x":1}}`, `{"a":[3,4]}`, `{"a":[3,4]}`, nodepolicy.RequestOptionsEnforced, false},
+		{"object replaced by scalar", `{"a":{"x":1}}`, `{"a":false}`, `{"a":false}`, nodepolicy.RequestOptionsEnforced, false},
+		{"scalar replaced by null", `{"a":1}`, `{"a":null}`, `{"a":null}`, nodepolicy.RequestOptionsEnforced, false},
+		{"array is one configured leaf", `{"a":[{"x":1,"free":2}]}`, `{"a":[{"x":3}]}`, `{"a":[{"x":3}]}`, nodepolicy.RequestOptionsEnforced, false},
+		{"unconfigured controls preserve bytes", `{"temperature":0.8,"tools":[ {"type":"function"} ],"stream":true,"max_tokens":17}`, `{"temperature":0.1}`, `{"temperature":0.1,"tools":[ {"type":"function"} ],"stream":true,"max_tokens":17}`, nodepolicy.RequestOptionsEnforced, false},
+		{"escaped canonical configured member", `{"\u0061":1}`, `{"a":2}`, `{"\u0061":2}`, nodepolicy.RequestOptionsEnforced, false},
+		{"unconfigured duplicates preserved", `{"a":1,"free":{"x":1,"X":2},"n":1,"n":2}`, `{"a":2}`, `{"a":2,"free":{"x":1,"X":2},"n":1,"n":2}`, nodepolicy.RequestOptionsEnforced, false},
+		{"unconfigured duplicate at configured object level", `{"a":{"x":1,"free":0,"free":1}}`, `{"a":{"x":2}}`, `{"a":{"x":2,"free":0,"free":1}}`, nodepolicy.RequestOptionsEnforced, false},
+		{"configured array replaces ambiguous subtree", `{"a":{"x":1,"X":2}}`, `{"a":[]}`, `{"a":[]}`, nodepolicy.RequestOptionsEnforced, false},
+		{"unchanged object retains whitespace", " {\"a\": { \"x\": 1 }, \"free\": 1.0}\n", `{"a":{"x":1}}`, " {\"a\": { \"x\": 1 }, \"free\": 1.0}\n", nodepolicy.RequestOptionsEnforced, false},
+		{"model rewrite and enforcement", `{"model":"weak","a":0}`, `{"a":2}`, `{"model":"m","a":2}`, nodepolicy.RequestOptionsEnforced, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(tc.body)
+			out, release, err := transformBody(nil, body, "m", tc.rewrite, []byte(tc.options), tc.mode)
+			if err != nil {
+				t.Fatalf("transform: %v", err)
+			}
+			defer release()
+			if string(out) != tc.want {
+				t.Fatalf("body=%q, want %q", out, tc.want)
+			}
+			if tc.body == tc.want {
+				if &out[0] != &body[0] {
+					t.Fatal("unchanged body was copied")
+				}
+			} else if cap(out) != len(out) {
+				t.Fatalf("send capacity=%d length=%d", cap(out), len(out))
+			}
+		})
+	}
+}
+
+func TestRequestOptionsConfiguredAmbiguity(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"exact duplicate", `{"a":1,"a":2}`},
+		{"escaped duplicate", `{"a":1,"\u0061":2}`},
+		{"folded duplicate", `{"a":1,"A":2}`},
+		{"single folded variant", `{"A":2}`},
+		{"nested exact duplicate", `{"a":{"x":1,"x":2}}`},
+		{"nested escaped duplicate", `{"a":{"x":1,"\u0078":2}}`},
+		{"nested folded variant", `{"a":{"X":2}}`},
+		{"folded parent", `{"A":{"x":2}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, release, err := transformBody(nil, []byte(tc.body), "", false, []byte(`{"a":{"x":3}}`), nodepolicy.RequestOptionsEnforced)
+			if release != nil {
+				defer release()
+			}
+			var invalid *ambiguousOptionsError
+			if !errors.As(err, &invalid) || err.Error() != ambiguousOptionsMessage || invalid.HTTPStatus() != http.StatusBadRequest || out != nil {
+				t.Fatalf("body=%q error=%v, want fixed typed bad request", out, err)
+			}
+		})
+	}
+}
+
+func TestRequestOptionsModelRewriteAuthority(t *testing.T) {
+	for _, key := range []string{`model`, `Model`, `mo\u0064el`} {
+		t.Run(key, func(t *testing.T) {
+			out, release, err := transformBody(nil, []byte(`{"model":"weak"}`), "m", true, []byte(`{"`+key+`":"forbidden"}`), nodepolicy.RequestOptionsEnforced)
+			if release != nil {
+				defer release()
+			}
+			if !errors.Is(err, errAmbiguousModel) || out != nil {
+				t.Fatalf("configured model survived rewrite: body=%q error=%v", out, err)
+			}
+		})
+	}
+}
+
+func TestRequestOptionsPreparedIdentity(t *testing.T) {
+	body := []byte(`{"model":"m","temperature":0.8}`)
+	options := []byte(`{"temperature":0.1}`)
+	c := candidate{id: "self", self: true, model: "m"}
+	prepared := preparedBodyIdentity{c, options, nodepolicy.RequestOptionsDefaults, 7}
+	for _, tc := range []struct {
+		name       string
+		candidate  candidate
+		mode       nodepolicy.RequestOptionsMode
+		generation uint64
+		reuse      bool
+		want       string
+	}{
+		{"same body reused", c, nodepolicy.RequestOptionsDefaults, 7, true, string(body)},
+		{"omitted mode reuses defaults", c, "", 7, true, string(body)},
+		{"identical options different mode rebuilds", c, nodepolicy.RequestOptionsEnforced, 7, false, `{"model":"m","temperature":0.1}`},
+		{"new generation rebuilds", c, nodepolicy.RequestOptionsDefaults, 8, false, string(body)},
+		{"candidate failover rebuilds", candidate{id: "other", self: true, model: "m"}, nodepolicy.RequestOptionsDefaults, 7, false, string(body)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reuse := prepared.matches(tc.candidate, append([]byte(nil), options...), tc.mode, tc.generation)
+			if reuse != tc.reuse {
+				t.Fatalf("reuse=%v, want %v", reuse, tc.reuse)
+			}
+			out := body
+			if !reuse {
+				var release func()
+				var err error
+				out, release, err = transformBody(nil, body, "", false, options, tc.mode)
+				if err != nil {
+					t.Fatalf("rebuild: %v", err)
+				}
+				defer release()
+			}
+			if string(out) != tc.want {
+				t.Fatalf("prepared body=%s, want %s", out, tc.want)
+			}
+		})
+	}
+	if prepared.matches(c, []byte(`{"temperature":0.2}`), nodepolicy.RequestOptionsDefaults, 7) {
+		t.Fatal("different option bytes reused")
+	}
+}
+
 // tierFixture is one facade with manual peers and a policy.
 type tierFixture struct {
 	p   *Proxy

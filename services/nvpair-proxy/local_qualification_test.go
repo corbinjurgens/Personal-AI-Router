@@ -127,7 +127,7 @@ func qualificationFixture(t *testing.T) (*localQualification, nodepolicy.Profile
 		t.Fatal("fixture artifact lacks synthetic-fixture revision 1")
 	}
 	profile := nodepolicy.Profile{Name: "fixture", Engine: q.Engine, Model: q.Model, ContextTokens: q.ContextTokens,
-		MaxOutputTokens: q.MaxOutputTokens, RequestOptions: q.RequestOptions, Qualification: &nodepolicy.QualificationRef{ID: q.ID, Revision: q.Revision}}
+		MaxOutputTokens: q.MaxOutputTokens, RequestOptions: q.RequestOptions, RequestOptionsMode: q.RequestOptionsMode, Qualification: &nodepolicy.QualificationRef{ID: q.ID, Revision: q.Revision}}
 	return q, profile, doc.Cases
 }
 
@@ -156,6 +156,141 @@ func TestQualificationFixtureCases(t *testing.T) {
 			}
 			if bound.input != tc.InputTokens || bound.output != tc.OutputTokens {
 				t.Fatalf("bound = %d input, %d output; want %d, %d", bound.input, bound.output, tc.InputTokens, tc.OutputTokens)
+			}
+		})
+	}
+}
+
+func TestRequestOptionsQualificationMode(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mode     nodepolicy.RequestOptionsMode
+		accepted bool
+	}{
+		{"omitted means defaults", "", true},
+		{"explicit defaults", nodepolicy.RequestOptionsDefaults, true},
+		{"enforced", nodepolicy.RequestOptionsEnforced, true},
+		{"unknown", "ENFORCED", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := testQualification("mode", "ollama", "m")
+			q.RequestOptions = json.RawMessage(`{"temperature":0.1}`)
+			q.RequestOptionsMode = tc.mode
+			data, err := json.Marshal(struct {
+				Version        int                   `json:"version"`
+				Qualifications []*localQualification `json:"qualifications"`
+			}{qualificationDocumentVersion, []*localQualification{q}})
+			if err != nil {
+				t.Fatalf("encode qualification: %v", err)
+			}
+			registry, err := parseQualificationDocument(data)
+			if !tc.accepted {
+				if err == nil {
+					t.Fatal("invalid qualification mode accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse qualification: %v", err)
+			}
+			got, ok := registry.lookup(nodepolicy.QualificationRef{ID: q.ID, Revision: q.Revision})
+			if !ok || got.RequestOptionsMode.Effective() != tc.mode.Effective() {
+				t.Fatalf("qualification mode lost: %+v", got)
+			}
+		})
+	}
+}
+
+func TestRequestOptionsStrictSamplerGrammar(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		accepted     bool
+	}{
+		{"nonnegative integer and finite numbers", `"top_k":0,"min_p":0.02,"repeat_penalty":1.1`, true},
+		{"positive integer", `"top_k":40`, true},
+		{"negative zero is nonnegative", `"top_k":-0`, true},
+		{"integer grammar has no engine range cap", `"top_k":9223372036854775808`, true},
+		{"finite exponent", `"min_p":1e-10,"repeat_penalty":1e308`, true},
+		{"finite grammar leaves engine ranges to engine", `"min_p":-1,"repeat_penalty":0`, true},
+		{"negative top k", `"top_k":-1`, false},
+		{"fractional top k", `"top_k":1.5`, false},
+		{"exponent top k", `"top_k":1e1`, false},
+		{"null top k", `"top_k":null`, false},
+		{"quoted top k", `"top_k":"4"`, false},
+		{"overflow min p", `"min_p":1e309`, false},
+		{"null min p", `"min_p":null`, false},
+		{"quoted repeat penalty", `"repeat_penalty":"1.1"`, false},
+		{"null repeat penalty", `"repeat_penalty":null`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := testQualification("samplers", "ollama", "m")
+			profile := nodepolicy.Profile{Engine: "ollama", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024}
+			body := []byte(strings.TrimSuffix(strictBody("m"), "}") + "," + tc.fields + "}")
+			_, bound, err := q.validateRequest(profile, routeChatCompletions, body)
+			if tc.accepted {
+				if err != nil || bound.input != 18 || bound.output != 16 {
+					t.Fatalf("bound=%+v error=%v", bound, err)
+				}
+				return
+			}
+			var invalid *strictQualificationError
+			if !errors.As(err, &invalid) {
+				t.Fatalf("error=%v, want scalar rejection", err)
+			}
+		})
+	}
+}
+
+func TestRequestOptionsPublicChatGrammarUnchanged(t *testing.T) {
+	q, target := chatFixture()
+	budget := &chatTestBudget{limit: 1 << 20}
+	prepared, err := q.prepare(context.Background(), target, http.MethodPost, routeChatCompletions, []byte(chatSimple), budget.acquire)
+	if err != nil {
+		t.Fatalf("public Chat positive control: %v", err)
+	}
+	prepared.close()
+	if budget.held != 0 {
+		t.Fatalf("positive control retained %d bytes", budget.held)
+	}
+	for _, tc := range []struct{ name, key, value string }{
+		{"valid top k remains local", "top_k", "4"},
+		{"invalid top k", "top_k", `"bad"`},
+		{"valid min p remains local", "min_p", "0.02"},
+		{"overflow min p", "min_p", "1e309"},
+		{"valid repeat penalty remains local", "repeat_penalty", "1.1"},
+		{"invalid repeat penalty", "repeat_penalty", `"bad"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, target := chatFixture()
+			q.Fields[tc.key] = true
+			budget := &chatTestBudget{limit: 1 << 20}
+			body := strings.TrimSuffix(chatSimple, "}") + `,"` + tc.key + `":` + tc.value + `}`
+			prepared, err := q.prepare(context.Background(), target, http.MethodPost, routeChatCompletions, []byte(body), budget.acquire)
+			if prepared != nil {
+				prepared.close()
+			}
+			if !errors.Is(err, errChat) || prepared != nil || budget.held != 0 {
+				t.Fatalf("public Chat sampler accepted or retained storage: prepared=%v err=%v held=%d", prepared != nil, err, budget.held)
+			}
+		})
+	}
+}
+
+func TestRequestOptionsQualificationModeFieldTypes(t *testing.T) {
+	q := testQualification("mode", "ollama", "m")
+	q.RequestOptionsMode = nodepolicy.RequestOptionsDefaults
+	data, err := json.Marshal(struct {
+		Version        int                   `json:"version"`
+		Qualifications []*localQualification `json:"qualifications"`
+	}{qualificationDocumentVersion, []*localQualification{q}})
+	if err != nil {
+		t.Fatalf("encode qualification: %v", err)
+	}
+	for _, value := range []string{`null`, `false`, `1`, `[]`, `{}`} {
+		t.Run(value, func(t *testing.T) {
+			invalid := strings.Replace(string(data), `"requestOptionsMode":"defaults"`, `"requestOptionsMode":`+value, 1)
+			if _, err := parseQualificationDocument([]byte(invalid)); err == nil {
+				t.Fatal("non-string qualification mode accepted")
 			}
 		})
 	}

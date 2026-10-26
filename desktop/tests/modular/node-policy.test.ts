@@ -889,6 +889,39 @@ describe('node push parsers', () => {
 })
 
 describe('policy revision and activation fields', () => {
+    it('preserves inference settings through local and peer policy get, set, push and CAS', () => {
+        const policy = {
+            version: 2,
+            revision: '9007199254740993',
+            profiles: [
+                {
+                    name: 'm',
+                    engine: 'llamacpp',
+                    model: 'm',
+                    localOnly: true,
+                    requestOptionsMode: 'enforced',
+                    requestOptions: { temperature: 0.5, stop: ['end'], nested: { leaf: 1 } }
+                }
+            ],
+            engineBindings: [{ engine: 'llamacpp', model: 'm' }],
+            routing: { accounts: [] }
+        }
+        const document = parsePolicyDocument({ policy, availability: 'available' })
+        const params = policySetParams({
+            nodeId: 'peer',
+            policy: document.policy,
+            expectedPersistedRevision: document.revision
+        })
+        expect(params).toEqual({
+            nodeId: 'peer',
+            policy,
+            expectedPersistedRevision: '9007199254740993'
+        })
+        expect(JSON.parse(parsePolicySetResult({ policy: params.policy }).policy)).toEqual(policy)
+        const change = parsePolicyChange({ nodeId: 'peer', policy })
+        if (!change) throw new Error('Missing inference-settings change')
+        expect(JSON.parse(change.policy)).toEqual(policy)
+    })
     it('reads the persisted revision and the activation report from policy:get', () => {
         const document = parsePolicyDocument({
             policy: { revision: '12' },
@@ -1459,6 +1492,139 @@ describe('routing settings editor', () => {
         await act(async () => emitPolicy(change))
     }
     const lastBase = (): string | undefined => set.mock.lastCall?.[0].expectedPersistedRevision
+
+    describe('typed inference settings draft', () => {
+        const profiles = [
+            { name: 'm', engine: 'llamacpp', model: 'm', requestOptions: { temperature: 1 } }
+        ]
+        const initial = JSON.stringify({
+            version: 2,
+            revision: '5',
+            profiles,
+            engineBindings: [{ engine: 'llamacpp', model: 'm' }],
+            routing: { accounts: [] }
+        })
+
+        async function temperature(value: string) {
+            const input = container.querySelector<HTMLInputElement>(
+                'input[aria-label="Temperature"]'
+            )
+            if (!input) throw new Error('Missing temperature input')
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+            if (!setter) throw new Error('Missing input setter')
+            await act(async () => {
+                setter.call(input, value)
+                input.dispatchEvent(new Event('input', { bubbles: true }))
+            })
+        }
+
+        it('edits the shared draft and saves exactly this device against its loaded revision', async () => {
+            get.mockResolvedValue(savedDocument('5', { policy: initial }))
+            set.mockResolvedValue(snapshot('6', 'pending'))
+            await open()
+            await temperature('0.4')
+            const draft = editor().value
+            expect(JSON.parse(draft)).toEqual({
+                ...JSON.parse(initial),
+                profiles: [{ ...profiles[0], requestOptions: { temperature: 0.4 } }]
+            })
+            await click('Save')
+            expect(set).toHaveBeenCalledExactlyOnceWith({
+                nodeId: undefined,
+                policy: draft,
+                expectedPersistedRevision: '5'
+            })
+            expect(container.textContent).toContain('Saved, not yet enforced')
+            expect(setAvailability).not.toHaveBeenCalled()
+        })
+
+        it('blocks Save for invalid typed input without mutating the shared JSON draft', async () => {
+            get.mockResolvedValue(savedDocument('5', { policy: initial }))
+            await open()
+            await temperature('-1')
+            expect(editor().value).toBe(initial)
+            expect(button('Save').disabled).toBe(true)
+            await temperature('0')
+            expect(button('Save').disabled).toBe(false)
+        })
+
+        it('restores Save after cancelling enforced mode on a profile without options', async () => {
+            const empty = JSON.stringify({
+                version: 2,
+                revision: '5',
+                profiles: [{ name: 'm', engine: 'llamacpp', model: 'm' }]
+            })
+            get.mockResolvedValue(savedDocument('5', { policy: empty }))
+            set.mockResolvedValue(snapshot('6', 'pending'))
+            await open()
+            const chooseMode = async (value: string) => {
+                const label = Array.from(container.querySelectorAll('label')).find(
+                    item => item.textContent === 'Request overrides'
+                )
+                const trigger = label && document.getElementById(label.htmlFor)
+                if (!(trigger instanceof HTMLButtonElement))
+                    throw new Error('Missing request overrides')
+                await act(async () => trigger.click())
+                const option = Array.from(
+                    document.querySelectorAll<HTMLButtonElement>('[role="option"]')
+                ).find(item => item.textContent?.trim() === value)
+                if (!option) throw new Error('Missing requested mode')
+                await act(async () => option.click())
+            }
+            await chooseMode('Force PAIR values')
+            expect(editor().value).toBe(empty)
+            expect(button('Save').disabled).toBe(true)
+            await chooseMode('Allow request overrides')
+            expect(editor().value).toBe(empty)
+            expect(button('Save').disabled).toBe(false)
+            await click('Save')
+            expect(set).toHaveBeenCalledExactlyOnceWith({
+                nodeId: undefined,
+                policy: empty,
+                expectedPersistedRevision: '5'
+            })
+            expect(setAvailability).not.toHaveBeenCalled()
+        })
+
+        it('keeps a typed dirty draft through pushes and disconnection without lifecycle writes', async () => {
+            get.mockResolvedValue(savedDocument('5', { policy: initial }))
+            await open()
+            await temperature('0.4')
+            const draft = editor().value
+            await push({ nodeId: SELF, ...snapshot('6', 'pending') })
+            expect(editor().value).toBe(draft)
+            expect(
+                container.querySelector<HTMLInputElement>('input[aria-label="Temperature"]')?.value
+            ).toBe('0.4')
+            await act(async () => useConnectionStore.setState({ connected: false }))
+            expect(editor().value).toBe(draft)
+            expect(
+                container.querySelector<HTMLInputElement>('input[aria-label="Temperature"]')
+                    ?.disabled
+            ).toBe(true)
+            expect(button('Save').disabled).toBe(true)
+            expect(set).not.toHaveBeenCalled()
+            expect(setAvailability).not.toHaveBeenCalled()
+        })
+
+        it('keeps typed options disabled while a policy conflict awaits reload', async () => {
+            get.mockResolvedValueOnce(savedDocument('5', { policy: initial })).mockResolvedValue(
+                savedDocument('6', { policy: initial })
+            )
+            set.mockRejectedValue(new Error('policy conflict'))
+            await open()
+            await temperature('0.4')
+            const draft = editor().value
+            await click('Save')
+            expect(editor().value).toBe(draft)
+            expect(
+                container.querySelector<HTMLInputElement>('input[aria-label="Temperature"]')
+                    ?.disabled
+            ).toBe(true)
+            expect(button('Save').disabled).toBe(true)
+            expect(container.textContent).toContain(CONFLICT)
+        })
+    })
 
     describe('activation status', () => {
         it('shows a saved policy the proxy has not enforced as pending', async () => {

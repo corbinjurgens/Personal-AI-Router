@@ -22,6 +22,7 @@ import { getModularSupervisor } from '@/electron/service-bridge/modular-supervis
 import {
     ENGINE_LOCKED_CODE,
     LOCAL_VETO_CODE,
+    REMOTE_SETTING_LOCKED_CODE,
     engineLockedMessage,
     localVetoMessage
 } from '@/shared/constants/service-errors'
@@ -64,6 +65,38 @@ describe('service error codes across the IPC boundary', () => {
             success: false,
             error: '-32011 in plain text'
         })
+    })
+
+    it('preserves the inference-settings lock code through the typed IPC and renderer transport', async () => {
+        await expect(
+            invokeThrowing(new JsonRpcResponseError(REMOTE_SETTING_LOCKED_CODE, 'locked profile'))
+        ).resolves.toEqual({
+            success: false,
+            error: '-32014: locked profile',
+            code: REMOTE_SETTING_LOCKED_CODE
+        })
+        const transport = serviceTransport(
+            preloadAnswering({
+                success: false,
+                error: 'locked profile',
+                code: REMOTE_SETTING_LOCKED_CODE
+            })
+        )
+        await expect(
+            transport.invoke('policy:set', {
+                nodeId: 'peer',
+                policy: '{}',
+                expectedPersistedRevision: '5'
+            })
+        ).rejects.toMatchObject({
+            name: 'Error',
+            message: 'locked profile',
+            code: REMOTE_SETTING_LOCKED_CODE
+        })
+        expect(
+            serviceErrorCode(new ServiceCallError('locked profile', REMOTE_SETTING_LOCKED_CODE))
+        ).toBe(REMOTE_SETTING_LOCKED_CODE)
+        expect(serviceErrorCode(new Error('-32014: locked profile'))).toBeUndefined()
     })
 
     function preloadAnswering(

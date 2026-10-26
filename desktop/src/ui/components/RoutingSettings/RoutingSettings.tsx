@@ -24,6 +24,7 @@ import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import ModelEngineBindingsEditor from './ModelEngineBindingsEditor'
+import ModelSettingsEditor from './ModelSettingsEditor'
 import RoutingHistory from '@/ui/components/RoutingSettings/RoutingHistory'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
@@ -34,6 +35,7 @@ import { useNodesStore } from '@/ui/stores/nodes.store'
 import {
     LOCAL_VETO_CODE,
     REMOTE_MANAGEMENT_DENIED_CODE,
+    REMOTE_SETTING_LOCKED_CODE,
     localVetoMessage
 } from '@/shared/constants/service-errors'
 import { serviceErrorCode } from '@/ui/api/service-transport'
@@ -85,6 +87,8 @@ export default function RoutingSettings() {
 
     const [availability, setAvailability] = useState<NodeAvailability | null>(null)
     const [text, setText] = useState('')
+    const [settingsSnapshot, setSettingsSnapshot] = useState<NodePolicySnapshot | null>(null)
+    const [settingsValid, setSettingsValid] = useState(true)
     const [loading, setLoading] = useState(false)
     const [switching, setSwitching] = useState(false)
     const [saving, setSaving] = useState(false)
@@ -157,6 +161,9 @@ export default function RoutingSettings() {
                 const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
                 if (ticket !== latestLoad.current) return
                 adoptRoles(document, availabilityRead)
+                setSettingsSnapshot(current =>
+                    current && isOlder(document.revision, current.revision) ? current : document
+                )
                 if (preserveDraft && textRef.current !== savedTextRef.current) {
                     if (document.revision !== baseRevisionRef.current)
                         setConflict({
@@ -195,6 +202,8 @@ export default function RoutingSettings() {
             savedTextRef.current = ''
             baseRevisionRef.current = ''
             setStatus(null)
+            setSettingsSnapshot(null)
+            setSettingsValid(true)
             setRecoveryRequired(false)
             setText('')
             textRef.current = ''
@@ -210,6 +219,9 @@ export default function RoutingSettings() {
     // the user has no unsaved edits and the report is not older than the base:
     // a push never overwrites typing or rewinds the editor.
     const noteStatus = useCallback((saved: NodePolicySnapshot) => {
+        setSettingsSnapshot(current =>
+            current && isOlder(saved.revision, current.revision) ? current : saved
+        )
         setStatus(current =>
             current && isOlder(saved.revision, current.revision)
                 ? current
@@ -318,6 +330,7 @@ export default function RoutingSettings() {
             permissionReadOnly ||
             loading ||
             saving ||
+            !settingsValid ||
             switching ||
             conflict !== null ||
             previousTarget.current !== targetId ||
@@ -346,6 +359,15 @@ export default function RoutingSettings() {
         } catch (err) {
             if (ticket !== latestLoad.current) return
             const code = serviceErrorCode(err)
+            if (code === REMOTE_SETTING_LOCKED_CODE) {
+                const detail = getErrorString(err)
+                    .slice(0, 1024)
+                    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+                setSaveError(
+                    `Inference settings are locked on ${nodeName}. Your policy draft is kept. Change this profile's inference settings on that device. Service message: ${detail}`
+                )
+                return
+            }
             if (code === REMOTE_MANAGEMENT_DENIED_CODE || code === LOCAL_VETO_CODE) {
                 setSaveError(
                     code === REMOTE_MANAGEMENT_DENIED_CODE
@@ -390,7 +412,9 @@ export default function RoutingSettings() {
         loading,
         saving,
         switching,
-        conflict
+        conflict,
+        settingsValid,
+        nodeName
     ])
 
     const nodeItems: DropdownEntry[] = useMemo(
@@ -506,8 +530,23 @@ export default function RoutingSettings() {
                         />
                     )}
 
+                    {targetId !== null && (
+                        <ModelSettingsEditor
+                            key={targetId}
+                            text={text}
+                            onTextChange={setText}
+                            savedText={settingsSnapshot?.policy ?? null}
+                            nodeName={nodeName}
+                            remote={nodeId !== null}
+                            disabled={
+                                loading || saving || switching || permissionReadOnly || !canSave
+                            }
+                            onValidityChange={setSettingsValid}
+                        />
+                    )}
+
                     <Stack gap="2">
-                        <Text kind="body/semibold/sm">Policy</Text>
+                        <Text kind="body/semibold/sm">Advanced policy JSON</Text>
                         <Text kind="body/regular/sm">
                             Pausing always unloads models and stops engines. The stopEngines and
                             unloadModels fields are ignored.
@@ -595,7 +634,7 @@ export default function RoutingSettings() {
                                 kind="primary"
                                 color="brand"
                                 size="small"
-                                disabled={loading || saving || !canSave}
+                                disabled={loading || saving || !canSave || !settingsValid}
                                 aria-busy={saving}
                                 onClick={() => void save()}
                             >

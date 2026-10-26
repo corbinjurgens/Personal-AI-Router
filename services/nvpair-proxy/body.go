@@ -33,6 +33,13 @@ func (*requestIdentifierError) Error() string {
 }
 func (*requestIdentifierError) HTTPStatus() int { return http.StatusBadRequest }
 
+const ambiguousOptionsMessage = "the request body has ambiguous configured option members"
+
+type ambiguousOptionsError struct{}
+
+func (*ambiguousOptionsError) Error() string   { return ambiguousOptionsMessage }
+func (*ambiguousOptionsError) HTTPStatus() int { return http.StatusBadRequest }
+
 func requestJSONStringTooLong(raw []byte) bool {
 	n := 0
 	for i := 1; i < len(raw)-1; {
@@ -359,7 +366,8 @@ type bodyMergePlan struct {
 
 // The caller closes release after its final transport borrower joins. No
 // intermediate rewrite, recursive merge output, or appended-default copy exists.
-func transformBody(ctx context.Context, body []byte, model string, rewrite bool, defaults []byte) ([]byte, func(), error) {
+func transformBody(ctx context.Context, body []byte, model string, rewrite bool, defaults []byte, mode nodepolicy.RequestOptionsMode) ([]byte, func(), error) {
+	enforced := mode.Effective() == nodepolicy.RequestOptionsEnforced
 	if !isJSONObject(defaults) {
 		defaults = nil
 	}
@@ -431,6 +439,22 @@ func transformBody(ctx context.Context, body []byte, model string, rewrite bool,
 		if err != nil {
 			return nil, err
 		}
+		if enforced {
+			if parent == nil {
+				for _, d := range defMembers {
+					if compareStrictKeys(d.key, "model") == 0 {
+						return nil, errAmbiguousModel
+					}
+				}
+			}
+			unique, err := uniqueKeysContext(body, ctx, defMembers)
+			if err != nil {
+				return nil, err
+			}
+			if !unique {
+				return nil, &ambiguousOptionsError{}
+			}
+		}
 		// 128 bytes/member covers map entries/control groups and old/new
 		// map growth plus the exact-capacity child pointer array.
 		if err := w.acquire(128*int64(len(members)) + 512); err != nil {
@@ -480,6 +504,15 @@ func transformBody(ctx context.Context, body []byte, model string, rewrite bool,
 			m := node.members[i]
 			req, def := node.body[m.valueStart:m.valueEnd], node.defaults[d.valueStart:d.valueEnd]
 			if !isJSONObject(req) || !isJSONObject(def) {
+				if enforced && !bytes.Equal(req, def) {
+					if err := w.acquire(256); err != nil {
+						return nil, nil, err
+					}
+					// A leaf uses the same postorder/emission machinery as an
+					// object, borrowing its configured bytes until final emission.
+					child := &bodyMergePlan{body: def, size: len(def), changed: true, parent: node, next: all}
+					all, node.children[i] = child, child
+				}
 				continue
 			}
 			child, e := newNode(req, def, node)
@@ -570,14 +603,14 @@ func transformBody(ctx context.Context, body []byte, model string, rewrite bool,
 }
 
 func replaceModel(body []byte, model string) ([]byte, bool) {
-	out, release, err := transformBody(nil, body, model, true, nil)
+	out, release, err := transformBody(nil, body, model, true, nil, nodepolicy.RequestOptionsDefaults)
 	if release != nil {
 		defer release()
 	}
 	return out, err == nil && out != nil
 }
 func mergeDefaults(body, defaults []byte) []byte {
-	out, release, err := transformBody(nil, body, "", false, defaults)
+	out, release, err := transformBody(nil, body, "", false, defaults, nodepolicy.RequestOptionsDefaults)
 	if release != nil {
 		defer release()
 	}

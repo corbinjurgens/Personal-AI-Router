@@ -92,6 +92,23 @@ If the capability matters on a headless machine, add it to the terminal interfac
 under `services/nvpair-tui/` as well. That is a separate client with its own
 views, so nothing reaches it automatically.
 
+### Model Engine Bindings
+
+The [binding guide](model-engine-bindings.mdx) describes target-local policy
+edits, bounded request-triggered activation, readiness classes and acceptance
+limits. Shared `nodepolicy` owns validation/projection; the target broker owns
+policy persistence and preparation coordination; engine-manager owns process
+effects; the proxy owns candidate selection, waiting and fresh admission.
+Reuse the existing E4 switch transaction and client receipt presentation.
+
+The desktop binding editor edits the existing policy JSON draft through the
+same Save/CAS/readback flow; its automated checks are recorded in the guide.
+Joined Windows process checks passed on the integrated Task 7 source. The
+guide records the exercised boundaries, remaining process gaps and refusal-only
+authority diagnostics. The historical reverse refusal's predicate remains
+unestablished. Native acceptance remains pending, not observed; use actual
+deployed-path evidence before changing that status.
+
 ### Changing an Existing JSON-RPC Method or Payload
 
 Update the producer, the broker relay, every consumer, the tests, and the

@@ -44,7 +44,10 @@ import {
     type IPairApi
 } from '@/ui/api/pair-api'
 import { serviceTransport, ServiceCallError } from '@/ui/api/service-transport'
-import { REMOTE_MANAGEMENT_DENIED_CODE } from '@/shared/constants/service-errors'
+import {
+    REMOTE_MANAGEMENT_DENIED_CODE,
+    REMOTE_SETTING_LOCKED_CODE
+} from '@/shared/constants/service-errors'
 import { AddNodeModal } from '@/ui/components/AddNodeModal'
 import AvailableNodeCard from '@/ui/components/ClusterSettings/AvailableNode'
 import ActiveNode from '@/ui/components/ClusterSettings/ActiveNode'
@@ -1309,6 +1312,186 @@ describe('permission controls', () => {
         ).toBe(policy.policy)
         expect(setPolicy).not.toHaveBeenCalled()
         expect(availability).not.toHaveBeenCalled()
+    })
+
+    function inferencePolicy(localOnly = false, temperature = 1): NodePolicyDocument {
+        return {
+            ...policy,
+            policy: JSON.stringify({
+                version: 2,
+                revision: '5',
+                profiles: [
+                    {
+                        name: 'm',
+                        engine: 'llamacpp',
+                        model: 'm',
+                        localOnly,
+                        requestOptions: { temperature }
+                    }
+                ],
+                engineBindings: [{ engine: 'llamacpp', model: 'm' }],
+                routing: { accounts: [] }
+            })
+        }
+    }
+
+    function temperatureInput(): HTMLInputElement {
+        const input = document.querySelector<HTMLInputElement>('input[aria-label="Temperature"]')
+        if (!input) throw new Error('Missing remote temperature input')
+        return input
+    }
+
+    it('saves typed remote inference settings to exactly the selected peer with its loaded CAS revision', async () => {
+        getPolicy.mockResolvedValue(inferencePolicy())
+        await act(async () => root.render(<RoutingSettings />))
+        await choosePeer()
+        expect(document.body.textContent).toContain('Editing settings on Peer')
+        await changeText(temperatureInput(), '0.4')
+        const draft = document.querySelector<HTMLTextAreaElement>(
+            'textarea[aria-label="Node policy JSON"]'
+        )?.value
+        if (!draft) throw new Error('Missing shared remote policy draft')
+        await act(async () => button('Save').click())
+        expect(setPolicy).toHaveBeenCalledExactlyOnceWith({
+            nodeId: 'peer-1',
+            policy: draft,
+            expectedPersistedRevision: '5'
+        })
+        expect(getPolicy).toHaveBeenLastCalledWith('peer-1')
+        expect(availability).not.toHaveBeenCalled()
+        expect(applySettings).not.toHaveBeenCalled()
+        expect(previewSettings).not.toHaveBeenCalled()
+    })
+
+    it('uses the loaded remote lock even when Advanced policy JSON clears the flag', async () => {
+        getPolicy.mockResolvedValue(inferencePolicy(true))
+        await act(async () => root.render(<RoutingSettings />))
+        await choosePeer()
+        const tampered = inferencePolicy(false, 2).policy
+        await changeText(
+            document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Node policy JSON"]'),
+            tampered
+        )
+        expect(temperatureInput().disabled).toBe(true)
+        expect(temperatureInput().value).toBe('2')
+        const label = Array.from(container.querySelectorAll('label')).find(
+            item => item.textContent?.trim() === 'Request overrides'
+        )
+        const mode = label && document.getElementById(label.htmlFor)
+        if (!(mode instanceof HTMLButtonElement)) throw new Error('Missing request overrides')
+        expect(mode.disabled).toBe(true)
+        expect(document.querySelector<HTMLInputElement>('input[type="checkbox"]')?.disabled).toBe(
+            true
+        )
+        expect(document.body.textContent).toContain(
+            "Locked on Peer. Change this profile's inference settings on that device."
+        )
+        expect(setPolicy).not.toHaveBeenCalled()
+    })
+
+    it('applies a saved lock push without replacing a remote typed dirty draft', async () => {
+        let emit: Parameters<INodePolicyApi['onPolicyChanged']>[0] | undefined
+        window.pairApi.nodePolicy.onPolicyChanged = callback => {
+            emit = callback
+            return () => {}
+        }
+        getPolicy.mockResolvedValue(inferencePolicy())
+        await act(async () => root.render(<RoutingSettings />))
+        await choosePeer()
+        await changeText(temperatureInput(), '0.4')
+        const draft = document.querySelector<HTMLTextAreaElement>(
+            'textarea[aria-label="Node policy JSON"]'
+        )?.value
+        if (!emit) throw new Error('Missing policy push subscription')
+        const push = emit
+        await act(async () => push({ ...inferencePolicy(true), revision: '6', nodeId: 'peer-1' }))
+        expect(temperatureInput().disabled).toBe(true)
+        expect(temperatureInput().value).toBe('0.4')
+        expect(
+            document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Node policy JSON"]')
+                ?.value
+        ).toBe(draft)
+        expect(document.body.textContent).toContain('Locked on Peer')
+        expect(setPolicy).not.toHaveBeenCalled()
+    })
+
+    it('disables inference edits after management permission is revoked without losing the typed draft', async () => {
+        getPolicy.mockResolvedValue(inferencePolicy())
+        await act(async () => root.render(<RoutingSettings />))
+        await choosePeer()
+        await changeText(temperatureInput(), '0.4')
+        const draft = document.querySelector<HTMLTextAreaElement>(
+            'textarea[aria-label="Node policy JSON"]'
+        )?.value
+        capability.mockResolvedValue({ version: 1, allowed: false, revision: '2', state: 'denied' })
+        await act(async () =>
+            useNodeConfigurationStore.getState().readManagement('peer-1', 'peer-1')
+        )
+        expect(temperatureInput().disabled).toBe(true)
+        expect(temperatureInput().value).toBe('0.4')
+        expect(button('Save').disabled).toBe(true)
+        expect(
+            document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Node policy JSON"]')
+                ?.value
+        ).toBe(draft)
+        expect(setPolicy).not.toHaveBeenCalled()
+    })
+
+    it('preserves a dirty remote inference draft after a numeric lock refusal without an uncertain readback', async () => {
+        getPolicy.mockResolvedValue(inferencePolicy())
+        setPolicy.mockRejectedValueOnce(
+            new ServiceCallError(
+                `device is offline\n${'x'.repeat(5000)}`,
+                REMOTE_SETTING_LOCKED_CODE
+            )
+        )
+        await act(async () => root.render(<RoutingSettings />))
+        await choosePeer()
+        await changeText(temperatureInput(), '0.4')
+        const draft = document.querySelector<HTMLTextAreaElement>(
+            'textarea[aria-label="Node policy JSON"]'
+        )?.value
+        const reads = getPolicy.mock.calls.length
+        await act(async () => button('Save').click())
+        expect(document.body.textContent).toContain(
+            'Inference settings are locked on Peer. Your policy draft is kept.'
+        )
+        expect(document.body.textContent).not.toContain(
+            'Could not confirm whether the save took effect'
+        )
+        const banner = Array.from(document.querySelectorAll<HTMLElement>('[role="alert"]')).find(
+            item => item.textContent?.includes('Service message:')
+        )
+        expect(banner?.textContent).not.toContain('\n')
+        expect(banner?.textContent?.split('Service message: ')[1]?.length).toBe(1024)
+        expect(
+            document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Node policy JSON"]')
+                ?.value
+        ).toBe(draft)
+        expect(getPolicy).toHaveBeenCalledTimes(reads)
+        expect(setPolicy).toHaveBeenCalledExactlyOnceWith({
+            nodeId: 'peer-1',
+            policy: draft,
+            expectedPersistedRevision: '5'
+        })
+        expect(button('Reload').disabled).toBe(false)
+    })
+
+    it('does not infer a lock refusal from text without a numeric service code', async () => {
+        getPolicy.mockResolvedValue(inferencePolicy())
+        setPolicy.mockRejectedValueOnce(new Error('-32014: locked profile'))
+        await act(async () => root.render(<RoutingSettings />))
+        await choosePeer()
+        await changeText(temperatureInput(), '0.4')
+        const reads = getPolicy.mock.calls.length
+        getPolicy.mockRejectedValue(new Error('disconnected'))
+        await act(async () => button('Save').click())
+        expect(document.body.textContent).toContain(
+            'Could not confirm whether the save took effect'
+        )
+        expect(document.body.textContent).not.toContain('Inference settings are locked on Peer')
+        expect(getPolicy).toHaveBeenCalledTimes(reads + 1)
+        expect(temperatureInput().value).toBe('0.4')
     })
 
     it('preserves an unsent remote policy through reconnect and never replays a write', async () => {
