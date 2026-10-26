@@ -23,6 +23,7 @@ import getErrorString from '@/shared/utils/get-error-string'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
+import ModelEngineBindingsEditor from './ModelEngineBindingsEditor'
 import RoutingHistory from '@/ui/components/RoutingSettings/RoutingHistory'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
@@ -313,7 +314,16 @@ export default function RoutingSettings() {
     )
 
     const save = useCallback(async () => {
-        if (permissionReadOnly) return
+        if (
+            permissionReadOnly ||
+            loading ||
+            saving ||
+            switching ||
+            conflict !== null ||
+            previousTarget.current !== targetId ||
+            baseRevisionRef.current === ''
+        )
+            return
         const ticket = latestLoad.current
         const base = baseRevisionRef.current
         setSaving(true)
@@ -370,7 +380,18 @@ export default function RoutingSettings() {
         } finally {
             if (ticket === latestLoad.current) setSaving(false)
         }
-    }, [text, nodeId, noteStatus, adoptRoles, permissionReadOnly, targetId])
+    }, [
+        text,
+        nodeId,
+        noteStatus,
+        adoptRoles,
+        permissionReadOnly,
+        targetId,
+        loading,
+        saving,
+        switching,
+        conflict
+    ])
 
     const nodeItems: DropdownEntry[] = useMemo(
         () => [
@@ -388,6 +409,8 @@ export default function RoutingSettings() {
     const canSave =
         !permissionReadOnly &&
         !switching &&
+        previousTarget.current === targetId &&
+        baseRevisionRef.current !== '' &&
         availability !== null &&
         conflict === null &&
         text.trim() !== ''
@@ -469,6 +492,17 @@ export default function RoutingSettings() {
                             targetId={targetId}
                             nodeId={nodeId ?? undefined}
                             onSaved={adopt}
+                        />
+                    )}
+
+                    {targetId !== null && (
+                        <ModelEngineBindingsEditor
+                            targetId={targetId}
+                            text={text}
+                            onTextChange={setText}
+                            disabled={
+                                loading || saving || switching || permissionReadOnly || !canSave
+                            }
                         />
                     )}
 
