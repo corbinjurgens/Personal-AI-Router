@@ -79,7 +79,13 @@ func newEngineBindingServiceFixture(t *testing.T, s *remoteServiceFixture, confi
 	f.start(t)
 	t.Cleanup(func() {
 		e.unblock()
-		if err := s.cleanupChecked(); err != nil {
+		err := s.cleanupChecked()
+		if t.Failed() {
+			// The existing owner has joined the stderr pumps; capture before
+			// removeBundle deletes the private log directory.
+			logBindingRefusalDecisions(t, s.serviceFixture)
+		}
+		if err != nil {
 			t.Errorf("binding service cleanup: %v", err)
 			return
 		}
@@ -95,6 +101,20 @@ func newEngineBindingServiceFixture(t *testing.T, s *remoteServiceFixture, confi
 		}
 	})
 	return f
+}
+
+func logBindingRefusalDecisions(t *testing.T, s *serviceFixture) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(s.dir, "logs", "broker.log"))
+	if err != nil {
+		t.Logf("binding permission decision log read: %v", err)
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "remote management decision") || strings.Contains(line, "bound engine management refused") {
+			t.Logf("binding permission decision: %s", line)
+		}
+	}
 }
 
 func (f *engineBindingFixture) grant(t *testing.T, peer string, allowed bool) {
@@ -1035,18 +1055,6 @@ func testEngineBindingPinned(t *testing.T, reverse bool) {
 		if t.Failed() {
 			logSwitchPeerAuthority(t, "binding failure before fixture teardown", mesh.a, mesh.b)
 			logSwitchPeerAuthority(t, "binding failure before fixture teardown", mesh.b, mesh.a)
-			// The production owner explicitly logs only secret-free permission
-			// metadata. Preserve those decisions before disposable logs vanish.
-			data, err := os.ReadFile(filepath.Join(s.dir, "logs", "broker.log"))
-			if err != nil {
-				t.Logf("binding permission decision log read: %v", err)
-			} else {
-				for _, line := range strings.Split(string(data), "\n") {
-					if strings.Contains(line, "remote management decision") {
-						t.Logf("binding permission decision: %s", line)
-					}
-				}
-			}
 		}
 	})
 	f.grant(t, mesh.a.uuid, true)

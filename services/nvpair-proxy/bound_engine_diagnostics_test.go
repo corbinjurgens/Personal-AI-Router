@@ -33,6 +33,8 @@ type boundManagementLog struct {
 	ExpectedIncarnation string `json:"expected_incarnation"`
 	ObservedIncarnation string `json:"observed_incarnation"`
 	Permission          string `json:"permission"`
+	ChangedCompared     bool   `json:"changed_component_authority_compared"`
+	ChangedSame         bool   `json:"changed_component_authority_same"`
 }
 
 // These tests remain serial, like the other default-logger capture tests in
@@ -52,7 +54,7 @@ func assertBoundManagementLog(t *testing.T, logs *bytes.Buffer, want boundManage
 	if err := json.Unmarshal(logs.Bytes(), &fields); err != nil {
 		t.Fatalf("decode management diagnostic fields: %v", err)
 	}
-	for _, name := range []string{"time", "level", "msg", "site", "reason", "node_id", "peer_id", "cluster_id", "epoch", "counter", "io_error_code", "expected_incarnation", "observed_incarnation", "permission"} {
+	for _, name := range []string{"time", "level", "msg", "site", "reason", "node_id", "peer_id", "cluster_id", "epoch", "counter", "io_error_code", "expected_incarnation", "observed_incarnation", "permission", "changed_component_authority_compared", "changed_component_authority_same"} {
 		if _, ok := fields[name]; !ok {
 			t.Fatalf("management diagnostic missing field %q", name)
 		}

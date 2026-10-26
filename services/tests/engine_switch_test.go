@@ -1005,6 +1005,13 @@ func newPinnedSwitchFixture(t *testing.T, reverse bool) *pinnedSwitchFixture {
 		origin.stop()
 		mesh.stopScanner()
 		f.p.cleanup()
+		if t.Failed() {
+			for _, line := range strings.Split(f.p.output.String(), "\n") {
+				if strings.Contains(line, "bound engine management refused") {
+					t.Logf("target bound refusal: %s", line)
+				}
+			}
+		}
 	})
 	directory := mesh.directory(mesh.b)
 	ec := mesh.b.observers[noderec.ServiceEngineControl]

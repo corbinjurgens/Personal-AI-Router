@@ -20,6 +20,10 @@ const membersFileName = "members.json"
 // alone cannot establish a new admission when the roster still records the old
 // epoch. Only the cluster-manager writes or upgrades these records.
 func peerServiceMember(data []byte, peerUUID, clusterID string, pinEpoch uint64) (uint64, bool) {
+	return peerServiceMemberDiagnostic(data, peerUUID, clusterID, pinEpoch, nil)
+}
+
+func peerServiceMemberDiagnostic(data []byte, peerUUID, clusterID string, pinEpoch uint64, diagnostic *PeerServiceDiagnostic) (uint64, bool) {
 	var members []struct {
 		NodeUUID       string `json:"nodeUuid"`
 		State          string `json:"state"`
@@ -27,6 +31,7 @@ func peerServiceMember(data []byte, peerUUID, clusterID string, pinEpoch uint64)
 		AdmissionEpoch uint64 `json:"admissionEpoch"`
 	}
 	if err := json.Unmarshal(data, &members); err != nil {
+		diagnostic.refuse("members_decode", nil)
 		return 0, false
 	}
 	var epoch uint64
@@ -37,9 +42,13 @@ func peerServiceMember(data []byte, peerUUID, clusterID string, pinEpoch uint64)
 		}
 		if found || member.State != "member" || member.ClusterID != clusterID ||
 			member.AdmissionEpoch == 0 || member.AdmissionEpoch != pinEpoch {
+			diagnostic.refuse("member_admission_mismatch", nil)
 			return 0, false
 		}
 		found, epoch = true, member.AdmissionEpoch
+	}
+	if !found {
+		diagnostic.refuse("member_missing", nil)
 	}
 	return epoch, found
 }
@@ -60,6 +69,10 @@ type admissionRecord struct {
 // active pair. Unlike the membership compatibility gate below, service-route
 // authority requires an explicit, complete admission record.
 func peerServiceAdmission(data []byte) (admissionRecord, bool) {
+	return peerServiceAdmissionDiagnostic(data, nil)
+}
+
+func peerServiceAdmissionDiagnostic(data []byte, diagnostic *PeerServiceDiagnostic) (admissionRecord, bool) {
 	var rec struct {
 		admissionRecord
 		Counter   uint64 `json:"counter"`
@@ -67,7 +80,11 @@ func peerServiceAdmission(data []byte) (admissionRecord, bool) {
 		Retired   bool   `json:"retired"`
 	}
 	if err := json.Unmarshal(data, &rec); err != nil {
+		diagnostic.refuse("admission_decode", nil)
 		return admissionRecord{}, false
+	}
+	if diagnostic != nil {
+		diagnostic.ClusterID, diagnostic.Epoch, diagnostic.Counter = rec.ClusterID, rec.Epoch, rec.Counter
 	}
 	// The owner loads records predating activated with epoch as the high-water
 	// mark; use the same interpretation without upgrading anything on disk.
@@ -76,6 +93,7 @@ func peerServiceAdmission(data []byte) (admissionRecord, bool) {
 	}
 	if rec.ClusterID == "" || rec.Epoch == 0 || rec.Retired ||
 		rec.Epoch > rec.Activated || rec.Activated > rec.Counter {
+		diagnostic.refuse("admission_invalid", nil)
 		return admissionRecord{}, false
 	}
 	return rec.admissionRecord, true

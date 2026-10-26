@@ -7,6 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,6 +137,7 @@ func TestBoundEnginePeerRevocationDuringLifecycleWait(t *testing.T) {
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
+	logs := captureBoundAuthorityLogs(t)
 	done := make(chan error, 1)
 	go func() { done <- m.activateBoundEngine(context.Background(), p) }()
 	waitBoundLifecycleAdmission(t, m.exec)
@@ -145,6 +152,129 @@ func TestBoundEnginePeerRevocationDuringLifecycleWait(t *testing.T) {
 		t.Fatal("revocation could not cancel lifecycle waiting")
 	}
 	requireBoundNoStart(t, m)
+	records := readBoundAuthorityLogs(t, logs)
+	if len(records) == 0 {
+		t.Fatalf("accepted watcher refusal diagnostics = %+v", records)
+	}
+	// This fixture rewrites its marker and document while the watcher reads.
+	// A transition read must fail closed too; synchronous denial is asserted
+	// exactly by TestBoundEngineAuthorityRefusalDiagnostic below.
+	for _, record := range records {
+		transition := strings.HasPrefix(record.Reason, "permission_marker_") || strings.HasPrefix(record.Reason, "permission_document_")
+		if record.Site != "engine_manager.remote_management" ||
+			!(record.Reason == "permission_denied" && record.Permission == "denied" || transition && record.Permission == "unavailable") {
+			t.Fatalf("unexpected watcher refusal diagnostic: %+v", record)
+		}
+	}
+}
+
+type boundAuthorityLogRecord struct {
+	Message             string `json:"msg"`
+	Site                string `json:"site"`
+	Reason              string `json:"reason"`
+	NodeID              string `json:"node_id"`
+	PeerID              string `json:"peer_id"`
+	ClusterID           string `json:"cluster_id"`
+	Epoch               uint64 `json:"epoch"`
+	Counter             uint64 `json:"counter"`
+	ExpectedIncarnation string `json:"expected_incarnation"`
+	ObservedIncarnation string `json:"observed_incarnation"`
+	Permission          string `json:"permission"`
+}
+
+func captureBoundAuthorityLogs(t *testing.T) *lockedBuffer {
+	t.Helper()
+	logs := &lockedBuffer{}
+	previous := slog.Default()
+	previousWriter, previousFlags := log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		log.SetOutput(previousWriter)
+		log.SetFlags(previousFlags)
+	})
+	return logs
+}
+
+func readBoundAuthorityLogs(t *testing.T, logs *lockedBuffer) []boundAuthorityLogRecord {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(logs.String()))
+	var records []boundAuthorityLogRecord
+	for {
+		var record boundAuthorityLogRecord
+		if err := decoder.Decode(&record); errors.Is(err, io.EOF) {
+			return records
+		} else if err != nil {
+			t.Fatalf("decode bound authority diagnostic: %v", err)
+		}
+		if record.Message == "bound engine management refused" {
+			records = append(records, record)
+		}
+	}
+}
+
+func TestBoundEngineAuthorityRefusalDiagnostic(t *testing.T) {
+	test := func(name, site, reason, permission string, change func(*testing.T, *Manager, *nodepolicy.ActivateBoundEngineRequest, *rmFixture)) {
+		t.Run(name, func(t *testing.T) {
+			m, p := boundActivationFixture(t)
+			f := rmNewFixture(t, "self", "peer")
+			f.writePermissions("1", map[string]bool{"peer": true})
+			m.mesh = f.mesh
+			incarnation, ok := f.mesh.PeerServiceIncarnation("peer")
+			if !ok {
+				t.Fatal("fixture lacks current peer authority")
+			}
+			p.PeerID, p.PeerIncarnation = "peer", incarnation
+			change(t, m, &p, f)
+			logs := captureBoundAuthorityLogs(t)
+			var veto *localVetoError
+			if err := m.boundEngineAuthority(p); !errors.As(err, &veto) || veto.code != codeRemoteManagementDenied {
+				t.Fatalf("bound authority refusal = %v", err)
+			}
+			records := readBoundAuthorityLogs(t, logs)
+			if len(records) != 1 || records[0].Site != site || records[0].Reason != reason ||
+				records[0].Permission != permission || records[0].PeerID != "peer" || records[0].ExpectedIncarnation != p.PeerIncarnation {
+				t.Fatalf("bound authority log = %+v", records)
+			}
+			if reason != "mesh_unavailable" && records[0].NodeID != "self" {
+				t.Fatalf("refusal lost its deciding identity: %+v", records[0])
+			}
+			requireBoundNoStart(t, m)
+		})
+	}
+	test("missing mesh", "engine_manager.peer_incarnation", "mesh_unavailable", "not_checked", func(_ *testing.T, m *Manager, _ *nodepolicy.ActivateBoundEngineRequest, _ *rmFixture) {
+		m.mesh = nil
+	})
+	test("authority read", "engine_manager.peer_incarnation", "members_read", "not_checked", func(t *testing.T, _ *Manager, _ *nodepolicy.ActivateBoundEngineRequest, f *rmFixture) {
+		if err := os.Remove(filepath.Join(f.dir, "members.json")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	test("incarnation mismatch", "engine_manager.peer_incarnation", "incarnation_mismatch", "not_checked", func(_ *testing.T, _ *Manager, p *nodepolicy.ActivateBoundEngineRequest, _ *rmFixture) {
+		p.PeerIncarnation = strings.Repeat("0", 64)
+	})
+	test("permission denied", "engine_manager.remote_management", "permission_denied", "denied", func(_ *testing.T, _ *Manager, _ *nodepolicy.ActivateBoundEngineRequest, f *rmFixture) {
+		f.writePermissions("2", map[string]bool{"peer": false})
+	})
+}
+
+func TestBoundEngineAuthoritySuccessDoesNotLog(t *testing.T) {
+	m, p := boundActivationFixture(t)
+	f := rmNewFixture(t, "self", "peer")
+	f.writePermissions("1", map[string]bool{"peer": true})
+	m.mesh = f.mesh
+	incarnation, ok := f.mesh.PeerServiceIncarnation("peer")
+	if !ok {
+		t.Fatal("fixture lacks current peer authority")
+	}
+	p.PeerID, p.PeerIncarnation = "peer", incarnation
+	logs := captureBoundAuthorityLogs(t)
+	if err := m.boundEngineAuthority(p); err != nil {
+		t.Fatalf("valid authority refused: %v", err)
+	}
+	if records := readBoundAuthorityLogs(t, logs); len(records) != 0 {
+		t.Fatalf("successful bound authority emitted refusal: %+v", records)
+	}
 }
 
 func TestBoundEngineCallerCancellationDuringLifecycleWait(t *testing.T) {

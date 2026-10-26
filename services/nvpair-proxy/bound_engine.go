@@ -52,6 +52,8 @@ func logBoundEngineManagementRefusal(site, peer string, diagnostic clustertrust.
 		"node_id", diagnostic.NodeID, "peer_id", peer, "cluster_id", diagnostic.ClusterID,
 		"epoch", diagnostic.Epoch, "counter", diagnostic.Counter, "io_error_code", diagnostic.ErrorCode,
 		"expected_incarnation", diagnostic.ExpectedIncarnation, "observed_incarnation", diagnostic.ObservedIncarnation,
+		"changed_component_authority_compared", diagnostic.ChangedComponentCompared,
+		"changed_component_authority_same", diagnostic.ChangedComponentSame,
 		"permission", "not_checked")
 }
 
