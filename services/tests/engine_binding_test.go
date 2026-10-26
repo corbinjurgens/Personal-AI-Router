@@ -1037,9 +1037,14 @@ func testEngineBindingPinned(t *testing.T, reverse bool) {
 			logSwitchPeerAuthority(t, "binding failure before fixture teardown", mesh.b, mesh.a)
 			// The production owner explicitly logs only secret-free permission
 			// metadata. Preserve those decisions before disposable logs vanish.
-			for _, line := range strings.Split(s.service.output.String(), "\n") {
-				if strings.Contains(line, "remote management decision") {
-					t.Logf("binding permission decision: %s", line)
+			data, err := os.ReadFile(filepath.Join(s.dir, "logs", "broker.log"))
+			if err != nil {
+				t.Logf("binding permission decision log read: %v", err)
+			} else {
+				for _, line := range strings.Split(string(data), "\n") {
+					if strings.Contains(line, "remote management decision") {
+						t.Logf("binding permission decision: %s", line)
+					}
 				}
 			}
 		}
