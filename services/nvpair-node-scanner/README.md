@@ -131,6 +131,7 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 |---|---|---|
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
 | `--mdns` | `true` | Browse and advertise nodes over mDNS; `--mdns=false` constructs neither the browser nor the responder |
+| `--mdns-service <name>` | `_nvpair-node._tcp` | DNS-SD service used by both browser and responder (`_name._tcp`) |
 | `--test-scan-interval <duration>` | `5s` | Fixture-only mDNS scan cadence |
 | `--test-scan-timeout <duration>` | `3s` | Fixture-only timeout for each mDNS browse |
 | `--test-peer-refresh-interval <duration>` | `15s` | Fixture-only cadence for the mDNS-independent inventory and membership sweep |
@@ -156,6 +157,17 @@ accepts the broker's private authenticated peer-services notifications, and runs
 periodic enrichment and maintenance. Authenticated and explicitly configured peer
 HTTP remains active under its existing transport and admission rules. This flag
 provides neither general network isolation nor an authentication bypass.
+
+For genuine multicast fixtures, give all participants the same private service
+under `local`, for example `_pair-example._tcp`. Only `local` is supported:
+zeroconf v1.0.0 caches its receive-matching service name under that domain.
+The responder retains `<OS-hostname>.local.` as its SRV/A target; sharing a host
+name cannot match another service's PTR, SRV or TXT records. Service names are
+lowercased and accept one optional trailing root dot. Empty names, invalid DNS
+labels and service types other than `_name._tcp` fail before
+identity, IPC or discovery setup, even with `--mdns=false`. Production defaults
+are unchanged. Names separate discovery records; configured and authenticated
+peer HTTP still requires independently owned fixture endpoints.
 
 ## JSON-RPC surface
 

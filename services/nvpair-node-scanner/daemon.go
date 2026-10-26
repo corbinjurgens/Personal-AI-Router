@@ -244,7 +244,7 @@ const modelsRefreshConcurrency = 16
 // enrichment onto HTTPS via the --client-cert/--client-key/--ca-bundle flags; nil
 // keeps the default plain-HTTP fetch. mdnsEnabled controls browser and responder
 // construction without disabling the directory or its independent refresh loops.
-func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, timings scannerTimings) *daemon {
+func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, namespace noderec.MDNSNamespace, timings scannerTimings) *daemon {
 	// nodeid reads <base>/cluster/identity.json; --cluster-dir is that cluster
 	// subdir, so its parent is the base. Empty -> nodeid's shared default.
 	baseDir := ""
@@ -299,13 +299,13 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 	// cluster-manager's browser). Self re-stamps are handled separately in
 	// reloadIdentity, which moves this node's own directory entry to the new uuid.
 	if mdnsEnabled {
-		d.browser = NewDiscovery(noderec.ServiceType, noderec.Domain,
+		d.browser = NewDiscovery(namespace.Service, namespace.Domain,
 			discovery.WithInterval(d.timings.scanInterval),
 			discovery.WithScanTimeout(d.timings.scanTimeout),
 			WithLivenessProbe(func(n RawNode) bool { return d.reachable(n) }),
 			WithKeyFunc(func(n RawNode) string { return UUIDFromTXT(n.TXT) }),
 		)
-		if resp, err := mdns.NewResponder(instance, noderec.ServiceType, noderec.Domain, noderec.SRVPort, reg.txt()); err != nil {
+		if resp, err := mdns.NewResponder(instance, namespace.Service, namespace.Domain, noderec.SRVPort, reg.txt()); err != nil {
 			slog.Warn("mDNS advertising disabled for _nvpair-node", "err", err)
 		} else {
 			d.responder = resp

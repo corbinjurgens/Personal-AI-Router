@@ -75,16 +75,24 @@ type Scanner struct {
 // same base cluster-manager persists to (empty selects the shared default).
 // tlsHTTP is nil unless the operator opted node-info enrichment onto HTTPS via
 // the --client-cert/--client-key/--ca-bundle flags.
-func NewScanner(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool) *Scanner {
-	return newScannerWithTimings(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled, defaultScannerTimings())
+// namespace is validated before identity or discovery construction.
+func NewScanner(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, namespace noderec.MDNSNamespace) (*Scanner, error) {
+	return newScannerWithTimings(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled, namespace, defaultScannerTimings())
 }
 
-// newScannerWithTimings receives timings validated by main before startup.
-func newScannerWithTimings(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, timings scannerTimings) *Scanner {
+// newScannerWithTimings validates namespace and timings before startup effects.
+func newScannerWithTimings(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, namespace noderec.MDNSNamespace, timings scannerTimings) (*Scanner, error) {
+	namespace, err := namespace.Normalize()
+	if err != nil {
+		return nil, err
+	}
+	if err := timings.validate(); err != nil {
+		return nil, err
+	}
 	return &Scanner{
 		codec:  codec,
-		daemon: newDaemon(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled, timings),
-	}
+		daemon: newDaemon(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled, namespace, timings),
+	}, nil
 }
 
 func (s *Scanner) Run(ctx context.Context) error {

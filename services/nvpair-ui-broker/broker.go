@@ -204,6 +204,7 @@ type Broker struct {
 	nodeID               string
 	scannerPath          string
 	disableMDNS          bool
+	scannerNamespace     *noderec.MDNSNamespace
 	manualProbePorts     *manualProbePorts
 	nodeInfoPath         string
 	proxyPath            string
@@ -470,6 +471,7 @@ type Broker struct {
 // broker won't spawn that worker because its binary couldn't be resolved).
 type workerPaths struct {
 	disableMDNS      bool
+	scannerNamespace *noderec.MDNSNamespace
 	manualProbePorts *manualProbePorts
 	scanner          string
 	nodeInfo         string
@@ -517,6 +519,11 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 	if paths.engineMgrControlHost != nil {
 		controlHost = *paths.engineMgrControlHost
 	}
+	validNamespace := true
+	if paths.scannerNamespace != nil {
+		_, err := paths.scannerNamespace.Normalize()
+		validNamespace = err == nil
+	}
 	// Resolve the local node id once, as the stable per-host UUID (the same
 	// value the node-scanner advertises as hostUuid and the cluster-manager
 	// uses as nodeUuid). It's stamped onto every local-origin workload
@@ -525,7 +532,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 	// only. The same value is passed to nvpair-errors via --node-id so
 	// its localNodeID stays in lockstep with what the broker stamps.
 	nodeID := ""
-	if validateEngineManagerControlHost(controlHost) == nil && paths.residentRetryDelay >= 0 && paths.advertiseCadence >= 0 && paths.scannerWaits.validate() == nil {
+	if validNamespace && validateEngineManagerControlHost(controlHost) == nil && paths.residentRetryDelay >= 0 && paths.advertiseCadence >= 0 && paths.scannerWaits.validate() == nil {
 		nodeID = resolveLocalNodeID(paths.clusterDir)
 	}
 	return &Broker{
@@ -534,6 +541,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		nodeID:               nodeID,
 		scannerPath:          paths.scanner,
 		disableMDNS:          paths.disableMDNS,
+		scannerNamespace:     paths.scannerNamespace,
 		manualProbePorts:     paths.manualProbePorts,
 		nodeInfoPath:         paths.nodeInfo,
 		proxyPath:            paths.proxy,
@@ -1783,6 +1791,9 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 		return fmt.Errorf("service ports: %w", err)
 	}
 	if err := b.manualProbePorts.validate(); err != nil {
+		return err
+	}
+	if _, err := b.scannerArgs(); err != nil {
 		return err
 	}
 	if err := validateEngineManagerControlHost(b.engineMgrControlHost); err != nil {

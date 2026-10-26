@@ -17,6 +17,7 @@ import (
 
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/noderec"
 )
 
 // scannerTimings are copied into each daemon before discovery is constructed.
@@ -65,10 +66,15 @@ func main() {
 	caBundle := flag.String("ca-bundle", "", "path to PEM CA bundle to trust for verifying node-info server certificates (additive to the system trust store); enabling any of these TLS flags moves node-info enrichment onto HTTPS")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	mdnsEnabled := flag.Bool("mdns", true, "browse and advertise nodes over mDNS")
+	mdnsService := flag.String("mdns-service", noderec.ServiceType, "mDNS DNS-SD service used for browsing and advertising (_name._tcp)")
 	timings := defaultScannerTimings()
 	timings.registerFlags(flag.CommandLine)
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
+	namespace, err := (noderec.MDNSNamespace{Service: *mdnsService, Domain: noderec.Domain}).Normalize()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if *showVersion {
 		fmt.Println(Version)
@@ -130,7 +136,10 @@ func main() {
 	}()
 
 	codec := NewCodec(transport)
-	scanner := newScannerWithTimings(codec, mesh, *clusterDir, tlsHTTP, *mdnsEnabled, timings)
+	scanner, err := newScannerWithTimings(codec, mesh, *clusterDir, tlsHTTP, *mdnsEnabled, namespace, timings)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if err := scanner.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("scanner error: %v", err)

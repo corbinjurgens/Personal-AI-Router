@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/noderec"
 )
 
 func TestScannerTimingProductionDefaults(t *testing.T) {
@@ -104,12 +105,21 @@ func TestScannerTimingOverridesAreInstanceOwned(t *testing.T) {
 		t.Fatalf("validate timing overrides: %v", err)
 	}
 	dir := filepath.Join(t.TempDir(), "cluster")
-	overridden := newScannerWithTimings(nil, clustertrust.Open(dir), dir, nil, true, timings).daemon
+	namespace := noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: noderec.Domain}
+	overriddenScanner, err := newScannerWithTimings(nil, clustertrust.Open(dir), dir, nil, true, namespace, timings)
+	if err != nil {
+		t.Fatalf("construct scanner with timing overrides: %v", err)
+	}
+	overridden := overriddenScanner.daemon
 	timings.scanInterval = time.Second
 	timings.scanTimeout = time.Second
 	timings.peerRefreshInterval = time.Second
 	otherDir := filepath.Join(t.TempDir(), "cluster")
-	ordinary := NewScanner(nil, clustertrust.Open(otherDir), otherDir, nil, true).daemon
+	ordinaryScanner, err := NewScanner(nil, clustertrust.Open(otherDir), otherDir, nil, true, namespace)
+	if err != nil {
+		t.Fatalf("construct scanner with default timings: %v", err)
+	}
+	ordinary := ordinaryScanner.daemon
 	wantOverrides := scannerTimings{
 		scanInterval:        50 * time.Millisecond,
 		scanTimeout:         10 * time.Millisecond,

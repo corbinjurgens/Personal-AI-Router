@@ -17,13 +17,13 @@ import (
 	"time"
 
 	"github.com/grandcat/zeroconf"
+	"nvpair-shared/noderec"
 )
-
-const testDomain = "local."
 
 type mdnsAdvertiserFixture struct {
 	Instance  string
 	Service   string
+	Domain    string
 	Port      int
 	TXT       []string
 	Interface string
@@ -33,6 +33,10 @@ func init() {
 	if data := os.Getenv("NVPAIR_TEST_MDNS_ADVERTISER"); data != "" {
 		var fixture mdnsAdvertiserFixture
 		if err := json.Unmarshal([]byte(data), &fixture); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := validateFixtureMDNSNamespace(noderec.MDNSNamespace{Service: fixture.Service, Domain: fixture.Domain}); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -63,6 +67,9 @@ func init() {
 // interface must not prevent a failed assertion from returning to the suite.
 func startMDNSAdvertiser(t *testing.T, fixture mdnsAdvertiserFixture) func() {
 	t.Helper()
+	if err := validateFixtureMDNSNamespace(noderec.MDNSNamespace{Service: fixture.Service, Domain: fixture.Domain}); err != nil {
+		t.Fatal(err)
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -128,14 +135,17 @@ func startMDNSAdvertiser(t *testing.T, fixture mdnsAdvertiserFixture) func() {
 }
 
 func TestInProcessDiscovery(t *testing.T) {
+	namespace := newFixtureMDNSNamespace(t)
+	if namespace.Domain != noderec.Domain || namespace.Service == noderec.ServiceType {
+		t.Fatalf("positive receive control requires a private service under local: %+v", namespace)
+	}
 	const (
-		service  = "_test-disc._tcp"
 		instance = "in-proc-test"
 		port     = 55555
 	)
 
 	iface := mdnsFixtureInterface(t)
-	startMDNSAdvertiser(t, mdnsAdvertiserFixture{Instance: instance, Service: service, Port: port, TXT: []string{"env=test"}, Interface: iface.Name})
+	startMDNSAdvertiser(t, mdnsAdvertiserFixture{Instance: instance, Service: namespace.Service, Domain: namespace.Domain, Port: port, TXT: []string{"env=test"}, Interface: iface.Name})
 	time.Sleep(500 * time.Millisecond)
 
 	resolver, err := zeroconf.NewResolver(mdnsResolverOptions([]net.Interface{iface})...)
@@ -158,12 +168,15 @@ func TestInProcessDiscovery(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := mdnsBrowse(t, resolver, ctx, service, entries, []net.Interface{iface}); err != nil {
+	if err := mdnsBrowse(t, resolver, ctx, namespace.Service, namespace.Domain, entries, []net.Interface{iface}); err != nil {
 		t.Fatalf("browse: %v", err)
 	}
 
 	select {
 	case entry := <-found:
+		if entry.Service != namespace.Service || entry.Domain != noderec.Domain || entry.HostName != instance+".local." {
+			t.Errorf("received names = %+v, want private service %s under local", entry, namespace.Service)
+		}
 		if entry.Port != port {
 			t.Errorf("port = %d, want %d", entry.Port, port)
 		}
@@ -181,12 +194,12 @@ func TestInProcessDiscovery(t *testing.T) {
 }
 
 func TestInProcessMultipleInstances(t *testing.T) {
-	const service = "_test-multi._tcp"
+	namespace := newFixtureMDNSNamespace(t)
 	instances := []string{"node-alpha", "node-beta", "node-gamma"}
 
 	iface := mdnsFixtureInterface(t)
 	for i, inst := range instances {
-		startMDNSAdvertiser(t, mdnsAdvertiserFixture{Instance: inst, Service: service, Port: 50000 + i, Interface: iface.Name})
+		startMDNSAdvertiser(t, mdnsAdvertiserFixture{Instance: inst, Service: namespace.Service, Domain: namespace.Domain, Port: 50000 + i, Interface: iface.Name})
 	}
 	time.Sleep(500 * time.Millisecond)
 
@@ -211,7 +224,7 @@ func TestInProcessMultipleInstances(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := mdnsBrowse(t, resolver, ctx, service, entries, []net.Interface{iface}); err != nil {
+	if err := mdnsBrowse(t, resolver, ctx, namespace.Service, namespace.Domain, entries, []net.Interface{iface}); err != nil {
 		t.Fatalf("browse: %v", err)
 	}
 	<-ctx.Done()
@@ -226,17 +239,17 @@ func TestInProcessMultipleInstances(t *testing.T) {
 }
 
 func TestInProcessRemoval(t *testing.T) {
+	namespace := newFixtureMDNSNamespace(t)
 	const (
-		service  = "_test-rmv._tcp"
 		instance = "removable-node"
 		port     = 55556
 	)
 
 	iface := mdnsFixtureInterface(t)
-	stop := startMDNSAdvertiser(t, mdnsAdvertiserFixture{Instance: instance, Service: service, Port: port, Interface: iface.Name})
+	stop := startMDNSAdvertiser(t, mdnsAdvertiserFixture{Instance: instance, Service: namespace.Service, Domain: namespace.Domain, Port: port, Interface: iface.Name})
 
 	// Phase 1: verify discoverable
-	entry := browseForInstanceOnInterfaces(t, service, instance, 5*time.Second, []net.Interface{iface})
+	entry := browseForInstanceOnInterfaces(t, namespace.Service, namespace.Domain, instance, 5*time.Second, []net.Interface{iface})
 	if entry == nil {
 		t.Fatal("service not found before removal")
 	}
@@ -247,7 +260,7 @@ func TestInProcessRemoval(t *testing.T) {
 	time.Sleep(time.Second)
 
 	// Phase 2: verify no longer discoverable
-	entry = browseForInstanceOnInterfaces(t, service, instance, 5*time.Second, []net.Interface{iface})
+	entry = browseForInstanceOnInterfaces(t, namespace.Service, namespace.Domain, instance, 5*time.Second, []net.Interface{iface})
 	if entry != nil {
 		t.Error("service still discoverable after shutdown")
 	} else {
@@ -257,12 +270,12 @@ func TestInProcessRemoval(t *testing.T) {
 
 // --- helpers ---
 
-func browseForInstance(t *testing.T, service, instance string, timeout time.Duration) *zeroconf.ServiceEntry {
+func browseForInstance(t *testing.T, service, domain, instance string, timeout time.Duration) *zeroconf.ServiceEntry {
 	t.Helper()
-	return browseForInstanceOnInterfaces(t, service, instance, timeout, nil)
+	return browseForInstanceOnInterfaces(t, service, domain, instance, timeout, nil)
 }
 
-func browseForInstanceOnInterfaces(t *testing.T, service, instance string, timeout time.Duration, ifaces []net.Interface) *zeroconf.ServiceEntry {
+func browseForInstanceOnInterfaces(t *testing.T, service, domain, instance string, timeout time.Duration, ifaces []net.Interface) *zeroconf.ServiceEntry {
 	t.Helper()
 	resolver, err := zeroconf.NewResolver(mdnsResolverOptions(ifaces)...)
 	if err != nil {
@@ -284,7 +297,7 @@ func browseForInstanceOnInterfaces(t *testing.T, service, instance string, timeo
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := mdnsBrowse(t, resolver, ctx, service, entries, ifaces); err != nil {
+	if err := mdnsBrowse(t, resolver, ctx, service, domain, entries, ifaces); err != nil {
 		t.Fatalf("browse: %v", err)
 	}
 

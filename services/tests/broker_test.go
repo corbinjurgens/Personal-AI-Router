@@ -64,9 +64,9 @@ type subscriptionResult struct {
 	Subscribed bool `json:"subscribed"`
 }
 
-func startBroker(t *testing.T, extraArgs ...string) (stdin io.WriteCloser, msgs <-chan jsonrpc.Message, cleanup func()) {
+func startBroker(t *testing.T, namespace noderec.MDNSNamespace, extraArgs ...string) (stdin io.WriteCloser, msgs <-chan jsonrpc.Message, cleanup func()) {
 	t.Helper()
-	args, err := reserveFixtureServicePorts(t).brokerArgs(t.TempDir(), append([]string{"--scanner-mdns=true"}, extraArgs...)...)
+	args, err := reserveFixtureServicePorts(t).brokerArgs(t.TempDir(), append(fixtureMDNSBrokerArgs(namespace), extraArgs...)...)
 	if err != nil {
 		t.Fatal(err)
 	}

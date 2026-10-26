@@ -22,6 +22,7 @@ import (
 )
 
 func TestModelsHTTPEnrichment(t *testing.T) {
+	namespace := newFixtureMDNSNamespace(t)
 	// Stand-in engine-manager HTTP surface serving the model list.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
@@ -60,11 +61,11 @@ func TestModelsHTTPEnrichment(t *testing.T) {
 	// address in the daemon's enrichment target selection).
 	txt := []string{"v=1", "uuid=" + instance + "-uuid", "ip=127.0.0.1", fmt.Sprintf("em=%d", emPort)}
 	startMDNSAdvertiser(t, mdnsAdvertiserFixture{
-		Instance: instance, Service: nodeRecordService, Port: emPort, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
+		Instance: instance, Service: namespace.Service, Domain: namespace.Domain, Port: emPort, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
 	})
-	t.Logf("advertising %s @ %s (em=%d)", instance, nodeRecordService, emPort)
+	t.Logf("advertising %s @ %s.%s (em=%d)", instance, namespace.Service, namespace.Domain, emPort)
 
-	stdin, msgs, cleanup := startBroker(t)
+	stdin, msgs, cleanup := startBroker(t, namespace)
 	t.Cleanup(cleanup)
 
 	// Poll get-nodes until the node appears carrying the enriched model list.

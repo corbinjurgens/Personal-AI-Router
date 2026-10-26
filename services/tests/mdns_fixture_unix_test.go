@@ -39,17 +39,17 @@ func mdnsResolverOptions(ifaces []net.Interface) []zeroconf.ClientOption {
 func registerMDNSFixture(fixture mdnsAdvertiserFixture, iface net.Interface) (func() error, error) {
 	// Register's address enumeration omits loopback addresses. Keep the
 	// existing proxy registration and both IP transports on Unix.
-	server, err := zeroconf.RegisterProxy(fixture.Instance, fixture.Service, testDomain, fixture.Port,
-		fixture.Instance, []string{"127.0.0.1"}, fixture.TXT, []net.Interface{iface})
+	server, err := zeroconf.RegisterProxy(fixture.Instance, fixture.Service, fixture.Domain, fixture.Port,
+		fixture.Instance+"."+fixture.Domain+".", []string{"127.0.0.1"}, fixture.TXT, []net.Interface{iface})
 	if err != nil {
 		return nil, err
 	}
 	return func() error { server.Shutdown(); return nil }, nil
 }
 
-func mdnsBrowse(t *testing.T, resolver *zeroconf.Resolver, ctx context.Context, service string, entries chan<- *zeroconf.ServiceEntry, _ []net.Interface) error {
+func mdnsBrowse(t *testing.T, resolver *zeroconf.Resolver, ctx context.Context, service, domain string, entries chan<- *zeroconf.ServiceEntry, _ []net.Interface) error {
 	t.Helper()
-	return resolver.Browse(ctx, service, testDomain, entries)
+	return resolver.Browse(ctx, service, domain, entries)
 }
 
 func mdnsFixtureLogLine(string) {}

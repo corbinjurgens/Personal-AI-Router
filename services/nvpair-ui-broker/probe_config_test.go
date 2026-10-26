@@ -4,10 +4,15 @@
 package main
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
+	"time"
+
+	"nvpair-shared/noderec"
 )
 
 func TestProbeConfigScannerDefaultAndDisabledArguments(t *testing.T) {
@@ -24,10 +29,83 @@ func TestProbeConfigScannerDefaultAndDisabledArguments(t *testing.T) {
 			b := NewBroker(nil, workerPaths{clusterDir: clusterDir, disableMDNS: tc.disabled})
 			want := append([]string{"--cluster-dir", clusterDir}, tc.want...)
 			for range 2 {
-				if got := b.scannerArgs(); !reflect.DeepEqual(got, want) {
-					t.Fatalf("scanner argv = %q, want %q", got, want)
+				if got, err := b.scannerArgs(); err != nil || !reflect.DeepEqual(got, want) {
+					t.Fatalf("scanner argv = %q, %v, want %q", got, err, want)
 				}
 			}
+		})
+	}
+}
+
+func TestScannerNamespaceSurvivesSupervisedRestart(t *testing.T) {
+	fixture := buildServicePortFixture(t)
+	namespace := &noderec.MDNSNamespace{Service: "_PAIR-Fixture._TCP.", Domain: "LOCAL."}
+	b := NewBroker(nil, workerPaths{scanner: fixture, scannerNamespace: namespace, clusterDir: filepath.Join(t.TempDir(), "cluster")})
+	sup := newSupervisor("node-scanner", restartPolicy{baseDelay: 10 * time.Millisecond, maxDelay: 10 * time.Millisecond, maxAttempts: 3}, b.spawnScanner)
+	if err := sup.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(sup.Stop)
+	first := b.getScanner()
+	assertArgs := func() {
+		t.Helper()
+		args := b.getScanner().cmd.Args
+		i := slices.Index(args, "--mdns-service")
+		if i < 0 || i+1 >= len(args) || args[i+1] != "_pair-fixture._tcp" {
+			t.Fatalf("scanner argv %q missing normalized private service", args)
+		}
+	}
+	assertArgs()
+	if err := first.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for b.getScanner() == first {
+		if time.Now().After(deadline) {
+			t.Fatal("scanner did not restart")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	assertArgs()
+}
+
+func TestScannerNamespaceInvalidBeforeIdentityAndSpawn(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		disabled  bool
+		namespace noderec.MDNSNamespace
+	}{
+		{"missing domain with multicast enabled", false, noderec.MDNSNamespace{Service: noderec.ServiceType}},
+		{"missing domain with multicast disabled", true, noderec.MDNSNamespace{Service: noderec.ServiceType}},
+		{"custom domain with multicast enabled", false, noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: "fixture.local"}},
+		{"custom domain with multicast disabled", true, noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: "fixture.local"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "must-not-exist")
+			assertNoIdentity := func() {
+				t.Helper()
+				if _, err := os.Stat(root); !os.IsNotExist(err) {
+					t.Fatalf("invalid namespace created identity directory or stat failed: %v", err)
+				}
+			}
+			b := NewBroker(nil, workerPaths{
+				scanner: "must-not-start", clusterDir: filepath.Join(root, "cluster"), disableMDNS: tc.disabled,
+				scannerNamespace: &tc.namespace,
+			})
+			assertNoIdentity()
+			if b.nodeID != "" {
+				t.Fatalf("invalid namespace resolved identity %q", b.nodeID)
+			}
+			if args, err := b.scannerArgs(); err == nil || args != nil {
+				t.Fatalf("invalid namespace argv = %q, %v", args, err)
+			}
+			if err := b.Serve(context.Background()); err == nil {
+				t.Fatal("Serve accepted invalid namespace")
+			}
+			if handle, err := b.spawnScanner(); err == nil || handle != nil {
+				t.Fatalf("invalid namespace spawn = %v, %v", handle, err)
+			}
+			assertNoIdentity()
 		})
 	}
 }

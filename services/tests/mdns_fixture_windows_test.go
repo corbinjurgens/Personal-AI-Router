@@ -98,16 +98,17 @@ func (s fixtureMDNSSender) send(msg *dns.Msg, target *net.UDPAddr) error {
 	return nil
 }
 
-func fixtureMDNSQuery(service string) *dns.Msg {
-	return &dns.Msg{Question: []dns.Question{{Name: strings.Trim(service, ".") + "." + testDomain, Qtype: dns.TypePTR, Qclass: dns.ClassINET}}}
+func fixtureMDNSQuery(service, domain string) *dns.Msg {
+	return &dns.Msg{Question: []dns.Question{{Name: strings.Trim(service, ".") + "." + strings.TrimSuffix(domain, ".") + ".", Qtype: dns.TypePTR, Qclass: dns.ClassINET}}}
 }
 
 // One complete DNS-SD packet lets zeroconf resolve the fixture without a second
 // lookup. Its address remains loopback, independently of the transport source.
 func fixtureMDNSRecords(f mdnsAdvertiserFixture, goodbye bool) *dns.Msg {
-	service := strings.Trim(f.Service, ".") + "." + testDomain
+	domain := strings.TrimSuffix(f.Domain, ".") + "."
+	service := strings.Trim(f.Service, ".") + "." + domain
 	instance := f.Instance + "." + service
-	host := f.Instance + "." + testDomain
+	host := f.Instance + "." + domain
 	txt := append([]string(nil), f.TXT...)
 	if len(txt) == 0 {
 		txt = []string{""}
@@ -131,8 +132,9 @@ func fixtureMDNSReplyTarget(query *dns.Msg, fixture mdnsAdvertiserFixture, from 
 	if query.Response {
 		return nil
 	}
-	service := strings.Trim(fixture.Service, ".") + "." + testDomain
-	instance, host := fixture.Instance+"."+service, fixture.Instance+"."+testDomain
+	domain := strings.TrimSuffix(fixture.Domain, ".") + "."
+	service := strings.Trim(fixture.Service, ".") + "." + domain
+	instance, host := fixture.Instance+"."+service, fixture.Instance+"."+domain
 	matched, unicast := false, false
 	for _, q := range query.Question {
 		if q.Qclass&0x7fff != dns.ClassINET {
@@ -229,7 +231,7 @@ func serveMDNSFixture(ctx context.Context, conn *net.UDPConn, sender fixtureMDNS
 
 // zeroconf still receives/decodes entries. Its Windows IfIndex writes do not
 // select egress, so supplement them after Browse has started its receiver.
-func mdnsBrowse(t *testing.T, resolver *zeroconf.Resolver, ctx context.Context, service string, entries chan<- *zeroconf.ServiceEntry, ifaces []net.Interface) error {
+func mdnsBrowse(t *testing.T, resolver *zeroconf.Resolver, ctx context.Context, service, domain string, entries chan<- *zeroconf.ServiceEntry, ifaces []net.Interface) error {
 	t.Helper()
 	if ifaces == nil {
 		ifaces = []net.Interface{mdnsFixtureInterface(t)}
@@ -239,11 +241,11 @@ func mdnsBrowse(t *testing.T, resolver *zeroconf.Resolver, ctx context.Context, 
 		return err
 	}
 	queryCtx, cancel := context.WithCancel(ctx)
-	if err := resolver.Browse(queryCtx, service, testDomain, entries); err != nil {
+	if err := resolver.Browse(queryCtx, service, domain, entries); err != nil {
 		cancel()
 		return err
 	}
-	query := fixtureMDNSQuery(service)
+	query := fixtureMDNSQuery(service, domain)
 	if err := sender.send(query, fixtureMDNSTarget); err != nil {
 		cancel()
 		return err

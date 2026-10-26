@@ -27,7 +27,11 @@ func (b *Broker) spawnScanner() (supervisedHandle, error) {
 	if err := b.scannerWaits.validate(); err != nil {
 		return nil, err
 	}
-	args := append(b.scannerArgs(), b.scannerWaits.args()...)
+	args, err := b.scannerArgs()
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, b.scannerWaits.args()...)
 	sp, err := startScanner(
 		b.scannerPath,
 		applog.LevelString(),

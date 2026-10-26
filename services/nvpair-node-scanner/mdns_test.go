@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -23,7 +25,11 @@ import (
 func newMDNSDisabledDaemon(t *testing.T) *daemon {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "cluster")
-	return NewScanner(nil, clustertrust.Open(dir), dir, nil, false).daemon
+	scanner, err := NewScanner(nil, clustertrust.Open(dir), dir, nil, false, noderec.MDNSNamespace{Service: noderec.ServiceType, Domain: noderec.Domain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scanner.daemon
 }
 
 func requireMDNSDisabled(t *testing.T, d *daemon) {
@@ -78,14 +84,18 @@ func TestMDNSDisabledSuppressesConstruction(t *testing.T) {
 
 func TestMDNSEnabledConstructsDiscovery(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cluster")
-	d := NewScanner(nil, clustertrust.Open(dir), dir, nil, true).daemon
+	scanner, err := NewScanner(nil, clustertrust.Open(dir), dir, nil, true, noderec.MDNSNamespace{Service: noderec.ServiceType, Domain: noderec.Domain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := scanner.daemon
 	if d.browser == nil {
 		t.Fatal("mDNS enabled scanner did not construct a browser")
 	}
 	// NewResponder only enumerates interfaces; Run and UpdateTXT send traffic.
 	// Compare availability without starting either discovery component, including
 	// on hosts without multicast-capable interfaces where construction must fail.
-	_, err := mdns.NewResponder(d.instance, noderec.ServiceType, noderec.Domain, noderec.SRVPort, d.reg.txt())
+	_, err = mdns.NewResponder(d.instance, noderec.ServiceType, noderec.Domain, noderec.SRVPort, d.reg.txt())
 	if got, want := d.responder != nil, err == nil; got != want {
 		t.Fatalf("responder constructed = %v, want %v (interface availability: %v)", got, want, err)
 	}
@@ -113,7 +123,11 @@ func TestMDNSDisabledDaemonPublishesSelfUntilCancellation(t *testing.T) {
 
 func TestMDNSDisabledPeerServicesRefreshAndMaintenance(t *testing.T) {
 	fixture, claim := newPeerServicesScanner(t)
-	d := NewScanner(nil, fixture.mesh, fixture.clusterDir, nil, false).daemon
+	scanner, err := NewScanner(nil, fixture.mesh, fixture.clusterDir, nil, false, noderec.MDNSNamespace{Service: noderec.ServiceType, Domain: noderec.Domain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := scanner.daemon
 	_, done := startMDNSDisabledDaemon(t, d)
 	send := func(claim noderec.PeerServicesClaim) {
 		t.Helper()
@@ -158,12 +172,67 @@ func TestMDNSDisabledPeerServicesRefreshAndMaintenance(t *testing.T) {
 	}
 }
 
+func TestScannerNamespaceReachesBrowserAndResponder(t *testing.T) {
+	namespace := noderec.MDNSNamespace{Service: "_PAIR-Fixture._TCP.", Domain: "LOCAL."}
+	dir := filepath.Join(t.TempDir(), "cluster")
+	scanner, err := NewScanner(nil, clustertrust.Open(dir), dir, nil, true, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := scanner.daemon
+	// Inspect the constructed owners without running them or emitting multicast.
+	for field, want := range map[string]string{"service": "_pair-fixture._tcp", "domain": noderec.Domain} {
+		if got := reflect.ValueOf(d.browser).Elem().FieldByName(field).String(); got != want {
+			t.Fatalf("browser %s = %q, want %q", field, got, want)
+		}
+	}
+	if d.responder == nil {
+		if _, err := mdns.NewResponder(d.instance, "_pair-fixture._tcp", noderec.Domain, noderec.SRVPort, nil); err == nil {
+			t.Fatal("configured responder missing despite available interfaces")
+		}
+		t.Skip("responder construction unavailable without a multicast-capable interface; browser checked")
+	}
+	for field, want := range map[string]string{
+		"serviceName":  "_pair-fixture._tcp.local.",
+		"instanceName": strings.Trim(d.instance, ".") + "._pair-fixture._tcp.local.",
+		"hostName":     strings.Trim(d.instance, ".") + ".local.",
+	} {
+		if got := reflect.ValueOf(d.responder).Elem().FieldByName(field).String(); got != want {
+			t.Fatalf("responder %s = %q, want %q", field, got, want)
+		}
+	}
+}
+
+func TestScannerRejectsNamespaceBeforeIdentityEffects(t *testing.T) {
+	test := func(name string, enabled bool, namespace noderec.MDNSNamespace) {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "must-not-exist", "cluster")
+			scanner, err := NewScanner(nil, nil, dir, nil, enabled, namespace)
+			if err == nil || scanner != nil {
+				t.Fatalf("invalid namespace constructed scanner: %v, %v", scanner, err)
+			}
+			if _, err := os.Stat(filepath.Dir(dir)); !os.IsNotExist(err) {
+				t.Fatalf("invalid namespace touched identity directory: %v", err)
+			}
+		})
+	}
+	test("missing domain with multicast disabled", false, noderec.MDNSNamespace{Service: noderec.ServiceType})
+	test("missing domain with multicast enabled", true, noderec.MDNSNamespace{Service: noderec.ServiceType})
+	test("custom domain with multicast disabled", false, noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: "fixture.local"})
+	test("custom domain with multicast enabled", true, noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: "fixture.local"})
+}
+
 func TestMDNSDisabledRefreshesInventory(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		timings := defaultScannerTimings()
 		timings.peerRefreshInterval = 25 * time.Millisecond
 		dir := filepath.Join(t.TempDir(), "cluster")
-		d := newScannerWithTimings(nil, clustertrust.Open(dir), dir, nil, false, timings).daemon
+		scanner, err := newScannerWithTimings(nil, clustertrust.Open(dir), dir, nil, false,
+			noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: noderec.Domain}, timings)
+		if err != nil {
+			t.Fatalf("construct mDNS disabled scanner with timing overrides: %v", err)
+		}
+		d := scanner.daemon
 		requireMDNSDisabled(t, d)
 		const hostUUID = "peer-inventory"
 		seedEMNode(d, hostUUID, "127.0.0.1", 18080)
