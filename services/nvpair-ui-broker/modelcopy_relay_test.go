@@ -19,6 +19,7 @@ func modelCopyRelayFixture(t *testing.T, answer func(*Peer, *Message)) (*Broker,
 	worker := NewPeer(NewCodec(workerConn))
 	peer := NewPeer(NewCodec(brokerWorker))
 	b := &Broker{codec: NewCodec(brokerClient), engineMgr: &rpcWorker{peer: peer}, engineSubscribed: true}
+	startTestEngineNotifications(t, b, func() { _ = brokerClient.Close() })
 	source := b.activateEngineManagerSource()
 	b.bindEngineMgr(b.engineMgr, source)
 	pump, workerPump := make(chan struct{}), make(chan struct{})

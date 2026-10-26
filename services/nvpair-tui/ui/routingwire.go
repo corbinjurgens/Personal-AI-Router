@@ -47,17 +47,24 @@ func newRoutingHistoryWire() *routingHistoryWire {
 	return &routingHistoryWire{current: new(routingHistoryBank), pending: new(routingHistoryBank), baseline: new(routingHistoryBank)}
 }
 
+// RoutingHistoryClient keeps the service client and its sole bounded history
+// bank together so the UI can borrow records without retaining another window.
+type RoutingHistoryClient struct {
+	*rpc.Client
+	wire *routingHistoryWire
+}
+
 // NewRoutingHistoryClient attaches one bounded history consumer to the service
 // connection. The caller owns conn if construction fails; otherwise Client
 // owns it and later dial results. Subscription is enabled before Run starts.
-func NewRoutingHistoryClient(conn io.ReadWriteCloser, dial func(context.Context) (io.ReadWriteCloser, error)) (*rpc.Client, error) {
+func NewRoutingHistoryClient(conn io.ReadWriteCloser, dial func(context.Context) (io.ReadWriteCloser, error)) (*RoutingHistoryClient, error) {
 	wire := newRoutingHistoryWire()
 	client, err := rpc.NewReconnectingHistoryClient(conn, dial, wire.consume, wire.reset)
 	if err != nil {
 		return nil, err
 	}
 	client.SetHistorySubscription(true)
-	return client, nil
+	return &RoutingHistoryClient{Client: client, wire: wire}, nil
 }
 
 // reset and consume are the synchronous history-client factory callbacks. They
@@ -519,7 +526,16 @@ func routingHistoryWait(ms *int64) string {
 	if *ms < 1000 {
 		return fmt.Sprintf("%d ms", *ms)
 	}
-	return fmt.Sprintf("%d.%d s", *ms/1000, (*ms%1000)/100)
+	seconds := float64(*ms) / 1000
+	whole := int64(seconds)
+	fraction := seconds - float64(whole)
+	// Match desktop's toFixed(1): exact binary ties round up, rather than
+	// Go's ties-to-even. Decimal half-tenths are binary-exact only at .25/.75.
+	if fraction == 0.25 || fraction == 0.75 {
+		tenths := whole*10 + int64(fraction*10) + 1
+		return fmt.Sprintf("%d.%d s", tenths/10, tenths%10)
+	}
+	return fmt.Sprintf("%.1f s", seconds)
 }
 
 func routingHistoryReason(reason string) string {

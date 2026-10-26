@@ -349,6 +349,39 @@ machine. Run them deliberately, on a machine you do not mind changing.
 
 A skip is not a pass. If you are relying on a test, check it actually ran.
 
+### Controller-selected model COPY
+
+`TestModelCopyControllerProcess` in `tests/model_copy_controller_test.go` uses
+three private controller/source/destination identities, production broker and
+engine-manager handlers, an empty-directory scanner, and tiny synthetic artifacts.
+The controller has no model store. The source reader is authenticated as the
+destination, and catalog/download egress is refused and counted.
+
+The selector covers custom and canonical layouts, direct/reverse transport,
+positive-byte interruption, explicit nonzero-Range retry, cancellation, permission
+and pin refusals, source replacement, destination conflicts, failed mutation
+acknowledgement and no automatic replay after a lost acknowledgement. Run its
+plain and race variants in the machine's serialized fixed-path test lane:
+
+```sh
+go test ./... -run '^TestModelCopyControllerProcess$' -count=1 -v
+go test -race ./... -run '^TestModelCopyControllerProcess$' -count=1 -v
+```
+
+Windows focused plain/race runs at base `44e76c6b` passed on 2026-10-26 with
+14 named terminals each and no failures or skips. After review strengthened
+the transport-drop oracle, that leaf and its parent passed plain/race again;
+module vet exited zero. The combined whole-suite run remains separate.
+The fixture checks actual
+loopback ec binds; existing cluster/inventory listeners retain their production
+binds on private ports and registered images. Its transport counters and absent
+controller store do not observe every attempted local artifact filesystem call.
+Strict zero-attempt controller IO remains an instrumentation requirement.
+Native acceptance separately verifies installed builds, exact source bindings,
+live pins/grants, destination hashes/receipts, explicit interruption/retry/cancel,
+controller IO instrumentation and UI behavior. COPY does not authorize engine
+startup, model loading or inference, or clone source serving configuration.
+
 ## Versioning
 
 `services/versions.json` is the single source of truth for every component version and the `services` suite version. The build scripts read it and stamp each binary via `-ldflags "-X main.Version=..."`. Declare the bumps your change needs in the `pair-release-intent:v1` block in your pull-request description — automation writes `versions.json`, so do not edit it by hand — and describe any user-facing change there so it reaches the changelog. [`VERSIONING.md`](VERSIONING.md) has the bump rules.

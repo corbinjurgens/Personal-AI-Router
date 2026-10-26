@@ -291,20 +291,34 @@ func TestBufferDecreaseFourStreamsDrain(t *testing.T) {
 	}
 }
 
-func TestBufferDecreasePreparationSharesStreamCategory(t *testing.T) {
-	root := bufferTestBudget(t, 192<<20, 0)
-	ctx, _ := decreaseDrainOwner(t, root)
-	frames := ownedFrameBudget(ctx)
-	if frames == nil || !frames.reserve(streamFrameBudgetBytes) {
-		t.Fatal("could not fill shared stream category")
+func TestBufferDecreasePreparationSharesStreamRoot(t *testing.T) {
+	root := bufferTestBudget(t, 256<<20, 0)
+	for i := 0; i < 3; i++ {
+		ctx, owner := decreaseDrainOwner(t, root)
+		frames := ownedFrameBudget(ctx)
+		if frames == nil || !frames.reserve(streamFrameRequestLimitBytes) {
+			t.Fatal("could not fill request's frame scope")
+		}
+		t.Cleanup(func() { frames.release(streamFrameRequestLimitBytes) })
+		owner.close() // The frame holder keeps its root charge.
 	}
-	defer frames.release(streamFrameBudgetBytes)
-	other, _ := decreaseDrainOwner(t, root)
+	if err := root.reconfigure(192<<20, 0); err != nil {
+		t.Fatalf("decrease to live stream charge: %v", err)
+	}
+	if used := preparationUsed(root); used != 192<<20 {
+		t.Fatalf("stream root charge=%d, want 192 MiB", used)
+	}
+	// Preparation of another request must compete for the same hard root.
+	p := &Proxy{buffers: root}
+	r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, routeChatCompletions, nil))
+	defer owner.close()
+	other := r.Context()
 	_, release, err := preparePerformanceBuffers(other, []byte(`{"stream":true}`), originStreamRequest{protocol: streamProtocolSSE, declared: true, choices: 1}, performancePrepareLocalNumeric)
 	if err == nil {
 		release()
-		t.Fatal("response preparation bypassed saturated shared stream category")
+		t.Fatal("response preparation bypassed saturated stream root")
 	}
+	bufferAssertBusy(t, err)
 }
 
 func TestBufferDecreaseCancelledReaderReleasesCharges(t *testing.T) {
@@ -340,4 +354,108 @@ func TestBufferDecreaseCancelledReaderReleasesCharges(t *testing.T) {
 		t.Fatal(err)
 	}
 	bufferAssertTotals(t, root, 0, 0, 0)
+}
+
+func TestBufferDecreaseScaledStreamsDrain(t *testing.T) {
+	root := bufferTestBudget(t, 256<<20, 0)
+	const first = "data: {\"choices\":[]}\n\n"
+	multiline := func(padding int) []byte {
+		return []byte("data: {\"padding\":\"" + strings.Repeat("x", padding) + "\",\ndata: \"choices\":[]}\n\n")
+	}
+	later := multiline(900 << 10)
+	largest := multiline(int(streamFrameMaxBytes) - 64)
+	terminal := []byte("data: [DONE]\n\n")
+	var readers []*streamFrameReader
+	var cancels []context.CancelFunc
+	var releases []func()
+	for i := 0; i < 64; i++ {
+		ctx, owner := decreaseDrainOwner(t, root)
+		ctx, cancel := context.WithCancel(ctx)
+		t.Cleanup(cancel)
+		prepared, release, err := preparePerformanceBuffers(ctx, []byte(`{"model":"m","stream":true}`), originStreamRequest{protocol: streamProtocolSSE, declared: true, choices: 1}, performancePrepareLocalNumeric)
+		if err != nil {
+			t.Fatalf("stream %d preparation: %v", i, err)
+		}
+		t.Cleanup(release)
+		reader, err := newStreamFrameReader(streamFrameConfig{
+			Protocol: streamProtocolSSE, Parent: prepared,
+			Upstream: &decreaseDrainBody{frames: [][]byte{[]byte(first), later, largest, terminal}},
+		})
+		if err != nil {
+			t.Fatalf("stream %d construction: %v", i, err)
+		}
+		t.Cleanup(func() {
+			if err := reader.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		prefix := make([]byte, len(first))
+		if _, err := io.ReadFull(reader, prefix); err != nil || string(prefix) != first {
+			t.Fatalf("stream %d prefix=%q error=%v", i, prefix, err)
+		}
+		readers = append(readers, reader)
+		cancels = append(cancels, cancel)
+		releases = append(releases, func() { release(); owner.close() })
+	}
+	if err := root.reconfigure(192<<20, 0); err != nil {
+		t.Fatalf("decrease: %v", err)
+	}
+	for _, release := range releases {
+		release()
+	}
+	before := preparationUsed(root)
+	if want := int64(len(readers)) * streamFrameAllowance(streamProtocolSSE, 1, streamFrameNumericBytes); before != want || before <= 192<<20 {
+		t.Fatalf("reader-only root=%d, want %d charged envelopes above 192 MiB", before, want)
+	}
+	// Ordinary HTTP entry must refuse before dispatch while admitted readers
+	// alone exceed the decreased root. No engine or listener is present.
+	p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), NewDiscovery(), 0)
+	p.buffers = root
+	recorder := httptest.NewRecorder()
+	p.soleFacade().handleHTTP(recorder, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":true}`)))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("new HTTP admission status=%d, want 503", recorder.Code)
+	}
+	if len(p.activeRoutingRequests()) != 0 || len(p.workloadRequests) != 0 || len(p.priorityReservations) != 0 || p.performance.size != 0 {
+		t.Fatal("refusal retained request/workload/reservation/performance effects")
+	}
+	if after := preparationUsed(root); after != before {
+		t.Fatal("refused HTTP admission changed live reader charges")
+	}
+	done := make(chan struct{}, len(readers))
+	for i, reader := range readers {
+		cancelled := i%4 == 0
+		if cancelled {
+			cancels[i]()
+		}
+		go func() {
+			defer func() { done <- struct{}{} }()
+			n, err := io.Copy(io.Discard, reader)
+			wantBytes := int64(len(later) + len(largest) + len(terminal))
+			wantOutcome := streamOutcomeCompleted
+			if cancelled {
+				wantBytes, wantOutcome = 0, streamOutcomeCancelled
+			}
+			if result := reader.Result(); err != nil || n != wantBytes || result.Outcome != wantOutcome || result.Reason != "" {
+				t.Errorf("stream %d bytes=%d error=%v result=%+v, want %d/%v", i, n, err, result, wantBytes, wantOutcome)
+			}
+			if err := reader.Close(); err != nil {
+				t.Errorf("close stream %d: %v", i, err)
+			}
+		}()
+	}
+	for range readers {
+		<-done
+	}
+	bufferAssertTotals(t, root, 0, 0, 0)
+	if root.capacity != 192<<20 {
+		t.Fatalf("drained root capacity=%d, want 192 MiB", root.capacity)
+	}
+	live, err := preparationConstruct(root, preparationClasses()[0])
+	if err != nil {
+		t.Fatalf("new admission after drain: %v", err)
+	}
+	if err := live.close(); err != nil {
+		t.Fatalf("close new admission: %v", err)
+	}
 }

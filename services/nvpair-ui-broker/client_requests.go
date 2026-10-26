@@ -23,6 +23,7 @@ import (
 // otherwise hand them to engine-manager, which serves several of them as its
 // own broker-side surface. One list so a new internal method is added once.
 var internalClientMethods = map[string]struct{}{
+	notifyEngineNotificationsReset: {},
 	// Peer relay notifications: only engine-manager relays these, with a
 	// verified caller.
 	policyRelayRequestMethod:       {},
@@ -308,9 +309,7 @@ func (b *Broker) handleMessage(msg *Message) {
 		b.relayToManualNodes(msg)
 
 	case "engine:subscribe":
-		b.engineMu.Lock()
-		b.engineSubscribed = true
-		b.engineMu.Unlock()
+		b.resumeEngineNotifications()
 		if err := b.codec.Respond(msg.ID, SubscriptionResult{Subscribed: true}); err != nil {
 			log.Printf("failed to respond to engine:subscribe: %v", err)
 		}
@@ -512,16 +511,16 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			Engine string `json:"engine"`
 		}
 		if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
-			remote, reserved, operationID, err := b.admitLocalEngineOff(target.Engine)
+			yieldsToOff, reserved, operationID, err := b.admitLocalEngineOff(target.Engine)
 			if err != nil {
 				_ = b.codec.RespondError(msg.ID, -32000, err.Error())
 				return
 			}
-			if reserved && !remote {
+			if reserved && !yieldsToOff {
 				_ = b.codec.RespondError(msg.ID, -32000, "Engine switch reserves this engine (busy).")
 				return
 			}
-			if remote {
+			if yieldsToOff {
 				localOffEngine = target.Engine
 				localOffOperationID = operationID
 			} else {
@@ -595,7 +594,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	method := msg.Method
 	params := msg.Params
 	if localOffOperationID != "" {
-		// This Off was admitted against this remote reservation. Once it has
+		// This Off was admitted against this yielding reservation. Once it has
 		// settled, the delayed request must not stop a later local On or switch.
 		var err error
 		params, err = json.Marshal(struct {

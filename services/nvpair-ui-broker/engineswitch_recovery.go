@@ -165,7 +165,7 @@ func (b *Broker) recoverEngineSwitchPauseOnTransitionLocked(w *rpcWorker, resume
 				}
 			}
 			// Recover the durable veto outcome even if restart lost the latch.
-			if veto == nil && cp.Origin == settings.SwitchOriginRemote {
+			if veto == nil && cp.YieldsToLocalOff() {
 				if r, ok := c.store.Lookup(cp.OperationID); ok && r.Error != nil && r.Error.Kind == settings.SwitchErrorRemoteVeto {
 					veto = &settings.SwitchLocalVeto{Pause: true}
 				}
@@ -317,6 +317,16 @@ func (b *Broker) recoverEngineSwitchPauseOnTransitionLocked(w *rpcWorker, resume
 	}
 	if err := b.notifyEngineSwitchRecoveryReady(ctx, w, manager.Configuration.ManagerIncarnation); err != nil {
 		return fail(err)
+	}
+	for id, r := range c.store.journal.Receipts {
+		if r.Automatic && r.Terminal && (!r.RecoveryRequired || c.resolved[id]) {
+			if err := c.store.SettleAutomatic(id); err != nil {
+				return fail(err)
+			}
+			if after, ok := c.store.Lookup(id); ok && after.Sequence > r.Sequence {
+				b.switchChangedLocked(after)
+			}
+		}
 	}
 	c.recoveryErr = nil
 	if len(reserved) > 0 && b.engineSettingsLoaded && b.engineSettingsError == nil {

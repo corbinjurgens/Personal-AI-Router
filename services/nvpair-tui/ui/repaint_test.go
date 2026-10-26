@@ -25,11 +25,11 @@ func TestScrollSurvivesEveryFrame(t *testing.T) {
 	m := newTestModel(defaultViews(nil)...)
 	m.width, m.height = 120, 40
 	m.resizeViews()
-	m.selectTab(4)
+	m.selectTab(5)
 
-	logs, ok := m.views[4].(*logsView)
+	logs, ok := m.views[5].(*logsView)
 	if !ok {
-		t.Fatal("view 4 is not the logs tab")
+		t.Fatal("view 5 is not the logs tab")
 	}
 	for i := range 500 {
 		logs.Update(LogLineMsg{Line: "line " + strings.Repeat("x", i%20)})

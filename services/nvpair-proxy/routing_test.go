@@ -1634,7 +1634,10 @@ func TestUnifiedDispatchPeekReadErrorAndTimeout(t *testing.T) {
 		close(upstream.release)
 		body := &routingResponseBody{ReadCloser: upstream, attempt: a}
 		result := make(chan error, 1)
-		go func() { _, err := awaitFirstBody(body, 50*time.Millisecond); result <- err }()
+		go func() {
+			_, err := awaitFirstBody(&http.Response{Body: body}, 50*time.Millisecond, owner, nil)
+			result <- err
+		}()
 		waitChan(t, committed, "raw IO finished before blocked callback")
 		if err := <-result; !errors.Is(err, errFirstBodyTimeout) {
 			t.Fatalf("committed peek timer=%v", err)
@@ -1675,7 +1678,10 @@ func TestUnifiedDispatchPeekReadErrorAndTimeout(t *testing.T) {
 			err  error
 		}
 		result := make(chan peekResult, 1)
-		go func() { b, err := awaitFirstBody(body, time.Second); result <- peekResult{b, err} }()
+		go func() {
+			b, err := awaitFirstBody(&http.Response{Body: body}, time.Second, owner, nil)
+			result <- peekResult{b, err}
+		}()
 		waitChan(t, committed, "raw error commitment before peek publication")
 		if !a.requestCommitted() {
 			t.Fatal("positive raw read with error did not commit")
@@ -1721,7 +1727,10 @@ func TestUnifiedDispatchPeekReadErrorAndTimeout(t *testing.T) {
 		defer unblock()
 		body := &routingResponseBody{ReadCloser: upstream, attempt: a}
 		result := make(chan error, 1)
-		go func() { _, err := awaitFirstBody(body, 20*time.Millisecond); result <- err }()
+		go func() {
+			_, err := awaitFirstBody(&http.Response{Body: body}, 20*time.Millisecond, owner, nil)
+			result <- err
+		}()
 		waitChan(t, upstream.entered, "pending raw first read")
 		waitChan(t, upstream.closed, "timeout cancels and closes pending body")
 		select {

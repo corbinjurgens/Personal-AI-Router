@@ -45,22 +45,28 @@ const task1UpgradePath = "/cluster/reverse"
 // after withdrawing the engine's identity; these fixtures run no broker, so
 // there is no identity to withdraw.
 type task1Process struct {
-	t        *testing.T
-	cmd      *exec.Cmd
-	writeMu  sync.Mutex
-	in       io.WriteCloser
-	output   serviceOutput
-	mu       sync.Mutex
-	frames   []jsonrpc.Message
-	readErr  error
-	done     chan struct{}
-	readDone chan struct{}
-	waitErr  error
-	nextID   int
-	stopped  bool
+	t             *testing.T
+	cmd           *exec.Cmd
+	writeMu       sync.Mutex
+	in            io.WriteCloser
+	output        serviceOutput
+	mu            sync.Mutex
+	frames        []jsonrpc.Message
+	readErr       error
+	done          chan struct{}
+	readDone      chan struct{}
+	waitErr       error
+	nextID        int
+	stopped       bool
+	mutationError string // Private broker-boundary fault, guarded by mu.
 }
 
 func startTask1Process(t *testing.T, base, binary string, args ...string) *task1Process {
+	t.Helper()
+	return startTask1ProcessWithEnv(t, base, binary, nil, args...)
+}
+
+func startTask1ProcessWithEnv(t *testing.T, base, binary string, extraEnv []string, args ...string) *task1Process {
 	t.Helper()
 	p := &task1Process{t: t, cmd: exec.Command(binary, args...), done: make(chan struct{}), readDone: make(chan struct{}), nextID: 1}
 	if binary == brokerBin {
@@ -80,6 +86,11 @@ func startTask1Process(t *testing.T, base, binary string, args ...string) *task1
 	p.cmd.Env = append(os.Environ(), "HOME="+base, "XDG_CONFIG_HOME="+base, "APPDATA="+base, "LOCALAPPDATA="+base, "USERPROFILE="+base)
 	if binary == brokerBin || binary == engineMgrBin {
 		p.cmd.Env = privateEngineEnv(t, base)
+	}
+	p.cmd.Env = append(p.cmd.Env, extraEnv...)
+	if binary == brokerBin {
+		// Optional workers resolve only from this empty private directory.
+		p.cmd.Dir = base
 	}
 	var err error
 	p.in, err = p.cmd.StdinPipe()
@@ -153,7 +164,10 @@ func (p *task1Process) confirmModelMutation(params json.RawMessage) {
 		p.t.Errorf("model mutation request: %v", err)
 		return
 	}
-	reply := nodepolicy.ModelMutationReply{RequestID: req.RequestID, Engine: req.Engine, OK: true}
+	p.mu.Lock()
+	refusal := p.mutationError
+	p.mu.Unlock()
+	reply := nodepolicy.ModelMutationReply{RequestID: req.RequestID, Engine: req.Engine, OK: refusal == "", Error: refusal}
 	if err := p.write(map[string]any{"jsonrpc": "2.0", "method": nodepolicy.MethodModelMutationReply, "params": reply}); err != nil {
 		p.t.Errorf("model mutation reply: %v", err)
 	}

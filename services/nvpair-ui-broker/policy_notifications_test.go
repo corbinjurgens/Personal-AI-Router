@@ -19,6 +19,7 @@ import (
 
 func TestIntentSubscribedRelayPreservesSnapshot(t *testing.T) {
 	b, out := newPolicyBroker(t)
+	startTestEngineNotifications(t, b, func() {})
 	source := b.activateEngineManagerSource()
 	id := json.RawMessage(`1`)
 	b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "engine:subscribe"})

@@ -32,6 +32,108 @@ func switchStoreReceipt(id string) settings.SwitchReceipt {
 		Source: settings.SwitchEngineState{Intent: settings.SwitchIntentUnknown}, Target: settings.SwitchEngineState{Intent: settings.SwitchIntentUnknown}}
 }
 
+func TestEngineSwitchStoreAutomaticRingPreservesManualAndUnsettled(t *testing.T) {
+	s := switchStoreOpen(t)
+	manual := switchStoreAccept(t, s, switchStoreReceipt("manual"))
+	manual = switchStoreNext(manual, settings.SwitchValidating)
+	if err := s.Advance(manual.RequestID, manual); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Advance(manual.RequestID, switchStoreNext(manual, settings.SwitchFailedValidation)); err != nil {
+		t.Fatal(err)
+	}
+	var unsettled string
+	for i := 0; i < settings.MaxAutomaticSwitchReceipts+5; i++ {
+		r := switchStoreReceipt(fmt.Sprintf("binding:run:%d", i))
+		r.Automatic, r.Deadline = true, r.AcceptedAt.Add(settings.AutomaticSwitchBudget)
+		switchStoreAccept(t, s, r)
+		r = switchStoreNext(r, settings.SwitchValidating)
+		if err := s.Advance(r.RequestID, r); err != nil {
+			t.Fatal(err)
+		}
+		terminal := switchStoreNext(r, settings.SwitchFailedValidation)
+		if i == 0 {
+			terminal.RecoveryRequired = true
+			unsettled = r.RequestID
+		}
+		if err := s.Advance(r.RequestID, terminal); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			if err := s.SaveLocalObligation(r.RequestID, settings.SwitchLocalObligation{TargetOff: true}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SettleAutomatic(r.RequestID); err == nil {
+				t.Fatal("undischarged automatic row settled")
+			}
+		} else if err := s.SettleAutomatic(r.RequestID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	j := switchStoreDisk(t, s)
+	if len(j.AutomaticSettled) != settings.MaxAutomaticSwitchReceipts || len(j.Receipts) != settings.MaxAutomaticSwitchReceipts+2 {
+		t.Fatalf("retained receipts=%d settled=%d", len(j.Receipts), len(j.AutomaticSettled))
+	}
+	if _, ok := j.Receipts["manual"]; !ok {
+		t.Fatal("manual receipt evicted")
+	}
+	if r, ok := j.Receipts[unsettled]; !ok || !r.RecoveryRequired {
+		t.Fatal("unsettled recovery row evicted")
+	}
+	if _, ok := j.Receipts["binding:run:1"]; ok {
+		t.Fatal("old settled automatic receipt retained")
+	}
+	if err := s.SaveLocalObligation(unsettled, settings.SwitchLocalObligation{TargetOff: true, Discharged: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SettleAutomatic(unsettled); err != nil {
+		t.Fatal(err)
+	}
+	j = switchStoreDisk(t, s)
+	if j.Receipts[unsettled].RecoveryRequired || j.AutomaticSettled[unsettled] == 0 {
+		t.Fatal("cleanup settlement not durable")
+	}
+	if j.Receipts[unsettled].Sequence <= 3 {
+		t.Fatal("recovery settlement did not advance authoritative readback sequence")
+	}
+}
+
+func TestEngineSwitchStoreAutomaticPruneUncertainWrite(t *testing.T) {
+	s := switchStoreOpen(t)
+	for i := 0; i <= settings.MaxAutomaticSwitchReceipts; i++ {
+		r := switchStoreReceipt(fmt.Sprintf("binding:run:%d", i))
+		r.Automatic, r.Deadline = true, r.AcceptedAt.Add(settings.AutomaticSwitchBudget)
+		switchStoreAccept(t, s, r)
+		r = switchStoreNext(r, settings.SwitchValidating)
+		if err := s.Advance(r.RequestID, r); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Advance(r.RequestID, switchStoreNext(r, settings.SwitchFailedValidation)); err != nil {
+			t.Fatal(err)
+		}
+		if i < settings.MaxAutomaticSwitchReceipts {
+			if err := s.SettleAutomatic(r.RequestID); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		before := s.Generation()
+		s.write = func(path string, data []byte, mode os.FileMode) error {
+			if err := durablefile.WriteFile(path, data, mode); err != nil {
+				return err
+			}
+			return durablefile.ErrReplaced
+		}
+		if err := s.SettleAutomatic(r.RequestID); !errors.Is(err, durablefile.ErrReplaced) {
+			t.Fatalf("settlement error=%v", err)
+		}
+		j := switchStoreDisk(t, s)
+		if s.Generation() != before+1 || j.Generation != before+1 || len(j.AutomaticSettled) != settings.MaxAutomaticSwitchReceipts {
+			t.Fatalf("uncertain replacement generation=%d rows=%d", j.Generation, len(j.AutomaticSettled))
+		}
+	}
+}
+
 func switchStoreNext(r settings.SwitchReceipt, phase string) settings.SwitchReceipt {
 	r = cloneSwitchReceipt(r)
 	r.Sequence++

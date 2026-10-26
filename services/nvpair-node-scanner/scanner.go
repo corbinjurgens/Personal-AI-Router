@@ -77,13 +77,21 @@ type Scanner struct {
 // the --client-cert/--client-key/--ca-bundle flags.
 // namespace is validated before identity or discovery construction.
 func NewScanner(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, namespace noderec.MDNSNamespace) (*Scanner, error) {
+	return newScannerWithTimings(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled, namespace, defaultScannerTimings())
+}
+
+// newScannerWithTimings validates namespace and timings before startup effects.
+func newScannerWithTimings(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, namespace noderec.MDNSNamespace, timings scannerTimings) (*Scanner, error) {
 	namespace, err := namespace.Normalize()
 	if err != nil {
 		return nil, err
 	}
+	if err := timings.validate(); err != nil {
+		return nil, err
+	}
 	return &Scanner{
 		codec:  codec,
-		daemon: newDaemon(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled, namespace),
+		daemon: newDaemon(codec, mesh, clusterDir, tlsHTTP, mdnsEnabled, namespace, timings),
 	}, nil
 }
 

@@ -125,9 +125,10 @@ func TestRoutingHistoryMainAssemblyJoinsBlockedInitialOnFailure(t *testing.T) {
 // underlying connection has interrupted its transport operation.
 type historyRequiredReplyTransport struct {
 	net.Conn
-	entered, closed, interrupted, completed, finish chan struct{}
-	borrowed                                        []byte
-	closeOnce                                       sync.Once
+	entered, closed, interrupted, completed, finish        chan struct{}
+	ordinaryEntered, allowOrdinary, replyReady, allowReply chan struct{}
+	borrowed                                               []byte
+	closeOnce                                              sync.Once
 }
 
 func (w *historyRequiredReplyTransport) Write(raw []byte) (int, error) {
@@ -136,8 +137,17 @@ func (w *historyRequiredReplyTransport) Write(raw []byte) (int, error) {
 		return 0, err
 	}
 	if msg.Error == nil {
+		if msg.Method == "test:ordinary-before-refusal" {
+			close(w.ordinaryEntered)
+			<-w.allowOrdinary
+		}
 		return w.Conn.Write(raw)
 	}
+	// Keep the required frame out of the pipe until the ordinary-frame reader
+	// has actually stopped. This barrier holds the codec gate, so no ordinary
+	// writer can slip between that handoff and the required Write below.
+	close(w.replyReady)
+	<-w.allowReply
 	w.borrowed = raw
 	close(w.entered)
 	n, err := w.Conn.Write(raw)
@@ -162,9 +172,14 @@ func TestRoutingHistoryMainAssemblyInterruptsRequiredReplyOnCancellation(t *test
 			transport := &historyRequiredReplyTransport{
 				Conn: server, entered: make(chan struct{}), closed: make(chan struct{}),
 				interrupted: make(chan struct{}), completed: make(chan struct{}), finish: make(chan struct{}),
+				ordinaryEntered: make(chan struct{}), allowOrdinary: make(chan struct{}), replyReady: make(chan struct{}), allowReply: make(chan struct{}),
 			}
 			var finishOnce sync.Once
 			finish := func() { finishOnce.Do(func() { close(transport.finish) }) }
+			var allowReplyOnce sync.Once
+			allowReply := func() { allowReplyOnce.Do(func() { close(transport.allowReply) }) }
+			var allowOrdinaryOnce sync.Once
+			allowOrdinary := func() { allowOrdinaryOnce.Do(func() { close(transport.allowOrdinary) }) }
 			lifetime := newBrokerMainLifetime()
 			dir := t.TempDir()
 			b, err := newMainBroker(lifetime, workerPaths{scanner: scanner, clusterDir: filepath.Join(dir, "cluster")}, transport, true)
@@ -174,11 +189,21 @@ func TestRoutingHistoryMainAssemblyInterruptsRequiredReplyOnCancellation(t *test
 			done := make(chan error, 1)
 			go func() { done <- b.serveMainLifetime(lifetime) }()
 			joined := false
+			var ordinaryDrained chan struct{}
 			t.Cleanup(func() {
+				allowOrdinary()
+				allowReply()
 				finish()
 				lifetime.cancel()
 				_ = client.Close()
 				_ = server.Close()
+				if ordinaryDrained != nil {
+					select {
+					case <-ordinaryDrained:
+					case <-time.After(5 * time.Second):
+						t.Error("ordinary-frame reader did not join during cleanup")
+					}
+				}
 				if !joined {
 					select {
 					case <-done:
@@ -200,11 +225,49 @@ func TestRoutingHistoryMainAssemblyInterruptsRequiredReplyOnCancellation(t *test
 					break
 				}
 			}
+			ordinaryDrained = make(chan struct{})
+			var drainErr error
+			go func() {
+				defer close(ordinaryDrained)
+				for {
+					if _, err := peer.Read(); err != nil {
+						drainErr = err
+						return
+					}
+				}
+			}()
+			// app:ready does not fence the startup policy announcement. Force an
+			// ordinary frame to own the gate before the refusal, independent of
+			// whether that announcement happens to win this run's scheduling.
+			ordinary := make(chan error, 1)
+			go func() { ordinary <- b.codec.Notify("test:ordinary-before-refusal", nil) }()
+			historyAwaitReadSignal(t, transport.ordinaryEntered)
 			// The raw guard supplies the required refusal and its borrowed ID.
-			// No initial writer is involved, and the client never reads the reply.
+			// No initial writer is involved.
 			if _, err := io.WriteString(client, `{"jsonrpc":"2.0","id":"required\u0031","method":"routing:subscribe","params":null}`+"\n"); err != nil {
 				t.Fatal(err)
 			}
+			allowOrdinary()
+			historyAwaitReadSignal(t, transport.replyReady)
+			// Only interrupt the client's read side, then join the actual reader
+			// before admitting the required frame. The real connection remains
+			// open and the client never reads any byte of the required reply.
+			if err := client.SetReadDeadline(time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			historyAwaitReadSignal(t, ordinaryDrained)
+			if !errors.Is(drainErr, os.ErrDeadlineExceeded) {
+				t.Fatalf("ordinary-frame reader stopped before handoff: %v", drainErr)
+			}
+			select {
+			case err := <-ordinary:
+				if err != nil {
+					t.Fatalf("competing ordinary frame: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("competing ordinary frame did not complete")
+			}
+			allowReply()
 			historyAwaitReadSignal(t, transport.entered)
 			pinned := bytes.Clone(transport.borrowed)
 			var refusal Message

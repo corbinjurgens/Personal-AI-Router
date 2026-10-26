@@ -682,17 +682,52 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 // broker and asserts it surfaces in the shared discovery snapshot.
 func TestBrokerManualNodeMergedIntoDiscovery(t *testing.T) {
 	const nodeName = "xproc-manual-merge-1"
+	const nodeID = "manual:name:" + nodeName
 
-	stdin, msgs, _, cleanup := startBrokerWith(t, "--manual-nodes-path", manualNodesBin)
-	t.Cleanup(cleanup)
+	stdin, msgs, stderr, cleanup := startBrokerWith(t, "--manual-nodes-path", manualNodesBin)
+	var stderrLog safeBuffer
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		for line := range stderr {
+			fmt.Fprintln(&stderrLog, line)
+		}
+	}()
+	var lastSnapshot json.RawMessage
+	t.Cleanup(func() {
+		cleanup()
+		select {
+		case <-stderrDone:
+		case <-time.After(5 * time.Second):
+			t.Error("broker stderr reader did not finish")
+		}
+		if t.Failed() {
+			t.Logf("last discovery snapshot: %s\nbroker stderr:\n%s", lastSnapshot, stderrLog.String())
+		}
+	})
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 
-	// This merge assertion needs no reachable service. The fixture disables
-	// all manual probe legs before worker startup, so loopback is never dialed.
-	addReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":800,"method":"node/add","params":{"address":"127.0.0.1","name":%q}}`, nodeName) + "\n"
+	// The fixture disables every manual probe leg before worker startup, and the
+	// documentation address (RFC 5737) owns no listener, so nothing is dialed.
+	addReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":800,"method":"node/add","params":{"address":"192.0.2.1","name":%q}}`, nodeName) + "\n"
 	if _, err := stdin.Write([]byte(addReq)); err != nil {
 		t.Fatalf("write node/add: %v", err)
+	}
+	added := waitForResponseID(t, msgs, 800, 10*time.Second)
+	if added.Error != nil {
+		t.Fatalf("node/add: %+v", added.Error)
+	}
+	var status struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(added.Result, &status); err != nil {
+		t.Fatalf("decode node/add result: %v; result=%s", err, added.Result)
+	}
+	if status.ID != nodeID || status.Name != nodeName || status.Address != "192.0.2.1" {
+		t.Fatalf("node/add result=%+v, want id=%q name=%q address=192.0.2.1", status, nodeID, nodeName)
 	}
 
 	// Poll discovery:get-nodes until the manual node's id appears (the
@@ -708,10 +743,17 @@ func TestBrokerManualNodeMergedIntoDiscovery(t *testing.T) {
 			if !ok {
 				t.Fatal("broker stream closed before the manual node appeared")
 			}
-			if msg.Method == "" && msg.ID != nil {
+			if msg.Method == "" && idEquals(msg.ID, reqID) {
+				if msg.Error != nil {
+					t.Fatalf("discovery:get-nodes: %+v", msg.Error)
+				}
+				lastSnapshot = append(lastSnapshot[:0], msg.Result...)
 				var res availableNodesResult
-				if json.Unmarshal(msg.Result, &res) == nil && containsNode(res.Nodes, "manual:name:"+nodeName) {
-					t.Logf("manual node %q present in discovery snapshot", nodeName)
+				if err := json.Unmarshal(msg.Result, &res); err != nil {
+					t.Fatalf("decode discovery:get-nodes: %v", err)
+				}
+				if containsNode(res.Nodes, nodeID) {
+					t.Logf("manual node %q present in discovery snapshot", nodeID)
 					return
 				}
 			}
@@ -719,7 +761,7 @@ func TestBrokerManualNodeMergedIntoDiscovery(t *testing.T) {
 			reqID++
 			sendReq(t, stdin, reqID, "discovery:get-nodes")
 		case <-deadline:
-			t.Fatalf("timed out waiting for manual node %q in discovery:get-nodes", nodeName)
+			t.Fatalf("timed out waiting for manual node %q in discovery:get-nodes", nodeID)
 		}
 	}
 }

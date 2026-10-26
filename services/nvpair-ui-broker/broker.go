@@ -193,6 +193,10 @@ type Broker struct {
 	settingsCancels      map[string]context.CancelFunc
 	activeSettings       map[string]activeSettingsOperation
 	codec                *Codec
+	// Published before workers start; the service-facing session owns the
+	// relay and its physical transport interruption, including blocked writes.
+	engineNotifications  *engineNotificationRelay
+	disconnectClient     func()
 	cancel               context.CancelFunc
 	startedAt            time.Time
 	nodeID               string
@@ -218,6 +222,11 @@ type Broker struct {
 	clusterMgrPath       string
 	schedulerPath        string
 	clusterDir           string
+	// Fixture wait overrides are copied at construction and never changed in use.
+	// Zero retains the production interval, including for bare Broker fixtures.
+	residentRetryDelay time.Duration
+	advertiseCadence   time.Duration
+	scannerWaits       scannerWaitOverrides
 	// Managed-port state is prepared before proxy startup and read by the proxy
 	// supervisor/reader goroutines. Ollama commits its pending backend move after
 	// its proxy reserves :11434; LM Studio moves through engine-manager first,
@@ -488,6 +497,10 @@ type workerPaths struct {
 	// trusted/). Threaded to every worker that does cluster-scoped inter-node
 	// mTLS so they serve/dial pinned peers once this node joins a cluster.
 	clusterDir string
+	// Fixture-only startup overrides; zero retains the production intervals.
+	residentRetryDelay time.Duration
+	advertiseCadence   time.Duration
+	scannerWaits       scannerWaitOverrides
 }
 
 // NewBroker constructs a per-session broker. paths.scanner is required —
@@ -517,7 +530,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 	// only. The same value is passed to nvpair-errors via --node-id so
 	// its localNodeID stays in lockstep with what the broker stamps.
 	nodeID := ""
-	if validNamespace && validateEngineManagerControlHost(controlHost) == nil {
+	if validNamespace && validateEngineManagerControlHost(controlHost) == nil && paths.residentRetryDelay >= 0 && paths.advertiseCadence >= 0 && paths.scannerWaits.validate() == nil {
 		nodeID = resolveLocalNodeID(paths.clusterDir)
 	}
 	return &Broker{
@@ -546,6 +559,9 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		clusterMgrPath:       paths.clusterMgr,
 		schedulerPath:        paths.scheduler,
 		clusterDir:           paths.clusterDir,
+		residentRetryDelay:   paths.residentRetryDelay,
+		advertiseCadence:     paths.advertiseCadence,
+		scannerWaits:         paths.scannerWaits,
 		store:                newDiscoveryStore(),
 		telemetry:            newTelemetryCache(),
 		relayDir:             relay.NewDirectory(),
@@ -1261,9 +1277,7 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 	if !subscribed {
 		return
 	}
-	if err := b.codec.Notify(method, params); err != nil {
-		slog.Warn("forward engine notification failed", "method", method, "err", err)
-	}
+	b.queueEngineNotification(source, method, params)
 }
 
 // handleEngineSubscribe wires engine-manager's discovery:subscribe into the
@@ -1765,6 +1779,12 @@ func (b *Broker) newServeContext(parent context.Context, lifetime *brokerMainLif
 }
 
 func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error {
+	if err := b.scannerWaits.validate(); err != nil {
+		return err
+	}
+	if err := validateTestWaitIntervals(b.modelConfigRetryInterval(), b.advertisementInterval()); err != nil {
+		return err
+	}
 	if err := validateServicePorts(b.servicePorts()); err != nil {
 		return fmt.Errorf("service ports: %w", err)
 	}
@@ -1784,6 +1804,8 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 	b.cancel = cancel
 	b.setServeCtx(ctx)
 	defer cancel()
+	stopEngineNotifications := b.startEngineNotificationRelay(ctx)
+	defer stopEngineNotifications()
 	if h := b.routingHistory; h != nil {
 		// Required local replies use background write contexts and can hold the
 		// dispatcher inside RespondHistoryError. Interrupt output independently
@@ -2372,7 +2394,7 @@ func (b *Broker) readLoop(ctx context.Context) error {
 // errors:clear are routed into the nvpair-errors pipeline (the broker now
 // supervises it) rather than dropped.
 func (b *Broker) forwardClusterManagerNotification(method string, params json.RawMessage) {
-	if routingHistoryMethod(method) {
+	if routingHistoryMethod(method) || method == notifyEngineNotificationsReset {
 		return
 	}
 	// Private authority envelopes never reach ordinary clients, even if an

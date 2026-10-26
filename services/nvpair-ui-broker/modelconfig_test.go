@@ -1732,6 +1732,38 @@ func TestModelConfigDefiniteLoadFailureReason(t *testing.T) {
 	test("recovered finish", true)
 }
 
+func TestModelConfigLoadFailureReasonIsStatusOnly(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startResidentAttempt(t, nodepolicy.ResidentFailed)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	assertModelConfigLoadFailed(t, f)
+	status := f.b.localPolicy().ModelConfiguration
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var readback nodepolicy.ModelConfiguration
+	if err := json.Unmarshal(raw, &readback); err != nil {
+		t.Fatalf("produced failed-load status rejected: %v", err)
+	}
+	if len(readback.Models) != 1 {
+		t.Fatalf("produced status has no unique resident: %+v", readback)
+	}
+	entry := readback.Models[0]
+	if entry.Reason != nodepolicy.ModelReasonLoadFailed {
+		t.Fatalf("produced failure lost its status reason: %+v", entry)
+	}
+	refusal := nodepolicy.ResidentRefusal{Engine: entry.Engine, Model: entry.Model, Reason: entry.Reason}
+	if err := refusal.Validate(); err == nil {
+		t.Error("completed load failure accepted as a prepare refusal")
+	}
+	if err := (nodepolicy.DispatchResidentResult{Reason: nodepolicy.DispatchResidentReason(entry.Reason)}).Validate(); err == nil {
+		t.Error("completed load failure accepted as a dispatch refusal")
+	}
+}
+
 // The manager's ordinary definite failure carries its readable post-load
 // inventory, which omits the model; the proxy settles it without recovery.
 func TestModelConfigObservedLoadFailureReason(t *testing.T) {
@@ -2464,17 +2496,23 @@ func TestModelConfigRestartProxyEngineOffRefusalRetries(t *testing.T) {
 
 func TestModelConfigRetryWakesAtDeadlineBetweenIdleTicks(t *testing.T) {
 	f := newModelConfigFixture(t)
+	f.b.residentRetryDelay = 60 * time.Millisecond
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.now = time.Now
 	r.mu.Unlock()
+	before := time.Now()
 	f.b.reconcileModelConfig(context.Background())
+	after := time.Now()
 	if got := len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)); got != 1 {
 		t.Fatalf("initial prepares = %d, want one", got)
 	}
 	r.mu.Lock()
-	r.models.retryAt = time.Now().Add(60 * time.Millisecond)
+	retryAt := r.models.retryAt
 	r.mu.Unlock()
+	if retryAt.Before(before.Add(60*time.Millisecond)) || retryAt.After(after.Add(60*time.Millisecond)) {
+		t.Fatalf("retry deadline = %s, want configured 60ms after reconciliation", retryAt)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); f.b.runIdlePolicy(ctx) }()

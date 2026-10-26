@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/discovery"
 	sharederrors "nvpair-shared/errors"
 	"nvpair-shared/mdns"
 	"nvpair-shared/netmon"
@@ -51,6 +52,7 @@ type daemon struct {
 	dir                   *directory
 	responder             *mdns.Responder
 	browser               *Discovery
+	timings               scannerTimings
 	// instance is this node's mDNS instance name (the hostname). It names the
 	// registry-driven self directory entry (publishSelf), which is anchored to
 	// our own identity rather than to hearing our own multicast.
@@ -215,14 +217,21 @@ func nodeInfoTransport(tlsConfig *tls.Config) *http.Transport {
 // sweep to finish instead of timing out partway through it.
 const modelsFetchTimeout = 6 * time.Second
 
-// peerRefreshInterval is the cadence of the mDNS-independent convergence loop
+// The scanner passes its production browse defaults through the shared browser's
+// existing options. Fixture overrides never change the shared defaults or policy.
+const (
+	defaultScanInterval = 5 * time.Second
+	defaultScanTimeout  = 3 * time.Second
+)
+
+// defaultPeerRefreshInterval is the cadence of the mDNS-independent convergence loop
 // (refreshPeersLoop). The event-driven enrichment still handles fast initial
 // discovery; this is the background sweep that catches changes that never move
 // the mDNS record (a model pull/delete, a late engine start) and announcements
 // that did move it but were not received (a peer joining or leaving a cluster).
 // It comfortably exceeds modelsFetchTimeout so a worst-case sweep finishes well
 // before the next tick.
-const peerRefreshInterval = 15 * time.Second
+const defaultPeerRefreshInterval = 15 * time.Second
 
 // modelsRefreshConcurrency caps how many peer /v1/models fetches a single sweep
 // runs at once. It sits well above realistic LAN node counts, so it only bounds
@@ -235,7 +244,7 @@ const modelsRefreshConcurrency = 16
 // enrichment onto HTTPS via the --client-cert/--client-key/--ca-bundle flags; nil
 // keeps the default plain-HTTP fetch. mdnsEnabled controls browser and responder
 // construction without disabling the directory or its independent refresh loops.
-func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, namespace noderec.MDNSNamespace) *daemon {
+func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool, namespace noderec.MDNSNamespace, timings scannerTimings) *daemon {
 	// nodeid reads <base>/cluster/identity.json; --cluster-dir is that cluster
 	// subdir, so its parent is the base. Empty -> nodeid's shared default.
 	baseDir := ""
@@ -259,6 +268,7 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 	instance, _ := os.Hostname()
 	d := &daemon{
 		codec:              codec,
+		timings:            timings,
 		mesh:               mesh,
 		reg:                reg,
 		instance:           instance,
@@ -290,6 +300,8 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 	// reloadIdentity, which moves this node's own directory entry to the new uuid.
 	if mdnsEnabled {
 		d.browser = NewDiscovery(namespace.Service, namespace.Domain,
+			discovery.WithInterval(d.timings.scanInterval),
+			discovery.WithScanTimeout(d.timings.scanTimeout),
 			WithLivenessProbe(func(n RawNode) bool { return d.reachable(n) }),
 			WithKeyFunc(func(n RawNode) string { return UUIDFromTXT(n.TXT) }),
 		)
@@ -1460,7 +1472,7 @@ func isLoopbackHost(host string) bool {
 // first means a peer that just joined or left is dialed under its current
 // identity rather than the previous one.
 func (d *daemon) refreshPeersLoop(ctx context.Context) {
-	ticker := time.NewTicker(peerRefreshInterval)
+	ticker := time.NewTicker(d.timings.peerRefreshInterval)
 	defer ticker.Stop()
 	for {
 		select {

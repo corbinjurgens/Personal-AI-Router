@@ -21,8 +21,11 @@ import (
 const residentDispatchRequestMethod = "engine:dispatch-resident-request"
 const residentDispatchReplyMethod = "engine:dispatch-resident-reply"
 
-// Reuse the Serve-owned idle tick for failed attempts. Successful replies wait
-// at most two ticks for watcher publication before evaluating inventory again.
+// Failed attempts use the Serve-owned retry timer independently of the idle tick.
+const defaultResidentRetryInterval = 30 * time.Second
+
+// Successful replies wait at most two idle ticks for watcher publication before
+// evaluating inventory again. Fixture retry overrides do not shorten this window.
 const residentObservationTimeout = 2 * idleCheckInterval
 
 type residentPendingObservation struct {
@@ -374,7 +377,7 @@ func (b *Broker) modelConfigurationFor(policy nodepolicy.Policy) nodepolicy.Mode
 }
 
 // reconcileModelConfig is called by the Serve-owned idle loop. Concurrent calls
-// coalesce; failures retry on the existing idle tick without spinning on wakes.
+// coalesce; failures retry at their deadline without spinning on unchanged wakes.
 func (b *Broker) reconcileModelConfig(ctx context.Context) {
 	e := b.captureModelConfig()
 	r := b.nodePolicyRuntime()
@@ -419,7 +422,7 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		}
 	}
 	r.models.last = &e
-	r.models.retryAt = r.now().Add(idleCheckInterval)
+	r.models.retryAt = r.now().Add(b.modelConfigRetryInterval())
 	previous := r.models.status
 	r.models.status = nodepolicy.ModelConfiguration{PolicyRevision: e.Policy.Revision, ObservationGeneration: r.models.status.ObservationGeneration + 1, Models: []nodepolicy.ModelConfigurationEntry{}}
 	for _, ref := range b.residentRefs(e.Policy) {

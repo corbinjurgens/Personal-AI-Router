@@ -28,6 +28,16 @@ Component/bridge checks do not establish installed builds or native transfer
 acceptance. Keyboard/focus, narrow-window layout, actual peers, direct/reverse
 transfer and destination serving setup remain external acceptance work.
 
+The synthetic controller COPY process fixture is implemented under
+`services/tests/model_copy_controller_test.go`; Windows plain/race runs passed
+on 2026-10-26 at base `44e76c6b` (14 named terminals each, no failures or skips).
+The review-hardened transport-drop leaf then passed plain/race (two terminals
+each), and module vet exited zero. It checks destination-owned transfer, receipts, authenticated
+reader identity, interruption/retry/cancel and refusal paths. Its controller
+transport/store assertions do not instrument every attempted local artifact
+filesystem operation. See the [process fixture limits and native checklist](../../services/readme.md#controller-selected-model-copy)
+before using its eventual results as acceptance evidence.
+
 Desktop node settings expose **Switch engine**, **From**, **To**, **Switch** and
 **Refresh readback**; TUI node detail uses `w` / **switch engine**. Both expose
 existing E3 invoke/status methods and sequence notifications. The target broker
@@ -49,7 +59,7 @@ owns the transaction; clients correlate receipts rather than coordinate engines.
 | Engine version metadata    | Backend-limited                 | The backend status surface does not provide a complete version/install-owner/update contract                                                    |
 | Errors                     | Complete                        | Broker-relayed registry with peer synchronization                                                                                               |
 | Workloads                  | Complete after subscription     | Local and peer workload events feed one Electron catalog                                                                                        |
-| Routing history            | Consumer banks integrated; presentation separate | Origin-local public subscribe/unsubscribe/get-initial/changed through the service; desktop demand/pull/consumed and TUI reconnecting wire are active |
+| Routing history            | Desktop and TUI presentation integrated | Desktop Settings → Routing and the TUI Routing tab use origin-local bounded history with matching state, attempt, money and wait semantics |
 | Cluster pairing            | Complete                        | PIN pairing, identity, membership, leave, and removal                                                                                           |
 | Cluster transport security | Backend-owned                   | Node-to-node transport security, including the proxies' cluster-mTLS inference ingress, is entirely backend; Personal AI Router implements none |
 | Settings                   | Partial                         | Cluster identity plus per-engine ports and engine arguments, local and remote; inert backend settings are not surfaced                            |
@@ -80,9 +90,22 @@ Eight service writer leases and one global initial transfer bound simultaneous
 history writes without a subscriber cap. Busy keeps desktop/TUI loading with
 validated rows and one bounded retry timer; ordinary RPC and inference continue.
 Bank/frame capacities are representation limits, not RSS claims. Electron's
-ready/pull/consumed loans are separate from the service relay. Original Tasks 4/5
-still own desktop Settings/card and TUI Routing-tab presentation. No SC-b or
-public-provider activation, native acceptance or whole-J318 completion is implied.
+ready/pull/consumed loans are separate from the service relay.
+
+Desktop Settings → Routing includes expandable history and identity-safe workload
+summaries. The TUI Routing tab follows Jobs, with `r` refresh, `enter` attempts
+and `esc` back. It drains coalesced ready tokens on the existing UI tick, showing
+changes within one second. Narrow tables keep Model/State/Attempts; scrollable
+detail retains destination/account IDs, fixed reasons, admission/first-byte waits
+and HTTP status. Both clients label Ceiling, Cumulative granted, Current held,
+Charged and Accounting separately, distinguish unavailable amounts from zero,
+and retain Completed for delivered requests whose accounting failed.
+
+Streaming paused, waiting to resume requires owner-reported recoverability;
+Interrupted, resumed requires an actual linked successor. SC-b continuation is
+not implemented, so a terminal exhausted interruption says Stream interrupted.
+History has no cancel action and does not activate public providers. Component
+fixtures do not establish installed/native acceptance or whole-J318 completion.
 
 ## Engine switch recovery limits
 
@@ -459,6 +482,39 @@ readiness. Other observers use the existing scanner refresh cycle, normally
 lifecycle pushes are immediate. These guarantees require a coordinated fleet
 update. Installed-machine, native UI, and isolated multi-process acceptance
 remain separate validation obligations.
+
+The source regression `TestModelDownloadStateProcess` in `services/tests` covers
+real service/broker/manager relays, fresh-client hydration, pinned observer reads,
+scanner loopback self-enrichment, queued-model isolation, native failure and
+disconnect outcomes, restart markers, readiness refusals and bounded retention.
+Its fake router uses synthetic catalog IDs and tiny target-only shards; the
+controller has no model store or model-serving listener. On Windows at base
+`44e76c6b` (2026-10-26), its final plain run passed 17 named terminals with no
+failures or skips. Race had 15 passes and two failed terminals after a fixed
+scanner image replacement was refused during setup; the affected leaf and its
+parent then passed a targeted race rerun. No data race was reported, and module
+vet exited zero. The failed aggregate race run is preserved. These runs include
+second-response NDJSON, replacement-route reads, control-POST counts and terminal
+subscriber convergence.
+Independent scanner peer refresh, automatic resident dispatch,
+the full progress-watchdog interval, lower-revision/retired-source notification
+injection, and exact crashes inside journal replacement
+are not established by this fixture. Its ec bind is loopback; existing em and
+cluster-manager listeners still bind wildcard addresses on private ports. Joined
+peer-transfer receipt assertions and native UI acceptance remain separate.
+
+`TestModelDownloadStateTransferJoinProcess` adds source assertions on the joined
+download/COPY implementation at `efda20f7691a01980dd4740789d5d4829f6ba43b`.
+Windows plain and race runs passed on 2026-10-26 with three named terminals each,
+no failures or skips, and module vet exited zero. The whole-suite run is separate.
+Real custom export list/GET positive controls precede active
+and failed catalog-pull fences, with blocked COPY required to dispatch no
+artifact GET and leave destination artifacts and mutation effects unchanged.
+A real, independently hashed COPY receipt is then kept separate from a failed
+same-key catalog pull: an identity-bound verified retry may report COPY success
+while the catalog snapshot/journal and ready-dependent export fence remain
+unchanged. Explicit successful catalog retry is tested separately as the source
+readiness restoration path. This does not broaden the Task 5 or native UI proof.
 
 `engine:models` (and the `em` `GET /v1/models` surface) returns the flat model
 union, the per-engine breakdown (`modelsByEngine`), the per-engine set of

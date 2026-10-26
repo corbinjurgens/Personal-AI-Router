@@ -5,6 +5,25 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+`policy:set` accepts target-owned `engineBindings`, a list of `{engine, model}`
+native references. Absence and `[]` disable the binding configuration; new
+local and peer readbacks always emit `engineBindings: []` when empty. The policy
+schema remains version 2. Each native name has one binding, with at most 256
+entries and the existing identifier and encoded-reference bounds. The target
+uses current descriptor naming to reject overlapping matching sets, including
+implied-latest aliases, and requires each binding to be served when served
+permission is explicit. Names remain case-sensitive. Saving changes no engine
+intent and starts no engine; request-triggered preparation is a separate feature.
+
+Bindings use the existing local or granted-peer CAS policy writer. Peer edits
+preserve private routing, accounts, tiers, availability and pause provenance.
+The relay checks that a target preserves requested model-control fields,
+including explicit empty bindings, and reports unsupported readback when an
+older target discards them. An uncertain save requires readback and review,
+never automatic CAS resubmission. Malformed stored bindings enter paused policy
+recovery and retain the original bytes for diagnosis; stored-model sanitation
+never removes them.
+
 Target-owned model download state uses the shared optional
 `downloadState:{version:1,sourceId,revision,recoveryRequired,entries}` snapshot.
 Entries carry `id`, `engine`, exact `model`, `phase`, `blocksReadiness`, optional
@@ -77,6 +96,29 @@ inventory or admission evidence is evaluated on the next wake without waiting
 for the deadline. Each retry is a new operation subject to the same
 eligibility, inventory and hold checks.
 
+Process fixtures can set `--test-resident-retry-interval=1s` and
+`--test-advertise-interval=250ms` on each broker launch, including replacement
+launches. Both flags accept positive Go durations; explicit zero or negative
+values fail before logging setup, identity creation, transport setup or worker
+resolution. Omitting them retains the production 30-second resident retry and
+5-second local engine advertisement cadence. Programmatic `workerPaths` and bare
+broker fixtures use zero to retain those same defaults. Values are copied per
+broker at construction and are not changed while it runs. The advertisement
+override covers Ollama, LM Studio, the other built-in engines and descriptor
+engines. These fixture overrides leave the 30-second idle ticker, 60-second
+resident observation window, operation budgets, cancellation and capacity holds
+unchanged. They add no environment-variable configuration.
+
+Fixtures that supervise a real scanner can also pass
+`--test-scanner-scan-interval=250ms` together with
+`--test-scanner-scan-timeout=150ms`, or independently pass
+`--test-scanner-peer-refresh-interval=250ms`. These overrides are copied into
+the broker's worker plan and forwarded on every scanner launch and restart.
+Zero or omitted values pass no override and retain the scanner's normal
+defaults. Negative values, an incomplete scan pair, or a timeout longer than
+the scan interval are rejected before startup. The miss threshold and liveness
+probe policy are unchanged.
+
 A definite terminal manager `failed` result reports `unknown` with `load-failed`,
 including finish/recovery failures and readbacks while its terminal hold is
 retained. This reason does not prove that the model is unloaded or capacity is
@@ -86,6 +128,15 @@ or transport failure remains `unknown` with `operation-timeout`. A stale proxy
 source still reports the engine running; it uses the same retry deadline.
 These status reasons do not change hold cleanup, expiry or retry scheduling,
 and never include raw engine errors.
+
+`load-failed` is a model-configuration status reason only. Shared prepare and
+dispatch refusal validation excludes it; the proxy reports current permission,
+capacity or reservation refusal independently of a prior load outcome. The
+status reason still requires a coordinated fleet upgrade: brokers predating
+`load-failed` drop policy-set announcements containing it, and desktop parsers
+predating the reason reject the entry.
+Separating refusal validation does not make those configuration facts readable
+by older peers.
 
 A pause of either origin reports model-configuration reason `paused`, including
 the accepted interval before persistence. An ordinary saved Off reports
@@ -407,9 +458,29 @@ Only the existing process watcher fences worker exit and closes its `Done`
 channel after `cmd.Wait`. Interruption does not call `Stop`, join the process,
 or force-kill engine-manager: stdin EOF retains its ordinary engine cleanup
 path and the broker's existing graceful engine-manager shutdown policy.
-The subscribed engine event relay still writes synchronously to the
-service-facing codec on the engine reader goroutine. A stalled downstream can
-therefore stop engine stdout draining; decoupling that relay is separate work.
+The subscribed engine event relay and manager-originated switch progress use
+one FIFO queue for the broker's service-facing client. The queue holds at most
+32 waiting events and 8 MiB of method/parameter bytes including the event in
+flight. It owns copies of queued parameters. Enqueue never waits for client IO
+or space: overflow drops that client's engine subscription and pending engine
+events without cancelling the broker, closing its ordinary transport or stopping
+engine-manager. An already-admitted event may finish. One fixed pending reset
+bit wakes the sole sender, which writes private
+`service/engine-notifications-reset` after the active Write returns. The service
+consumes it for the current broker run, invalidates engine subscription/baseline
+ownership and disconnects its attached clients. Those clients already receive
+all broadcast engine events; their existing reconnect, subscribe and initial
+state reads recover from the gap without stopping the broker or engines. This
+requires the matching service version; it is not a desktop/TUI event or a client
+request. Actual transport failure retains ordinary session failure semantics.
+A single sender preserves engine-event order, rejects queued events from retired
+manager sources, and is cancelled and joined with its captured transport
+interruption callback before Serve returns. An event already handed to the codec
+may finish after its source retires. Other ordinary traffic shares the codec's
+per-frame write gate; history does not enter this queue and never holds that gate
+while waiting for another history frame. A fully blocked stdout still couples other
+ordinary client traffic. Policy replay's synchronous client announcement under
+the push slot and proxy supervisor lock remains a separate limitation.
 
 On startup — **before** emitting `app:ready` — the broker spawns the scanner and (when available) node-info, `nvpair-proxy`, the workload-manager, and the cluster-manager as child processes over stdio. The proxy is spawned up front but doesn't gate `app:ready` — each of its facades announces its listen port asynchronously (see below). None of the auxiliary workers gate `app:ready`.
 

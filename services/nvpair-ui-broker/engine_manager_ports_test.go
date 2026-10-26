@@ -243,11 +243,15 @@ func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 		}
 	}
 	controlHost := "127.0.0.1"
+	namespace := noderec.MDNSNamespace{Service: "_pair-fixture._tcp", Domain: noderec.Domain}
 	b := NewBroker(nil, workerPaths{
 		scanner: scannerBinary, engineMgr: engineBinary,
 		engineMgrHTTPPort: ports[0], engineMgrControlPort: ports[1],
 		engineMgrControlHost: &controlHost,
 		clusterDir:           filepath.Join(t.TempDir(), "cluster"),
+		disableMDNS:          true,
+		scannerNamespace:     &namespace,
+		scannerWaits:         scannerWaitOverrides{scanInterval: 250 * time.Millisecond, scanTimeout: 150 * time.Millisecond, peerRefresh: 500 * time.Millisecond},
 	})
 	for _, listener := range listeners {
 		if err := listener.Close(); err != nil {
@@ -334,6 +338,18 @@ func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 			}
 			defer handle.Stop()
 			defer b.setScanner(nil)
+			wantTail := []string{
+				"--cluster-dir", b.clusterDir,
+				"--mdns-service", namespace.Service,
+				"--mdns=false",
+				"--test-scan-interval", "250ms",
+				"--test-scan-timeout", "150ms",
+				"--test-peer-refresh-interval", "500ms",
+			}
+			actual := b.getScanner().cmd.Args
+			if len(actual) < len(wantTail) || !reflect.DeepEqual(actual[len(actual)-len(wantTail):], wantTail) {
+				t.Fatalf("scanner startup arguments=%q, want fixture overrides %q", actual, wantTail)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			for {

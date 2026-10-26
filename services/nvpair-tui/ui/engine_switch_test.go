@@ -35,6 +35,20 @@ func switchDetail(t *testing.T, remote bool) (*nodeDetail, *reconnectUIFixture) 
 	return d, f
 }
 
+func TestAutomaticEngineSwitchPresentation(t *testing.T) {
+	d, _ := switchDetail(t, false)
+	d.engineSwitch.requestID = "binding:run:1"
+	r := switchReceipt(d, 3, enginesettings.SwitchDraining)
+	r.Automatic = true
+	d.engineSwitch.receipt = &r
+	view := d.switchView()
+	for _, want := range []string{"Automatic engine switch", "binding:run:1", "draining", "From receipt", "To receipt"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("missing %q in %s", want, view)
+		}
+	}
+}
+
 func switchResponse(t *testing.T, value any) *rpc.Message {
 	t.Helper()
 	raw, err := json.Marshal(value)

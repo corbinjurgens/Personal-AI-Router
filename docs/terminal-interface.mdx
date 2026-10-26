@@ -142,7 +142,7 @@ header stays on `starting service...`, the service tree did not come up, and the
 
 | Key | Action |
 | --- | --- |
-| `1` – `5` | Go straight to a tab |
+| `1` – `6` | Go straight to a tab |
 | `tab`, `shift+tab` | Next, previous tab |
 | `?` | Toggle full help |
 | `ctrl+x` | Dismiss the update notice, while one is showing |
@@ -184,9 +184,10 @@ are.
 | --- | --- | --- |
 | 1 | **Nodes** | Every machine PAIR knows about, whether reachable, and its cluster standing. `enter` opens one machine's engines, models, and hardware |
 | 2 | **Jobs** | The endpoints your clients connect to, and inference work as it runs. `t` sends a minute of test traffic |
-| 3 | **Service** | Uptime and version, an `ok` / `DOWN` / `?` row per worker, settings, and a data reset |
-| 4 | **Errors** | Active service errors by severity, age, node, and message |
-| 5 | **Logs** | Service log output, with a filter and save-to-file |
+| 3 | **Routing** | Private request history; `r` refreshes and `enter` opens attempts |
+| 4 | **Service** | Uptime and version, an `ok` / `DOWN` / `?` row per worker, settings, and a data reset |
+| 5 | **Errors** | Active service errors by severity, age, node, and message |
+| 6 | **Logs** | Service log output, with a filter and save-to-file |
 
 The **Errors** tab shows its own count in the tab bar — `Errors (2)` — so you can
 see there is something to look at from any other tab.
@@ -512,7 +513,29 @@ The test is local to the machine you run it on. Running it here does not start
 one anywhere else, and a peer running one does not show up as progress here —
 only as jobs.
 
-The **Service** tab (3) reports whether each worker is up. Worker status is
+The **Routing** tab (3) shows the newest 256 requests that originated on this
+machine. This is the same private history as desktop Settings → Routing, kept
+in memory; broker restart clears it. Proxy restart retains accepted history.
+Disconnection clears the client table and says Disconnected; reconnecting
+resubscribes and loads history again. Updates appear within one second.
+
+Press `r` to refresh and `enter` to show the selected request's attempts. Scroll
+with `j` / `k` or the page keys; `enter` or `esc` returns to the list. Narrow terminals
+retain Model, State and Attempts; detail includes the hidden columns, full node,
+engine, deployment and account IDs, model, fixed reason, admission/first-byte
+waits, HTTP status and account state. A missing model says `model not specified`.
+Only the newest 32 attempts remain; `(+n older)` discloses a trimmed prefix.
+
+Spend separates Ceiling, Cumulative granted, Current held and Charged, with a
+separate Accounting status. Amounts use exact nano-USD precision; `—` means
+unavailable and `$0` means known zero. Completed delivery can have failed
+accounting. Streaming paused, waiting to resume appears only when the routing
+owner reports recoverability, and Interrupted, resumed requires a real linked
+successor. SC-b stream continuation is not implemented; a terminal interruption
+with no recovery says Stream interrupted. History adds no cancellation control
+or public-provider activation and never includes prompts or response bodies.
+
+The **Service** tab (4) reports whether each worker is up. Worker status is
 best-effort: `DOWN` means a worker reported a crash. The error reporting worker
 is the one that collects those reports, so it cannot report its own — its row
 says so. If the service itself is not answering, every row reads `?` rather than
@@ -549,7 +572,7 @@ before starting `nvpair`. Builds run from source never check.
 
 ## Look at Errors and Logs
 
-On **Errors** (4), press `c` to clear the selected entry. The tab label carries
+On **Errors** (5), press `c` to clear the selected entry. The tab label carries
 the count, so you do not have to go looking. The line under the table describes
 whichever entry you have selected — which engine and operation it came from, the
 model if there was one, and what the service suggests doing about it.
@@ -559,7 +582,7 @@ that reported it — the `NODE` column tells you which that is. Select an entry
 from another machine and `c` is withdrawn from the footer, with a line naming the
 node to clear it from. Clearing there removes it everywhere.
 
-On **Logs** (5), scroll with `j` / `k` and the page keys. Press `/` to filter to
+On **Logs** (6), scroll with `j` / `k` and the page keys. Press `/` to filter to
 lines containing a string, `c` to clear the filter, and `t` to toggle tailing
 the newest line — scrolling up releases follow on its own. This is the first place
 to look when something has not started.
@@ -571,7 +594,7 @@ Set how much detail the services log on the **Service** tab, not here.
 
 ## Change Settings
 
-On **Service** (3), move with `j` / `k` and press `enter`. The cluster name opens
+On **Service** (4), move with `j` / `k` and press `enter`. The cluster name opens
 as a text field, with `enter` to save and `esc` to cancel. Ports are not changed
 here — they belong to a machine, so they live on its detail screen.
 

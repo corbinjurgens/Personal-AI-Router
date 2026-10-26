@@ -10,9 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -106,8 +108,64 @@ func TestDialReportsNotRunning(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_, err := Dial(ctx)
-	if !errors.Is(err, ErrNotRunning) {
-		t.Fatalf("Dial err = %v, want ErrNotRunning", err)
+	if !errors.Is(err, ErrNotRunning) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Dial err = %v, want ErrNotRunning and the missing-socket cause", err)
+	}
+}
+
+func TestDialStaleSocketPreservesCause(t *testing.T) {
+	endpoint := filepath.Join(shortTempDir(t), "stale.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: endpoint, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := DialEndpoint(ctx, endpoint)
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("connected to a stale socket")
+	}
+	if !errors.Is(err, ErrNotRunning) || !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("DialEndpoint = %v, want ErrNotRunning and connection refused", err)
+	}
+}
+
+func TestConnectOrStartCanceledContextDoesNotStart(t *testing.T) {
+	dir := shortTempDir(t)
+	t.Setenv(EndpointEnv, filepath.Join(dir, "missing.sock"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	conn, err := ConnectOrStart(ctx, filepath.Join(dir, "must-not-start"), nil)
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("connected with an already canceled context")
+	}
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrNotRunning) || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ConnectOrStart = %v, want cancellation without absence or launch errors", err)
+	}
+}
+
+func TestConnectOrStartInvalidSocketParentDoesNotStart(t *testing.T) {
+	dir := shortTempDir(t)
+	parent := filepath.Join(dir, "regular-file")
+	if err := os.WriteFile(parent, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EndpointEnv, filepath.Join(parent, "s.sock"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := ConnectOrStart(ctx, filepath.Join(dir, "must-not-start"), nil)
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("connected through a regular-file parent")
+	}
+	if !errors.Is(err, syscall.ENOTDIR) || errors.Is(err, ErrNotRunning) || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ConnectOrStart = %v, want ENOTDIR without absence or launch errors", err)
 	}
 }
 

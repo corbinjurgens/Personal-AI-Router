@@ -258,7 +258,61 @@ func TestPrepareResidentWire(t *testing.T) {
 
 func TestResidentRefusalWire(t *testing.T) {
 	testResidentWire(t, ResidentRefusal{Engine: "ollama", Model: "m", Reason: ModelReasonNoFit}, "engine model reason",
-		residentWireRejection{"invalid reference", "model", ""}, residentWireRejection{"unknown reason", "reason", "raw engine error"})
+		residentWireRejection{"invalid reference", "model", ""},
+		residentWireRejection{"unknown reason", "reason", "raw engine error"},
+		residentWireRejection{"load failure is status only", "reason", ModelReasonLoadFailed})
+}
+
+func TestResidentRefusalReasons(t *testing.T) {
+	for _, reason := range []ModelConfigurationReason{
+		ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked,
+		ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled,
+		ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy,
+		ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown,
+	} {
+		t.Run(string(reason), func(t *testing.T) {
+			refusal := ResidentRefusal{Engine: "ollama", Model: "m", Reason: reason}
+			prepared := PrepareResidentResult{EvidenceGeneration: 1, Refusals: []ResidentRefusal{refusal}}
+			dispatched := DispatchResidentResult{Reason: DispatchResidentReason(reason)}
+			if err := prepared.Validate(); err != nil {
+				t.Fatalf("prepare reason rejected: %v", err)
+			}
+			if err := dispatched.Validate(); err != nil {
+				t.Fatalf("dispatch reason rejected: %v", err)
+			}
+			raw, err := json.Marshal(prepared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var prepareAgain PrepareResidentResult
+			if err := json.Unmarshal(raw, &prepareAgain); err != nil || !reflect.DeepEqual(prepareAgain, prepared) {
+				t.Fatalf("prepare round trip=%+v error=%v", prepareAgain, err)
+			}
+			raw, err = json.Marshal(dispatched)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var dispatchAgain DispatchResidentResult
+			if err := json.Unmarshal(raw, &dispatchAgain); err != nil || dispatchAgain != dispatched {
+				t.Fatalf("dispatch round trip=%+v error=%v", dispatchAgain, err)
+			}
+		})
+	}
+}
+
+func TestResidentRefusalRejectsLoadFailed(t *testing.T) {
+	refusal := ResidentRefusal{Engine: "ollama", Model: "m", Reason: ModelReasonLoadFailed}
+	prepared := PrepareResidentResult{EvidenceGeneration: 1, Refusals: []ResidentRefusal{refusal}}
+	dispatched := DispatchResidentResult{Reason: DispatchResidentReason(ModelReasonLoadFailed)}
+	if err := refusal.Validate(); err == nil {
+		t.Error("Validate accepted load-failed as a resident refusal")
+	}
+	if err := prepared.Validate(); err == nil {
+		t.Error("Validate accepted load-failed in a prepare result")
+	}
+	if err := dispatched.Validate(); err == nil {
+		t.Error("Validate accepted load-failed in a dispatch result")
+	}
 }
 
 func TestPrepareResidentResultWire(t *testing.T) {
@@ -276,7 +330,8 @@ func TestPrepareResidentResultWire(t *testing.T) {
 		testResidentWire(t, PrepareResidentResult{EvidenceGeneration: 1, Refusals: []ResidentRefusal{refusal}}, "evidenceGeneration",
 			residentWireRejection{"duplicate refusal", "refusals", []ResidentRefusal{refusal, refusal}},
 			residentWireRejection{"too many refusals", "refusals", make([]ResidentRefusal, 257)},
-			residentWireRejection{"invalid refusal", "refusals", []ResidentRefusal{{}}})
+			residentWireRejection{"invalid refusal", "refusals", []ResidentRefusal{{}}},
+			residentWireRejection{"load failure is status only", "refusals", []ResidentRefusal{{Engine: "ollama", Model: "m", Reason: ModelReasonLoadFailed}}})
 	})
 }
 
@@ -359,7 +414,8 @@ func TestDispatchResidentResultWire(t *testing.T) {
 	t.Run("refusal", func(t *testing.T) {
 		testResidentWire(t, DispatchResidentResult{Reason: DispatchReasonReservationRevoked}, "dispatched reason",
 			residentWireRejection{"refusal without reason", "reason", ""},
-			residentWireRejection{"unknown reason", "reason", "raw error"})
+			residentWireRejection{"unknown reason", "reason", "raw error"},
+			residentWireRejection{"load failure is status only", "reason", ModelReasonLoadFailed})
 	})
 	for _, reason := range []DispatchResidentReason{DispatchReasonReservationUnknown, DispatchResidentReason(ModelReasonNoFit), DispatchResidentReason(ModelReasonEngineOff), DispatchResidentReason(ModelReasonOperationTimeout)} {
 		t.Run(string(reason), func(t *testing.T) {
@@ -531,7 +587,7 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 }
 
 func TestResidentWireEnums(t *testing.T) {
-	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonLoadFailed, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
+	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
 		t.Run(string(reason), func(t *testing.T) {
 			testResidentWire(t, ResidentRefusal{Engine: "ollama", Model: "m", Reason: reason}, "engine model reason")
 		})

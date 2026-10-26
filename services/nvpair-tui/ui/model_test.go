@@ -507,8 +507,15 @@ func TestMinimumWidthKeepsNavigationVisible(t *testing.T) {
 	m = updated.(Model)
 
 	lines := strings.Split(m.View(), "\n")
-	if !strings.Contains(lines[1], "Logs") {
-		t.Errorf("last tab is hidden at minimum width: %q", lines[1])
+	// With Routing included, the shell uses its existing numbered form at
+	// minimum width. Every tab must stay reachable and the active one named.
+	for i := range m.views {
+		if !strings.Contains(lines[1], strconv.Itoa(i+1)) {
+			t.Errorf("tab %d is hidden at minimum width: %q", i+1, lines[1])
+		}
+	}
+	if !strings.Contains(lines[1], m.activeView().Title()) {
+		t.Errorf("active tab is not named at minimum width: %q", lines[1])
 	}
 	footer := lines[len(lines)-1]
 	for _, want := range []string{"quit", "help"} {

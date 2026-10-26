@@ -26,6 +26,25 @@ import (
 // lookup that hung would wedge StopAll (and the whole app shutdown).
 const portLookupTimeout = 2 * time.Second
 
+func managedInstallPath(binAbs, dirAbs string) bool {
+	// Resolve existing paths together so canonical image aliases cannot turn
+	// a symlink escaping the managed directory into install ownership.
+	if resolvedBin, err := filepath.EvalSymlinks(binAbs); err == nil {
+		resolvedDir, err := filepath.EvalSymlinks(dirAbs)
+		if err != nil {
+			return false
+		}
+		binAbs, dirAbs = resolvedBin, resolvedDir
+	} else if !os.IsNotExist(err) {
+		return false
+	}
+	rel, err := filepath.Rel(dirAbs, binAbs)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
 // configureSysProcAttr puts the child in its own process group so a
 // terminate signals the whole group — engines that fork helper
 // processes (model runners, etc.) get cleaned up too.
@@ -53,10 +72,10 @@ func pidOnPort(port int) (pid int, image string, ok bool) {
 		return 0, "", false
 	}
 	if p != 0 {
-		return p, procImage(p), true
+		return p, imagePathForPID(p), true
 	}
 	if p, found := ssPID(port); found {
-		return p, procImage(p), true
+		return p, imagePathForPID(p), true
 	}
 	return 0, "", false
 }
@@ -118,10 +137,10 @@ func ssPID(port int) (int, bool) {
 	}
 }
 
-// procImage reads the executable identity from the OS, never argv or a
+// imagePathForPID reads the executable identity from the OS, never argv or a
 // basename. Darwin's proc_pidpath copies at most PROC_PIDPATHINFO_MAXSIZE
 // bytes from the kernel; unavailable or malformed inspection fails closed.
-func procImage(pid int) string {
+func imagePathForPID(pid int) string {
 	if pid <= 0 || int64(pid) > 1<<31-1 {
 		return ""
 	}

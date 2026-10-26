@@ -568,6 +568,7 @@ func writeStrictSelfRefusal(w http.ResponseWriter, err error) int {
 
 func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Request, start time.Time, reqID string, bodyBytes []byte, model string, streamIdle time.Duration, cancelReasonOr func(string) string, requestOwner *routingRequest, policy dispatchPolicy) {
 	p := f.host
+	buffers := inferenceBuffers(r.Context())
 	var err error
 	ctl.mu.Lock()
 	ctl.body = bodyBytes
@@ -591,13 +592,14 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		stopStrictWatch()
 		stopStrictWatch = func() {}
 		if strictHeld != nil {
-			strictHeld.Finish(strictEvidence)
+			ticket, evidence := strictHeld, strictEvidence
+			buffers.releaseAfterPendingBody(func() { ticket.Finish(evidence) })
 			strictHeld, strictEvidence = nil, strictNotDispatched
 		}
 	}
 	defer func() {
 		if currentAttempt != nil {
-			currentAttempt.ticket.release()
+			buffers.releaseAfterPendingBody(currentAttempt.ticket.release)
 		}
 		finishStrict()
 	}()
@@ -674,8 +676,8 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	preparedValid := false
 	releaseSendBody, releasePreparation := func() {}, func() {}
 	dropPrepared := func() {
-		releasePreparation()
-		releaseSendBody()
+		buffers.releaseAfterPendingBody(releasePreparation)
+		buffers.releaseAfterPendingBody(releaseSendBody)
 		releaseSendBody, releasePreparation = func() {}, func() {}
 		preparedValid = false
 	}
@@ -1725,6 +1727,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		}
 		retry := false
 		retryBusy := false
+		bodyCleanupPending := false
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 		var performance *performanceAttempt
 		if cand.self {
@@ -1818,7 +1821,8 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				if len(round) != 1 {
 					bodyWait = min(firstBodyTimeout, bodyWait)
 				}
-				body, err := awaitFirstBody(resp.Body, bodyWait)
+				body, err := awaitFirstBody(resp, bodyWait, ctl, buffers)
+				bodyCleanupPending = stderrors.Is(err, errFirstBodyJoinTimeout)
 				if err != nil {
 					if ctl.sink != nil && att.requestCommitted() {
 						if !att.canDeliverResponse() {
@@ -1843,7 +1847,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					} else {
 						att.observeAttempt(routingAttemptResult{factAttemptFailed, factNoContent, resp.StatusCode, true})
 						proxyErr = err.Error()
-						if !last {
+						if !last && !bodyCleanupPending {
 							retry = true
 							slog.Warn("proxy upstream produced no content, failing over",
 								"id", reqID, "node_id", cand.id, "target", target.Host,
@@ -2006,7 +2010,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				}
 				// A deliberate abort says nothing about the node or its
 				// address, and is never the client's answer.
-				if att.redispatched() {
+				if att.redispatched() && !bodyCleanupPending {
 					retry = true
 					return
 				}
@@ -2035,7 +2039,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				if !stderrors.Is(err, clustertrust.ErrPeerSlotOccupied) {
 					candFacade.targets.Forget(cand.id)
 				}
-				if !last {
+				if !last && !bodyCleanupPending {
 					// Transport/dial error with candidates left: fail over.
 					retry = true
 					proxyErr = err.Error()
@@ -2089,12 +2093,15 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// the time it ends; charge them to the request's allowances.
 			spendWaits(time.Since(admissionStarted))
 		}
-		// The admitted execution ends with the attempt: a retried attempt no
-		// longer occupies this node, and a committed one has finished copying.
-		att.ticket.release()
+		// Admission ends after the real transport/body borrowers. A bounded
+		// cleanup failure retains this ticket and prohibits another dispatch.
+		buffers.releaseAfterPendingBody(att.ticket.release)
 		finishStrict()
 		att.finished(publicAttemptTerminal{})
 		switch {
+		case bodyCleanupPending:
+			// Even regeneration cannot overlap still-owned upstream IO.
+			retry = false
 		case att.redispatched():
 			// Moved on by a cancel, not failed: it costs no dispatch.
 			retry = true

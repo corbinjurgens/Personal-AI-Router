@@ -19,6 +19,53 @@ func switchRequestFixture() SwitchRequest {
 		TargetEngine: "llamacpp-custom", ExpectedRevision: "e3v1:" + strings.Repeat("a", 64)}
 }
 
+func TestAutomaticSwitchCause(t *testing.T) {
+	t.Run("manual input cannot select automatic cause", func(t *testing.T) {
+		data, err := json.Marshal(switchRequestFixture())
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = append([]byte(`{"automatic":true,`), data[1:]...)
+		if _, err := DecodeSwitchRequest(data); err == nil {
+			t.Fatal("public automatic flag accepted")
+		}
+	})
+	t.Run("automatic receipt budget and strict cause", func(t *testing.T) {
+		r := switchReceiptFixture()
+		r.Automatic = true
+		if err := r.Validate(); err == nil {
+			t.Fatal("manual budget accepted for automatic operation")
+		}
+		r.Deadline = r.AcceptedAt.Add(AutomaticSwitchBudget)
+		if err := r.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got SwitchReceipt
+		if err := json.Unmarshal(data, &got); err != nil || !reflect.DeepEqual(got, r) {
+			t.Fatalf("round trip: %+v, %v", got, err)
+		}
+		for _, bad := range []string{`null`, `"true"`, `1`} {
+			if err := json.Unmarshal([]byte(strings.Replace(string(data), `"automatic":true`, `"automatic":`+bad, 1)), &got); err == nil {
+				t.Fatalf("accepted cause %s", bad)
+			}
+		}
+	})
+	t.Run("cause does not change origin", func(t *testing.T) {
+		p := SwitchPrepareRequest{Automatic: true, Origin: SwitchOriginLocal}
+		if !p.YieldsToLocalOff() || p.Origin != SwitchOriginLocal {
+			t.Fatal("automatic local operation must yield without becoming remote")
+		}
+		p.Automatic = false
+		if p.YieldsToLocalOff() {
+			t.Fatal("manual local operation yielded")
+		}
+	})
+}
+
 func switchReceiptFixture() SwitchReceipt {
 	request := switchRequestFixture()
 	now := time.Date(2026, 10, 19, 1, 0, 0, 0, time.UTC)

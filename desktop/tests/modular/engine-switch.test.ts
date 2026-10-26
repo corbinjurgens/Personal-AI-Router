@@ -31,6 +31,24 @@ vi.mock('@/electron/service-bridge/node-info-poller', () => ({
 afterEach(() => vi.restoreAllMocks())
 
 const revision = `e3v1:${'a'.repeat(64)}`
+
+describe('automatic engine switch receipts', () => {
+    it('keeps automatic cause and the shorter deadline through readback', () => {
+        const row = { ...fixture(), automatic: true, deadline: '2026-10-19T01:01:30Z' }
+        expect(parseEngineSwitchResult({ receipt: row }).receipt).toEqual(row)
+        expect(
+            parseEngineSwitchStatus({ configurationRevision: revision, receipt: row }).receipt
+        ).toEqual(row)
+    })
+    it.each([null, 'true', 1])('rejects malformed automatic cause %s', automatic => {
+        expect(() => parseEngineSwitchResult({ receipt: { ...fixture(), automatic } })).toThrow()
+    })
+    it('refuses the manual deadline for automatic work', () => {
+        expect(() =>
+            parseEngineSwitchResult({ receipt: { ...fixture(), automatic: true } })
+        ).toThrow()
+    })
+})
 const observed = {
     intent: 'off',
     running: false,

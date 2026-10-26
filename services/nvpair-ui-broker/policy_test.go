@@ -358,7 +358,7 @@ func TestServedResidentPeerReadbackRefusesDroppedPreferences(t *testing.T) {
 		{"absent served preserved", `{}`, `{"policy":{}}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := residentReadbackSupported(json.RawMessage(tc.request), json.RawMessage(tc.result))
+			err := modelControlReadbackSupported(json.RawMessage(tc.request), json.RawMessage(tc.result))
 			if (err != nil) != tc.refused {
 				t.Fatalf("refused=%v want %v: %v", err != nil, tc.refused, err)
 			}

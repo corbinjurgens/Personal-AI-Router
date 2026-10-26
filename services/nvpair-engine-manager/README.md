@@ -5,6 +5,18 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-engine-manager
 
+Internal automatic replacement reuses the E4 switch transaction. Optional
+`automatic: true` in prepare/checkpoint and receipt contracts describes cause,
+independently of authenticated local/remote origin. The public request has no
+automatic flag. Automatic work retains its initial deadline, capped at 90 seconds.
+It requires a sole running PAIR-controlled, non-adopted source with no reclaim
+uncertainty, rechecked before source effects. The reservation fences other
+activation. Local Off can preempt automatic work of either origin through the
+same durable operation-scoped veto as remote E4. Manual local switching, locks,
+pause and termination proof retain their guards. Readiness proves the server,
+not model inventory. The broker owns bounded automatic receipt retention after
+manager release; unresolved checkpoints remain fenced through recovery.
+
 A config-driven control plane for local inference engines. The bundled
 manifests support Ollama, LM Studio, and llama.cpp. It manages everything about
 an engine **except serving inference**: detect, user-mode install,
@@ -27,6 +39,14 @@ orphan reclaim, stopping a matching orphan before launching cold. Foreign
 processes are preserved. A clean stop clears the endpoint while shutdown
 preserves saved On/Off intent. Older files without endpoint metadata keep their
 existing restore behavior.
+
+Reclaim also checks a saved positive PID for the same endpoint, revalidating
+both its recorded executable and its current OS image against the managed
+install. A matching child is stopped and its exit confirmed even before it
+binds, so restore cannot race it with a cold child. Missing PID records and the
+spawn-to-PID-save crash window retain listener-based reclaim. Linux image
+matching resolves available symlinks and compares case-sensitively; macOS
+retains canonical paths and filesystem-verified case aliases.
 
 ### llama.cpp backend checkpoint
 
@@ -807,6 +827,41 @@ in `ModelsResult` or native `list_models`. Dedicated bridge/UI presentation of
 the setup requirement and durability qualification is separate work; these Go
 fields do not establish that presentation or serving readiness.
 
+### Controller COPY process verification
+
+The isolated `services/tests` selector `^TestModelCopyControllerProcess$` drives
+the typed broker RPC with separate synthetic controller/source/destination
+identities and real engine-manager handlers. Its test source covers custom and
+canonical layouts, authenticated direct/reverse transfer, positive-byte
+interruption and explicit Range retry, controller cancellation, target permission
+and pin failures, changed source content, destination conflicts, failed mutation
+acknowledgement and lost-response no-replay behavior. See the
+[fixture prerequisites and native checklist](../readme.md#controller-selected-model-copy).
+
+On Windows at base `44e76c6b` (2026-10-26), the complete focused parent passed
+plain and race with 14 named terminals, no failures or skips. Review then
+strengthened the lost-acknowledgement fault to drop the downstream connection
+before response headers; that changed leaf and its parent passed plain and race
+(two terminals each). Module vet exited zero. Commands used the registered
+fixed-path wrapper, private profiles and offline Go, from `services/tests`:
+
+```sh
+go test -p 1 -parallel 1 -count=1 -json -timeout=30m -run '^TestModelCopyControllerProcess$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=30m -run '^TestModelCopyControllerProcess$' .
+go test -p 1 -parallel 1 -count=1 -json -timeout=15m -run '^TestModelCopyControllerProcess$/^dispatched_POST_is_not_replayed_on_alternate_reverse_route$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=15m -run '^TestModelCopyControllerProcess$/^dispatched_POST_is_not_replayed_on_alternate_reverse_route$' .
+```
+
+Raw output remains in the machine's temporary
+`download-transfer-process-checks-20261026` directory. The combined whole-suite
+run is separate from these focused results.
+The fixture records/refuses controller artifact transport and checks that its
+model store stays absent. Production artifact filesystem calls have no
+process-level attempt observer, so these checks alone do not prove zero attempted
+controller filesystem IO. Installed builds, actual source bindings, native UI
+behavior, strict controller artifact IO instrumentation and destination serving
+setup require separate acceptance.
+
 ## CLI flags
 
 | Flag | Default | Description |
@@ -948,9 +1003,12 @@ an owned cold launch; a later fresh switch target start uses that owner too.
 Foreign listeners are never killed and retain the existing port-ownership error.
 Reclaim observes caller and shutdown cancellation before signalling and while
 waiting for termination. Windows windowless orphans use `taskkill /T /F` without
-consuming the Unix graceful interval. Failed or cancelled reclaim reports a start
-failure and fences adoption, including explicit Start, until a verified stop or
-successful owned cold start. Passive status remains not running and unhealthy.
+consuming the Unix graceful interval. After a forced signal, reclaim polls for
+positive PID-exit evidence for up to the default five-second stop grace, even
+without a readiness probe; caller cancellation interrupts that wait.
+Failed or cancelled reclaim reports a start failure and fences adoption,
+including explicit Start, until a verified stop or successful owned cold start.
+Passive status remains not running and unhealthy.
 Listener refusal alone cannot clear that fence: the recorded failed-reclaim PID
 must be verified exited. Live/reused PIDs and inspection errors retain the fence;
 the retained PID never authorizes signalling without the current reclaim predicate.
@@ -1082,6 +1140,78 @@ current support and canonical ready inventory for ready-dependent actions. This
 requires a coordinated fleet update. Files predating this journal are not
 retroactively certified. Process, native UI and real-target acceptance remain
 separate from component tests.
+
+`services/tests/model_download_state_test.go::TestModelDownloadStateProcess`
+contains process scenarios for target-local service subscribers, a newly attached
+client, pinned observer inventory and production scanner self-enrichment. Its
+synthetic SSE router exposes first-shard, delayed-terminal and disconnect
+barriers. The assertions distinguish completion, stable ready inventory and
+loaded observation; reject typed/raw Load and existing export reads without
+native effects; isolate a cancelled queued model; and check direct/reverse POST
+counts, failure recovery, failed journal removal and bounded retained state.
+Service restarts use the existing private bundle's process-identity cleanup.
+On Windows at base `44e76c6b` (2026-10-26), the final plain run below passed
+17 named terminals with no failures or skips. The race run had 15 passes and
+two failed terminals (the queued-cancellation leaf and its parent): Windows
+refused replacement of the fixed scanner image during setup. That leaf alone
+then passed under race (two terminals, no failures or skips). No data race was
+reported. The failed aggregate run remains failed; no second full focused race
+pass is claimed. `go vet ./...` exited zero.
+The commands ran from `services/tests` with the fixed-path wrapper, private
+profile and offline Go bindings. Raw output remains in the machine's temporary
+`download-transfer-process-checks-20261026` directory.
+
+```sh
+go test -p 1 -parallel 1 -count=1 -json -timeout=30m -run '^TestModelDownloadStateProcess$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=30m -run '^TestModelDownloadStateProcess$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=15m -run '^TestModelDownloadStateProcess$/^queued_cancellation_has_no_native_effects_or_unsafe_marker$' .
+```
+
+These runs include bounded second-response NDJSON capture, replacement
+reverse-session/read checks, control-surface POST counters and exact terminal
+notification convergence assertions.
+The control observer reuses a registered fixture image and the existing owned
+port adapter; it forwards pinned HTTP streams to the real manager unchanged.
+
+The fixture does not prove independent scanner peer refresh: authenticated peer
+descriptors reject loopback addresses. Its production scanner uses only the
+target's registered loopback self-enrichment route, with mDNS disabled. Automatic
+resident dispatch is an internal broker/proxy boundary and is not exercised by
+this process fixture. The compiled manager has no short progress-watchdog seam
+or crash barrier inside durable journal replacement; watchdog and exact atomic
+replacement failures retain component-level coverage. No lower-revision or
+retired-source notification is injected by this fixture. The ec listener uses
+`--control-host=127.0.0.1`; em and cluster-manager retain their production
+wildcard binding on private fixture ports. No installed-machine or transfer-join
+acceptance follows from these scenarios.
+
+The separate `TestModelDownloadStateTransferJoinProcess` source regression joins
+downloads to the accepted COPY implementation on base `efda20f7691a01980dd4740789d5d4829f6ba43b`.
+It first requires a real custom-alias list and full artifact GETs with independently
+checked hashes. Active and failed pulls then refuse that previously reachable
+export and destination COPY: no artifact GET is dispatched by COPY, destination
+store contents and mutation-withdrawal counts stay unchanged, and an explicit
+successful same-key catalog retry restores export and COPY. Another scenario
+creates a real COPY receipt, fails a catalog pull for the same exact key, and
+performs an identity-bound receipt retry. Successful local rehash and skipped
+files must leave the failed download snapshot, durable unsafe marker, receipt
+and readiness fence unchanged. Assertions require absent controller artifact
+stores, stopped controller engines and source/destination certificates on peer
+reads. As in the COPY fixture, they do not observe attempted local artifact syscalls.
+
+On Windows (2026-10-26), the joined selector passed plain and race with three
+named terminals each, no failures or skips; module vet exited zero. Commands
+ran from `services/tests` under the same fixed-path/private/offline bindings:
+
+```sh
+go test -p 1 -parallel 1 -count=1 -json -timeout=20m -run '^TestModelDownloadStateTransferJoinProcess$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=20m -run '^TestModelDownloadStateTransferJoinProcess$' .
+```
+
+The merged whole-suite run remains separate. These scenarios reuse
+the controller COPY fixture and its cleanup, with a fixture-only adopted SSE
+router and Windows-safe aliases holding a 128-byte model and 4 KiB draft. They
+do not extend the unsupported Task 5 injection or native-machine claims above.
 
 ## Shutdown behavior
 

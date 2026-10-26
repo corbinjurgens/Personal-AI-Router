@@ -17,8 +17,30 @@ nvpair-tui ───┼─ local socket / pipe ── nvpair-service      ├─
 another client┘   (attach / detach)    (owns broker stdio)  └─ … every other worker
 ```
 
-The broker is unchanged: it still speaks newline-delimited JSON-RPC 2.0 over
+The broker speaks newline-delimited JSON-RPC 2.0 over
 stdio to a single parent, which is now this process.
+
+## Engine notification overflow recovery
+
+The broker's bounded engine-event sender reports a delivery gap through private
+`service/engine-notifications-reset` once its output drains. The service
+intercepts this notification before ordinary caching/broadcast and accepts it
+only from its current live broker run. Clients cannot invoke or inject it.
+
+Engine notifications are broadcast to every attachment, so all attached clients
+can have missed state. The service withdraws those registrations, closes them
+through the existing detach/closeNow owner, clears the acknowledged
+`engine:subscribe` and cached `engine:ready`, and invalidates pending engine
+subscriptions so a late acknowledgement cannot restore the old cache. Internal
+subscription callers are completed once. Other pending requests, subscriptions
+and baselines retain their existing owners; accepted broker work is not
+cancelled. Detach does not release a history writer's borrowed backing early.
+
+The broker and engine-manager stay running. The service retains the actual
+broker `app:ready`, rather than synthesizing another ready event, so reconnecting
+clients use their existing subscribe and initial-state reads. The reset is
+consumed here and never exposed as a desktop/TUI API. Broker and service must be
+updated together for this recovery path.
 
 ## Origin-local routing history relay
 

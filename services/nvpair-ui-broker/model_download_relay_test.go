@@ -6,9 +6,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/noderec"
@@ -72,8 +74,13 @@ func TestModelDownloadEngineResponseRelay(t *testing.T) {
 func TestModelDownloadEngineNotificationRelay(t *testing.T) {
 	test := func(name, method string, snapshot *modeldownload.Snapshot) {
 		t.Run(name, func(t *testing.T) {
-			var wire bytes.Buffer
-			b := &Broker{codec: NewCodec(&wire), engineSubscribed: true}
+			server, client := net.Pipe()
+			t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+			if err := client.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			b := &Broker{codec: NewCodec(server), engineSubscribed: true}
+			startTestEngineNotifications(t, b, func() { _ = server.Close() })
 			source := b.activateEngineManagerSource()
 			want := map[string]any{"engine": "llamacpp"}
 			if method == "engine:pull-progress" {
@@ -90,7 +97,7 @@ func TestModelDownloadEngineNotificationRelay(t *testing.T) {
 				t.Fatalf("encode notification: %v", err)
 			}
 			b.forwardEngineNotificationFrom(source, method, raw)
-			message, err := b.codec.Read()
+			message, err := NewCodec(client).Read()
 			if err != nil {
 				t.Fatalf("read notification: %v", err)
 			}

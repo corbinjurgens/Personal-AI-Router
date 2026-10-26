@@ -13,11 +13,50 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
 )
+
+// scannerTimings are copied into each daemon before discovery is constructed.
+// Only process fixtures override them; ordinary constructors use the defaults.
+type scannerTimings struct {
+	scanInterval        time.Duration
+	scanTimeout         time.Duration
+	peerRefreshInterval time.Duration
+}
+
+func defaultScannerTimings() scannerTimings {
+	return scannerTimings{
+		scanInterval:        defaultScanInterval,
+		scanTimeout:         defaultScanTimeout,
+		peerRefreshInterval: defaultPeerRefreshInterval,
+	}
+}
+
+func (t *scannerTimings) registerFlags(fs *flag.FlagSet) {
+	fs.DurationVar(&t.scanInterval, "test-scan-interval", t.scanInterval, "fixture-only mDNS scan cadence")
+	fs.DurationVar(&t.scanTimeout, "test-scan-timeout", t.scanTimeout, "fixture-only mDNS browse timeout (must not exceed scan interval)")
+	fs.DurationVar(&t.peerRefreshInterval, "test-peer-refresh-interval", t.peerRefreshInterval, "fixture-only peer inventory and membership refresh cadence")
+}
+
+func (t scannerTimings) validate() error {
+	if t.scanInterval <= 0 {
+		return fmt.Errorf("--test-scan-interval must be positive")
+	}
+	if t.scanTimeout <= 0 {
+		return fmt.Errorf("--test-scan-timeout must be positive")
+	}
+	if t.peerRefreshInterval <= 0 {
+		return fmt.Errorf("--test-peer-refresh-interval must be positive")
+	}
+	if t.scanTimeout > t.scanInterval {
+		return fmt.Errorf("--test-scan-timeout must not exceed --test-scan-interval")
+	}
+	return nil
+}
 
 func main() {
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
@@ -28,6 +67,8 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	mdnsEnabled := flag.Bool("mdns", true, "browse and advertise nodes over mDNS")
 	mdnsService := flag.String("mdns-service", noderec.ServiceType, "mDNS DNS-SD service used for browsing and advertising (_name._tcp)")
+	timings := defaultScannerTimings()
+	timings.registerFlags(flag.CommandLine)
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
 	namespace, err := (noderec.MDNSNamespace{Service: *mdnsService, Domain: noderec.Domain}).Normalize()
@@ -38,6 +79,10 @@ func main() {
 	if *showVersion {
 		fmt.Println(Version)
 		os.Exit(0)
+	}
+
+	if err := timings.validate(); err != nil {
+		log.Fatalf("invalid scanner timings: %v", err)
 	}
 
 	applog.Init("nvpair-node-scanner", resolveLevel())
@@ -91,7 +136,7 @@ func main() {
 	}()
 
 	codec := NewCodec(transport)
-	scanner, err := NewScanner(codec, mesh, *clusterDir, tlsHTTP, *mdnsEnabled, namespace)
+	scanner, err := newScannerWithTimings(codec, mesh, *clusterDir, tlsHTTP, *mdnsEnabled, namespace, timings)
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -343,7 +343,7 @@ func TestModelCopyCustomAliasSecurity(t *testing.T) {
 	})
 	t.Run("same bytes preset path and symlink rebind require relisting", func(t *testing.T) {
 		f := newCustomCopyFixture(t)
-		_, client := modelFileServer(t, f.source, nil)
+		server, client := modelFileServer(t, f.source, nil)
 		list, err := client.modelFiles(context.Background(), "llamacpp", reportedCopyAlias, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -376,12 +376,15 @@ func TestModelCopyCustomAliasSecurity(t *testing.T) {
 		if err := body.Close(); err != nil {
 			t.Fatal(err)
 		}
+		// Join the handler so its deferred file close finishes before removal.
+		server.Close()
 		if err := os.Remove(copyPath); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Symlink(f.artifact, copyPath); err != nil {
 			t.Fatal(err)
 		}
+		_, client = modelFileServer(t, f.source, nil)
 		body, _, err = client.modelFile(context.Background(), "llamacpp", reportedCopyAlias, updated.Files[0].Path, updated.ExportID, 0)
 		if body != nil {
 			body.Close()

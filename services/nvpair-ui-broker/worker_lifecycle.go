@@ -24,10 +24,14 @@ import (
 // spawn failure returns the error without storing a handle, leaving the
 // previous (dead) handle in place until the next successful (re)start.
 func (b *Broker) spawnScanner() (supervisedHandle, error) {
+	if err := b.scannerWaits.validate(); err != nil {
+		return nil, err
+	}
 	args, err := b.scannerArgs()
 	if err != nil {
 		return nil, err
 	}
+	args = append(args, b.scannerWaits.args()...)
 	sp, err := startScanner(
 		b.scannerPath,
 		applog.LevelString(),

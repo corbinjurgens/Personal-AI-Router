@@ -101,7 +101,9 @@ export function EngineSwitchControls({
         : undefined
     return (
         <Stack gap="3" className="pair-paper min-w-0 max-w-full p-4">
-            <Text kind="body/semibold/md">{COPY.heading}</Text>
+            <Text kind="body/semibold/md">
+                {receipt?.automatic ? 'Automatic engine switch' : COPY.heading}
+            </Text>
             <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
                 <FormField slotLabel={COPY.source}>
                     <Select

@@ -41,11 +41,11 @@ type preparationClass struct {
 
 func preparationClasses() []preparationClass {
 	return []preparationClass{
-		{name: "self numeric", mode: performancePrepareLocalNumeric, stream: true, numeric: true, ceilings: [3]int{15, 15, 15}},
-		{name: "self syntax", mode: performancePrepareLocalSyntax, stream: true, ceilings: [3]int{15, 15, 15}},
+		{name: "self numeric", mode: performancePrepareLocalNumeric, stream: true, numeric: true, ceilings: [3]int{57, 76, 307}},
+		{name: "self syntax", mode: performancePrepareLocalSyntax, stream: true, ceilings: [3]int{59, 78, 315}},
 		{name: "self nonstream", mode: performancePrepareLocalNumeric, ceilings: [3]int{874, 1166, 4665}},
-		{name: "self omitted OpenAI", raw: `{"model":"m"}`, mode: performancePrepareLocalNumeric},
-		{name: "peer stream", mode: performancePreparePeer, stream: true, peer: true, ceilings: [3]int{15, 15, 15}},
+		{name: "self omitted OpenAI", raw: `{"model":"m"}`, mode: performancePrepareLocalNumeric, ceilings: [3]int{875, 1167, 4671}},
+		{name: "peer stream", mode: performancePreparePeer, stream: true, peer: true, ceilings: [3]int{61, 82, 328}},
 		{name: "peer nonstream", mode: performancePreparePeer, peer: true, ceilings: [3]int{2047, 2729, 10919}},
 	}
 }
@@ -74,14 +74,24 @@ func preparationIntake(root *bufferBudget, raw string) (context.Context, *ownedI
 	return r.Context(), owner, body, nil
 }
 
-func preparationUsed(root *bufferBudget) (int64, int64) {
+func preparationUsed(root *bufferBudget) int64 {
 	root.mu.Lock()
 	defer root.mu.Unlock()
-	var frames int64
-	if root.streams != nil {
-		frames = root.streams.used
+	return root.used
+}
+
+func preparationFrameBytes(ctx context.Context) int64 {
+	prepared, _ := ctx.Value(performancePreparationKey{}).(performancePreparation)
+	return preparationFrameScopeBytes(prepared.frames)
+}
+
+func preparationFrameScopeBytes(frames *frameBudget) int64 {
+	if frames == nil {
+		return 0
 	}
-	return root.used, frames
+	frames.scope.budget.mu.Lock()
+	defer frames.scope.budget.mu.Unlock()
+	return frames.scope.used
 }
 
 func TestBufferPreparationChargeClasses(t *testing.T) {
@@ -97,7 +107,7 @@ func TestBufferPreparationChargeClasses(t *testing.T) {
 				t.Fatalf("intake: %v", err)
 			}
 			defer owner.close()
-			before, _ := preparationUsed(root)
+			before := preparationUsed(root)
 			if want := int64(len(body)+len("m")) + (96 << 10); before != want {
 				t.Fatalf("body/model/parser charge=%d, want %d", before, want)
 			}
@@ -105,7 +115,7 @@ func TestBufferPreparationChargeClasses(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse stream request: %v", err)
 			}
-			_, release, err := preparationPrepare(ctx, body, request, class.mode)
+			prepared, release, err := preparationPrepare(ctx, body, request, class.mode)
 			if err != nil {
 				t.Fatalf("prepare: %v", err)
 			}
@@ -124,15 +134,15 @@ func TestBufferPreparationChargeClasses(t *testing.T) {
 				if class.numeric {
 					parser = streamFrameNumericBytes
 				}
-				wantFrames = streamFrameMetadataBytes + 1 + streamFrameReadChunk + parser + 4*streamFrameMaxBytes
+				wantFrames = streamFrameMetadataBytes + 1 + streamFrameReadChunk + parser + 3*streamFrameMaxBytes
 			}
-			after, frames := preparationUsed(root)
+			after, frames := preparationUsed(root), preparationFrameBytes(prepared)
 			if after-before != wantBase+wantFrames || frames != wantFrames {
-				t.Fatalf("preparation root/category=%d/%d, want %d/%d (base=%d)", after-before, frames, wantBase+wantFrames, wantFrames, wantBase)
+				t.Fatalf("preparation root/frames=%d/%d, want %d/%d (base=%d)", after-before, frames, wantBase+wantFrames, wantFrames, wantBase)
 			}
 			release()
-			if used, frames := preparationUsed(root); used != before || frames != 0 {
-				t.Fatalf("released preparation root/category=%d/%d, want %d/0", used, frames, before)
+			if used, frames := preparationUsed(root), preparationFrameBytes(prepared); used != before || frames != 0 {
+				t.Fatalf("released preparation root/frames=%d/%d, want %d/0", used, frames, before)
 			}
 			owner.close()
 			bufferAssertTotals(t, root, 0, 0, 0)
@@ -166,14 +176,14 @@ func TestBufferPreparationOnlyEffectiveStreamingRoutesPrepareFrames(t *testing.T
 				if err != nil {
 					t.Fatalf("parse: %v", err)
 				}
-				_, release, err := preparationPrepare(ctx, body, request, mode)
+				prepared, release, err := preparationPrepare(ctx, body, request, mode)
 				if err != nil {
 					t.Fatalf("prepare: %v", err)
 				}
 				defer release()
-				_, frames := preparationUsed(root)
+				frames := preparationFrameBytes(prepared)
 				if (frames > 0) != route.frames {
-					t.Fatalf("frame category=%d, want frames=%v", frames, route.frames)
+					t.Fatalf("frame envelope=%d, want frames=%v", frames, route.frames)
 				}
 			})
 		}
@@ -206,7 +216,7 @@ func TestBufferPreparationResponseGrantsFollowEffectiveStream(t *testing.T) {
 				t.Fatalf("prepare: %v", err)
 			}
 			defer release()
-			before, frames := preparationUsed(root)
+			before, frames := preparationUsed(root), preparationFrameBytes(prepared)
 			if (frames > 0) != test.protected {
 				t.Fatalf("prepaid response bytes=%d, want protection=%v", frames, test.protected)
 			}
@@ -476,7 +486,7 @@ func TestBufferPreparationHugeChoicesTypedLimit(t *testing.T) {
 						t.Fatalf("intake: %v", err)
 					}
 					defer owner.close()
-					before, _ := preparationUsed(root)
+					before := preparationUsed(root)
 					request, err := parseOriginStreamRequest("/v1/chat/completions", body)
 					if err == nil {
 						var release func()
@@ -486,8 +496,8 @@ func TestBufferPreparationHugeChoicesTypedLimit(t *testing.T) {
 						}
 					}
 					bufferAssertLimit(t, err)
-					if used, frames := preparationUsed(root); used != before || frames != 0 {
-						t.Fatalf("rejected choices retained root/category=%d/%d, want %d/0", used, frames, before)
+					if used := preparationUsed(root); used != before {
+						t.Fatalf("rejected choices retained root=%d, want %d", used, before)
 					}
 					owner.close()
 					bufferAssertTotals(t, root, 0, 0, 0)
@@ -619,8 +629,8 @@ func preparationConstruct(root *bufferBudget, class preparationClass) (*preparat
 func TestBufferPreparationMeasuredLiveCeilings(t *testing.T) {
 	// These isolated preparations omit the registry's per-live-owner root charge
 	// and routing snapshots. They are not admitted HTTP concurrency
-	// or RSS measurements. Each row gets a fresh process root and shared 64 MiB
-	// stream category. No listener, engine, transport or response output is used.
+	// or RSS measurements. Each row gets a fresh process root.
+	// No listener, engine, transport or response output is used.
 	for _, class := range preparationClasses() {
 		for index, mib := range []int64{192, 256, 1024} {
 			t.Run(fmt.Sprintf("%s/%dMiB", class.name, mib), func(t *testing.T) {
@@ -636,22 +646,26 @@ func TestBufferPreparationMeasuredLiveCeilings(t *testing.T) {
 				}()
 				var perRoot, perFrames, frameCapacity int64
 				for {
-					before, beforeFrames := preparationUsed(root)
+					before := preparationUsed(root)
 					live, err := preparationConstruct(root, class)
 					if err != nil {
 						bufferAssertBusy(t, err)
-						if after, frames := preparationUsed(root); after != before || frames != beforeFrames {
-							t.Fatalf("terminal probe leaked root/category=%d/%d, want %d/%d", after, frames, before, beforeFrames)
+						if after := preparationUsed(root); after != before {
+							t.Fatalf("terminal probe leaked root=%d, want %d", after, before)
 						}
 						break
 					}
 					held = append(held, live)
-					after, frames := preparationUsed(root)
-					if len(held) == 1 {
-						perRoot, perFrames = after-before, frames-beforeFrames
+					after := preparationUsed(root)
+					var frames int64
+					if live.reader != nil {
+						frames = preparationFrameScopeBytes(live.reader.budget)
 					}
-					if after-before != perRoot || frames-beforeFrames != perFrames {
-						t.Fatalf("nonuniform per-request root/category=%d/%d, want %d/%d", after-before, frames-beforeFrames, perRoot, perFrames)
+					if len(held) == 1 {
+						perRoot, perFrames = after-before, frames
+					}
+					if after-before != perRoot || frames != perFrames {
+						t.Fatalf("nonuniform per-request root/frames=%d/%d, want %d/%d", after-before, frames, perRoot, perFrames)
 					}
 					if live.reader != nil {
 						r := live.reader
@@ -680,32 +694,128 @@ func TestBufferPreparationMeasuredLiveCeilings(t *testing.T) {
 					t.Fatalf("nonstream request charged %d response bytes", perFrames)
 				}
 				byteCeiling := (mib << 20) / perRoot
-				if perFrames > 0 {
-					byteCeiling = min(byteCeiling, streamFrameBudgetBytes/perFrames)
-				}
 				if int64(len(held)) != byteCeiling || (class.ceilings[index] != 0 && len(held) != class.ceilings[index]) {
-					t.Fatalf("measured live=%d, byte formula=%d, intake reference=%d; per-request root/category=%d/%d", len(held), byteCeiling, class.ceilings[index], perRoot, perFrames)
+					t.Fatalf("measured live=%d, byte formula=%d, intake reference=%d; per-request root/frames=%d/%d", len(held), byteCeiling, class.ceilings[index], perRoot, perFrames)
 				}
 				if frameCapacity > 10<<20 {
 					t.Fatalf("physical initial frame arrays=%d, exceed 10 MiB", frameCapacity)
 				}
 				// Exactly one bounded row per class/capacity; no request-count log.
-				t.Logf("%s %dMiB: live=%d root/request=%d category/request=%d frame-arrays=%d", class.name, mib, len(held), perRoot, perFrames, frameCapacity)
+				t.Logf("%s %dMiB: live=%d root/request=%d frames/request=%d frame-arrays=%d", class.name, mib, len(held), perRoot, perFrames, frameCapacity)
 			})
 		}
 	}
 }
 
-func TestBufferPreparationLogicalCategoryNoPhysicalAllocation(t *testing.T) {
+func TestBufferPreparationLogicalFrameScopeNoPhysicalAllocation(t *testing.T) {
 	root := bufferTestBudget(t, 1024<<20, 0)
 	scope := bufferMustScope(t, root, math.MaxInt64)
-	frames := &frameBudget{limit: streamFrameBudgetBytes, scope: scope}
+	frames := &frameBudget{limit: streamFrameRequestLimitBytes, scope: scope}
 	defer frames.releasePreparation()
-	if err := preparationFramePrepare(context.Background(), frames, streamFrameBudgetBytes); err != nil {
-		t.Fatalf("logical category grant: %v", err)
+	if err := preparationFramePrepare(context.Background(), frames, streamFrameRequestLimitBytes); err != nil {
+		t.Fatalf("logical frame scope grant: %v", err)
 	}
-	bufferAssertTotals(t, root, streamFrameBudgetBytes, 1, 0)
+	bufferAssertTotals(t, root, streamFrameRequestLimitBytes, 1, 0)
 	bufferAssertLimit(t, preparationFramePrepare(context.Background(), frames, 1))
 	frames.releasePreparation()
 	bufferAssertTotals(t, root, 0, 0, 0)
+}
+
+func TestBufferPreparationFrameProposalsUseRootFIFO(t *testing.T) {
+	for _, action := range []string{"cancel pending proposal", "grant after drain", "wait bound"} {
+		t.Run(action, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				root := bufferTestBudget(t, 100<<20, time.Hour)
+				hold := bufferMustAcquire(t, root, 80<<20)
+				var frames []*frameBudget
+				for i := 0; i < 2; i++ {
+					ctx, owner := decreaseDrainOwner(t, root)
+					defer owner.close()
+					frame := ownedFrameBudget(ctx)
+					if frame == nil {
+						t.Fatal("missing frame budget")
+					}
+					defer frame.releasePreparation()
+					frames = append(frames, frame)
+				}
+				first := bufferStartCall(t, context.Background(), func(ctx context.Context) (*bufferLease, error) {
+					return frames[0].scope.acquire(ctx, 60<<20)
+				})
+				synctest.Wait()
+				first.pending(t)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if action == "wait bound" {
+					if err := root.reconfigure(100<<20, time.Second); err != nil {
+						t.Fatalf("set second proposal wait: %v", err)
+					}
+				}
+				queued := bufferStartCall(t, ctx, func(ctx context.Context) (*bufferLease, error) {
+					return frames[1].scope.acquire(ctx, 50<<20)
+				})
+				synctest.Wait()
+				queued.pending(t)
+				// These independent stream proposals total more than root capacity.
+				// They must queue, since each can fit after an earlier owner drains.
+				bufferAssertTotals(t, root, (80<<20)+2*(96<<10), 3, 2)
+				if err := root.reconfigure(70<<20, time.Hour); err != nil {
+					t.Fatalf("decrease: %v", err)
+				}
+				if lease, err := frames[0].scope.tryAcquire(context.Background(), 1); err == nil {
+					lease.close()
+					t.Fatal("new root grant succeeded above decreased capacity")
+				} else {
+					bufferAssertBusy(t, err)
+				}
+				first.pending(t)
+				queued.pending(t)
+				if action != "grant after drain" {
+					cause := context.Canceled
+					if action == "wait bound" {
+						cause = context.DeadlineExceeded
+						bufferAdvance(time.Second)
+					} else {
+						cancel()
+						synctest.Wait()
+					}
+					_, err := queued.result(t)
+					bufferAssertBusy(t, err)
+					if !errors.Is(err, cause) || frames[1].scope.used != 0 {
+						t.Fatalf("refusal=%v retained proposal=%d", err, frames[1].scope.used)
+					}
+				}
+				hold.close()
+				synctest.Wait()
+				lease := first.success(t)
+				pending := 0
+				if action == "grant after drain" {
+					pending = 1
+				}
+				bufferAssertTotals(t, root, (60<<20)+2*(96<<10), 3, pending)
+				if action == "grant after drain" {
+					queued.pending(t)
+				}
+				lease.close()
+				synctest.Wait()
+				if action == "grant after drain" {
+					queued.success(t).close()
+				}
+				if err := root.reconfigure(1024<<20, 0); err != nil {
+					t.Fatalf("increase: %v", err)
+				}
+				// Existing and newly created request scopes keep the individual
+				// frame bound when process capacity grows.
+				bufferAssertLimit(t, frames[0].admit(context.Background(), (64<<20)+1))
+				if err := frames[0].admit(context.Background(), 64<<20); err != nil {
+					t.Fatalf("existing scope after increase: %v", err)
+				}
+				freshCtx, freshOwner := decreaseDrainOwner(t, root)
+				defer freshOwner.close()
+				fresh := ownedFrameBudget(freshCtx)
+				if fresh == nil || fresh.scope.limit != 64<<20 || fresh.scope.budget != root {
+					t.Fatal("new frame scope lost its individual limit or root")
+				}
+			})
+		})
+	}
 }
