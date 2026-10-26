@@ -185,6 +185,8 @@ type Broker struct {
 	pendingInstallStarts map[*pendingInstallStart]struct{}
 	switchInit           sync.Once
 	engineSwitch         *engineSwitchCoordinator
+	boundInit            sync.Once
+	boundEngines         *boundEngineCoordinator
 	engineSettingsLoaded bool
 	engineSettingsError  error
 	engineSettingsEpoch  string

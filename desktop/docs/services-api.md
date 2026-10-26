@@ -138,6 +138,7 @@
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `engine:action` | request (we call) | ✅ yes |
+| `engine:activate-bound-engine` | request (we call) | ➖ ignored |
 | `engine:active-model-copies` | request (we call) | ✅ yes |
 | `engine:cancel-model-copy` | request (we call) | ✅ yes |
 | `engine:catalog` | request (we call) | ✅ yes |
@@ -291,6 +292,8 @@
 
 | Method | Direction | In bridge? |
 |---|---|---|
+| `admission/cancel-bound-engine` | notification (we consume) | ➖ ignored |
+| `admission/prepare-bound-engine` | notification (we consume) | ➖ ignored |
 | `admission/state` | notification (we consume) | ➖ ignored |
 | `admission/strict-readiness` | notification (we consume) | ➖ ignored |
 | `discovery:subscribe` | notification (we consume) | ✅ yes |
@@ -400,6 +403,7 @@
 | `errors:report` | notification (we consume) | ✅ yes |
 | `errors:update` | notification (we consume) | ✅ yes |
 | `log/set-level` | notification (we consume) | ✅ yes |
+| `node/bound-engine-prepared` | notification (we consume) | ➖ ignored |
 | `performance:changed` | notification (we consume) | ✅ yes |
 | `scheduler:telemetry` | notification (we consume) | ➖ ignored |
 | `service/engine-notifications-reset` | notification (we consume) | ➖ ignored |

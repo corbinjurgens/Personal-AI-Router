@@ -65,8 +65,11 @@ func (e *Executor) waitDetect(engine string, want bool, timeout time.Duration) b
 // auto-assign a free loopback port); Bind "" => the manifest's
 // runtime.bind (which itself defaults to loopback).
 type startOpts struct {
-	RequireOwned bool
-	ReclaimOwned bool
+	// Private cold activation repeats authority after lifecycle admission.
+	boundGuard       func() error
+	boundOperationID string
+	RequireOwned     bool
+	ReclaimOwned     bool
 	// Automatic switches retain their deadline through failed-start cleanup.
 	BoundedCleanup bool
 	Port           int
@@ -103,11 +106,22 @@ func (e *Executor) Start(ctx context.Context, engine string) error {
 // rechecks target pause and lock after taking the lifecycle lock. Saved Off
 // alone does not prohibit a fresh explicit start.
 func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts) error {
-	done, err := e.admitMutation(engine)
+	var done func()
+	var err error
+	if opts.boundGuard != nil {
+		done, err = e.admitBoundEngineMutation(engine, opts.boundOperationID)
+	} else {
+		done, err = e.admitMutation(engine)
+	}
 	if err != nil {
 		return err
 	}
 	defer done()
+	if opts.boundGuard != nil {
+		if err := opts.boundGuard(); err != nil {
+			return err
+		}
+	}
 	st, err := e.state(engine)
 	if err != nil {
 		return err
@@ -115,8 +129,19 @@ func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts)
 	if err := prepareStrataState(ctx, st); err != nil {
 		return err
 	}
-	st.opMu.Lock()
+	if opts.boundGuard != nil {
+		if err := lockBoundEngineLifecycle(ctx, st); err != nil {
+			return err
+		}
+	} else {
+		st.opMu.Lock()
+	}
 	defer st.opMu.Unlock()
+	if opts.boundGuard != nil {
+		if err := opts.boundGuard(); err != nil {
+			return err
+		}
+	}
 	if opts.Origin == intentPeer {
 		if err := e.remoteVeto(engine); err != nil {
 			return err
@@ -126,6 +151,9 @@ func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts)
 		return err
 	}
 	if err := e.setDesiredEnabled(engine, true, opts.Origin); err != nil {
+		if opts.BoundedCleanup {
+			return errors.Join(err, e.doStopContext(ctx, st, engine))
+		}
 		return errors.Join(err, e.doStop(st, engine))
 	}
 	return nil
@@ -715,16 +743,23 @@ func (e *Executor) StopForSwitch(engine, operationID string) error {
 }
 
 func (e *Executor) stopFrom(engine string, origin intentOrigin, operationID string) error {
+	return e.stopFromApplied(engine, origin, operationID, nil)
+}
+
+func (e *Executor) stopFromApplied(engine string, origin intentOrigin, operationID string, applied *bool) error {
 	st, err := e.state(engine)
 	if err != nil {
 		return err
 	}
-	done, err := e.admitStop(engine, origin, operationID)
+	done, err := e.admitStopScoped(engine, origin, operationID, applied != nil)
 	if err != nil {
 		return err
 	}
 	if done == nil {
 		return nil
+	}
+	if applied != nil {
+		*applied = true
 	}
 	defer done()
 	if origin == intentLocal {

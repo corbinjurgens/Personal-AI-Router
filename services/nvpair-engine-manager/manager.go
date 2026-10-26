@@ -47,6 +47,7 @@ type opParam struct {
 	Start  bool   `json:"start,omitempty"`
 	// SwitchOperationID scopes a delayed local Off to the admitted reservation.
 	SwitchOperationID string `json:"switchOperationId,omitempty"`
+	BoundOperationID  string `json:"boundOperationId,omitempty"`
 	// VerifyStop requests internal cleanup evidence on an ordinary unscoped stop.
 	VerifyStop bool `json:"verifyStop,omitempty"`
 }
@@ -368,6 +369,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 		}
 		m.codec.Respond(msg.ID, map[string]int{"port": p.Port})
 
+	case nodepolicy.MethodActivateBoundEngine:
+		go m.runActivateBoundEngine(ctx, msg)
+
 	case "engine:action":
 		go m.runAction(ctx, msg)
 
@@ -433,6 +437,12 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 	case "engine:start":
 		err = start()
 	case "engine:stop":
+		if p.BoundOperationID != "" {
+			applied := false
+			err = m.exec.stopFromApplied(p.Engine, intentLocal, p.BoundOperationID, &applied)
+			m.respondOrErr(msg, map[string]bool{"applied": applied}, err)
+			return
+		}
 		if p.SwitchOperationID != "" {
 			err = m.exec.StopForSwitch(p.Engine, p.SwitchOperationID)
 		} else {
