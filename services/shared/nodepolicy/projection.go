@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"reflect"
 	"slices"
 	"strings"
@@ -60,7 +62,7 @@ func (p Policy) PeerProjection() PeerPolicy {
 		Pause:          p.Pause,
 		Admission:      p.Admission,
 		Idle:           p.Idle,
-		Profiles:       p.Profiles,
+		Profiles:       copyProfiles(p.Profiles),
 		ServedModels:   slices.Clone(p.ServedModels),
 		ResidentModels: slices.Clone(p.ResidentModels),
 		EngineBindings: slices.Clone(p.EngineBindings),
@@ -69,6 +71,145 @@ func (p Policy) PeerProjection() PeerPolicy {
 		TierPolicy:     p.TierPolicy,
 		PausedBy:       p.PausedBy,
 	}
+}
+
+// RemoteSettingLockedError is a definite refusal of a peer policy write. The
+// broker maps its type to remote_setting_locked; callers must not parse text.
+// Identity is private and is populated only from the stored target policy.
+type RemoteSettingLockedError struct {
+	engine string
+	model  string
+	stored bool
+}
+
+func (e *RemoteSettingLockedError) Error() string {
+	if !e.stored {
+		return "inference settings can only be locked on the target device"
+	}
+	const identityBytes = 96
+	return fmt.Sprintf("inference settings are locked on the target device for engine %.96q model %.96q", boundedIdentity(e.engine, identityBytes), boundedIdentity(e.model, identityBytes))
+}
+
+func boundedIdentity(value string, limit int) string {
+	if len(value) > limit {
+		return value[:limit]
+	}
+	return value
+}
+
+func checkPeerInferenceSettings(stored, incoming []Profile) error {
+	type identity struct{ engine, model string }
+	next := make(map[identity]Profile, len(incoming))
+	previous := make(map[identity]Profile, len(stored))
+	for _, profile := range incoming {
+		next[identity{profile.Engine, profile.Model}] = profile
+	}
+	for _, profile := range stored {
+		key := identity{profile.Engine, profile.Model}
+		previous[key] = profile
+		if !profile.LocalOnly {
+			continue
+		}
+		candidate, exists := next[key]
+		if !exists || !candidate.LocalOnly || profile.RequestOptionsMode.Effective() != candidate.RequestOptionsMode.Effective() || !equalRequestOptions(profile.RequestOptions, candidate.RequestOptions) {
+			return &RemoteSettingLockedError{engine: profile.Engine, model: profile.Model, stored: true}
+		}
+	}
+	for _, profile := range incoming {
+		if !profile.LocalOnly {
+			continue
+		}
+		old, exists := previous[identity{profile.Engine, profile.Model}]
+		if !exists {
+			return &RemoteSettingLockedError{}
+		}
+		if !old.LocalOnly {
+			return &RemoteSettingLockedError{engine: old.Engine, model: old.Model, stored: true}
+		}
+	}
+	return nil
+}
+
+func equalRequestOptions(a, b json.RawMessage) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == 0 && len(b) == 0
+	}
+	decode := func(raw []byte) (any, error) {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var value any
+		if err := dec.Decode(&value); err != nil {
+			return nil, err
+		}
+		if _, err := dec.Token(); err != io.EOF {
+			return nil, errors.New("invalid request options")
+		}
+		return value, nil
+	}
+	left, err := decode(a)
+	if err != nil {
+		return false
+	}
+	right, err := decode(b)
+	return err == nil && equalOptionValue(left, right)
+}
+
+func equalOptionValue(a, b any) bool {
+	switch left := a.(type) {
+	case map[string]any:
+		right, ok := b.(map[string]any)
+		if !ok || len(left) != len(right) {
+			return false
+		}
+		for key, value := range left {
+			other, exists := right[key]
+			if !exists || !equalOptionValue(value, other) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		right, ok := b.([]any)
+		if !ok || len(left) != len(right) {
+			return false
+		}
+		for i := range left {
+			if !equalOptionValue(left[i], right[i]) {
+				return false
+			}
+		}
+		return true
+	case json.Number:
+		right, ok := b.(json.Number)
+		return ok && exactOptionNumber(left) == exactOptionNumber(right)
+	default:
+		return reflect.DeepEqual(a, b)
+	}
+}
+
+// Canonical decimal coefficient/exponent comparison preserves precision without
+// expanding a potentially enormous exponent or converting through float64.
+func exactOptionNumber(number json.Number) string {
+	value := string(number)
+	sign := ""
+	if strings.HasPrefix(value, "-") {
+		sign, value = "-", value[1:]
+	}
+	mantissa, exponent, _ := strings.Cut(strings.ToLower(value), "e")
+	var power big.Int
+	if exponent != "" {
+		power.SetString(exponent, 10) // The JSON decoder already validated syntax.
+	}
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	digits := strings.TrimLeft(whole+fraction, "0")
+	if digits == "" {
+		return "0"
+	}
+	trimmed := strings.TrimRight(digits, "0")
+	var adjustment big.Int
+	adjustment.SetInt64(int64(len(digits) - len(trimmed) - len(fraction)))
+	power.Add(&power, &adjustment)
+	return sign + trimmed + "e" + power.String()
 }
 
 // localTiers copies the local entries of every tier, dropping empty tiers.
@@ -178,7 +319,11 @@ func MergePeerSet(stored Policy, raw []byte) (Policy, error) {
 	if incoming.TierPolicy != stored.TierPolicy {
 		return Policy{}, errors.New("a paired node cannot change the tier policy")
 	}
+	if err := checkPeerInferenceSettings(stored.Profiles, incoming.Profiles); err != nil {
+		return Policy{}, err
+	}
 	merged := incoming
+	merged.Profiles = copyProfiles(incoming.Profiles)
 	merged.Tiers = stored.Tiers
 	merged.TierPolicy = stored.TierPolicy
 	merged.Routing = stored.Routing

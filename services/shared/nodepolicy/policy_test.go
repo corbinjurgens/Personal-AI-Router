@@ -14,6 +14,88 @@ import (
 	"nvpair-shared/engines"
 )
 
+func TestProfileInferenceSettingsSchemaAndDefaults(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		for _, mode := range []RequestOptionsMode{"", RequestOptionsDefaults, RequestOptionsEnforced} {
+			t.Run(fmt.Sprintf("version %d mode %q", version, mode), func(t *testing.T) {
+				p := Default()
+				p.Version = version
+				p.Profiles = []Profile{{Name: "sample", Engine: "llamacpp", Model: "sample", RequestOptions: json.RawMessage(`{"temperature":0.5}`), RequestOptionsMode: mode, LocalOnly: true}}
+				raw, err := json.Marshal(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := Parse(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Version != 2 || got.Profiles[0].RequestOptionsMode.Effective() != mode.Effective() || !got.Profiles[0].LocalOnly {
+					t.Fatalf("settings lost: %+v", got.Profiles[0])
+				}
+				if mode != RequestOptionsEnforced && got.Profiles[0].RequestOptionsMode != "" {
+					t.Fatal("default mode was not omitted")
+				}
+				encoded, err := json.Marshal(got)
+				if err != nil {
+					t.Fatal(err)
+				}
+				again, err := Parse(encoded)
+				if err != nil || !reflect.DeepEqual(got, again) {
+					t.Fatalf("unstable roundtrip: %v", err)
+				}
+			})
+		}
+	}
+	t.Run("omitted fields preserve client wins", func(t *testing.T) {
+		got, err := Parse([]byte(`{"profiles":[{"name":"sample","engine":"llamacpp","model":"sample"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Profiles[0].LocalOnly || got.Profiles[0].RequestOptionsMode.Effective() != RequestOptionsDefaults {
+			t.Fatal("omitted fields changed behavior")
+		}
+		got.Profiles[0].LocalOnly = true
+		if err := got.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		got.Profiles[0].LocalOnly = false
+		if err := got.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestProfileInferenceSettingsValidation(t *testing.T) {
+	test := func(name, settings string, wantError bool) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(`{"profiles":[{"name":"sample","engine":"llamacpp","model":"sample",` + settings + `}]}`))
+			if (err != nil) != wantError {
+				t.Fatalf("error=%v, want error=%v", err, wantError)
+			}
+		})
+	}
+	test("explicit defaults and false", `"requestOptionsMode":"defaults","localOnly":false`, false)
+	test("unknown mode", `"requestOptionsMode":"force"`, true)
+	test("mode number", `"requestOptionsMode":1`, true)
+	test("mode null", `"requestOptionsMode":null`, true)
+	test("flag string", `"localOnly":"true"`, true)
+	test("flag number", `"localOnly":1`, true)
+	test("flag null", `"localOnly":null`, true)
+	test("enforced absent options", `"requestOptionsMode":"enforced"`, true)
+	test("enforced empty options", `"requestOptionsMode":"enforced","requestOptions":{}`, true)
+	test("enforced null options", `"requestOptionsMode":"enforced","requestOptions":null`, true)
+	test("exact duplicate", `"requestOptionsMode":"enforced","requestOptions":{"temperature":1,"temperature":2}`, true)
+	test("escaped duplicate", `"requestOptionsMode":"enforced","requestOptions":{"temperature":1,"temper\u0061ture":2}`, true)
+	test("case folded duplicate", `"requestOptionsMode":"enforced","requestOptions":{"temperature":1,"TEMPERATURE":2}`, true)
+	test("nested duplicate", `"requestOptionsMode":"enforced","requestOptions":{"options":{"seed":1,"SEED":2}}`, true)
+	test("unicode folded duplicate", `"requestOptionsMode":"enforced","requestOptions":{"k":1,"\u212a":2}`, true)
+	test("nested objects and array leaves", `"requestOptionsMode":"enforced","requestOptions":{"options":{"seed":1},"stop":["a","b"]}`, false)
+	test("default duplicate behavior unchanged", `"requestOptions":{"temperature":1,"temperature":2}`, false)
+	test("configured model forbidden", `"requestOptionsMode":"enforced","requestOptions":{"MODEL":"other"}`, true)
+	test("bounded nesting", `"requestOptionsMode":"enforced","requestOptions":`+strings.Repeat(`{"x":`, 65)+`1`+strings.Repeat(`}`, 65), true)
+}
+
 func TestResidentContextBound(t *testing.T) {
 	var maximum int
 	if err := json.Unmarshal([]byte(fmt.Sprint(int(^uint(0)>>1))), &maximum); err != nil {

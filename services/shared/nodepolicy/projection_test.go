@@ -5,10 +5,150 @@ package nodepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func inferenceLockPolicy() Policy {
+	p := Default()
+	p.Profiles = []Profile{
+		{Name: "locked", Engine: "llamacpp", Model: "stored-model", LocalOnly: true, RequestOptions: json.RawMessage(`{"temperature":0.5,"nested":{"seed":9007199254740993},"stop":["a","b"]}`)},
+		{Name: "editable", Engine: "lmstudio", Model: "editable-model", RequestOptions: json.RawMessage(`{"temperature":1}`)},
+	}
+	return p
+}
+
+func TestPeerInferenceSettingsLockRefusesWholeWrite(t *testing.T) {
+	test := func(name string, change func(*Policy), wantLocked bool) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			stored := inferenceLockPolicy()
+			incoming := stored
+			incoming.Profiles = copyProfiles(stored.Profiles)
+			incoming.Idle.UnloadAfterMinutes = 17
+			change(&incoming)
+			raw, err := json.Marshal(incoming.PeerProjection())
+			if err != nil {
+				t.Fatal(err)
+			}
+			merged, err := MergePeerSet(stored, raw)
+			var locked *RemoteSettingLockedError
+			if errors.As(err, &locked) != wantLocked {
+				t.Fatalf("error=%v, want locked=%v", err, wantLocked)
+			}
+			if wantLocked {
+				if !reflect.DeepEqual(merged, Policy{}) {
+					t.Fatal("refusal returned a partially merged policy")
+				}
+				if strings.Contains(err.Error(), "incoming-secret") || strings.Contains(err.Error(), "temperature") || strings.Contains(err.Error(), "9007199254740993") || strings.Contains(err.Error(), "locked\"") {
+					t.Fatal("lock diagnostic leaked nonidentity fields")
+				}
+			} else if err != nil || merged.Idle.UnloadAfterMinutes != 17 {
+				t.Fatalf("allowed edit refused: %v", err)
+			}
+			if stored.Profiles[0].Name != "locked" || string(stored.Profiles[0].RequestOptions) != `{"temperature":0.5,"nested":{"seed":9007199254740993},"stop":["a","b"]}` {
+				t.Fatal("stored policy changed")
+			}
+		})
+	}
+	test("unlocked options", func(p *Policy) { p.Profiles[1].RequestOptions = json.RawMessage(`{"top_k":7}`) }, false)
+	test("display metadata", func(p *Policy) { p.Profiles[0].Name = "renamed"; p.Profiles[0].MemoryBytes = 100 }, false)
+	test("reordered profiles", func(p *Policy) { p.Profiles[0], p.Profiles[1] = p.Profiles[1], p.Profiles[0] }, false)
+	test("explicit default", func(p *Policy) { p.Profiles[0].RequestOptionsMode = RequestOptionsDefaults }, false)
+	test("clear lock", func(p *Policy) { p.Profiles[0].LocalOnly = false }, true)
+	test("set existing unlocked lock", func(p *Policy) { p.Profiles[1].LocalOnly = true }, true)
+	test("delete protected identity", func(p *Policy) { p.Profiles = p.Profiles[1:] }, true)
+	test("change protected model", func(p *Policy) { p.Profiles[0].Model = "incoming-secret" }, true)
+	test("change protected engine", func(p *Policy) { p.Profiles[0].Engine = "lmstudio" }, true)
+	test("change mode", func(p *Policy) { p.Profiles[0].RequestOptionsMode = RequestOptionsEnforced }, true)
+	test("remove options", func(p *Policy) { p.Profiles[0].RequestOptions = nil }, true)
+	test("add option", func(p *Policy) {
+		p.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.5,"nested":{"seed":9007199254740993},"stop":["a","b"],"top_k":2}`)
+	}, true)
+	test("delete option", func(p *Policy) { p.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.5}`) }, true)
+	test("precise numeric change", func(p *Policy) {
+		p.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.5,"nested":{"seed":9007199254740992},"stop":["a","b"]}`)
+	}, true)
+	test("array reorder", func(p *Policy) {
+		p.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.5,"nested":{"seed":9007199254740993},"stop":["b","a"]}`)
+	}, true)
+	test("object order whitespace equivalent numeric spelling", func(p *Policy) {
+		p.Profiles[0].RequestOptions = json.RawMessage(`{ "stop":["a","b"], "nested":{"seed":9007199254740993.0}, "temperature":5e-1 }`)
+	}, false)
+}
+
+func TestPeerInferenceSettingsNewLockAndInvalidIdentity(t *testing.T) {
+	stored := inferenceLockPolicy()
+	t.Run("new lock uses fixed message", func(t *testing.T) {
+		peer := stored.PeerProjection()
+		peer.Profiles = append(peer.Profiles, Profile{Name: "private-display", Engine: "llamacpp", Model: "incoming-secret", LocalOnly: true})
+		raw, err := json.Marshal(peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		merged, err := MergePeerSet(stored, raw)
+		var locked *RemoteSettingLockedError
+		if !errors.As(err, &locked) || locked.Error() != "inference settings can only be locked on the target device" || !reflect.DeepEqual(merged, Policy{}) {
+			t.Fatalf("unexpected refusal: %v", err)
+		}
+	})
+	t.Run("duplicate identity rejected before lock comparison", func(t *testing.T) {
+		peer := stored.PeerProjection()
+		peer.Profiles[0].LocalOnly = false
+		duplicate := peer.Profiles[0]
+		duplicate.Name = "duplicate"
+		peer.Profiles = append(peer.Profiles, duplicate)
+		raw, err := json.Marshal(peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = MergePeerSet(stored, raw)
+		var locked *RemoteSettingLockedError
+		if err == nil || errors.As(err, &locked) {
+			t.Fatalf("duplicate identity classified as lock: %v", err)
+		}
+	})
+	t.Run("bounded stored identity only", func(t *testing.T) {
+		err := &RemoteSettingLockedError{engine: strings.Repeat("e", 10000), model: strings.Repeat("m", 10000), stored: true}
+		if len(err.Error()) > 512 {
+			t.Fatalf("unbounded diagnostic bytes=%d", len(err.Error()))
+		}
+	})
+}
+
+func TestPeerInferenceSettingsProjectionOwnsRawOptions(t *testing.T) {
+	stored := inferenceLockPolicy()
+	stored.Profiles[0].RequestOptionsMode = RequestOptionsEnforced
+	peer := stored.PeerProjection()
+	if !peer.Profiles[0].LocalOnly || peer.Profiles[0].RequestOptionsMode != RequestOptionsEnforced {
+		t.Fatal("projection lost fields")
+	}
+	raw, err := json.Marshal(peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded PeerPolicy
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(peer, decoded) {
+		t.Fatal("peer settings roundtrip changed")
+	}
+	peer.Profiles[0].RequestOptions[2] = 'X'
+	if stored.Profiles[0].RequestOptions[2] == 'X' {
+		t.Fatal("projection aliases stored options")
+	}
+	merged, err := MergePeerSet(stored, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged.Profiles[0].RequestOptions[2] = 'Y'
+	if stored.Profiles[0].RequestOptions[2] == 'Y' {
+		t.Fatal("merged options alias stored state")
+	}
+}
 
 func TestPeerBufferSettingsStayOriginLocal(t *testing.T) {
 	stored := Default()
