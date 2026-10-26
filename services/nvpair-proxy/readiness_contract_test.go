@@ -453,3 +453,53 @@ func TestRequestOptionsInstalledQualificationMode(t *testing.T) {
 		t.Fatal("identical option bytes hid changed mode")
 	}
 }
+
+func TestRequestOptionsQualificationNumericIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, before, after string
+		equal               bool
+	}{
+		{"integer beyond float precision", `{"seed":9007199254740992}`, `{"seed":9007199254740993}`, false},
+		{"fraction beyond float precision", `{"temperature":0.100000000000000001}`, `{"temperature":0.100000000000000002}`, false},
+		{"decimal spelling", `{"temperature":0.1}`, `{"temperature":0.10}`, true},
+		{"integer spelling", `{"top_k":1}`, `{"top_k":1.0}`, true},
+		{"exponent spelling", `{"temperature":0.1}`, `{"temperature":1e-1}`, true},
+		{"absent and empty", ``, `{}`, true},
+		{"empty and absent", `{}`, ``, true},
+		{"empty evidence and null profile", `{}`, `null`, true},
+		{"nested object precision", `{"nested":{"seed":9007199254740992}}`, `{"nested":{"seed":9007199254740993}}`, false},
+		{"array precision", `{"values":[9007199254740992]}`, `{"values":[9007199254740993]}`, false},
+		{"nested equivalent spelling and order", `{"nested":{"a":[0.1,1]},"b":2}`, `{"b":2.0,"nested":{"a":[0.10,1e0]}}`, true},
+		{"array order", `{"values":[1,2]}`, `{"values":[2,1]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReadinessEnvelopeFixture(t, "llamacpp")
+			f.policy.Profiles[0].RequestOptions = json.RawMessage(tc.before)
+			f.q.RequestOptions = json.RawMessage(tc.before)
+			f.install(t)
+			if got := f.a.StrictReadiness(); got.Capability == nil {
+				t.Fatal("initial matching qualification unavailable")
+			}
+			key := admKey{engine: f.engine, model: "m"}
+			generation := f.a.strict.generation[key]
+			before := f.a.strict.qualified[key]
+			after := before
+			after.profile.RequestOptions = json.RawMessage(tc.after)
+			if got := sameInstalledQualification(before, after); got != tc.equal {
+				t.Errorf("sameInstalledQualification=%v, want %v", got, tc.equal)
+			}
+			policy := f.a.currentPolicy()
+			policy.Profiles = append([]nodepolicy.Profile(nil), policy.Profiles...)
+			policy.Profiles[0].RequestOptions = json.RawMessage(tc.after)
+			if err := f.a.activatePolicy(policy); err != nil {
+				t.Fatalf("activate changed options: %v", err)
+			}
+			if got := f.a.StrictReadiness().Capability != nil; got != tc.equal {
+				t.Errorf("qualification available=%v, want %v", got, tc.equal)
+			}
+			if got := f.a.strict.generation[key]; (got == generation) != tc.equal {
+				t.Errorf("generation changed from %d to %d, equivalent=%v", generation, got, tc.equal)
+			}
+		})
+	}
+}
