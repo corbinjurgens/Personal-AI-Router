@@ -364,14 +364,15 @@ A skip is not a pass. If you are relying on a test, check it actually ran.
 ### Model engine binding proof status
 
 The service path supports persisted bindings, guarded automatic E4 replacement,
-stopped-engine offers and bounded HTTP preparation. The dedicated desktop editor
-and joined `TestEngineBindingProcess` proof remain in progress. No delivered or
-executed assertion for that process selector is claimed here. See the
+stopped-engine offers and bounded HTTP preparation. The desktop editor uses the
+existing policy draft and Save/CAS flow. Joined `TestEngineBindingProcess`
+acceptance remains pending: focused Task 7 runs are reported green, but the
+combined run intermittently refuses reverse pinned target acceptance. See the
 [binding guide's pending process procedure](../docs/model-engine-bindings.mdx#client-and-process-proof-status)
 for planned Windows selectors and required drain/effect/response, authority,
 recovery and cleanup evidence. Its
 [native matrix](../docs/model-engine-bindings.mdx#native-acceptance-matrix) is
-entirely pending. Component or fake-engine process results cannot establish
+entirely pending, not observed. Component or fake-engine process results cannot establish
 installed-engine or multi-machine acceptance.
 
 ### Controller-selected model COPY

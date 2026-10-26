@@ -11,9 +11,9 @@ then wait while that node activates the assigned engine. Saving a binding starts
 nothing. An absent or empty binding list leaves unbound routing behavior unchanged;
 removing a binding does not proactively stop an engine.
 
-This is an early draft of the landed service behavior. The desktop binding
-editor and joined service-process proof are in progress and remain pending below.
-Native engine and multi-machine acceptance is pending for every matrix row.
+The service path and desktop binding editor are implemented. Joined
+service-process proof remains pending below. Native engine and multi-machine
+acceptance is pending, not observed, for every matrix row.
 
 ## Configure the Destination Policy
 
@@ -236,15 +236,46 @@ Desktop and TUI already display **Automatic engine switch** for marked receipts,
 using existing E4 phases, errors, observations and readback. They do not
 coordinate stop/start or infer completion from target readiness.
 
-**Pending desktop binding editor:** the dedicated editor in the existing
-single-node Routing & resources policy form is in progress. Its planned scope
-is to edit `engineBindings` in the same JSON draft and Save policy/CAS flow,
-preserving unrelated fields and explicit unknown outcomes. Its add/remove/clear,
-target-change, malformed-draft and no-lifecycle-call behavior is not claimed as
-implemented or verified here. No TUI binding editor is planned.
+### Desktop Binding Editor
 
-**Pending joined process proof:** `TestEngineBindingProcess` is in progress.
-No delivered or executed assertion is claimed here. Planned coverage is local
+In the selected node's **Routing & resources** form, use **Model engine
+bindings** to add a row, choose an engine and type its native model name. Engine
+choices use that node's descriptor labels. Suggestions contain only models
+observed for that node and engine; they are not a complete inventory. Type a
+native name when a stopped engine has reported no models.
+
+Add, edit, **Remove** and **Clear bindings** change only `engineBindings` in
+the existing **Policy** JSON draft. Clear writes an explicit empty array.
+Unrelated fields, including unsaved private routing/account edits, remain in
+the draft. Malformed JSON or binding rows disable the binding controls and keep
+the original text for correction, rather than rebuilding a policy from defaults.
+
+Use the same **Save** action and CAS/readback/error flow described above. The
+form guards against a changed target and clears the previous target's draft;
+obsolete reads or save replies cannot replace the new target's draft. Conflicts,
+unsupported targets, management denial, pause vetoes and uncertain saves remain
+explicit. Saving starts nothing, and a saved binding does not establish runtime
+readiness. Existing switch controls display automatic receipt phases and errors;
+the binding editor adds no lifecycle command, progress owner or separate draft
+store. There is no TUI or bulk binding editor.
+
+See the [desktop API contract](../desktop/docs/frontend-api.md#model-engine-bindings-in-routing--resources)
+and [editor regression tests](../desktop/tests/modular/model-engine-bindings-editor.test.tsx).
+Reported Task 6 Windows automation passed the focused suite (451 tests,
+including 15 new editor cases) and full unit suite (2357 passed, 13 skipped).
+The Mac merge gate repeated the focused suite and static checks. These are
+automated results; native GUI and assistive-technology acceptance remain
+**pending, not observed**.
+
+### Pending Joined Process Proof
+
+`TestEngineBindingProcess` remains in progress. PC3 reports focused plain runs
+repeated three times and a focused race run green at Task 7 revision `a929d3ed`.
+The combined run still intermittently refuses reverse pinned target acceptance
+with `503 management-denied`, so joined process acceptance is **pending**.
+A torn read in `Mesh.peerServiceAuthority` during cluster-manager metadata
+writes is the leading source hypothesis, not a confirmed cause. Refusal-only
+diagnostics at the authority owners are in progress. Planned coverage is local
 and pinned-remote CAS/restart readback, wrong-engine demand, held old inference,
 stop-before-start-before-response ordering, ready-peer preference, management
 denial with ready inference allowed, pause/lock/residency, contention/dwell,
@@ -253,8 +284,8 @@ cycling with manual-ID preservation. Direct and reverse paths must also prove
 terminal ingress, allowlisted cold facades, relationship removal/readmission,
 no replay, scoped cleanup and no survivors.
 
-The following are **planned Windows procedures**, not execution results or a
-claim that the new selector is delivered. Once the joined fixture is available,
+The following are **Windows acceptance procedures**, not a claim that the
+combined joined proof has passed. Use the final Task 7 fixture revision and
 run from `services/tests` in the designated serialized gate interval, using the
 installed fixed-path test wrapper and established exact executable-path firewall
 rules. A missing rule leaves the dependent run pending.
@@ -269,8 +300,9 @@ Record exact source, selectors, exits, failures/skips, executable paths,
 before/after firewall changes and survivor checks. Record screen observations
 as unmonitored when nobody watched; unchanged rules do not prove no dialog was
 displayed. Component tests and fake-engine process tests are source/fixture
-evidence, not native engine or installed-client acceptance. Final contract,
-typecheck and SPDX gates also remain separate from this early draft.
+evidence, not native engine or installed-client acceptance. Contract, typecheck
+and SPDX checks do not replace either process or native acceptance. Final
+documentation review remains pending until Task 7 is finalized.
 
 ## Native Acceptance Matrix
 
