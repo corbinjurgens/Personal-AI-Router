@@ -36,9 +36,9 @@ func (b *Broker) notifyPolicyChanged() {
 	b.announcePolicyLocked()
 }
 
-// schedulePolicyAnnouncement keeps client IO out of the renewal job, which
-// Serve cancels and joins before tearing down the client transport. Requests
-// coalesce while a sender waits for publishMu: at most one sender and one
+// schedulePolicyAnnouncement keeps client IO out of proxy replay and the renewal
+// job, which Serve cancels and joins before tearing down the client transport.
+// Requests coalesce while a sender waits for publishMu: at most one sender and one
 // waiter exist, both still subject to the existing client transport lifetime.
 func (b *Broker) schedulePolicyAnnouncement() {
 	b.signalModelConfig()

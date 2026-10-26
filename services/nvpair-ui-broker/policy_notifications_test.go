@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -281,6 +282,172 @@ func (c *stallingClient) Write(p []byte) (int, error) {
 		<-c.resume
 	}
 	return c.syncBuffer.Write(p)
+}
+
+func TestPolicyReplayUnreadClientReleasesSupervisionAndPushes(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	b.loadNodePolicy(filepath.Join(t.TempDir(), nodepolicy.FileName))
+	setClock(b, 5000)
+	server, client := net.Pipe()
+	output := &brokerLeaseUnreadClient{Conn: server, writing: make(chan struct{})}
+	b.codec = NewCodec(output)
+	pp, _, acks := attachAckingProxy(t, b)
+	replayed := make(chan struct{})
+	var replayOK bool
+	var supervised, pushed chan struct{}
+	var saved chan error
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+		receive(t, "replay cleanup", replayed)
+		if supervised != nil {
+			receive(t, "supervision cleanup", supervised)
+			receive(t, "push cleanup", pushed)
+		}
+		if saved != nil {
+			if err := receive(t, "save cleanup", saved); err != nil {
+				t.Errorf("save: %v", err)
+			}
+		}
+		waitBrokerLeaseAnnouncement(t, b.nodePolicyRuntime())
+	})
+	go func() {
+		// Initial proxy spawn replays under this supervisor ownership boundary.
+		b.proxySupMu.Lock()
+		replayOK = b.replayPolicyToProxy(context.Background(), pp)
+		b.proxySupMu.Unlock()
+		close(replayed)
+	}()
+	receive(t, "replay announcement entering the unread client codec", output.writing)
+	supervised, pushed = make(chan struct{}), make(chan struct{})
+	go func() {
+		b.proxySupMu.Lock()
+		b.proxySupMu.Unlock()
+		close(supervised)
+	}()
+	go func() {
+		b.pushPolicyNow(context.Background(), pushIntent)
+		close(pushed)
+	}()
+	// Neither operation may depend on the service/client reading its pipe.
+	for _, operation := range []struct {
+		name string
+		done <-chan struct{}
+	}{{"proxy supervisor user", supervised}, {"later proxy push", pushed}} {
+		select {
+		case <-operation.done:
+		case <-time.After(1500 * time.Millisecond):
+			t.Errorf("%s blocked behind the replay's client announcement", operation.name)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+	receive(t, "replay result before client reads", replayed)
+	if !replayOK {
+		t.Fatal("replay failed")
+	}
+	if got := b.localPolicy(); got.ActiveRevision != "0" || got.Activation != activationActive {
+		t.Fatalf("unread replay activation = %+v", got.policyActivation)
+	}
+
+	// A newer real save and its acknowledgement proceed while the old encoded
+	// announcement is still in Write. Publication must deliver them in order.
+	saved = make(chan error, 1)
+	go func() {
+		_, err := b.setLocalPolicy(mustJSON(map[string]any{"version": nodepolicy.SchemaVersion, "idle": map[string]any{"unloadAfterMinutes": 9}}), mustJSON("0"))
+		saved <- err
+	}()
+	waitUntil(t, "new revision to be acknowledged with the client unread", func() bool {
+		return acks.heldRevision() == "5000" && b.localPolicy().ActiveRevision == "5000"
+	})
+	if err := client.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewCodec(client)
+	var frames []Message
+	for range 2 {
+		frame, err := reader.Read()
+		if err != nil {
+			t.Fatalf("read policy announcement: %v", err)
+		}
+		frames = append(frames, *frame)
+	}
+	events := selfPolicyChanges(t, frames)
+	if len(events) != 2 || events[0].Policy.Revision != "0" || events[1].Policy.Revision != "5000" {
+		t.Fatalf("replay and save announcements = %v", announcedRevisions(events))
+	}
+	requireRevisionsNeverDescend(t, events)
+	requireLastAnnouncementIsStored(t, b, events)
+}
+
+func TestPolicyReplayRetainsPushSlotAcrossUnacknowledgedRPC(t *testing.T) {
+	test := func(name, heldMethod string, cancelReplay bool) {
+		t.Run(name, func(t *testing.T) {
+			b, _ := newPolicyBroker(t)
+			pp, proxy, acks := attachAckingProxy(t, b)
+			proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				result, errText := acks.answer(method, raw)
+				if method == heldMethod {
+					return result, holdSuccessReply
+				}
+				return result, errText
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			replayed, pushed := make(chan struct{}), make(chan struct{})
+			go func() {
+				b.replayPolicyToProxy(ctx, pp)
+				close(replayed)
+			}()
+			proxy.waitFor("held replay RPC", func(calls []policyCall) bool {
+				return len(calls) != 0 && calls[len(calls)-1].method == heldMethod
+			})
+			go func() {
+				b.pushPolicyNow(context.Background(), pushDrainPrefix+"ollama")
+				close(pushed)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				proxy.releaseHeld()
+				receive(t, "replay cleanup", replayed)
+				receive(t, "push cleanup", pushed)
+				waitBrokerLeaseAnnouncement(t, b.nodePolicyRuntime())
+			})
+			r := b.nodePolicyRuntime()
+			select {
+			case r.pushSlot <- struct{}{}:
+				r.releasePush()
+				t.Fatal("replay released the push slot before its RPC acknowledgement")
+			default:
+			}
+			select {
+			case <-pushed:
+				t.Fatal("later push overtook an unacknowledged replay RPC")
+			case <-time.After(30 * time.Millisecond):
+			}
+			if cancelReplay {
+				cancel()
+			} else {
+				proxy.releaseHeld()
+			}
+			receive(t, "replay completion", replayed)
+			receive(t, "later push completion", pushed)
+			if cancelReplay {
+				if got := b.localPolicy(); got.ActiveRevision != "" {
+					t.Fatalf("cancelled replay activated an unacknowledged policy: %+v", got.policyActivation)
+				}
+				return
+			}
+			want := []string{nodepolicy.MethodSetAvailability, nodepolicy.MethodSetPolicy, nodepolicy.MethodSetEngineIntent, nodepolicy.MethodSetResidency, nodepolicy.MethodSetModelIdentity, nodepolicy.MethodSetEngineDrain}
+			if got := proxy.methods(""); !reflect.DeepEqual(got, want) {
+				t.Fatalf("replay and later push order = %v, want %v", got, want)
+			}
+		})
+	}
+	test("availability acknowledgement", nodepolicy.MethodSetAvailability, false)
+	test("policy acknowledgement", nodepolicy.MethodSetPolicy, false)
+	test("cancelled policy acknowledgement", nodepolicy.MethodSetPolicy, true)
 }
 
 func TestPolicyAnnouncementToASlowClientDoesNotHoldBackSaves(t *testing.T) {

@@ -516,8 +516,10 @@ interruption callback before Serve returns. An event already handed to the codec
 may finish after its source retires. Other ordinary traffic shares the codec's
 per-frame write gate; history does not enter this queue and never holds that gate
 while waiting for another history frame. A fully blocked stdout still couples other
-ordinary client traffic. Policy replay's synchronous client announcement under
-the push slot and proxy supervisor lock remains a separate limitation.
+ordinary client traffic. Policy replay schedules its client announcement through
+the existing coalesced policy publisher, so an unread client does not retain the
+push slot or proxy supervisor lock after the replay RPCs finish. The RPCs remain
+serialized under the push slot through their acknowledgements or cancellation.
 
 On startup — **before** emitting `app:ready` — the broker spawns the scanner and (when available) node-info, `nvpair-proxy`, the workload-manager, and the cluster-manager as child processes over stdio. The proxy is spawned up front but doesn't gate `app:ready` — each of its facades announces its listen port asynchronously (see below). None of the auxiliary workers gate `app:ready`.
 
@@ -1165,7 +1167,10 @@ never go backwards and the last one matches `policy:get`. The same holds for
 `node:availability-changed`. A push scheduled in the background announces again when its
 answer changes the activation, and so does a pause's later availability push or
 an availability push made during policy recovery. It is also
-sent when a proxy start has been replayed the policy. `node:availability-changed {nodeId, availability,
+scheduled when a proxy start has been replayed the policy. Replay and renewal
+announcements coalesce through the same publisher, with at most one sender and
+one waiter; each reads the current state after taking the publication lock.
+`node:availability-changed {nodeId, availability,
 active}` follows each availability transition (`draining`, then `paused`; or
 `available`), and while draining it repeats whenever the active count changes.
 Both are also sent with another node's `nodeId` after this node changed that
