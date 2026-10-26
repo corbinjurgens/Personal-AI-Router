@@ -255,7 +255,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 		}
 		return nil
 	}
-	if presence.Occupied && rt.modeOrDefault() == "process" {
+	if presence.Occupied && (rt.modeOrDefault() == "process" || len(st.plat.DetectRequired) > 0) {
 		return fmt.Errorf("cannot start engine %q on port %d: the port is occupied by a service that did not identify as %s", engine, port, st.manifest.DisplayName)
 	}
 	if !pathInstalled {

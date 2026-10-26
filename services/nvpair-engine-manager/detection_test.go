@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -440,23 +441,89 @@ func TestConfiguredDetectionUninstallRefusesExternalExecutable(t *testing.T) {
 }
 
 func TestBundledDetectionAlternatives(t *testing.T) {
+	windowsOllama := []string{`{install_dir}\ollama.exe`, `%LOCALAPPDATA%\Programs\Ollama\ollama.exe`}
+	darwinOllama := []string{
+		"/Applications/Ollama.app/Contents/Resources/ollama",
+		"~/Applications/Ollama.app/Contents/Resources/ollama",
+		"{install_dir}/Ollama.app/Contents/Resources/ollama",
+	}
+	wantTemplates := map[string]map[string][]string{
+		"ollama": {
+			"windows/amd64": windowsOllama,
+			"windows/arm64": windowsOllama,
+			"darwin/amd64":  darwinOllama,
+			"darwin/arm64":  darwinOllama,
+			"linux/amd64":   {"{install_dir}/bin/ollama"},
+			"linux/arm64":   {"{install_dir}/bin/ollama"},
+		},
+		"lmstudio": {
+			"windows/amd64": {`%USERPROFILE%\.lmstudio\bin\lms.exe`},
+			"windows/arm64": {`%USERPROFILE%\.lmstudio\bin\lms.exe`},
+			"darwin/amd64":  {"~/.lmstudio/bin/lms"},
+			"darwin/arm64":  {"~/.lmstudio/bin/lms"},
+			"linux/amd64":   {"~/.lmstudio/bin/lms"},
+			"linux/arm64":   {"~/.lmstudio/bin/lms"},
+		},
+		"llamacpp": {
+			"windows/amd64": {`{install_dir}\llama-server.exe`},
+			"windows/arm64": {`{install_dir}\llama-server.exe`},
+			"darwin/amd64":  {"{install_dir}/llama-server"},
+			"darwin/arm64":  {"{install_dir}/llama-server"},
+			"linux/amd64":   {"{install_dir}/llama-server"},
+			"linux/arm64":   {"{install_dir}/llama-server"},
+		},
+	}
+	root := t.TempDir()
+	home, localData, installDir := filepath.Join(root, "home"), filepath.Join(root, "local-data"), filepath.Join(root, "install")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("LOCALAPPDATA", localData)
+	expectedExpansion := strings.NewReplacer("{install_dir}", installDir, "%LOCALAPPDATA%", localData, "%USERPROFILE%", home)
 	reg := NewRegistry()
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Equal(reg.Names(), sortedKeys(wantTemplates)) {
+		t.Fatalf("bundled engines = %v, want %v", reg.Names(), sortedKeys(wantTemplates))
 	}
 	for _, engine := range reg.Names() {
 		m, ok := reg.Get(engine)
 		if !ok {
 			t.Fatalf("missing bundled manifest %s", engine)
 		}
+		if !slices.Equal(sortedKeys(m.Platforms), sortedKeys(wantTemplates[engine])) {
+			t.Fatalf("%s platforms = %v, want %v", engine, sortedKeys(m.Platforms), sortedKeys(wantTemplates[engine]))
+		}
 		for _, key := range sortedKeys(m.Platforms) {
 			p := m.Platforms[key]
 			t.Run(engine+"/"+key, func(t *testing.T) {
+				if !slices.Equal(p.Detect, wantTemplates[engine][key]) {
+					t.Fatalf("ordered detect templates = %v, want %v", p.Detect, wantTemplates[engine][key])
+				}
 				if m.ManifestVersion != 1 || len(p.DetectRequired) != 0 || len(p.Detect) == 0 {
 					t.Fatalf("bundled installation contract changed: version %d, detect %v, required %v", m.ManifestVersion, p.Detect, p.DetectRequired)
 				}
-				// Rebind every declared alternative to inert regular files. These
-				// cases never inspect a real engine path on any host platform.
+				goos, _, ok := strings.Cut(key, "/")
+				if !ok {
+					t.Fatalf("invalid platform key %q", key)
+				}
+				// Expansion is string-only, including the absolute /Applications
+				// alternative. No filesystem lookup uses these declared paths.
+				for _, template := range p.Detect {
+					resolved, err := resolvePlaceholders(template, map[string]string{"install_dir": installDir})
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := expectedExpansion.Replace(template)
+					if suffix, ok := strings.CutPrefix(want, "~/"); ok {
+						want = filepath.Join(home, suffix)
+					}
+					if got := expandPathForOS(resolved, goos); got != want {
+						t.Fatalf("expand %q for %s = %q, want %q", template, goos, got, want)
+					}
+				}
+				// Select among inert regular files only after checking the actual
+				// ordered declarations and their environment/home expansion.
 				alternatives := make([]string, len(p.Detect))
 				for i := range alternatives {
 					alternatives[i] = filepath.Join(t.TempDir(), fmt.Sprintf("alternative-%d", i))
