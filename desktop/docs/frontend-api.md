@@ -35,6 +35,34 @@ They do not imply a WebSocket connection. Browser clients are not supported.
 
 ## Renderer API
 
+### Model engine bindings in Routing & resources
+
+The single-node **Model engine bindings** editor changes only `engineBindings`
+in the existing **Policy** JSON draft. Add, edit, remove and clear use that
+same draft and **Save** action; they introduce no API, draft store or lifecycle
+command. Clearing writes `engineBindings: []`. Other policy fields, including
+origin-private routing and accounts, are retained. Invalid JSON remains in the
+text editor with the existing save error; the binding controls cannot rebuild
+it from defaults.
+
+Engine choices use the selected node's existing engine view and descriptor
+labels. Model suggestions are labelled observations from that node and engine,
+not a complete inventory. Native model names can be typed even when a stopped
+engine has reported no models. A saved binding is configuration, not runtime
+readiness: saving starts nothing. Requests for this model can wait while this
+node activates its assigned engine.
+
+The existing `pairApi.nodePolicy.get(nodeId?)` and
+`set({nodeId?, policy, expectedPersistedRevision})`, policy-change notifications and target selection
+remain unchanged. The form sends the selected target's exact draft and base
+revision, retains unsaved edits across pushes, and clears them on target
+changes. Existing CAS conflicts, unsupported-target errors, management denial,
+pause vetoes and uncertain-save readback remain explicit; no automatic retry
+or second save path is added. The target can refuse changes to a binding
+reserved by automatic preparation as busy. Locks and pause retain their
+target-local unlock/Resume requirements. Existing engine switch controls show
+automatic receipt phases and errors; the binding editor owns no progress UI.
+
 ### Model copy
 
 Use a ready model's **Copy to device…** action, choose **Source device**,

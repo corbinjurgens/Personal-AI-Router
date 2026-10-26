@@ -46,7 +46,7 @@ func TestPublicEgressLeaseProcessDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("locate existing scanner fixture: %v", err)
 	}
-	jointCopyExecutable(t, self, f.scannerPath)
+	f.copyExecutable(self, f.scannerPath)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(freePort(t)),
 		"USERPROFILE="+f.configDir, "OLLAMA_HOST=")

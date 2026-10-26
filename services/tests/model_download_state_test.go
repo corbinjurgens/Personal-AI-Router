@@ -459,7 +459,7 @@ func newDownloadProcessFixture(t *testing.T, reverse bool) *downloadProcessFixtu
 	}
 	// The registered bundle scanner is the existing empty-directory fixture.
 	// A separate production scanner below runs --mdns=false, without claims.
-	jointCopyExecutable(t, self, s.scannerPath)
+	s.copyExecutable(self, s.scannerPath)
 	for _, binary := range []string{engineMgrBin, clusterMgrBin} {
 		s.inventory.paths = append(s.inventory.paths, s.copyBinary(binary))
 	}

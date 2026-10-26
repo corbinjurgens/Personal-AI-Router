@@ -149,23 +149,30 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 			i7BuffersCompletedStream(t, request)
 			i7HybridActiveCount(t, f, 0)
 			for _, c := range clients {
-				completed := row(t, c, key, terminal)
-				if completed.State != "completed" || completed.Status == nil || *completed.Status != http.StatusOK || completed.Seq <= open.Seq || completed.Served == nil || len(completed.Attempts) != 1 {
-					t.Fatalf("delivered history did not complete: %+v", completed)
-				}
-				destination := completed.Attempts[0].Destination
-				if destination.Kind != "local" || destination.NodeID == nil || *destination.NodeID != "i7-synthetic-node" || destination.Engine == nil || *destination.Engine != "llamacpp" || !reflect.DeepEqual(completed.Served, &destination) {
-					t.Fatalf("history lost its actual delivered destination: %+v", completed)
-				}
-				if route.model == "" {
-					if destination.Model != nil || completed.Workload != nil {
-						t.Fatalf("model-less delivery invented a model or workload: %+v", completed)
+				// A getInitial reply advances this subscriber's revision and may
+				// satisfy the terminal update before its push is queued. Require
+				// the independent push first, then compare the current baseline.
+				changed := push(t, c, key, open.Seq+1)
+				completed := row(t, c, key, func(record nodepolicy.RoutingHistoryRecord) bool {
+					return terminal(record) && record.Seq >= changed.Seq
+				})
+				for _, delivered := range []nodepolicy.RoutingHistoryRecord{changed, completed} {
+					if delivered.State != "completed" || delivered.Status == nil || *delivered.Status != http.StatusOK || delivered.Seq <= open.Seq || delivered.Served == nil || len(delivered.Attempts) != 1 {
+						t.Fatalf("delivered history did not complete: %+v", delivered)
 					}
-				} else if destination.Model == nil || *destination.Model != route.model {
-					t.Fatalf("concrete destination model=%v, want %q", destination.Model, route.model)
+					destination := delivered.Attempts[0].Destination
+					if destination.Kind != "local" || destination.NodeID == nil || *destination.NodeID != "i7-synthetic-node" || destination.Engine == nil || *destination.Engine != "llamacpp" || !reflect.DeepEqual(delivered.Served, &destination) {
+						t.Fatalf("history lost its actual delivered destination: %+v", delivered)
+					}
+					if route.model == "" {
+						if destination.Model != nil || delivered.Workload != nil {
+							t.Fatalf("model-less delivery invented a model or workload: %+v", delivered)
+						}
+					} else if destination.Model == nil || *destination.Model != route.model {
+						t.Fatalf("concrete destination model=%v, want %q", destination.Model, route.model)
+					}
 				}
-				changed := push(t, c, key, completed.Seq)
-				if changed.CreatedAt != completed.CreatedAt || changed.Seq < completed.Seq || changed.State != completed.State {
+				if changed.CreatedAt != completed.CreatedAt || changed.State != completed.State {
 					t.Fatalf("initial/push differ across the real relay: initial=%+v changed=%+v", completed, changed)
 				}
 				if route.model == "" {
@@ -237,8 +244,9 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 	})
 
 	t.Run("newest window survives process churn", func(t *testing.T) {
+		before := history(t, a, nodepolicy.MethodRoutingGetInitial)
 		lastID := uint64(0)
-		for _, record := range history(t, a, nodepolicy.MethodRoutingGetInitial).Requests {
+		for _, record := range before.Requests {
 			id, err := strconv.ParseUint(record.Request.RequestID, 10, 64)
 			if err != nil {
 				t.Fatal(err)
@@ -246,10 +254,37 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 			lastID = max(lastID, id)
 		}
 		lastID += nodepolicy.RoutingHistoryRecords + 4
+		var newest, other nodepolicy.RoutingHistoryInitial
+		completedRequests := 0
+		defer func() {
+			if !t.Failed() {
+				return
+			}
+			// Capture only bounded history metadata, without another RPC on the
+			// failure path. Numeric membership and timestamp rank are separate:
+			// these observations must distinguish intake lag from clock rollback
+			// or an incorrect expected request range before changing the oracle.
+			t.Logf("history churn: completed HTTP refusals=%d expected retained IDs=%d..%d origin=%s run=%s",
+				completedRequests, lastID-nodepolicy.RoutingHistoryRecords+1, lastID, run.OriginNodeID, run.ProxyRunID)
+			for _, window := range []struct {
+				name    string
+				initial nodepolicy.RoutingHistoryInitial
+			}{
+				{"before churn", before},
+				{"last client a snapshot", newest},
+				{"client b comparison snapshot", other},
+			} {
+				t.Logf("history churn %s: records=%d", window.name, len(window.initial.Requests))
+				for i, record := range window.initial.Requests[:min(len(window.initial.Requests), nodepolicy.RoutingHistoryRecords)] {
+					t.Logf("history churn %s[%d]: key=%+v createdAt=%d seq=%d state=%s reason=%s terminal=%t",
+						window.name, i, record.Request, record.CreatedAt, record.Seq, record.State, record.Reason, record.EndedAt != nil)
+				}
+			}
+		}()
 		for range nodepolicy.RoutingHistoryRecords + 4 {
 			egressProcessHTTP(t, f.client, http.MethodPost, f.port, "/v1/chat/completions", []byte(`{"model":"bad\nmodel"}`), http.StatusBadRequest)
+			completedRequests++
 		}
-		var newest nodepolicy.RoutingHistoryInitial
 		neEventually(t, "more than 256 actual requests converge to the retained window", 30*time.Second, func() bool {
 			newest = history(t, a, nodepolicy.MethodRoutingGetInitial)
 			if len(newest.Requests) != nodepolicy.RoutingHistoryRecords {
@@ -286,7 +321,7 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 			}
 			return true
 		})
-		other := history(t, b, nodepolicy.MethodRoutingGetInitial)
+		other = history(t, b, nodepolicy.MethodRoutingGetInitial)
 		if !reflect.DeepEqual(newest, other) {
 			t.Fatal("the two local subscriptions disagree on the newest retained window")
 		}
@@ -347,10 +382,7 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 			return count == 1
 		})
 		i7HybridListenerReady(t, f.client, listener)
-		egressProcessOK(t, f.call(t, "llamacpp-proxy:node/add-manual", map[string]any{
-			"id": "i7-synthetic-node", "host": "127.0.0.1", "port": upstream.port,
-			"addresses": []string{"127.0.0.1"}, "models": []string{egressProcessModel},
-		}))
+		i7HybridDestinationReady(t, f, "i7-synthetic-node")
 		nextSlot := upstream.slot(t, "replacement-source")
 		t.Cleanup(nextSlot.release)
 		nextRequest := i7BuffersStart(t, f.client, f.port, "/v1/chat/completions", "replacement-source", i7BuffersBody(128))

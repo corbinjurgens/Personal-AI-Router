@@ -133,14 +133,7 @@ func TestBrokerLlamaCPPProxySetPortPersistsOnlyRequestedFacade(t *testing.T) {
 	for _, engine := range []string{"ollama", "lmstudio"} {
 		_, otherPorts[engine] = h.b.getProxy().Status(engine)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("allocate target port: %v", err)
-	}
-	target := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatalf("release target port: %v", err)
-	}
+	target := h.reservePort(t)
 	// The namespace determines the engine, even if parameters name another.
 	response := callBrokerPortRequest(t, h.b, "llamacpp-proxy:set-port", settingsJSON(map[string]any{"engine": "ollama", "port": target}))
 	if response.Error != nil {
