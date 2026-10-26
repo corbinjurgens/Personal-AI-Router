@@ -1816,6 +1816,7 @@ func hybridPeerFixture(t *testing.T, peers map[string]int) *tierFixture {
 			fx.eng[id] = e
 		}
 		fx.advertise(t, id, map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+		pinRecordingPairPeer(t, f, id, fx.eng[id])
 	}
 	return fx
 }
@@ -2017,6 +2018,7 @@ func TestUnifiedDispatchHybridSelfRefusalFallsBackToPeer(t *testing.T) {
 	n.StrictAdmission = strictCapabilityFor("ollama", "llama3:latest")
 	oll.discovery.AddManual(n)
 	p.SetPriority([]string{"self", "peer"}) // The tier order leads with this node.
+	pinRecordingPairPeer(t, oll, "peer", peer)
 
 	policy := hybridTestPolicy(2, 5*time.Second)
 	policy.coldWait = 0

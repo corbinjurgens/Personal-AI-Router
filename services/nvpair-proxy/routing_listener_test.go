@@ -1531,6 +1531,7 @@ func TestModelControlsSelectionListenerShortAlias512ByteConcrete(t *testing.T) {
 			pol.TierPolicy.AllowStronger = false
 			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"peer": {model}}, nil)
 			fx.advertise(t, "peer", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole(model)}, strictCapabilityFor("ollama", model))
+			pinRecordingPairPeer(t, fx.p.soleFacade(), "peer", fx.eng["peer"])
 			port := inferenceListener(t, fx)
 			resp := inferencePost(t, port, `{"model":"weak"}`)
 			if _, err := io.ReadAll(resp.Body); err != nil {

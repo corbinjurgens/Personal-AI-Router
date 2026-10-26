@@ -355,7 +355,8 @@ func (f *facade) tierFacade(engine string, crossEngine bool) *facade {
 // each declaring node names for that tier, then the tier's local entries for
 // the nodes that declare nothing (declaredRoles). API entries are skipped
 // until hybrid dispatch exists. A declared role, like an entry, resolves only
-// on nodes whose inventory has its model. Within a role or an entry,
+// on nodes with matching inventory or a supported explicit binding offer.
+// Preparation candidates remain separate from strict readiness. Within a role or an entry,
 // candidates keep resolveCandidates' order (node/select pin, scheduler
 // priority, ID); across them the policy's preferLoaded decides whether tier
 // rank or warmth leads, and declared candidates stay ahead of entries of equal

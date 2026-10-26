@@ -648,6 +648,7 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 	// The live request context remains independent so accepted streams drain.
 	ctl.deadline = policy.deadline
 	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, ctl.deadline))
+	r = withBoundEngineDeadline(r, start)
 	defer ctl.finish()
 	stopCancellation := context.AfterFunc(reqCtx, func() {
 		cause := routingContextCause(reqCtx, p.serveCtx)
@@ -1004,7 +1005,7 @@ func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, s
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 		proxy := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
-				if cand.self {
+				if cand.peerUUID == "" {
 					stripInternalRoutingHeaders(req.Header)
 					req.Header.Del(peerStreamFramingHeader)
 				}

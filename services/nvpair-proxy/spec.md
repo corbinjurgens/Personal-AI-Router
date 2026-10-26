@@ -534,11 +534,13 @@ point remain owned by the existing dispatch policy below.
 For a model-bearing inference request:
 
 1. Filter a request-local discovery snapshot to nodes whose per-engine inventory
-   advertises the requested model. Ollama normalizes the implicit `:latest` tag;
+   advertises the requested model, or whose supported explicit binding offer
+   can prepare it (section 12.2). Ollama normalizes the implicit `:latest` tag;
    LM Studio and llama.cpp ids match exactly. An empty owner set returns a local
    `502` without contacting an engine.
-2. Order the eligible owners: explicit `node/select` pin, then the scheduler's
-   priority list, then deterministic default ordering.
+2. Order eligible owners: explicit `node/select` pin, then the ready class
+   before preparation candidates, then scheduler priority and deterministic
+   default ordering within a class.
 3. Reserve the least estimated-loaded scheduler-listed candidate and move it to
    the front (§6).
 4. Forward, failing over through the remaining candidates on a retryable status
@@ -1690,14 +1692,88 @@ Availability itself is never carried in discovery TXT data; the hint arrives in
 the peer's inventory policy. A node without a policy advertisement, such as a
 manual node, has an empty hint.
 
-**Waking a stopped engine.** The broker advertises an engine only while it is
-healthy, so a stopped engine drops this node out of that engine's discovery
-overlay. The proxy remembers its own node id and each engine's last advertised
+**Waking an unbound stopped engine.** Without an explicit binding offer, the
+broker withdraws an unhealthy engine's service. The proxy remembers its own
+node id and each engine's last advertised
 models from discovery, and offers a *dormant* self candidate — last in the
 round — when the engine is saved On, start-on-demand is set, the node is
 available, and the model was last advertised by that engine or is covered by a
 profile. Admission wakes it; the dispatch then targets the backend's reported
 address.
+
+**Preparing a bound engine.** Supported `engineBindingOffers` are independent
+of canonical inventory and strict readiness. An offered stopped facade keeps
+its actual listener reachable while its engine remains unhealthy. Ordinary
+concrete and existing concrete-tier requests may select it; strict hybrid
+requests exclude it. OpenAI-compatible concrete requests inspect other enabled
+compatible facades only for explicit bindings. Unbound concrete names stay on
+the entry engine. Native protocols never cross incompatible facades. A binding
+to another engine excludes conflicting old-engine inventory and direct ingress,
+including a stale strict envelope.
+
+Within equivalent tier/fallback and loaded-preference classes, ready candidates
+lead preparation candidates even against scheduler scores. Explicit eligible
+selection and the existing `preferLoaded` semantics remain authoritative.
+Ready alternatives receive `X-PAIR-Admission-Wait: 0` while alternatives remain.
+After those choices are exhausted, cold candidates can wait for preparation;
+their execution admission still uses a bounded queue allowance.
+
+The HTTP entry records one absolute preparation deadline, at most 90 seconds
+from entry and clamped to the request's remaining deadline. The private
+`X-PAIR-Engine-Prepare-Budget-Ms` header carries decreasing remaining milliseconds
+across attempts. Missing means the normal bound; excess is clamped to 90000;
+malformed, repeated, noncanonical, overflowing or nonpositive values permit no
+preparation. This header supplies time only, never activation authority.
+Refresh, dwell and failover cannot restart the bound. For a cold pinned peer,
+the same remaining allowance bounds acquisition of its existing peer-service
+slot and the wait for response headers. Expiry refuses with preparation 503
+before any output. The header timer ends when headers arrive in time; an
+accepted healthy stream can continue beyond the preparation deadline. Unbound
+and already-ready inference retain their existing deadlines.
+
+Self and terminal pinned-peer ingress use the same correlated
+`admission/prepare-bound-engine` notification owner. Peer authority consists only
+of the `VerifyClientPin` principal and its peer-service incarnation captured
+together at authenticated entry, before body or storage waits. Preparation
+and final dispatch reject a changed relationship rather than rebinding the
+old request to a new incarnation. Caller-supplied identity headers/body members
+are ignored. A destination prepares
+only its own engine and never routes onward. A ready engine can serve an
+inference-only peer without management permission. No execution, strict or
+resident ticket, placement/admission lock, or IPC reader is held while waiting.
+Existing buffer and waiter bounds remain in force. Cancellation retires the
+original waiter; an unknown acceptance never becomes a fresh submission.
+
+After successful preparation the proxy refreshes the real backend and queries
+its canonical native inventory under the remaining deadline and existing
+inference buffer account. It rechecks the binding revision, engine identity,
+candidate eligibility, serving permission, availability, protocol, model and
+tier capability/context constraints. Receipt success alone is insufficient.
+Pre-switch request transformations are discarded; ordinary admission rebuilds
+the final engine/model's profile defaults and revalidates policy/backend/identity
+after storage or queue waits and before dispatch. Bound requests that lose
+readiness during these waits refuse explicitly before the legacy wake path;
+they never borrow local wake authority. E4 retains drain, ownership,
+strict-generation and protected-resident responsibility. Old streams drain
+normally; new source work cannot extend a drain. No provisional output, SSE
+heartbeat or stream splice is emitted during preparation.
+
+A known preparation refusal returns HTTP 503 with the existing
+`{code:"admission",error,reason}` JSON shape and `X-PAIR-Admission` reason:
+`engine-switch-timeout`, `engine-switch-busy`, `engine-switch-cooldown`,
+`engine-locked`, `management-denied`, `model-unavailable`, or the existing
+`paused`, `draining`, `no-fit` reasons. Transient refusals carry `Retry-After`.
+`X-PAIR-Switch-Request-Id` is emitted only for a known accepted operation.
+Internal RPC codes remain on the correlated reply; engine/native error text
+is not forwarded. Refusal can fail over only before output within original
+eligibility and time bounds. No eligible inventory or supported offer retains
+the ordinary no-owner 502 (a concrete tier retains its existing no-model 404).
+Preparation metadata travels only on authenticated PAIR hops. The existing
+private-header stripping owner removes budget/activation and other PAIR headers
+before local or directly configured manual engines. Final `X-PAIR-Model`,
+`X-PAIR-Engine`, `X-PAIR-Node` identify
+actual execution. Waits feed the existing attempt/admission timing facts; no
+additional diagnostics store is introduced.
 
 **cancelActive** cancels every admitted execution: an ingress request's context
 is cancelled; a self dispatch that has not committed moves on to another
@@ -1758,7 +1834,7 @@ is resolved by the node it enters.
   `"any"` by warm first, then tier rank. Declared roles (ordered by engine,
   then model) before entries, entry order, and the per-role or per-entry owner
   order break ties. Reservations (§6) are taken only among the candidates
-  sharing the leading tier rank and warmth.
+  sharing the leading tier rank, warmth and preparation class.
 - **Body**: the top-level `model` is replaced by splicing its value's bytes;
   every other byte is forwarded as received.
 - **Nothing eligible** before any dispatch: `404` with

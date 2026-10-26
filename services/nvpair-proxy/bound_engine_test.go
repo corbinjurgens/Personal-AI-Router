@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -199,5 +200,91 @@ func TestBoundEngineCancellationDuringNotificationWrite(t *testing.T) {
 	p.boundEngines.mu.Unlock()
 	if pending != 0 {
 		t.Fatal("cancelled write retained waiter")
+	}
+}
+
+func TestBoundEngineDeadlineIsAbsoluteAndClamped(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest("POST", "/api/generate", nil).WithContext(ctx)
+	req.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "900000")
+	start := time.Now().Add(-50 * time.Millisecond)
+	req = withBoundEngineDeadline(req, start)
+	deadline, ok := req.Context().Value(boundEngineDeadlineKey{}).(time.Time)
+	callerDeadline, _ := ctx.Deadline()
+	if !ok || !deadline.Equal(callerDeadline) {
+		t.Fatalf("deadline=%v caller=%v", deadline, callerDeadline)
+	}
+	first := boundEngineRemaining(req.Context())
+	// Refresh contexts inherit the same immutable absolute deadline, even
+	// with a new, longer local preparation allowance.
+	refreshed, stop := context.WithTimeout(req.Context(), time.Minute)
+	defer stop()
+	if got := boundEngineRemaining(refreshed); got > first || got > 200*time.Millisecond {
+		t.Fatalf("refresh reset budget: first=%v refreshed=%v", first, got)
+	}
+	old := httptest.NewRequest("POST", "/api/generate", nil)
+	old = withBoundEngineDeadline(old, time.Now().Add(-91*time.Second))
+	if got := boundEngineRemaining(old.Context()); got != 0 {
+		t.Fatalf("entry time was reset: %v", got)
+	}
+}
+
+func TestBoundEngineAdmissionRevalidatesAfterQueueWait(t *testing.T) {
+	fx := newBindingRequestFixture(t)
+	e := newBindingEngine(t, "fixture", nil)
+	setBackend(t, fx.f, e.URL, true)
+	pol := fx.p.admission.currentPolicy()
+	pol.Admission.MaxConcurrentPerModel = 1
+	fx.p.admission.setPolicy(pol)
+	a := fx.p.admission
+	first := a.admit(context.Background(), admissionRequest{engine: "ollama", model: "fixture", waitCap: 0})
+	if first.ticket == nil {
+		t.Fatalf("initial admission=%+v", first)
+	}
+	defer first.ticket.release()
+	a.mu.Lock()
+	evidence := &boundEngineEvidence{backend: fx.f.currentLocalBackend(), policy: a.policyGeneration, identity: a.strict.identity["ollama"]}
+	a.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan admissionDecision, 1)
+	go func() {
+		done <- a.admit(ctx, admissionRequest{engine: "ollama", model: "fixture", waitCap: time.Second, revalidate: func() bool { return fx.f.boundEvidenceCurrentLocked(evidence) }})
+	}()
+	waitForCond(t, time.Second, "bound request queued without a ticket", func() bool { a.mu.Lock(); defer a.mu.Unlock(); return a.queued == 1 })
+	a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": {EngineRunID: "replacement"}})
+	select {
+	case result := <-done:
+		if result.ticket != nil || result.err != nil || result.reject != "model-unavailable" {
+			t.Fatalf("stale queued admission=%+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stale queued request did not wake")
+	}
+	if a.currentActive() != 1 || fx.f.beforeBoundDispatch(first.ticket, evidence) {
+		t.Fatal("changed identity granted/retained stale dispatch authority")
+	}
+}
+
+func TestBoundEngineConcreteFacadeOrderIsStable(t *testing.T) {
+	fx := newBindingRequestFixture(t)
+	fx.f.discovery.RemoveManual("self")
+	for _, name := range []string{"lmstudio", "llamacpp"} {
+		profile, ok := profileFor(name)
+		if !ok {
+			t.Fatalf("missing fixture profile %s", name)
+		}
+		f := newFacade(fx.p, profile, NewDiscovery(), profile.FacadePort)
+		fx.p.facades[name] = f
+		n := prNode(name)
+		n.Models, n.PolicyRevision, n.EngineBindingOffers = []string{"fixture"}, "1", bindingOffer(name, "fixture")
+		f.discovery.AddManual(n)
+	}
+	for range 32 {
+		cands := fx.f.resolveConcreteCandidates("fixture", routeChatCompletions)
+		if len(cands) != 2 || cands[0].engine != "llamacpp" || cands[1].engine != "lmstudio" {
+			t.Fatalf("unstable facade fallback: %+v", cands)
+		}
 	}
 }

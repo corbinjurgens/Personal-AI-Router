@@ -500,6 +500,41 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
 
 ### Node policy: admission, tiers, cancel (fork)
 
+Explicit model engine bindings can make ordinary concrete and concrete-tier
+inference wait for the destination's existing engine-switch transaction.
+Supported binding offers keep a stopped engine's real facade reachable without
+advertising invented inventory or strict readiness. Ready equivalent choices
+lead cold offers even against scheduler priority; explicit eligible selection
+and tier loaded preferences remain in force. OpenAI-compatible concrete names
+cross compatible facades only for explicit bindings. Native and unbound
+requests retain their engine domain. A conflicting old-engine ingress refuses.
+
+Preparation has one absolute 90-second total bound, clamped to caller time and
+carried on authenticated PAIR hops as decreasing private
+`X-PAIR-Engine-Prepare-Budget-Ms` milliseconds. A cold peer's slot acquisition
+and response-header wait share this bound; an accepted stream can then drain
+beyond it. Directly configured manual engines receive no private PAIR headers.
+Malformed values allow no preparation. The header grants no authority: pinned
+ingress retains the principal and incarnation captured together before body
+waits and rejects a changed relationship. It never routes onward. Ready
+inference does not require management permission; loss of readiness during
+admission refuses instead of issuing a legacy local wake.
+Waiting holds no execution, strict or resident ticket. A receipt is followed
+by actual backend/inventory, binding, policy, identity and candidate readback,
+then ordinary admission with fresh final-engine defaults. Output starts only
+after preparation and revalidation; old streams retain their drain protection.
+
+Known preparation refusal is HTTP 503 with the existing JSON admission error
+and `X-PAIR-Admission`: `engine-switch-timeout`, `engine-switch-busy`,
+`engine-switch-cooldown`, `engine-locked`, `management-denied`,
+`model-unavailable`, or existing paused/draining/no-fit reasons. Transient
+reasons carry `Retry-After`; an optional `X-PAIR-Switch-Request-Id` names only
+known acceptance. Unknown acceptance is never resubmitted as a new operation.
+Ordinary no-owner 502 remains unchanged. Private headers are stripped before
+the engine; final model/engine/node headers describe actual execution. Strict
+hybrid cold switching and native engine acceptance remain outside this path.
+See [the admission specification](spec.md#122-admission).
+
 The broker pushes this node's policy (`nvpair-shared/nodepolicy`) with
 process-scoped requests — `node/set-policy`, `node/set-availability`,
 `node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent` — each

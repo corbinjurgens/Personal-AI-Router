@@ -502,11 +502,19 @@ func hybridDispatchPolicy(start time.Time, limits nodepolicy.Limits, rules nodep
 }
 
 // peerSlotContext uses the remaining hybrid queue allowance for the origin's
-// peer-service slot, bounded by the shared pre-output deadline. Concrete and
-// local attempts retain their context.
+// peer-service slot, bounded by the shared pre-output deadline. A cold pinned
+// concrete candidate spends its one remaining preparation allowance here.
+// Ready, unbound and local attempts retain their existing context.
 func peerSlotContext(ctx context.Context, policy dispatchPolicy, cand candidate, queueLeft, preOutputLeft time.Duration) (context.Context, time.Duration) {
-	if !policy.hybrid || cand.self || cand.peerUUID == "" {
+	if cand.self || cand.peerUUID == "" {
 		return ctx, 0
+	}
+	if !policy.hybrid {
+		if !cand.preparation {
+			return ctx, 0
+		}
+		wait := min(boundEngineRemaining(ctx), max(preOutputLeft, 0))
+		return clustertrust.WithPeerSlotWait(ctx, wait), wait
 	}
 	wait := min(queueLeft, max(preOutputLeft, 0))
 	return clustertrust.WithPeerSlotWait(ctx, wait), wait
@@ -627,6 +635,15 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	// strictFor holds the strict entry each hybrid local candidate advertised
 	// when it was last resolved. The destination revalidates it.
 	strictFor := map[string]nodepolicy.StrictAdmissionModel{}
+	boundFailures := map[string]bool{}
+	var boundRefusal *nodepolicy.BoundEnginePrepared
+	boundKey := func(c candidate) string {
+		m := model
+		if c.model != "" {
+			m = c.model
+		}
+		return c.id + "\x00" + c.engineOr(f.profile.Name) + "\x00" + m
+	}
 	resolve := func() []candidate {
 		var cands []candidate
 		if policy.hybrid {
@@ -641,14 +658,14 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		} else if tier != "" {
 			cands = f.resolveTierCandidates(tier, needs, crossEngine)
 		} else {
-			cands = f.resolveCandidates(routingModel)
+			cands = f.resolveConcreteCandidates(routingModel, r.URL.Path)
 		}
-		if !ctl.hasExclusions() {
+		if !ctl.hasExclusions() && len(boundFailures) == 0 {
 			return cands
 		}
 		kept := make([]candidate, 0, len(cands))
 		for _, c := range cands {
-			if !ctl.isExcluded(c.id) {
+			if !ctl.isExcluded(c.id) && !boundFailures[boundKey(c)] {
 				kept = append(kept, c)
 			}
 		}
@@ -1290,6 +1307,13 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// claim before waiting.
 			repointWorkload("", "")
 			releaseHeld()
+			if boundRefusal != nil && len(resolve()) == 0 {
+				respondedWithError = true
+				finalStatus, proxyErr = http.StatusServiceUnavailable, "engine preparation refused"
+				ctl.observeIngress(routingIngressResult{factFailed, factUpstreamStatus, finalStatus})
+				writeBoundEngineRefusal(w, *boundRefusal)
+				break
+			}
 			if publicPending {
 				publicPending = false
 				if dispatchPublic() {
@@ -1397,6 +1421,48 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			break
 		}
 		currentAttempt = att
+		admissionStarted := time.Now()
+		var bindingEvidence *boundEngineEvidence
+		if cand.self && !policy.hybrid && (cand.preparation || candFacade.needsBoundPreparation(candModel)) {
+			// E4 drains the node-wide active count. Nothing held by this
+			// waiting request may be counted as execution or resident work.
+			beforeRebuild()
+			dropPrepared()
+			var result nodepolicy.BoundEnginePrepared
+			bindingEvidence, result = candFacade.prepareLocalBound(preparationCtx, candModel, "")
+			if result.Success {
+				eligible := false
+				for _, fresh := range resolve() {
+					if boundKey(fresh) == boundKey(cand) {
+						eligible = true
+						break
+					}
+				}
+				if !eligible {
+					result.Success, result.Reason = false, "model-unavailable"
+				}
+			}
+			if !result.Success {
+				att.observeAdmission(time.Since(admissionStarted))
+				att.observeAttempt(routingAttemptResult{factRejected, factUpstreamStatus, http.StatusServiceUnavailable, true})
+				cancelAttempt()
+				att.finished(publicAttemptTerminal{})
+				boundFailures[boundKey(cand)], boundRefusal = true, &result
+				if r.Context().Err() != nil {
+					break
+				}
+				continue
+			}
+			// The prepared target is terminal-local. The fresh backend replaces
+			// the offer's placeholder; defaults are rebuilt by ordinary admission.
+			if bindingEvidence != nil {
+				cand.url, _ = bindingEvidence.backend.target()
+				cand.preparation, cand.dormant = false, true
+				p.admission.mu.Lock()
+				roundGeneration = p.admission.policyGeneration
+				p.admission.mu.Unlock()
+			}
+		}
 
 		// The body this attempt sends: the request's own, with a tier's concrete
 		// model in place of the tier name and every other byte untouched.
@@ -1430,8 +1496,13 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// this round still has somewhere else to go, so a busy node hands the
 		// request straight back; the policy's queue timeout for the last one.
 		admissionWait := 0
-		if next >= len(round) {
+		if next >= len(round) || cand.preparation {
 			admissionWait = p.admission.currentPolicy().Admission.QueueTimeoutSeconds
+		}
+		if cand.preparation {
+			// Ready equivalents have already been tried. Allow the cold
+			// destination to prepare, while its execution queue stays bounded.
+			admissionWait = max(admissionWait, 1)
 		}
 		admissionTimeout := time.Duration(admissionWait) * time.Second
 		admissionTimeout = min(admissionTimeout, max(time.Until(deadline), 0))
@@ -1441,7 +1512,6 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// candidate like a peer's 503, and writes nothing to the client unless
 		// it is the answer.
 		target := cand.url
-		admissionStarted := time.Now()
 		var performanceWait time.Duration
 		if cand.self && policy.hybrid {
 			// The router admits its own hybrid candidate strictly, as
@@ -1507,9 +1577,11 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					resolvedInventory: true,
 					engine:            candEngine,
 					model:             candModel,
+					bound:             candFacade.boundModel(p.admission.currentPolicy(), candModel),
 					waitCap:           admissionTimeout,
 					cancel:            func() { ctl.abortLocalIf(att) },
 					prepare:           prepare,
+					revalidate:        func() bool { return candFacade.boundEvidenceCurrentLocked(bindingEvidence) },
 				})
 			}()
 			att.observeAdmission(time.Since(admissionStarted))
@@ -1545,6 +1617,14 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			}
 			if decision.reject != "" {
 				att.observeAttempt(routingAttemptResult{factRejected, admissionFactReason(decision.reject), 0, true})
+				if bindingEvidence != nil {
+					cancelAttempt()
+					att.finished(publicAttemptTerminal{})
+					result := boundEngineRefusal(string(decision.reject))
+					result.SwitchRequestID = bindingEvidence.switchRequestID
+					boundFailures[boundKey(cand)], boundRefusal = true, &result
+					continue
+				}
 				if decision.reject == nodepolicy.RejectBusy && len(round) == 1 {
 					// With no alternative, queue slices must not spend the
 					// failover budget. The job deadline still ends the wait.
@@ -1686,6 +1766,16 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			attemptReq.Header.Del(nodepolicy.AdmissionWaitHeader)
 		} else {
 			attemptReq.Header.Set(nodepolicy.AdmissionWaitHeader, strconv.Itoa(admissionWait))
+			if !policy.hybrid && cand.peerUUID != "" {
+				setBoundEngineBudget(attemptReq.Header, r.Context())
+				attemptReq = attemptReq.WithContext(clustertrust.WithPeerSlotAcquired(requestCtx, func(out *http.Request, _ time.Duration) error {
+					if cand.preparation && boundEngineRemaining(out.Context()) < time.Millisecond {
+						return errBoundEnginePrepareTimeout
+					}
+					setBoundEngineBudget(out.Header, r.Context())
+					return nil
+				}))
+			}
 		}
 		if policy.hybrid && !cand.self {
 			// The first production producer of the strict header. The
@@ -1760,12 +1850,28 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			}
 			strictEvidence = strictUncertain
 		}
+		if cand.self && !candFacade.beforeBoundDispatch(att.ticket, bindingEvidence) {
+			performance.finish(sc, false)
+			att.ticket.release()
+			cancelAttempt()
+			att.finished(publicAttemptTerminal{})
+			result := boundEngineRefusal("model-unavailable")
+			result.SwitchRequestID = bindingEvidence.switchRequestID
+			boundFailures[boundKey(cand)], boundRefusal = true, &result
+			continue
+		}
 
+		var transport http.RoundTripper = proxyResponseTransport{p.candidateTransport(cand)}
+		if cand.preparation && cand.peerUUID != "" {
+			transport = boundEnginePreparationTransport{transport}
+		}
 		proxy := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
-				if cand.self {
+				if cand.peerUUID == "" {
 					stripInternalRoutingHeaders(req.Header)
 					req.Header.Del(peerStreamFramingHeader)
+				}
+				if cand.self {
 					withLocalCredential(req.Header, candFacade.localInferenceCredential(r, target))
 				}
 				req.URL.Scheme = target.Scheme
@@ -1774,7 +1880,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			},
 			// A remote cluster peer is dialed over mTLS (per-peer pinned config);
 			// self/manual candidates use the plain transport. See candidateTransport.
-			Transport: performanceTransport{RoundTripper: proxyResponseTransport{p.candidateTransport(cand)}, attempt: performance},
+			Transport: performanceTransport{RoundTripper: transport, attempt: performance},
 			// ModifyResponse fires when the upstream's status line + headers
 			// have arrived but before the body streams. That's both the retry
 			// decision point and, on commit, the time-to-first-byte boundary.
@@ -1785,6 +1891,17 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				}
 				metadata := resp.Header.Values(peerStreamFramingHeader)
 				resp.Header.Del(peerStreamFramingHeader)
+				if resp.StatusCode == http.StatusServiceUnavailable && isBoundEngineRefusal(resp.Header.Get(nodepolicy.AdmissionHeader)) {
+					result := boundEngineRefusal(resp.Header.Get(nodepolicy.AdmissionHeader))
+					id := resp.Header.Get(nodepolicy.SwitchRequestIDHeader)
+					// Strict reply validation keeps untrusted peer headers from
+					// becoming an unbounded inspection identity.
+					probe := nodepolicy.BoundEnginePrepared{RequestID: "probe", ProxyRunID: "probe", Success: true, SwitchRequestID: id}
+					if probe.Validate() == nil {
+						result.SwitchRequestID = id
+					}
+					boundFailures[boundKey(cand)], boundRefusal = true, &result
+				}
 				retryBusy = len(round) == 1 && resp.StatusCode == http.StatusServiceUnavailable &&
 					resp.Header.Get(nodepolicy.AdmissionHeader) == string(nodepolicy.RejectBusy)
 				if (!last || retryBusy) && shouldRetry(resp.StatusCode) {
@@ -1996,6 +2113,23 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				if _, ok := err.(retrySignal); ok {
 					return // retryable status — the loop advances to the next candidate
 				}
+				if stderrors.Is(err, errBoundEnginePrepareTimeout) {
+					if r.Context().Err() != nil {
+						return
+					}
+					att.observeAttempt(routingAttemptResult{factRejected, factDeadline, http.StatusServiceUnavailable, true})
+					result := boundEngineRefusal("engine-switch-timeout")
+					boundFailures[boundKey(cand)], boundRefusal = true, &result
+					if !last {
+						retry = true
+						return
+					}
+					respondedWithError = true
+					servedNodeID, servedTarget, finalStatus = cand.id, target.Host, http.StatusServiceUnavailable
+					ctl.observeIngress(routingIngressResult{factFailed, factDeadline, finalStatus})
+					writeBoundEngineRefusal(ew, result)
+					return
+				}
 				if ctl.deadlineExpired() {
 					ctl.observeIngress(routingIngressResult{factFailed, factDeadline, http.StatusServiceUnavailable})
 					respondedWithError = true
@@ -2135,6 +2269,11 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	// achieves nothing, and attributing its end to a missing node would be a
 	// fabricated reason for something that was the requester's own choice.
 	if !responseFinished && !respondedWithError && r.Context().Err() == nil {
+		if boundRefusal != nil {
+			ctl.observeIngress(routingIngressResult{factFailed, factUpstreamStatus, http.StatusServiceUnavailable})
+			writeBoundEngineRefusal(w, *boundRefusal)
+			return
+		}
 		// Name what the loop was actually doing when it ran out, which is what
 		// the caller needs to know. The three cases are distinguishable: the
 		// budget is gone; or the deadline passed while an owner was still there
