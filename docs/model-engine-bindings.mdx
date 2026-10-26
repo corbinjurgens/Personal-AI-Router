@@ -1,0 +1,301 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Model Engine Bindings
+
+A node can assign a native model name to an engine in its target-local policy.
+An ordinary concrete-model request, or an existing concrete-tier request, can
+then wait while that node activates the assigned engine. Saving a binding starts
+nothing. An absent or empty binding list leaves unbound routing behavior unchanged;
+removing a binding does not proactively stop an engine.
+
+This is an early draft of the landed service behavior. The desktop binding
+editor and joined service-process proof are in progress and remain pending below.
+Native engine and multi-machine acceptance is pending for every matrix row.
+
+## Configure the Destination Policy
+
+The destination broker stores bindings in its existing `node-policy.json` under
+policy version 2. They are device configuration, separate from the request
+origin's private routing, provider accounts and tier configuration.
+
+This JSON is a **policy fragment**, not a complete `policy:set` document. The
+example assumes that the named model and engine have already been prepared:
+
+```json
+{
+  "engineBindings": [
+    { "engine": "ollama", "model": "qwen3:8b" }
+  ]
+}
+```
+
+Use the existing JSON-RPC policy APIs through the local service:
+
+1. Read `policy:get` for the intended destination. Omit `nodeId` for this node;
+   use that destination's `nodeId` for a peer.
+2. Start from the returned `policy` document and edit only `engineBindings`.
+   Preserve every unrelated field. A local `policy:set` defaults omitted fields,
+   so submitting the fragment alone can discard unrelated configuration.
+3. Send the edited document as `policy` to `policy:set`, with the same target
+   and `expectedPersistedRevision` equal to the `policy.revision` read for that
+   draft. On conflict, read again and deliberately reconcile the draft.
+4. Read back the same target. Check the saved bindings and the reported policy
+   activation state; persistence and activation are separate outcomes. After a
+   lost or uncertain save response, read back before deciding what to do next.
+   Do not automatically resubmit the write with a new revision.
+
+A remote edit requires the destination's current remote-management grant;
+pairing alone grants no mutation authority. Start from its peer-visible policy
+document, preserve that projection, and do not add a `routing` section. The
+destination preserves its protected private routing/accounts, tiers, availability
+and pause provenance through the existing peer policy writer.
+
+Clear bindings with `engineBindings: []` in that edited document. New local and
+peer readbacks emit an explicit empty array. If an older target drops a requested
+binding field, including an explicit clear, the relay reports model-control edits
+as unsupported. A successful transport response alone is insufficient. See the
+[broker policy contract](../services/nvpair-ui-broker/README.md) for the API and
+recovery behavior; there is no separate binding save API or CLI subcommand.
+
+### Native Names and Prerequisites
+
+Use the target engine's native model name, with case preserved. Descriptor
+naming controls matching: Ollama's implied `:latest` spelling can match its
+tagged form; exact-name engines require their native ID. This creates no alias
+between engines or between differently named models. Overlapping matching sets,
+including implied-latest overlaps, are rejected even across engines. Reserved
+tier aliases cannot be bound as native models.
+
+The list permits at most 256 entries. Model identifiers must be nonempty valid
+UTF-8, at most 512 bytes, without C0, DEL or C1 control characters. Each encoded
+`{engine, model}` reference is additionally limited to 256 JSON bytes, including
+escaping, so that smaller bound can be decisive. The current target must supply
+a recognized naming descriptor. When `servedModels` is explicit, every binding
+must be in that permitted set after target normalization; an explicit empty
+served set permits none. See the authoritative
+[binding validator](../services/shared/nodepolicy/engine_bindings.go) and
+[policy model-reference bounds](../services/shared/nodepolicy/policy.go).
+
+The engine must already be installed, fronted by a compatible enabled PAIR
+facade, and runnable with its existing launch configuration. The model must be
+available under that native name when the engine starts. Authentication and
+engine-specific launch prerequisites still apply, including prepared llama.cpp
+or Strata configuration where used. A running target missing the model refuses
+without restarting it. The feature does not convert or copy models, download or
+install engines or models, change presets/settings, or grant a new model-load
+or qualification capability. Normal inference and admission retain their own
+loading rules.
+
+## Routing and Readiness
+
+The proxy first applies model, protocol, serving permission, tier capability and
+context constraints. Concrete OpenAI-compatible requests may inspect other
+enabled compatible facades for explicit bindings. Unbound concrete names stay
+on their entry engine; concrete native Ollama requests stay on their entry engine.
+A binding to another engine excludes the node's conflicting old-engine model
+candidate, including direct ingress. A peer ingress request is terminal: it can
+prepare only that destination and cannot route onward.
+
+Ready-first selection operates inside the existing policy ordering:
+
+- For ordinary concrete requests, eligible inventory-backed candidates lead
+  offer-only preparation candidates before scheduler/load balancing. An eligible
+  explicit node selection remains authoritative and can select a cold node.
+- For concrete tiers, tier/fallback rank and loaded preference still apply.
+  `preferLoaded: "any"` puts loaded choices across tiers first; otherwise tier
+  rank precedes warmth. Within equal rank and warmth, candidates needing no
+  preparation lead preparation candidates. Eligible explicit selection can lead
+  a cold preparation class within those tier/warmth constraints.
+- Scheduler scores and local reservations choose inside the leading class;
+  they cannot promote an unselected cold offer over an equivalent ready choice.
+  Ready alternatives use zero admission wait while alternatives remain.
+
+Here, a ready selection class is inventory evidence, not a guarantee that a
+model is resident or a request will succeed. Versioned `engineBindingOffers`
+are a separate advisory signal. They neither invent inventory nor prove engine
+health, loaded state, model presence, qualification or strict capacity. A stopped
+offered engine can retain its real proxy listener in the authenticated service
+allowlist while its engine remains unhealthy. Listener reachability means the
+facade can receive, refuse or prepare a request, not that the engine is ready.
+
+After preparation, the proxy refreshes the actual engine endpoint and queries
+canonical native inventory. It rechecks binding revision, peer relationship,
+engine identity, availability, serving permission and candidate constraints.
+Ordinary admission then rebuilds the final engine/model defaults and revalidates
+after storage or queue waits and before dispatch. Receipt completion alone
+does not authorize inference. Waiting for preparation holds no execution,
+strict or resident ticket. Existing request-buffer and waiter bounds apply.
+
+Strict hybrid dispatch excludes cold binding offers and dormant candidates.
+Already qualified, currently ready hybrid candidates retain their existing path;
+a binding cannot stand in for fresh strict identity or qualification. See the
+[proxy admission specification](../services/nvpair-proxy/spec.md#122-admission).
+
+## Activation, Replacement and Safety
+
+Plain Off is saved state, not a prohibition: a nonempty binding permits ordinary
+Off activation for its model when the other guards allow it. An engine lock
+prevents activation, and unlocking leaves the engine Off. A node pause of either
+origin blocks activation until **local Resume**. Pause unloads/stops engines
+through its existing owner; local start/load/switch also requires Resume.
+
+With no running conflicting engine, the manager can perform a guarded cold
+start. Replacing a running engine uses the existing E4 transaction. There must
+be a sole conflicting source with affirmative PAIR control and certain process
+ownership. A manually started PAIR engine is not implicitly pinned. Adopted or
+external sources, uncertain reclaim/stop ownership, multiple conflicting engines
+and protected source residents prevent automatic displacement. There is no
+multi-engine eviction policy or automatic source restoration after target failure.
+
+Replacement withdraws the source and acknowledges drain and identity
+invalidation. Before source stop, the broker requires a fresh admission snapshot
+from the same proxy run proving zero active source work. Drain lasts at most
+60 seconds inside the preparation budget. It does not kill old inference to
+satisfy new demand, and new source work cannot extend the drain. Elapsed time,
+workload counts, listener refusal or HTTP disconnect alone is not stop proof.
+The manager must prove termination before target start; uncertain cleanup keeps
+the operation fenced.
+
+Local Off can preempt automatic work of either origin with a durable,
+operation-scoped obligation. Delayed cleanup cannot stop newer manual work.
+While automatic work or unresolved recovery reserves an engine, relevant
+binding, served-set and resident-protection edits refuse busy before saving;
+unrelated policy edits remain possible. Ready inference can serve a permitted
+peer without management authority. Starting or replacing for a peer requires
+its current target-local grant and the authenticated relationship incarnation,
+rechecked at acceptance and effects. HTTP identity fields grant no authority.
+
+### Bounds and Receipts
+
+Automatic preparation has one absolute budget of at most **90 seconds from HTTP
+entry**, clamped to the caller's remaining deadline. Candidate attempts, peer
+slot acquisition, response-header waits, refresh, dwell, drain and activation
+share it. A later waiter cannot extend an accepted operation's original deadline.
+An accepted healthy inference stream can continue beyond the preparation window.
+Manual E4 retains its separate 15-minute operation budget.
+
+One destination preparation operation is active at a time. Demand for the same
+target engine coalesces; each waiter still needs its own model and authority
+readback. Competing targets refuse busy, with no cross-engine FIFO. Replacement
+waits at least **60 seconds** after broker startup or any completed manual or
+automatic replacement. That dwell consumes the same budget; an already-ready
+target bypasses it.
+
+Receipts and checkpoints mark automatic replacements with `automatic: true`.
+The journal retains 32 settled terminal automatic receipts plus active or
+unresolved work under its existing 2 MiB bound. Unresolved recovery and cleanup
+are never pruned to make room. Manual receipts retain their separate 256-row
+capacity and retry/fence behavior; automation does not evict them. Broker-run
+sequence and proxy-session fences prevent delayed submissions from becoming new
+work after pruning or restart. See the
+[E4 transaction contract](../services/nvpair-ui-broker/ENGINE_SETTINGS.md).
+
+HTTP cancellation retires that request's waiter. If no waiter remains before
+acceptance, new acceptance is cancelled. Once preparation is accepted, losing
+the HTTP waiter alone does not cancel the node-owned operation: it keeps its
+initial deadline and may finish or reconcile. Pause, scoped Off and authority
+fences still apply. This is not a persisted inference queue or permission to
+replay interrupted work through a replacement worker.
+
+## Refusal and Retry
+
+Preparation emits no provisional inference bytes, SSE heartbeat or stream splice.
+A known refusal is HTTP `503` with the existing JSON admission error shape
+(`code`, `error`, `reason`) and `X-PAIR-Admission`. Preparation reasons include
+`engine-switch-timeout`, `engine-switch-busy`, `engine-switch-cooldown`,
+`engine-locked`, `management-denied`, `model-unavailable`, `paused`, `draining`
+and `no-fit`. Internal stale-revision or unavailable preparation results become
+`model-unavailable` at HTTP; native error text is not forwarded.
+
+`Retry-After: 1` accompanies timeout, busy, cooldown, draining and no-fit
+refusals; paused uses `Retry-After: 30`. Resolve locks, permissions or missing
+models before retrying those refusals. Failover is possible only before output,
+inside the original eligibility and time bounds. No eligible inventory or
+supported offer keeps the ordinary no-owner `502`; concrete tiers retain their
+existing no-model `404`.
+
+`X-PAIR-Switch-Request-Id` is present when a known switch receipt request ID
+is available. It can also name a durably rejected attempt: read the existing
+switch status to establish acceptance, phase and outcome. The header alone is
+not acceptance proof. An unknown acceptance must not become a fresh automatic
+submission, and absence of the header does not prove that no work was accepted.
+
+The private `X-PAIR-Engine-Prepare-Budget-Ms` carries decreasing time only on
+authenticated PAIR hops and supplies no authority. Absence uses the normal
+bound; excess is clamped to 90000 milliseconds. Malformed, repeated,
+noncanonical, overflowing or nonpositive values allow no preparation. Private
+headers are stripped before local or directly configured manual engines. Final
+`X-PAIR-Model`, `X-PAIR-Engine` and `X-PAIR-Node` describe actual execution.
+
+## Client and Process Proof Status
+
+Desktop and TUI already display **Automatic engine switch** for marked receipts,
+using existing E4 phases, errors, observations and readback. They do not
+coordinate stop/start or infer completion from target readiness.
+
+**Pending desktop binding editor:** the dedicated editor in the existing
+single-node Routing & resources policy form is in progress. Its planned scope
+is to edit `engineBindings` in the same JSON draft and Save policy/CAS flow,
+preserving unrelated fields and explicit unknown outcomes. Its add/remove/clear,
+target-change, malformed-draft and no-lifecycle-call behavior is not claimed as
+implemented or verified here. No TUI binding editor is planned.
+
+**Pending joined process proof:** `TestEngineBindingProcess` is in progress.
+No delivered or executed assertion is claimed here. Planned coverage is local
+and pinned-remote CAS/restart readback, wrong-engine demand, held old inference,
+stop-before-start-before-response ordering, ready-peer preference, management
+denial with ready inference allowed, pause/lock/residency, contention/dwell,
+unsupported targets, model/start failure, interrupted automatic work and receipt
+cycling with manual-ID preservation. Direct and reverse paths must also prove
+terminal ingress, allowlisted cold facades, relationship removal/readmission,
+no replay, scoped cleanup and no survivors.
+
+The following are **planned Windows procedures**, not execution results or a
+claim that the new selector is delivered. Once the joined fixture is available,
+run from `services/tests` in the designated serialized gate interval, using the
+installed fixed-path test wrapper and established exact executable-path firewall
+rules. A missing rule leaves the dependent run pending.
+
+```sh
+go test -count=1 -timeout=30m -run '^TestEngineBindingProcess$' .
+go test -race -count=1 -timeout=30m -run '^TestEngineBindingProcess$' .
+go test -count=1 -timeout=30m -run 'TestEngineSwitchProcess|TestE4SwitchClient' .
+```
+
+Record exact source, selectors, exits, failures/skips, executable paths,
+before/after firewall changes and survivor checks. Record screen observations
+as unmonitored when nobody watched; unchanged rules do not prove no dialog was
+displayed. Component tests and fake-engine process tests are source/fixture
+evidence, not native engine or installed-client acceptance. Final contract,
+typecheck and SPDX gates also remain separate from this early draft.
+
+## Native Acceptance Matrix
+
+Every row below is **pending, with no native observation recorded**. Change a
+row to observed only with evidence from the deployed path and exact tested
+source/build. A skipped engine or transport stays unverified. Schedule a separate
+owner-authorized engine interval with prepared engines/models, a destination and
+a second requester. This procedure grants no installation, real engine start/load,
+permission change or network disruption.
+
+| Scenario | Status | Evidence required before recording an observed pass |
+| --- | --- | --- |
+| Persistence and remote editing | Pending | Local and granted-remote CAS writes survive service/broker restart; denied edits, conflicts and unsupported clearing stay explicit; private origin configuration is preserved. |
+| Real replacement | Pending | Hold old inference on A, request the exact model bound to prepared B, and capture no early output, old completion, zero-active drain proof, verified A termination, B start and final response headers in order. Observe desktop/TUI automatic phases separately. |
+| Old work exceeds drain | Pending | Bounded refusal while old work continues; no target start without zero-active proof and no forced old-request cancellation to satisfy demand. |
+| Ready destination preference | Pending | An eligible ready peer wins over a lower-pressure cold equivalent without switching it; explicit eligible node selection and tier/loaded preferences retain their documented behavior. |
+| Alternating models and concurrency | Pending | Same-engine demand coalesces, competing targets refuse within budget, replacement respects dwell, old work drains and new source work cannot starve it. Record timing and effect order. |
+| Lock, pause, residency and Off | Pending | Locked target never starts, unlock leaves Off, either-origin pause blocks activation until local Resume, protected residents prevent displacement, ordinary bound Off can activate, and scoped local Off cannot stop newer work. |
+| Peer permission and relationship changes | Pending | Ready inference works without a management grant; cold effects require it. Revocation/removal/readmission during waits cannot reuse old authority. Include deployed pinned direct and reverse/off-LAN paths. |
+| Engine-specific prerequisites | Pending | Exercise prepared llama.cpp, Ollama, LM Studio and Strata only where installed and authorized. Verify native names and model presence, clear authentication/model-absence refusal, unchanged launch configuration and refusal to displace adopted sources. Record each engine separately. |
+| Failure and restart | Pending | Model absence/start failure refuses without silent source restoration; reclaim/lock/pause fences survive restart; interrupted operations reconcile without duplicate launches or late cleanup affecting newer manual work. |
+| Cleanup | Pending | Restore owner-declared policy/intent, stop test fixtures, verify no survivors or unintended firewall rules, and preserve production models/configuration. |
+
+Evidence must distinguish phase receipts from observed process effects, measured
+waits, actual model/engine response headers and current runtime readback. Keep
+credentials, prompts, response bodies and private deployment details out of
+published evidence. Source and process gates plus observed results for deployed
+native paths are required for whole-feature acceptance.

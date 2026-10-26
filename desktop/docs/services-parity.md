@@ -40,8 +40,11 @@ before using its eventual results as acceptance evidence.
 
 Desktop node settings expose **Switch engine**, **From**, **To**, **Switch** and
 **Refresh readback**; TUI node detail uses `w` / **switch engine**. Both expose
-existing E3 invoke/status methods and sequence notifications. The target broker
+existing E4 invoke/status methods and sequence notifications. The target broker
 owns the transaction; clients correlate receipts rather than coordinate engines.
+Marked receipts already display **Automatic engine switch** in desktop and TUI.
+The dedicated binding editor and joined binding process proof remain pending;
+see [model engine bindings](../../docs/model-engine-bindings.mdx).
 
 | Domain                     | Status                          | Current state                                                                                                                                   |
 | -------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -54,6 +57,7 @@ owns the transaction; clients correlate receipts rather than coordinate engines.
 | llama.cpp backend          | Integrated                      | Desktop and TUI expose install, lifecycle, catalog pull, inventory, load/unload, endpoints, routing, and demo traffic                            |
 | Local engine lifecycle     | Complete                        | Install, start, stop, uninstall, update, and port configuration                                                                                 |
 | Engine switching           | Integrated; native acceptance pending | Explicit source/target, revision and request correlation; typed denial/veto/conflict and recovery readback in desktop and TUI |
+| Model engine bindings      | Service path landed; editor/process proof pending | Target-local CAS policy, automatic receipts, advisory cold offers and bounded preparation; native matrix entirely pending |
 | Remote engine lifecycle    | Partial                         | Remote install, start, stop, status, and model pull are supported                                                                               |
 | Engine models              | Partial                         | Core list, pull, load, unload, and supported delete actions are wired                                                                           |
 | Engine version metadata    | Backend-limited                 | The backend status surface does not provide a complete version/install-owner/update contract                                                    |
@@ -133,6 +137,29 @@ the original outcome or prevent late acceptance. See the
 Process and native client acceptance require their own execution evidence;
 static checks and mocked client tests do not establish Windows or live-engine
 acceptance.
+
+## Model engine binding limits
+
+The typed policy bridge preserves `engineBindings` through existing policy
+get/set and CAS readback. Saving a binding changes no engine intent and starts
+nothing. Ordinary bound demand can activate plain Off, subject to lock, pause,
+protected residency, current management authority and process-ownership guards.
+Plain Off is not a lock; only local Resume lifts a node pause. Removing a binding
+does not proactively stop an engine.
+
+Versioned offers are distinct from inventory, loaded state, engine health and
+strict readiness. A reachable stopped-engine facade can receive/refuse/prepare
+inference. Ready-first ordering preserves tier/fallback, `preferLoaded` and
+eligible explicit selection. Strict hybrid cold activation remains excluded.
+The [binding guide](../../docs/model-engine-bindings.mdx) owns the operational
+bounds, HTTP refusal/retry semantics and native acceptance matrix.
+
+The dedicated editor inside the single-node Routing & resources form is
+**pending**. Its shared JSON draft, Save policy, target isolation and preservation
+behavior must be documented against the delivered editor before being claimed.
+Existing E4 automatic receipt presentation is implemented independently of that
+editor. Joined process proof is also **pending**; source/component checks do not
+establish executed process assertions or native acceptance.
 
 ## Supervision
 
