@@ -325,11 +325,13 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			releaseBody()
 			releaseBody = func() {}
 			var defaults []byte
+			mode := nodepolicy.RequestOptionsDefaults
 			if hasProfile {
 				defaults = profile.RequestOptions
+				mode = profile.RequestOptionsMode.Effective()
 			}
 			var err error
-			body, releaseBody, err = transformBody(ctx, rawBody, "", false, defaults)
+			body, releaseBody, err = transformBody(ctx, rawBody, "", false, defaults, mode)
 			if err != nil {
 				releaseBody = func() {}
 				return err
@@ -573,6 +575,12 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		return
 	}
 	var invalid *strictQualificationError
+	var ambiguous *ambiguousOptionsError
+	if errors.As(err, &ambiguous) {
+		rejectObservation(factRequestInvalid, http.StatusBadRequest)
+		writeInferencePreparationError(w, err)
+		return
+	}
 	if errors.As(err, &invalid) {
 		rejectObservation(factRequestInvalid, http.StatusBadRequest)
 		writeIngressError(w, http.StatusBadRequest, "strict-qualification", err.Error())

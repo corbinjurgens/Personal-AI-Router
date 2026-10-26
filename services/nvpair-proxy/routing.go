@@ -546,15 +546,32 @@ var publicChatInputs publicChatSource
 // node advertised for it.
 func hybridCandidateKey(c candidate) string { return c.id + "\x00" + c.engine + "\x00" + c.model }
 
+// A prepared body can be borrowed only by the same admitted candidate and
+// generation, with the same options and effective precedence.
+type preparedBodyIdentity struct {
+	candidate  candidate
+	defaults   []byte
+	mode       nodepolicy.RequestOptionsMode
+	generation uint64
+}
+
+func (p preparedBodyIdentity) matches(c candidate, defaults []byte, mode nodepolicy.RequestOptionsMode, generation uint64) bool {
+	return p.candidate == c && p.generation == generation && p.mode.Effective() == mode.Effective() && bytes.Equal(p.defaults, defaults)
+}
+
 // writeStrictSelfRefusal answers a refused hybrid self candidate the way
 // serveStrictLocal answers a refused strict request, and returns the status.
 func writeStrictSelfRefusal(w http.ResponseWriter, err error) int {
 	err = inferencePreparationRefusal(err)
 	var invalid *strictQualificationError
+	var ambiguous *ambiguousOptionsError
 	var capacity interface{ HTTPStatus() int }
 	switch {
 	case stderrors.Is(err, errAmbiguousModel):
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+		return http.StatusBadRequest
+	case stderrors.As(err, &ambiguous):
+		writeInferencePreparationError(w, err)
 		return http.StatusBadRequest
 	case stderrors.As(err, &invalid):
 		writeIngressError(w, http.StatusBadRequest, "strict-qualification", err.Error())
@@ -686,9 +703,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	rebasePrepared := func(ctx context.Context) {
 		preparedCtx = rebasePerformancePreparation(ctx, preparedCtx)
 	}
-	var preparedCandidate candidate
-	var preparedDefaults []byte
-	var preparedGeneration uint64
+	var prepared preparedBodyIdentity
 	var streamRequest originStreamRequest
 	preparedValid := false
 	releaseSendBody, releasePreparation := func() {}, func() {}
@@ -697,15 +712,18 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		buffers.releaseAfterPendingBody(releaseSendBody)
 		releaseSendBody, releasePreparation = func() {}, func() {}
 		preparedValid = false
+		prepared = preparedBodyIdentity{}
 	}
 	defer dropPrepared()
 	var beforeRebuild func()
 	prepareCandidate := func(ctx context.Context, c candidate, profile nodepolicy.Profile, hasProfile bool, generation uint64) error {
 		var defaults []byte
-		if hasProfile {
+		optionsMode := nodepolicy.RequestOptionsDefaults
+		if hasProfile && c.self {
 			defaults = profile.RequestOptions
+			optionsMode = profile.RequestOptionsMode.Effective()
 		}
-		if preparedValid && preparedCandidate == c && generation == preparedGeneration && bytes.Equal(defaults, preparedDefaults) {
+		if preparedValid && prepared.matches(c, defaults, optionsMode, generation) {
 			rebasePrepared(ctx)
 			return nil
 		}
@@ -717,7 +735,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// drop/reprepare and pass admission for its new dispatch.
 		dropPrepared()
 		var err error
-		sendBody, releaseSendBody, err = transformBody(ctx, bodyBytes, c.model, c.model != "", defaults)
+		sendBody, releaseSendBody, err = transformBody(ctx, bodyBytes, c.model, c.model != "", defaults, optionsMode)
 		if err != nil {
 			releaseSendBody = func() {}
 			return err
@@ -747,7 +765,8 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			releasePreparation = func() {}
 			return err
 		}
-		preparedCandidate, preparedDefaults, preparedGeneration, preparedValid = c, defaults, generation, true
+		prepared = preparedBodyIdentity{c, defaults, optionsMode, generation}
+		preparedValid = true
 		return nil
 	}
 	// prepareStrictCandidate qualifies a hybrid self candidate's body as
@@ -758,7 +777,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			beforeRebuild()
 		}
 		dropPrepared()
-		raw, releaseRaw, err := transformBody(ctx, bodyBytes, c.model, c.model != "", nil)
+		raw, releaseRaw, err := transformBody(ctx, bodyBytes, c.model, c.model != "", nil, nodepolicy.RequestOptionsDefaults)
 		if err != nil {
 			return 0, err
 		}
@@ -780,7 +799,8 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			releasePreparation = func() {}
 			return 0, err
 		}
-		preparedCandidate, preparedDefaults, preparedGeneration, preparedValid = c, nil, generation, false
+		prepared = preparedBodyIdentity{c, nil, nodepolicy.RequestOptionsDefaults, generation}
+		preparedValid = false
 		return validated.generation, nil
 	}
 	if model != "" {
@@ -795,7 +815,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		}
 	}
 	roundReservations := held.held
-	roundGeneration := preparedGeneration
+	roundGeneration := prepared.generation
 	// Released exactly once, whichever way the request ends: normal unwind,
 	// client disconnect, or an early return below. Without this a node stays
 	// counted as loaded until the next scheduler snapshot, so a steady trickle
@@ -1162,7 +1182,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		held = proposal
 		resMu.Unlock()
 		roundReservations = proposal.held
-		roundGeneration = preparedGeneration
+		roundGeneration = prepared.generation
 		return out, inferencePreparationRefusal(err)
 	}
 	beforeRebuild = func() { repointWorkload("", ""); releaseHeld() }
@@ -1678,9 +1698,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			resMu.Unlock()
 			if !hasClaim {
 				var proposal reservation
-				stable := preparedGeneration == roundGeneration
+				stable := prepared.generation == roundGeneration
 				if stable {
-					proposal, stable = p.claimPreparedTarget(attemptCtx, cand.id, preparedGeneration, roundReservations)
+					proposal, stable = p.claimPreparedTarget(attemptCtx, cand.id, prepared.generation, roundReservations)
 				}
 				if !stable {
 					att.ticket.release()

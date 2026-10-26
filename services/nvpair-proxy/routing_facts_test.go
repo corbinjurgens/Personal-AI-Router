@@ -190,6 +190,41 @@ func TestRoutingNativeFactsEntry(t *testing.T) {
 	}
 }
 
+func TestRequestOptionsNativeFactsInvalidHygiene(t *testing.T) {
+	p, _, engine := reviewR2TierFixture(t, false)
+	pol := p.admission.currentPolicy()
+	pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(`{"private_configured_key":1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
+	p.admission.setPolicy(pol)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","private_configured_key":"private-value","PRIVATE_CONFIGURED_KEY":"other-private-value"}`))
+	start := time.Now()
+	p.soleFacade().serveInference(w, r, start, "9", defaultStreamFrameIdle, concreteDispatchPolicy(start))
+	out := nativeOnlySource(t, p)
+	if w.Code != http.StatusBadRequest || engine.hits() != 0 || routingFactReason(out.disposition>>8&255) != factRequestInvalid || out.total != 0 {
+		t.Fatalf("status=%d hits=%d facts=%+v", w.Code, engine.hits(), out)
+	}
+	var refusal struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &refusal); err != nil {
+		t.Fatalf("decode refusal: %v", err)
+	}
+	if refusal.Code != "ambiguous-options" || refusal.Error != ambiguousOptionsMessage {
+		t.Fatalf("unsafe or untyped refusal=%+v", refusal)
+	}
+	// Native copies have only fixed inline fields. Inspect their actual bytes;
+	// JSON encoding would omit the unexported observation fields.
+	encoded := unsafe.Slice((*byte)(unsafe.Pointer(&out)), int(unsafe.Sizeof(out)))
+	if strings.Contains(string(encoded), "private") || strings.Contains(string(encoded), "PRIVATE") {
+		t.Fatal("native facts retained submitted option data")
+	}
+	if failureFactReason(fmt.Errorf("preparation: %w", &ambiguousOptionsError{})) != factRequestInvalid {
+		t.Fatal("wrapped ambiguity lost request-invalid classification")
+	}
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+}
+
 func TestRoutingNativeFactsConcreteDelivery(t *testing.T) {
 	for _, model := range []string{"m", ""} {
 		name := "known model"

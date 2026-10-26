@@ -138,7 +138,7 @@ func (a *admissionController) qualifiedModelLocked(k admKey, pr nodepolicy.Profi
 	if !ok || !slices.Contains(q.ModelDigests, digest) {
 		return nodeStrictModel{}, nil, false
 	}
-	if !sameJSONObject(pr.RequestOptions, q.RequestOptions) || pr.ContextTokens > q.ContextTokens || pr.MaxOutputTokens > q.MaxOutputTokens {
+	if pr.RequestOptionsMode.Effective() != q.RequestOptionsMode.Effective() || !sameJSONObject(pr.RequestOptions, q.RequestOptions) || pr.ContextTokens > q.ContextTokens || pr.MaxOutputTokens > q.MaxOutputTokens {
 		return nodeStrictModel{}, nil, false
 	}
 	m := nodeStrictModel{
@@ -214,6 +214,7 @@ func (a *admissionController) modelDigestLocked(id nodepolicy.EngineIdentity, k 
 
 func sameInstalledQualification(x, y installedQualification) bool {
 	return x.q == y.q && x.profile.ContextTokens == y.profile.ContextTokens &&
+		x.profile.RequestOptionsMode.Effective() == y.profile.RequestOptionsMode.Effective() &&
 		x.profile.MaxOutputTokens == y.profile.MaxOutputTokens && sameJSONObject(x.profile.RequestOptions, y.profile.RequestOptions)
 }
 

@@ -1126,6 +1126,11 @@ func (b *passthroughUpgradeBody) Close() error {
 }
 
 func writeInferencePreparationError(w http.ResponseWriter, err error) {
+	var ambiguous *ambiguousOptionsError
+	if stderrors.As(err, &ambiguous) {
+		writeIngressError(w, http.StatusBadRequest, "ambiguous-options", ambiguousOptionsMessage)
+		return
+	}
 	if stderrors.Is(err, errAmbiguousModel) {
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return

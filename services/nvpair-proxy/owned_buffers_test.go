@@ -587,7 +587,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 		}
 		base := int64(len(input) + 4 + (96 << 10))
 		bufferAssertTotals(t, budget, base, 3, 0)
-		out, release, err := transformBody(r.Context(), body, "m<&", true, defaults)
+		out, release, err := transformBody(r.Context(), body, "m<&", true, defaults, nodepolicy.RequestOptionsDefaults)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -617,7 +617,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out, release, err := transformBody(r.Context(), body, "", false, defaults)
+		out, release, err := transformBody(r.Context(), body, "", false, defaults, nodepolicy.RequestOptionsDefaults)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -652,7 +652,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out, release, err := transformBody(r.Context(), body, "", false, []byte(`{"missing":1}`))
+		out, release, err := transformBody(r.Context(), body, "", false, []byte(`{"missing":1}`), nodepolicy.RequestOptionsDefaults)
 		if release != nil {
 			defer release()
 		}
@@ -679,6 +679,78 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestRequestOptionsOwnedBuffers(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, options, want string
+		invalid, limited           bool
+	}{
+		{"replacement owns only exact final body", `{"model":"m","a":{"x":0}}`, `{"a":{"x":[1,2],"y":null}}`, `{"model":"m","a":{"x":[1,2],"y":null}}`, false, false},
+		{"no change borrows input", `{"model":"m","a":{"x":0}}`, `{"a":{"x":0}}`, `{"model":"m","a":{"x":0}}`, false, false},
+		{"ambiguity releases scan and plan", `{"model":"m","a":{"x":0,"X":1}}`, `{"a":{"x":2}}`, "", true, false},
+		{"final capacity refusal releases plan", `{"model":"m","a":0}`, `{"a":"` + strings.Repeat("x", 1<<20) + `"}`, "", false, true},
+		{"deep enforcement stays iterative", strings.Repeat(`{"x":`, 512) + `0` + strings.Repeat("}", 512), strings.Repeat(`{"x":`, 512) + `1` + strings.Repeat("}", 512), strings.Repeat(`{"x":`, 512) + `1` + strings.Repeat("}", 512), false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capacity := int64(8 << 20)
+			if tc.limited {
+				capacity = 1 << 20
+			}
+			budget := bufferTestBudget(t, capacity, time.Hour)
+			p := &Proxy{buffers: budget}
+			r := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(tc.input))
+			r, owner := p.ownInferenceBuffers(r)
+			defer owner.close()
+			body, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
+			if err != nil {
+				t.Fatalf("buffer request: %v", err)
+			}
+			base := int64(len(tc.input) + len(model) + (96 << 10))
+			live := 2
+			if model != "" {
+				live++
+			}
+			out, release, err := transformBody(r.Context(), body, "", false, []byte(tc.options), nodepolicy.RequestOptionsEnforced)
+			if release != nil {
+				defer release()
+			}
+			switch {
+			case tc.invalid:
+				var invalid *ambiguousOptionsError
+				if !errors.As(err, &invalid) {
+					t.Fatalf("error=%v, want ambiguity", err)
+				}
+			case tc.limited:
+				bufferAssertLimit(t, err)
+			default:
+				if err != nil {
+					t.Fatalf("transform: %v", err)
+				}
+				if string(out) != tc.want {
+					t.Fatalf("out=%q, want %q", out, tc.want)
+				}
+				if tc.input == tc.want {
+					if &out[0] != &body[0] {
+						t.Fatal("unchanged body copied")
+					}
+					bufferAssertTotals(t, budget, base, live, 0)
+				} else {
+					if cap(out) != len(out) {
+						t.Fatalf("capacity=%d length=%d", cap(out), len(out))
+					}
+					bufferAssertTotals(t, budget, base+int64(len(out))+256, live+1, 0)
+				}
+				release()
+			}
+			if (tc.invalid || tc.limited) && out != nil {
+				t.Fatal("refused transform produced body")
+			}
+			bufferAssertTotals(t, budget, base, live, 0)
+			owner.close()
+			bufferAssertTotals(t, budget, 0, 0, 0)
+		})
+	}
 }
 
 func TestOwnedInferenceBuffersAliasBorrowedScan(t *testing.T) {
