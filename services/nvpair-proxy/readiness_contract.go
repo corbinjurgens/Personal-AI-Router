@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -138,7 +137,7 @@ func (a *admissionController) qualifiedModelLocked(k admKey, pr nodepolicy.Profi
 	if !ok || !slices.Contains(q.ModelDigests, digest) {
 		return nodeStrictModel{}, nil, false
 	}
-	if pr.RequestOptionsMode.Effective() != q.RequestOptionsMode.Effective() || !sameJSONObject(pr.RequestOptions, q.RequestOptions) || pr.ContextTokens > q.ContextTokens || pr.MaxOutputTokens > q.MaxOutputTokens {
+	if pr.RequestOptionsMode.Effective() != q.RequestOptionsMode.Effective() || !nodepolicy.EqualRequestOptions(pr.RequestOptions, q.RequestOptions) || pr.ContextTokens > q.ContextTokens || pr.MaxOutputTokens > q.MaxOutputTokens {
 		return nodeStrictModel{}, nil, false
 	}
 	m := nodeStrictModel{
@@ -215,20 +214,7 @@ func (a *admissionController) modelDigestLocked(id nodepolicy.EngineIdentity, k 
 func sameInstalledQualification(x, y installedQualification) bool {
 	return x.q == y.q && x.profile.ContextTokens == y.profile.ContextTokens &&
 		x.profile.RequestOptionsMode.Effective() == y.profile.RequestOptionsMode.Effective() &&
-		x.profile.MaxOutputTokens == y.profile.MaxOutputTokens && sameJSONObject(x.profile.RequestOptions, y.profile.RequestOptions)
-}
-
-// sameJSONObject compares two optional JSON objects by content; absent and
-// empty are the same.
-func sameJSONObject(x, y json.RawMessage) bool {
-	var a, b map[string]any
-	if len(bytes.TrimSpace(x)) > 0 && json.Unmarshal(x, &a) != nil {
-		return false
-	}
-	if len(bytes.TrimSpace(y)) > 0 && json.Unmarshal(y, &b) != nil {
-		return false
-	}
-	return len(a) == 0 && len(b) == 0 || reflect.DeepEqual(a, b)
+		x.profile.MaxOutputTokens == y.profile.MaxOutputTokens && nodepolicy.EqualRequestOptions(x.profile.RequestOptions, y.profile.RequestOptions)
 }
 
 // setModelIdentity replaces the engine identity (nodepolicy.MethodSetModelIdentity)

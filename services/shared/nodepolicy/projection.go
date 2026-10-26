@@ -111,7 +111,7 @@ func checkPeerInferenceSettings(stored, incoming []Profile) error {
 			continue
 		}
 		candidate, exists := next[key]
-		if !exists || !candidate.LocalOnly || profile.RequestOptionsMode.Effective() != candidate.RequestOptionsMode.Effective() || !equalRequestOptions(profile.RequestOptions, candidate.RequestOptions) {
+		if !exists || !candidate.LocalOnly || profile.RequestOptionsMode.Effective() != candidate.RequestOptionsMode.Effective() || !EqualRequestOptions(profile.RequestOptions, candidate.RequestOptions) {
 			return &RemoteSettingLockedError{engine: profile.Engine, model: profile.Model, stored: true}
 		}
 	}
@@ -130,14 +130,18 @@ func checkPeerInferenceSettings(stored, incoming []Profile) error {
 	return nil
 }
 
-func equalRequestOptions(a, b json.RawMessage) bool {
-	if len(a) == 0 || len(b) == 0 {
-		return len(a) == 0 && len(b) == 0
-	}
+// EqualRequestOptions compares optional JSON objects without rounding numbers.
+// Absent options, null and an empty object are equivalent. Object key order is ignored,
+// array order is retained, and equal numeric values compare equal regardless of
+// decimal or exponent spelling. Invalid or non-object input compares unequal.
+func EqualRequestOptions(a, b json.RawMessage) bool {
 	decode := func(raw []byte) (any, error) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			return map[string]any{}, nil
+		}
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.UseNumber()
-		var value any
+		var value map[string]any
 		if err := dec.Decode(&value); err != nil {
 			return nil, err
 		}

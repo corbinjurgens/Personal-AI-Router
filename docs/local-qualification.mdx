@@ -140,11 +140,12 @@ itself.
 
 `requestOptionsMode` is `defaults` when omitted, and explicit `defaults`
 normalizes to omission. Qualification compares options and effective mode in
-profile and evidence. The current option comparator decodes numbers as float64:
-distinct high-precision JSON numbers can compare equal, both when matching
-evidence and when deciding whether an installed qualification changed. This is
-not an exact numeric binding and differs from the precision-preserving target
-policy lock comparison. Effective modes are compared directly.
+profile and evidence using the same exact comparator as the target policy lock.
+Numbers retain their precision: distinct high-precision values do not match;
+numerically equal spellings such as `0.1`/`0.10` and `1`/`1.0` do match. This
+comparison applies both to evidence matching and installed-qualification change
+detection. Absent options, defaults-mode `null` and `{}` are equivalent, object key order is ignored,
+and array order matters. Effective modes are compared directly.
 Defaults-mode requests allow client overrides;
 enforced-mode requests replace configured leaves recursively before strict
 validation. This path retains strict key/shape checks and

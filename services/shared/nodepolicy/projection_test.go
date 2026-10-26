@@ -20,6 +20,77 @@ func inferenceLockPolicy() Policy {
 	return p
 }
 
+func TestEqualRequestOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name, left, right string
+		equal             bool
+	}{
+		{"absent", ``, ``, true},
+		{"absent and empty", ``, `{}`, true},
+		{"whitespace and empty", " \n\t", `{}`, true},
+		{"decimal spelling", `{"v":0.1}`, `{"v":0.10}`, true},
+		{"integer spelling", `{"v":1}`, `{"v":1.0}`, true},
+		{"exponent spelling", `{"v":100}`, `{"v":1e2}`, true},
+		{"signed zero", `{"v":-0.0}`, `{"v":0e100}`, true},
+		{"large integer precision", `{"v":9007199254740992}`, `{"v":9007199254740993}`, false},
+		{"fraction precision", `{"v":0.100000000000000001}`, `{"v":0.100000000000000002}`, false},
+		{"huge exponent spelling", `{"v":1e100000000000000000000}`, `{"v":10e99999999999999999999}`, true},
+		{"nested precision", `{"v":{"a":[9007199254740992]}}`, `{"v":{"a":[9007199254740993]}}`, false},
+		{"object order and nested spelling", `{"a":{"n":[0.1,1]},"b":true}`, `{"b":true,"a":{"n":[1e-1,1.0]}}`, true},
+		{"array order", `{"v":[1,2]}`, `{"v":[2,1]}`, false},
+		{"string is not number", `{"v":"1"}`, `{"v":1}`, false},
+		{"null member differs from absent", `{"v":null}`, `{}`, false},
+		{"null document", `null`, `{}`, true},
+		{"identical null documents", `null`, `null`, true},
+		{"null and absent", `null`, ``, true},
+		{"array document", `[]`, `[]`, false},
+		{"invalid JSON", `{"v":`, `{"v":`, false},
+		{"second JSON value", `{} {}`, `{}`, false},
+		{"trailing invalid bytes", `{} x`, `{}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			left, right := json.RawMessage(tc.left), json.RawMessage(tc.right)
+			if got := EqualRequestOptions(left, right); got != tc.equal {
+				t.Errorf("EqualRequestOptions(left,right)=%v, want %v", got, tc.equal)
+			}
+			if got := EqualRequestOptions(right, left); got != tc.equal {
+				t.Errorf("EqualRequestOptions(right,left)=%v, want %v", got, tc.equal)
+			}
+		})
+	}
+}
+
+func TestPeerInferenceSettingsOptionalOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name, stored, incoming string
+	}{
+		{"absent to empty", ``, `{}`},
+		{"empty to absent", `{}`, ``},
+		{"unchanged null", `null`, `null`},
+		{"null to absent", `null`, ``},
+		{"absent to null", ``, `null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stored := inferenceLockPolicy()
+			stored.Profiles[0].RequestOptions = json.RawMessage(tc.stored)
+			peer := stored.PeerProjection()
+			peer.Profiles[0].RequestOptions = json.RawMessage(tc.incoming)
+			peer.Idle.UnloadAfterMinutes = 17
+			raw, err := json.Marshal(peer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			merged, err := MergePeerSet(stored, raw)
+			if err != nil {
+				t.Fatalf("equivalent empty options refused: %v", err)
+			}
+			if !merged.Profiles[0].LocalOnly || merged.Idle.UnloadAfterMinutes != 17 {
+				t.Fatal("equivalent update lost the lock or unrelated edit")
+			}
+		})
+	}
+}
+
 func TestPeerInferenceSettingsLockRefusesWholeWrite(t *testing.T) {
 	test := func(name string, change func(*Policy), wantLocked bool) {
 		t.Helper()
