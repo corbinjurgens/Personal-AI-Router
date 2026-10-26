@@ -72,24 +72,26 @@ func downloadProcessShardName(model string) string {
 // persistence, wire identities and relay notifications belong to real workers.
 // A router download outlives its SSE subscriber until an explicit unload.
 type downloadProcessRouter struct {
-	t             *testing.T
-	server        *httptest.Server
-	root          string
-	mu            sync.Mutex
-	status        map[string]string
-	posts         map[string]int
-	unloads       map[string]int
-	loads         int
-	mode          map[string]string
-	streams       map[chan string]bool
-	started       chan string
-	holdSubscribe <-chan struct{}
-	subscribed    chan struct{}
+	t              *testing.T
+	server         *httptest.Server
+	root           string
+	mu             sync.Mutex
+	status         map[string]string
+	posts          map[string]int
+	unloads        map[string]int
+	loads          int
+	mode           map[string]string
+	streams        map[chan string]bool
+	started        chan string
+	holdSubscribe  <-chan struct{}
+	subscribed     chan struct{}
+	shardErrors    map[string]error
+	onStartTimeout func(*testing.T, string)
 }
 
 func newDownloadProcessRouter(t *testing.T) *downloadProcessRouter {
 	t.Helper()
-	r := &downloadProcessRouter{t: t, root: t.TempDir(), status: map[string]string{}, posts: map[string]int{}, unloads: map[string]int{}, mode: map[string]string{}, streams: map[chan string]bool{}, started: make(chan string, 64)}
+	r := &downloadProcessRouter{t: t, root: t.TempDir(), status: map[string]string{}, posts: map[string]int{}, unloads: map[string]int{}, mode: map[string]string{}, streams: map[chan string]bool{}, started: make(chan string, 64), shardErrors: map[string]error{}}
 	r.server = newFixtureHTTPServer(t, http.HandlerFunc(r.serve))
 	t.Cleanup(r.server.Close)
 	return r
@@ -151,6 +153,9 @@ func (r *downloadProcessRouter) serve(w http.ResponseWriter, req *http.Request) 
 		// The first finalized shard and list membership precede native terminal.
 		// Its name is fixture-local; no real cache layout or model is consumed.
 		if err := os.WriteFile(filepath.Join(r.root, downloadProcessShardName(body.Model)), []byte("GGUFfixture"), 0o600); err != nil {
+			r.mu.Lock()
+			r.shardErrors[body.Model] = err
+			r.mu.Unlock()
 			r.t.Errorf("write first synthetic shard: %v", err)
 			http.Error(w, "fixture write failed", http.StatusInternalServerError)
 			return
@@ -280,6 +285,13 @@ func (r *downloadProcessRouter) waitStarted(t *testing.T, model string) {
 			t.Fatalf("native POST model=%q, want %q", got, model)
 		}
 	case <-time.After(serviceCallTimeout):
+		r.mu.Lock()
+		posts, streams, status, shardErr := r.posts[model], len(r.streams), r.status[model], r.shardErrors[model]
+		r.mu.Unlock()
+		t.Logf("first-shard timeout model=%q router_posts=%d router_active_streams=%d router_status=%q shard_write_error=%v", model, posts, streams, status, shardErr)
+		if r.onStartTimeout != nil {
+			r.onStartTimeout(t, model)
+		}
 		t.Fatalf("native POST did not reach first-shard barrier for %q", model)
 	}
 }
@@ -430,6 +442,7 @@ type downloadProcessFixture struct {
 	listeners      []int
 	controlMu      sync.Mutex
 	controlCalls   map[task1RequestKey]int
+	pullIDs        map[string]int
 }
 
 func newDownloadProcessFixture(t *testing.T, reverse bool) *downloadProcessFixture {
@@ -443,7 +456,8 @@ func newDownloadProcessFixture(t *testing.T, reverse bool) *downloadProcessFixtu
 		}
 	}
 	t.Setenv("OLLAMA_HOST", "")
-	f := &downloadProcessFixture{router: newDownloadProcessRouter(t), controlCalls: make(map[task1RequestKey]int)}
+	f := &downloadProcessFixture{router: newDownloadProcessRouter(t), controlCalls: make(map[task1RequestKey]int), pullIDs: make(map[string]int)}
+	f.router.onStartTimeout = f.logStartTimeout
 	f.service = newServiceFixture(t)
 	s := f.service
 	// Cleanup ownership comes from the existing bundle's executable/PID/creation
@@ -801,7 +815,70 @@ func (f *downloadProcessFixture) waitPhase(t *testing.T, model, phase string) (d
 
 func (f *downloadProcessFixture) pull(t *testing.T, model string) int {
 	t.Helper()
-	return f.controller.send(t, "engine:remote-pull-model", map[string]string{"node": f.targetNode.uuid, "engine": downloadProcessEngine, "model": model}, true)
+	id := f.controller.send(t, "engine:remote-pull-model", map[string]string{"node": f.targetNode.uuid, "engine": downloadProcessEngine, "model": model}, true)
+	f.pullIDs[model] = id
+	return id
+}
+
+// Inspect retained controller metadata without waiting for a terminal or consuming
+// frames. Only the failure path performs the extra, one-second target read.
+func (f *downloadProcessFixture) logStartTimeout(t *testing.T, model string) {
+	t.Helper()
+	id, known := f.pullIDs[model]
+	var response jsonrpc.Message
+	f.controller.mu.Lock()
+	for _, frame := range f.controller.frames {
+		if known && idEquals(frame.ID, id) {
+			response = frame
+			break
+		}
+	}
+	readErr := f.controller.readErr
+	f.controller.mu.Unlock()
+	if response.Error != nil {
+		// Remote error messages can embed an engine HTTP response body.
+		t.Logf("first-shard controller request_id=%d response=error code=%d stdout_error=%v", id, response.Error.Code, readErr)
+	} else if response.ID != nil {
+		// Do not print the raw result, which can contain an engine response body.
+		var result struct {
+			OpID string `json:"opId"`
+			ID   string `json:"id"`
+		}
+		err := json.Unmarshal(response.Result, &result)
+		t.Logf("first-shard controller request_id=%d response=success op_id=%q download_id=%q decode_error=%v stdout_error=%v", id, result.OpID, result.ID, err, readErr)
+	} else {
+		t.Logf("first-shard controller request_id=%d request_known=%t response=pending stdout_error=%v", id, known, readErr)
+	}
+	t.Logf("first-shard authenticated_control_posts=%d", f.controlCount(http.MethodPost, "/v1/models/pull"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://127.0.0.1:%d/v1/models", f.service.ports.engineManagerHTTP), nil)
+	if err != nil {
+		t.Logf("first-shard target models request_error=%v", err)
+		return
+	}
+	resp, err := f.observer.Do(req)
+	if err != nil {
+		t.Logf("first-shard target models read_error=%v", err)
+		return
+	}
+	var models downloadProcessModels
+	err = json.NewDecoder(io.LimitReader(resp.Body, modeldownload.MaxSnapshotBytes+65536)).Decode(&models)
+	closeErr := resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || err != nil || models.DownloadState == nil {
+		t.Logf("first-shard target models http=%d decode_error=%v snapshot_present=%t close_error=%v", resp.StatusCode, err, models.DownloadState != nil, closeErr)
+		return
+	}
+	snapshot := models.DownloadState
+	var entry modeldownload.Entry
+	found := false
+	for _, candidate := range snapshot.Entries {
+		if candidate.Engine == downloadProcessEngine && candidate.Model == model {
+			entry, found = candidate, true
+			break
+		}
+	}
+	t.Logf("first-shard target source_id=%q revision=%q entry_present=%t phase=%q download_id=%q reason=%q close_error=%v", snapshot.SourceID, snapshot.Revision, found, entry.Phase, entry.ID, entry.Reason, closeErr)
 }
 
 func (f *downloadProcessFixture) reply(t *testing.T, id int, success bool) jsonrpc.Message {
