@@ -157,10 +157,6 @@ func TestWorkloadCrossEngineIdentityDistinct(t *testing.T) {
 // hear the running workload AGAIN from the restarted manager — which only
 // happens if the broker rehydrated the fresh process's active set.
 func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
-	if portBusy(11435) {
-		t.Skip("ollama-proxy default port 11435 already in use; skipping")
-	}
-
 	// Fake Ollama that starts a streaming response, flushes one chunk so the
 	// proxy commits and the workload becomes "running", then blocks — keeping
 	// the proxied inference in-flight so it never reaches a terminal state. The
@@ -201,8 +197,11 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 	// stub must hold a cluster identity the node under test pins.
 	fx := newInterNodeCluster(t)
 	received := fx.startStubClusterPeer(t, "rehydrate-wm-peer", "rehydrate-peer-uuid")
+	configDir := t.TempDir()
+	privateProxyPort := freePort(t)
+	writePrivateBrokerEngineSettings(t, configDir, fx.nodeDir, map[string]int{"ollama": privateProxyPort})
 
-	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, t.TempDir(), fx.nodeDir,
+	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, configDir, fx.nodeDir,
 		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--workload-manager-path", workloadMgrBin,
@@ -228,6 +227,9 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 	proxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
+	if proxyPort != privateProxyPort {
+		t.Fatalf("Ollama proxy port=%d want private port=%d", proxyPort, privateProxyPort)
+	}
 	t.Logf("broker ready; proxy on %d", proxyPort)
 
 	pid1 := awaitInt(t, wmPids, 10*time.Second, "initial workload-manager start")
@@ -286,10 +288,6 @@ func TestWorkloadManagerRehydratesActiveWorkloadOnRestart(t *testing.T) {
 // state — otherwise a peer's wrongly-inferred "failed" (or a missed terminal)
 // can never be repaired after a restart.
 func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
-	if portBusy(11435) {
-		t.Skip("ollama-proxy default port 11435 already in use; skipping")
-	}
-
 	// Fake Ollama that completes immediately, so the workload reaches a terminal
 	// (completed) state right away.
 	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -303,8 +301,11 @@ func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
 
 	fx := newInterNodeCluster(t)
 	received := fx.startStubClusterPeer(t, "rehydrate-term-peer", "rehydrate-term-peer-uuid")
+	configDir := t.TempDir()
+	privateProxyPort := freePort(t)
+	writePrivateBrokerEngineSettings(t, configDir, fx.nodeDir, map[string]int{"ollama": privateProxyPort})
 
-	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, t.TempDir(), fx.nodeDir,
+	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, configDir, fx.nodeDir,
 		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--workload-manager-path", workloadMgrBin,
@@ -327,6 +328,9 @@ func TestWorkloadManagerRehydratesRecentTerminalOnRestart(t *testing.T) {
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 	proxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
+	if proxyPort != privateProxyPort {
+		t.Fatalf("Ollama proxy port=%d want private port=%d", proxyPort, privateProxyPort)
+	}
 	pid1 := awaitInt(t, wmPids, 10*time.Second, "initial workload-manager start")
 
 	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["rehydrate-term-model"]}}`, ollamaPort))

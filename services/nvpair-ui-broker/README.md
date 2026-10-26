@@ -516,8 +516,10 @@ interruption callback before Serve returns. An event already handed to the codec
 may finish after its source retires. Other ordinary traffic shares the codec's
 per-frame write gate; history does not enter this queue and never holds that gate
 while waiting for another history frame. A fully blocked stdout still couples other
-ordinary client traffic. Policy replay's synchronous client announcement under
-the push slot and proxy supervisor lock remains a separate limitation.
+ordinary client traffic. Policy replay schedules its client announcement through
+the existing coalesced policy publisher, so an unread client does not retain the
+push slot or proxy supervisor lock after the replay RPCs finish. The RPCs remain
+serialized under the push slot through their acknowledgements or cancellation.
 
 On startup — **before** emitting `app:ready` — the broker spawns the scanner and (when available) node-info, `nvpair-proxy`, the workload-manager, and the cluster-manager as child processes over stdio. The proxy is spawned up front but doesn't gate `app:ready` — each of its facades announces its listen port asynchronously (see below). None of the auxiliary workers gate `app:ready`.
 
@@ -1165,7 +1167,10 @@ never go backwards and the last one matches `policy:get`. The same holds for
 `node:availability-changed`. A push scheduled in the background announces again when its
 answer changes the activation, and so does a pause's later availability push or
 an availability push made during policy recovery. It is also
-sent when a proxy start has been replayed the policy. `node:availability-changed {nodeId, availability,
+scheduled when a proxy start has been replayed the policy. Replay and renewal
+announcements coalesce through the same publisher, with at most one sender and
+one waiter; each reads the current state after taking the publication lock.
+`node:availability-changed {nodeId, availability,
 active}` follows each availability transition (`draining`, then `paused`; or
 `available`), and while draining it repeats whenever the active count changes.
 Both are also sent with another node's `nodeId` after this node changed that
@@ -1469,6 +1474,15 @@ Two relay-specific error cases:
 - `ollama-proxy:shutdown` is **refused** with error `-32601` — the broker owns the proxy's lifecycle, so a client can't terminate it independently. Shut the broker down instead (which tears the proxy down with it).
 
 #### `ollama-proxy:set-port` / `lmstudio-proxy:set-port` / `llamacpp-proxy:set-port`
+
+Port preflight checks occupancy without dialing the occupant. On non-Windows
+hosts it probes IPv4/IPv6 wildcards and the loopback addresses used by managed
+launches and aliases (`127.0.0.1` and `::1`), immediately closing each temporary
+listener. An unsupported IPv6 family is skipped; occupied addresses and other
+probe failures refuse the port. Windows retains its exclusive wildcard bind
+probe, which also rejects concrete-address holders and aborts before native
+listen. The eventual engine/facade bind remains authoritative: preflight does
+not reserve a port across the settings operation.
 
 **Intercepted, not relayed verbatim.** For every engine profile, a port-only caller — `nvpair-tui` is the one in tree — gets to move a single port without rendering the whole launch settings form, but the change still runs through the same authoritative settings operation the desktop editor uses, so a port set from the terminal cannot diverge from one set from the UI. The namespace selects the engine. The broker reads that engine's current settings, substitutes the requested proxy port, and applies the result while preserving the server port and launch arguments. Accepted settings are saved in the settings journal.
 

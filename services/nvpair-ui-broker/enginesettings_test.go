@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -46,6 +47,25 @@ type settingsHarness struct {
 	// settingsReplies receives the engine:settings-reply notifications the
 	// broker sends the fake engine-manager.
 	settingsReplies chan json.RawMessage
+	// reservedPorts belong to the fake workers until test cleanup. Only these
+	// reservations may pass the injected check; foreign ports use real preflight.
+	reservedPorts sync.Map
+}
+
+func (h *settingsHarness) reservePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve settings fixture port: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("close settings fixture port: %v", err)
+		}
+	})
+	port := ln.Addr().(*net.TCPAddr).Port
+	h.reservedPorts.Store(port, struct{}{})
+	return port
 }
 
 func (h *settingsHarness) unaddressedProxyCalls() []policyCall {
@@ -66,20 +86,20 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 
 func newServingSettingsHarness(t *testing.T, engine string, serving *engines.ServingConfig) *settingsHarness {
 	t.Helper()
-	ports := make([]int, 4)
-	listeners := []net.Listener{}
-	for i := range ports {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		listeners = append(listeners, ln)
-		ports[i] = ln.Addr().(*net.TCPAddr).Port
-	}
-	for _, ln := range listeners {
-		_ = ln.Close()
-	}
 	h := &settingsHarness{b: &Broker{codec: NewCodec(&bytes.Buffer{}), nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}, settingsReplies: make(chan json.RawMessage, 8)}
+	ports := make([]int, 4)
+	for i := range ports {
+		ports[i] = h.reservePort(t)
+	}
+	// The workers communicate over pipes and never bind these ports themselves.
+	// Keep their reservations across failed starts and proxy moves, so another
+	// process cannot turn an unrelated retry into a port-conflict failure.
+	h.b.portAvailableCheck = func(port int) bool {
+		if _, reserved := h.reservedPorts.Load(port); reserved {
+			return true
+		}
+		return tcpPortAvailable(port)
+	}
 	worker, codec := newTestRPCWorkerPipe(t)
 	h.b.setEngineMgr(worker)
 	proxyWorker, proxyCodec := newTestRPCWorkerPipe(t)
@@ -399,6 +419,67 @@ func TestSettingsCoordinatorRevisionDedupNoopAndFailure(t *testing.T) {
 	}
 }
 
+func TestSettingsStoppedRetryPreservesPortReservation(t *testing.T) {
+	h := newSettingsHarness(t)
+	p := h.request(t)
+	p.Settings.LaunchText += " --failed-start"
+	h.fail.Store(true)
+	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+	if err != nil || receipt.Phase != "failed" {
+		t.Fatalf("startup failure receipt = %+v, %v", receipt, err)
+	}
+	h.fail.Store(false)
+	p = h.request(t)
+	before := h.b.engineSettings["ollama"].Snapshot
+	if before.Running {
+		t.Fatal("failed startup left the engine running")
+	}
+	// A competing process cannot take the stopped fake engine's port before
+	// the retry, even though its worker never binds a real engine listener.
+	competitor, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p.Settings.ServerPort))
+	if err == nil {
+		if err := competitor.Close(); err != nil {
+			t.Fatalf("close competing listener: %v", err)
+		}
+		t.Fatal("stopped fixture released its server-port reservation")
+	}
+	if tcpPortAvailable(p.Settings.ServerPort) {
+		t.Fatal("production preflight accepted the fixture's occupied loopback port")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("bind foreign occupied port: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("close foreign occupied port: %v", err)
+		}
+	})
+	conflict := p
+	conflict.RequestID = settingsID()
+	conflict.Settings.ServerPort = ln.Addr().(*net.TCPAddr).Port
+	preview, err := h.b.previewEngineSettings(context.Background(), conflict, "")
+	if err != nil {
+		t.Fatalf("preview foreign occupied port: %v", err)
+	}
+	if want := fmt.Sprintf("port %d is already in use", conflict.Settings.ServerPort); preview.Errors["ports"] != want {
+		t.Fatalf("port errors = %v, want %q", preview.Errors, want)
+	}
+	if _, err := h.b.applyEngineSettings(context.Background(), conflict, ""); err == nil {
+		t.Fatal("retry accepted a foreign occupied port")
+	}
+	if after := h.b.engineSettings["ollama"].Snapshot; after.Revision != before.Revision || after.Settings != before.Settings || h.applies.Load() != 1 {
+		t.Fatalf("rejected conflict changed settings or runtime: %+v, applies=%d", after, h.applies.Load())
+	}
+	receipt, err = h.b.applyEngineSettings(context.Background(), p, "")
+	if err != nil || receipt.Phase != "succeeded" || h.applies.Load() != 2 {
+		t.Fatalf("retry on reserved fixture port = %+v, %v, applies=%d", receipt, err, h.applies.Load())
+	}
+	if after := h.b.engineSettings["ollama"].Snapshot; !after.Running {
+		t.Fatal("retry lost resume intent")
+	}
+}
+
 func TestSettingsFailedApplyRestoresOnlyRunningReadyService(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -458,15 +539,8 @@ func TestSettingsProxyRebindPushesLivePortToClusterManager(t *testing.T) {
 			awaitLocalServices(t, seen, 0)
 			h.b.registerService(noderec.RegisterParams{Service: tc.service, Port: p.Settings.ProxyPort})
 			awaitLocalServices(t, seen, 1)
-			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatalf("reserve new proxy port: %v", err)
-			}
-			p.Settings.ProxyPort = listener.Addr().(*net.TCPAddr).Port
+			p.Settings.ProxyPort = h.reservePort(t)
 			p.Settings.LaunchText += " --rebind-fixture"
-			if err := listener.Close(); err != nil {
-				t.Fatalf("release new proxy port: %v", err)
-			}
 			receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
 			if err != nil || receipt.Phase != "succeeded" {
 				t.Fatalf("proxy port apply = %+v, %v", receipt, err)

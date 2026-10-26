@@ -272,17 +272,20 @@ var proxyPidRe = regexp.MustCompile(`proxy started.*\bpid=(\d+)`)
 // naming a single engine would claim that only that engine went down when in
 // fact all of them did.
 func TestBrokerCrashSurfacingAndRestart(t *testing.T) {
-	if portBusy(11435) {
-		t.Skip("ollama-proxy port 11435 already in use; skipping")
-	}
+	configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
+	proxyPort := freePort(t)
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"ollama": proxyPort})
 
-	stdin, msgs, stderr, cleanup := startBrokerWith(t,
+	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, configDir, clusterDir,
 		"--errors-path", errorsBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 	)
 	t.Cleanup(cleanup)
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
+	if port := waitProxyReady(t, stdin, msgs, 15*time.Second); port != proxyPort {
+		t.Fatalf("Ollama proxy port=%d want private port=%d", port, proxyPort)
+	}
 
 	// The proxy logs "proxy started ... pid=N" at startup (before app:ready),
 	// so it's already buffered. Grab the first pid and kill that process.
@@ -314,6 +317,9 @@ func TestBrokerCrashSurfacingAndRestart(t *testing.T) {
 		t.Fatalf("proxy was not restarted: same pid %d", pid2)
 	}
 	t.Logf("proxy auto-restarted: pid %d -> %d", pid1, pid2)
+	if port := waitProxyReady(t, stdin, msgs, 15*time.Second); port != proxyPort {
+		t.Fatalf("restarted Ollama proxy port=%d want private port=%d", port, proxyPort)
+	}
 }
 
 func mustPid(t *testing.T, line string) int {
@@ -585,16 +591,34 @@ func proxyStatus(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, id 
 // running, the requested port is free, so the broker relays it unchanged (no
 // bump) — exercising the interception + relay + rebind wiring end to end.
 func TestBrokerProxySetPortRebinds(t *testing.T) {
-	if portBusy(11435) {
-		t.Skip("ollama-proxy default port 11435 already in use; skipping")
-	}
 	cfg := t.TempDir()
+	clusterDir := filepath.Join(t.TempDir(), "cluster")
+	proxyPort := freePort(t)
+	serverPort := freePort(t)
+	ports := reserveFixtureServicePorts(t)
+	for _, port := range []int{proxyPort, ports.nodeInfo, ports.errors, ports.workload, ports.clusterManager, ports.engineManagerHTTP, ports.engineControl} {
+		if serverPort == port {
+			t.Fatalf("private stopped-engine port %d collides with a fixture listener", serverPort)
+		}
+	}
+	// A port-only settings edit preserves the manager's server port. Keep it
+	// valid but stopped, without enabling detection, launch or health probes.
+	absent := filepath.Join(cfg, "absent-ollama")
+	jointWriteJSON(t, filepath.Join(jointAppDir(cfg), "engines", "ollama.json"), map[string]any{
+		"engine": "ollama", "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
+			"detect": []string{absent}, "models_dir": filepath.Join(cfg, "absent-models", "ollama"),
+			"runtime": map[string]any{
+				"port": serverPort, "bin": absent, "cli": absent, "ready": nil, "health": nil, "auth_statuses": []int{},
+			},
+		}},
+	})
+	writePrivateBrokerEngineSettings(t, cfg, clusterDir, map[string]int{"ollama": proxyPort})
 	args := append([]string{
 		"--scanner-path", scannerBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--engine-manager-path", engineMgrBin,
-	}, reserveFixtureServicePorts(t).args()...)
-	args = append(args, "--cluster-dir", t.TempDir())
+	}, ports.args()...)
+	args = append(args, "--cluster-dir", clusterDir)
 	cmd, err := fixtureBrokerCommand(brokerBin, args...)
 	if err != nil {
 		t.Fatal(err)
@@ -629,11 +653,14 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 
-	// Wait for the proxy to announce its (default) port.
+	// Rebinding is independent of the product default; start on a private port.
 	id := 850
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		if ready, _ := proxyStatus(t, stdin, msgs, id); ready {
+		if ready, port := proxyStatus(t, stdin, msgs, id); ready {
+			if port != proxyPort {
+				t.Fatalf("initial Ollama proxy port=%d want private port=%d", port, proxyPort)
+			}
 			break
 		}
 		id++
@@ -644,6 +671,9 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 	}
 
 	target := freePort(t)
+	if target == proxyPort || target == serverPort {
+		t.Fatalf("rebind target %d must differ from the initial facade and stopped-engine port", target)
+	}
 	req := fmt.Sprintf(`{"jsonrpc":"2.0","id":860,"method":"ollama-proxy:set-port","params":{"port":%d}}`, target) + "\n"
 	if _, err := stdin.Write([]byte(req)); err != nil {
 		t.Fatalf("write ollama-proxy:set-port: %v", err)

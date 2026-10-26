@@ -11,8 +11,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httptrace"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -372,12 +375,45 @@ func i7HybridIdentity() nodepolicy.StrictModelIdentity {
 }
 
 // Publish through the existing private scanner fixture, not a product hook.
-// The loopback destination validates the synthetic strict envelope and rewritten
-// model. This is routing/process evidence, not native qualification or mTLS proof.
+// The pinned loopback peer validates the synthetic strict envelope and rewritten
+// model. It simulates qualified peer ingress, not native engine qualification.
 func i7HybridFixture(t *testing.T, edits ...func(*nodepolicy.Policy)) (*i7BuffersFixture, *serviceFixture, *i7BuffersFake, int) {
 	t.Helper()
-	f, service, _ := i7BuffersBroker(t, 256, 0)
-	u := i7BuffersUpstream(t)
+	return i7HybridFixturePeers(t, []string{"i7-synthetic-node"}, edits...)
+}
+
+func i7HybridFixturePeers(t *testing.T, peerIDs []string, edits ...func(*nodepolicy.Policy)) (*i7BuffersFixture, *serviceFixture, *i7BuffersFake, int) {
+	t.Helper()
+	var u *i7BuffersFake
+	f, service, _ := i7BuffersBroker(t, 256, 0, func(service *serviceFixture) {
+		const origin = "i7-source-node"
+		cert := mintClusterIdentity(t, service.clusterDir, origin)
+		writeActiveAdmission(t, service.clusterDir)
+		jointWriteJSON(t, filepath.Join(service.clusterDir, "identity.json"), map[string]any{"node_uuid": origin})
+		members := append([]string{origin}, peerIDs...)
+		writeMembers(t, service.clusterDir, members...)
+		var peers []*clustertrust.Mesh
+		for _, id := range peerIDs {
+			dir := t.TempDir()
+			peerCert := mintClusterIdentity(t, dir, id)
+			writeActiveAdmission(t, dir)
+			writePin(t, dir, origin, cert)
+			writeMembers(t, dir, id, origin)
+			writePin(t, service.clusterDir, id, peerCert)
+			mesh := clustertrust.Open(dir)
+			if _, ok := mesh.PeerServiceIncarnation(origin); !ok {
+				t.Fatalf("fixture peer %q lacks current source admission", id)
+			}
+			peers = append(peers, mesh)
+		}
+		mesh := clustertrust.Open(service.clusterDir)
+		for _, id := range peerIDs {
+			if _, ok := mesh.PeerServiceIncarnation(id); !ok {
+				t.Fatalf("fixture source lacks current peer admission for %q", id)
+			}
+		}
+		u = i7BuffersUpstream(t, peers...)
+	})
 	listener := freePort(t)
 	i7HybridPolicy(t, f, func(p *nodepolicy.Policy) {
 		p.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: egressProcessModel}}
@@ -394,12 +430,21 @@ func i7HybridFixture(t *testing.T, edits ...func(*nodepolicy.Policy)) (*i7Buffer
 	if err := advertisement.StrictAdmission.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	event := noderec.NodeEvent{Node: noderec.DirectoryNode{HostUUID: "i7-synthetic-node", Name: "i7-loopback", IP: "127.0.0.1",
-		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: u.port}},
-		ModelsByEngine: map[string][]string{"llamacpp": {egressProcessModel}}, Policy: advertisement}}
-	frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeDiscovered, Params: egressProcessJSON(t, event)}
-	egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, f.scannerPort, "/", egressProcessJSON(t, frame), http.StatusOK)
-	neEventually(t, "synthetic destination forwarded by the scanner and broker", 10*time.Second, func() bool {
+	for i, id := range peerIDs {
+		event := noderec.NodeEvent{Node: noderec.DirectoryNode{HostUUID: id, ClusterUUID: id, Trusted: true, Name: id, IP: "127.0.0.1",
+			Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: u.ports[i]}},
+			ModelsByEngine: map[string][]string{"llamacpp": {egressProcessModel}}, Policy: advertisement}}
+		frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeDiscovered, Params: egressProcessJSON(t, event)}
+		egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, f.scannerPort, "/", egressProcessJSON(t, frame), http.StatusOK)
+		i7HybridDestinationReady(t, f, id)
+	}
+	i7HybridListenerReady(t, f.client, listener)
+	return f, service, u, listener
+}
+
+func i7HybridDestinationReady(t *testing.T, f *i7BuffersFixture, id string) {
+	t.Helper()
+	neEventually(t, "pinned destination forwarded by the scanner and broker", 10*time.Second, func() bool {
 		reply := f.call(t, "llamacpp-proxy:nodes/list", map[string]any{})
 		egressProcessOK(t, reply)
 		var result struct {
@@ -410,21 +455,12 @@ func i7HybridFixture(t *testing.T, edits ...func(*nodepolicy.Policy)) (*i7Buffer
 		}
 		egressProcessDecode(t, reply.Result, &result)
 		for _, node := range result.Nodes {
-			if node.ID == event.Node.HostUUID && slices.Contains(node.Models, egressProcessModel) {
+			if node.ID == id && slices.Contains(node.Models, egressProcessModel) {
 				return true
 			}
 		}
 		return false
 	})
-	// The relayed advertisement supplies the qualification hints; the explicit
-	// fixture-only manual overlay authorizes plaintext to this loopback fake.
-	// Discovery.Nodes retains the subscribed metadata for the same stable ID.
-	egressProcessOK(t, f.call(t, "llamacpp-proxy:node/add-manual", map[string]any{
-		"id": event.Node.HostUUID, "host": "127.0.0.1", "port": u.port,
-		"addresses": []string{"127.0.0.1"}, "models": []string{egressProcessModel},
-	}))
-	i7HybridListenerReady(t, f.client, listener)
-	return f, service, u, listener
 }
 
 func i7HybridPolicy(t *testing.T, f *i7BuffersFixture, edit func(*nodepolicy.Policy)) {
@@ -623,7 +659,9 @@ func i7HybridRebind(t *testing.T) {
 }
 
 func i7HybridCancellation(t *testing.T) {
-	f, _, u, listener := i7HybridFixture(t)
+	// Ten committed owners prove numeric ordering of nine before ten. Spread
+	// them across pinned peers so the per-peer transport slot cap still applies.
+	f, _, u, listener := i7HybridFixturePeers(t, []string{"i7-synthetic-node", "i7-second-node"})
 	var held []i7BuffersHold
 	for i := range 10 {
 		id := fmt.Sprintf("control-%d", i+1)
@@ -637,6 +675,9 @@ func i7HybridCancellation(t *testing.T) {
 	for i, key := range keys {
 		if key.RequestID != strconv.Itoa(i+1) || key.OriginNodeID != keys[0].OriginNodeID || key.ProxyRunID != keys[0].ProxyRunID {
 			t.Fatalf("routing active order/identity at %d: %+v", i, keys)
+		}
+		if held[i].slot.strict.Request != key {
+			t.Fatalf("pinned destination strict request=%+v, active owner=%+v", held[i].slot.strict.Request, key)
 		}
 	}
 	i7HybridCancel(t, f, keys[8], true, nodepolicy.RoutingCancelConflictCommitted)
@@ -703,7 +744,7 @@ type i7BuffersFixture struct {
 	revision    string
 }
 
-func i7BuffersBroker(t *testing.T, capacity, wait int) (*i7BuffersFixture, *serviceFixture, string) {
+func i7BuffersBroker(t *testing.T, capacity, wait int, setup ...func(*serviceFixture)) (*i7BuffersFixture, *serviceFixture, string) {
 	t.Helper()
 	f := newProxyServiceFixture(t)
 	self, err := os.Executable()
@@ -714,6 +755,9 @@ func i7BuffersBroker(t *testing.T, capacity, wait int) (*i7BuffersFixture, *serv
 	scannerPort := freePort(t)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort), "USERPROFILE="+f.configDir, "OLLAMA_HOST=")
+	for _, prepare := range setup {
+		prepare(f)
+	}
 	f.start()
 	c := f.readyClient()
 	nextID := 7000
@@ -781,14 +825,24 @@ func (s *i7BuffersSlot) release() { s.once.Do(func() { close(s.released) }) }
 
 type i7BuffersFake struct {
 	port  int
+	ports []int
 	mu    sync.Mutex
 	slots map[string]*i7BuffersSlot
 }
 
-func i7BuffersUpstream(t *testing.T) *i7BuffersFake {
+func i7BuffersUpstream(t *testing.T, peers ...*clustertrust.Mesh) *i7BuffersFake {
 	t.Helper()
 	u := &i7BuffersFake{slots: make(map[string]*i7BuffersSlot)}
-	server := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(peers) == 0 {
+			for name := range r.Header {
+				if strings.HasPrefix(strings.ToLower(name), "x-pair-") || strings.EqualFold(name, "X-NVPAIR-Engine-Identity-Probe") {
+					t.Errorf("private header %q reached a manual engine fixture", name)
+					http.Error(w, "private engine header", http.StatusBadRequest)
+					return
+				}
+			}
+		}
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
 			w.Header().Set("Content-Type", "application/json")
 			if _, err := io.WriteString(w, `{"data":[{"id":"g-t4-concrete"}]}`); err != nil {
@@ -820,6 +874,11 @@ func i7BuffersUpstream(t *testing.T) *i7BuffersFake {
 				http.Error(w, "invalid hybrid fixture envelope", http.StatusBadRequest)
 				return
 			}
+			if r.TLS == nil || slot.strict.Request.OriginNodeID != clustertrust.UUIDFromCert(r.TLS.PeerCertificates[0]) {
+				t.Error("hybrid strict request origin differs from the pinned caller")
+				http.Error(w, "invalid hybrid fixture origin", http.StatusForbidden)
+				return
+			}
 		}
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
 			t.Errorf("read held fake request: %v", err)
@@ -835,6 +894,11 @@ func i7BuffersUpstream(t *testing.T) *i7BuffersFake {
 			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		if len(peers) != 0 {
+			// Simulate the pinned destination's framing and terminal attestation.
+			w.Header().Set("X-PAIR-Stream-Framing", "v1;declared;1")
+			w.Header().Add("Trailer", "X-PAIR-Stream-Framing")
+		}
 		if _, err := io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ready\"}}]}\n\n"); err != nil {
 			t.Errorf("write held stream: %v", err)
 			return
@@ -849,17 +913,54 @@ func i7BuffersUpstream(t *testing.T) *i7BuffersFake {
 		case <-slot.released:
 			if _, err := io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"); err != nil {
 				t.Errorf("finish held stream: %v", err)
+				return
+			}
+			if len(peers) != 0 {
+				w.Header().Set("X-PAIR-Stream-Framing", "v1;completed")
 			}
 		}
-	}))
-	u.port = portOfURL(t, server.URL)
+	})
+	var servers []*httptest.Server
+	if len(peers) == 0 {
+		servers = append(servers, newFixtureHTTPServer(t, handler))
+	}
+	for _, mesh := range peers {
+		server := &httptest.Server{Listener: listenFixtureLoopback(t), Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mesh.Refresh()
+			principal, pinned := mesh.VerifyClientPin(r)
+			incarnation, current := mesh.PeerServiceIncarnation(principal)
+			if !pinned || principal != "i7-source-node" || !current {
+				t.Error("hybrid fixture peer lacks an authenticated source relationship")
+				http.Error(w, "unpinned fixture caller", http.StatusForbidden)
+				return
+			}
+			mesh.Refresh()
+			verified, pinned := mesh.VerifyClientPin(r)
+			latest, current := mesh.PeerServiceIncarnation(principal)
+			if !pinned || verified != principal || !current || latest != incarnation {
+				t.Error("hybrid fixture source relationship changed at ingress")
+				http.Error(w, "changed fixture caller", http.StatusForbidden)
+				return
+			}
+			handler.ServeHTTP(w, r)
+		})}}
+		server.TLS = mesh.ServerTLSConfig()
+		server.StartTLS()
+		servers = append(servers, server)
+	}
+	for _, server := range servers {
+		u.ports = append(u.ports, portOfURL(t, server.URL))
+	}
+	u.port = u.ports[0]
 	t.Cleanup(func() {
 		u.mu.Lock()
 		for _, slot := range u.slots {
 			slot.release()
 		}
 		u.mu.Unlock()
-		server.Close()
+		for _, server := range servers {
+			server.Close()
+		}
 	})
 	return u
 }
