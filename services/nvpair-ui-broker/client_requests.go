@@ -23,7 +23,11 @@ import (
 // otherwise hand them to engine-manager, which serves several of them as its
 // own broker-side surface. One list so a new internal method is added once.
 var internalClientMethods = map[string]struct{}{
-	notifyEngineNotificationsReset: {},
+	nodepolicy.MethodPrepareBoundEngine:  {},
+	nodepolicy.MethodCancelBoundEngine:   {},
+	nodepolicy.NotifyBoundEnginePrepared: {},
+	nodepolicy.MethodActivateBoundEngine: {},
+	notifyEngineNotificationsReset:       {},
 	// Peer relay notifications: only engine-manager relays these, with a
 	// verified caller.
 	policyRelayRequestMethod:       {},
@@ -511,6 +515,9 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			Engine string `json:"engine"`
 		}
 		if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
+			if b.handleBoundEngineOff(msg, target.Engine) {
+				return
+			}
 			yieldsToOff, reserved, operationID, err := b.admitLocalEngineOff(target.Engine)
 			if err != nil {
 				_ = b.codec.RespondError(msg.ID, -32000, err.Error())

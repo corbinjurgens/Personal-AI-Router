@@ -352,7 +352,8 @@ type Proxy struct {
 	// admission is the node-wide admission controller every facade shares
 	// (FORK_DESIGN.md §3.3). Process-wide for the same reason as the
 	// reservation map: the limits are the machine's, not an engine's.
-	admission *admissionController
+	admission    *admissionController
+	boundEngines boundEngineWaiters
 
 	// routing is the engine-independent routing listener. It follows the
 	// activated policy and is owned by the process, not by any facade.
@@ -1462,6 +1463,9 @@ func (p *Proxy) handleMessage(msg *Message) {
 	// cannot know which facade a bare method is for. Split once here so every
 	// case below dispatches on the bare method.
 	engine, method := engines.SplitAddressedMethod(msg.Method)
+	if p.handleBoundEngineNotification(msg, engine, method) {
+		return
+	}
 
 	switch method {
 	case noderec.NotifyNodes:

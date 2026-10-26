@@ -24,6 +24,14 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func (p *Proxy) handleBoundEngineNotification(msg *Message, engine, method string) bool {
+	if engine != "" || method != nodepolicy.NotifyBoundEnginePrepared || !msg.IsNotification() {
+		return false
+	}
+	p.receiveBoundEnginePrepared(msg.Params)
+	return true
+}
+
 // bufferSettings checks conversions and old/new body overlap plus the separate
 // overflow probe before a policy can change admission or process authority.
 func (p *Proxy) bufferSettings(policy nodepolicy.Policy) (int64, time.Duration, error) {

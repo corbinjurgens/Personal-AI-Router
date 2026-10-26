@@ -670,20 +670,29 @@ func withoutRevision(raw json.RawMessage) json.RawMessage {
 // persisted and not active. A landed replacement whose durability failed is
 // adopted and applied the same way, then reported to the caller as a server error.
 func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.Policy, error)) (nodepolicy.Policy, error) {
+	b.engineConfigMu.Lock()
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	policy, err := build(r.current)
 	if err != nil {
 		r.mu.Unlock()
+		b.engineConfigMu.Unlock()
+		return nodepolicy.Policy{}, err
+	}
+	if err := b.boundPolicyChangeLocked(r.current, policy); err != nil {
+		r.mu.Unlock()
+		b.engineConfigMu.Unlock()
 		return nodepolicy.Policy{}, err
 	}
 	if err := policy.ValidateEngineBindings(b.engineModelNaming); err != nil {
 		r.mu.Unlock()
+		b.engineConfigMu.Unlock()
 		return nodepolicy.Policy{}, &invalidParamsError{err}
 	}
 	policy, err = r.publishLocked(policy)
 	if err != nil && !errors.Is(err, durablefile.ErrReplaced) {
 		r.mu.Unlock()
+		b.engineConfigMu.Unlock()
 		return nodepolicy.Policy{}, &policySaveError{err: err}
 	}
 	listenerChanged := policy.Routing.Listener.Enabled != r.current.Routing.Listener.Enabled ||
@@ -694,6 +703,7 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 	r.recoveryRequired = false
 	r.activationErr = ""
 	r.mu.Unlock()
+	b.engineConfigMu.Unlock()
 	b.publishNodeProjection()
 	// A listener the policy just enabled has no proxy to activate it in until
 	// the background start has replayed the policy, so its revision is pending

@@ -5,6 +5,29 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-engine-manager
 
+The broker-only parent request `engine:activate-bound-engine` supplies a
+zero-source bound activation with operation ID, engine/model, accepted policy
+revision, manager incarnation, absolute preparation deadline and optional
+verified peer ID/relationship incarnation. It has no ec endpoint. The manager
+rechecks current peer relationship and management permission, policy projection,
+pause and lock before admission and after waiting for the lifecycle lock.
+Revocation or cancellation can end that wait before effects. Cold admission
+uses the existing mutation gate to exclude competing starts, refuses a running
+source, and delegates startup, precise owned reclaim and durable intent to
+`StartWith`. Automatic local and peer demand both yield to local Off and pause
+through existing work cancellation; persisted intent keeps its actual origin.
+The wrapper never stops a source, changes launch settings or loads a model.
+Local Off enters the existing Stop admission while cold startup is reserved,
+persists Off before cancelling startup and retains exclusion through physical
+stop. Broker retries use the private `boundOperationId` option on `engine:stop`;
+the response is `{applied}` and a scope whose cold operation has ended has no
+effects against a later manual On or an E4 reservation. The broker retains its
+original operation lock through Off discharge and returns the ordinary status
+to the local client. A transport-uncertain cold result retains its original
+operation ID and blocks new activation until verified Off or manager recovery.
+Server readiness does not certify the requested model; the broker verifies
+fresh canonical inventory before replying to the proxy.
+
 Internal automatic replacement reuses the E4 switch transaction. Optional
 `automatic: true` in prepare/checkpoint and receipt contracts describes cause,
 independently of authenticated local/remote origin. The public request has no

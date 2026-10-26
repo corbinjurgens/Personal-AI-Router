@@ -117,6 +117,7 @@ type engineState struct {
 // layer runs the long ones (install, start) in goroutines so the read
 // loop stays responsive.
 type Executor struct {
+	boundActivation *boundEngineActivation // switchAdmission; current cold operation
 	// switchAdmission protects reservation admission and active mutation counts;
 	// switchMu serializes checkpoint steps without holding the admission gate.
 	switchAdmission   sync.Mutex

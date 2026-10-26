@@ -5,6 +5,43 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+Bound engine preparation uses private correlated notifications
+`admission/prepare-bound-engine`, `admission/cancel-bound-engine` and
+`node/bound-engine-prepared`. Requests contain request/proxy-run IDs, active
+policy revision, exact native engine/model and remaining `budgetMs` (bounded
+to 90 seconds). Peer ingress supplies its verified `peerId` and relationship
+`peerIncarnation` together. These are worker messages, blocked at public
+client and peer relay entry points. They carry no inference body or credential.
+
+The broker retains the submitting proxy and current manager through acceptance
+and reply. It resolves the current binding, served permission, availability,
+facade, installation and lock evidence. A healthy target needs inference
+permission only and must expose the requested canonical model. A running target
+missing that model refuses without restart. A cold target with no running
+source uses the parent-only `engine:activate-bound-engine` wrapper around
+manager startup. One eligible conflicting source uses the existing bounded
+automatic E4 transaction and its drain, ownership, receipt and recovery fences.
+Multiple sources or a protected resident refuse displacement. Peer mutation
+requires a current target-local management grant in addition to the exact
+relationship incarnation, rechecked at serialized acceptance.
+
+Same-target waiters share one operation without extending its original deadline;
+another target refuses busy. Replacement waits for the minimum dwell after
+broker startup or any completed manual/automatic replacement, inside that same
+budget. Healthy targets bypass dwell. Last-waiter cancellation prevents new
+acceptance; accepted E4 work retains node ownership and its initial deadline.
+Relevant binding, served and resident edits refuse busy before persistence while
+automatic work or unresolved recovery reserves those engines. Unrelated policy
+edits remain allowed. Success requires healthy backend publication and fresh
+canonical inventory; it grants no model load, qualification or admission ticket.
+Terminal automatic receipts keep these reservations until manager release and
+durable settlement succeed. Local Off can preempt cold activation through the
+existing Stop owner, with operation-scoped delivery and physical discharge under
+the original operation lock. A transport-uncertain cold result retains its
+original operation ID and activation fence until verified Off or a recovered
+manager replaces the original worker.
+The seam is separate from stopped-engine offers and HTTP dispatch integration.
+
 `policy:set` accepts target-owned `engineBindings`, a list of `{engine, model}`
 native references. Absence and `[]` disable the binding configuration; new
 local and peer readbacks always emit `engineBindings: []` when empty. The policy

@@ -38,6 +38,9 @@ func (e *Executor) admitMutation(engine string) (func(), error) {
 }
 
 func (e *Executor) admitMutationLocked(engine string) (func(), error) {
+	if e.switchMutations[""] > 0 {
+		return nil, &switchBusyError{engine}
+	}
 	e.desired.mu.Lock()
 	state, err := e.desired.load()
 	e.desired.mu.Unlock()
@@ -62,10 +65,31 @@ func (e *Executor) trackMutationLocked(engine string) func() {
 // it before waiting for the reserved lifecycle lock. Track the stop so a newly
 // released reservation cannot be replaced while this veto finishes cleanup.
 func (e *Executor) admitStop(engine string, origin intentOrigin, operationID string) (func(), error) {
+	return e.admitStopScoped(engine, origin, operationID, false)
+}
+
+func (e *Executor) admitStopScoped(engine string, origin intentOrigin, operationID string, boundOnly bool) (func(), error) {
 	e.switchAdmission.Lock()
 	defer e.switchAdmission.Unlock()
 	e.desired.mu.Lock()
 	state, err := e.desired.load()
+	if cold := e.boundActivation; err == nil && cold != nil && cold.engine == engine && origin == intentLocal && (operationID == "" || boundOnly && operationID == cold.operationID) {
+		state.setIntent(engine, false, intentLocal)
+		err = e.desired.save(state)
+		e.desired.mu.Unlock()
+		e.remoteWork.cancelEngine(engine, &localVetoError{code: codeLocalVeto, reason: engineOffVeto(engine)})
+		if err != nil {
+			return nil, err
+		}
+		e.emitIntent()
+		e.switchMutations[""]++ // retain exclusion until physical Stop completes
+		done := e.trackMutationLocked(engine)
+		return func() { e.switchAdmission.Lock(); e.switchMutations[""]--; e.switchAdmission.Unlock(); done() }, nil
+	}
+	if boundOnly {
+		e.desired.mu.Unlock()
+		return nil, err
+	}
 	if err == nil && operationID != "" {
 		cp := state.PendingSwitch
 		if origin != intentLocal || cp == nil || cp.OperationID != operationID || cp.Phase == settings.SwitchCheckpointReleased || !cp.YieldsToLocalOff() || (cp.SourceEngine != engine && cp.TargetEngine != engine) {

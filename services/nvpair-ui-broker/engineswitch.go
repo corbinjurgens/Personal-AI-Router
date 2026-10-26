@@ -777,6 +777,10 @@ func (b *Broker) acceptEngineSwitchSubmission(ctx context.Context, p settings.Sw
 			runtime.mu.Unlock()
 			return settings.SwitchResult{}, switchError(settings.SwitchErrorInterrupted, "Automatic deadline expired or source changed before acceptance.")
 		}
+		if err := b.admitBoundSwitchLocked(ctx, runtime); err != nil {
+			runtime.mu.Unlock()
+			return settings.SwitchResult{}, err
+		}
 		r.Automatic, r.Deadline = true, automatic.deadline
 	}
 	refuse := func(err error) (settings.SwitchResult, error) {
