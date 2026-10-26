@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"strings"
@@ -360,6 +361,23 @@ type IdleConfig struct {
 	WakeTimeoutSeconds int `json:"wakeTimeoutSeconds"`
 }
 
+// RequestOptionsMode controls precedence without changing request-owned fields
+// outside the configured options. The omitted mode preserves client overrides.
+type RequestOptionsMode string
+
+const (
+	RequestOptionsDefaults RequestOptionsMode = "defaults"
+	RequestOptionsEnforced RequestOptionsMode = "enforced"
+)
+
+// Effective returns the mode used for comparison and request processing.
+func (m RequestOptionsMode) Effective() RequestOptionsMode {
+	if m == "" {
+		return RequestOptionsDefaults
+	}
+	return m
+}
+
 // Profile describes one model as served on this node.
 type Profile struct {
 	Name         string `json:"name"`
@@ -376,8 +394,14 @@ type Profile struct {
 	MaxConcurrent int   `json:"maxConcurrent,omitempty"`
 	// RequestOptions is merged into every request body for this model before it
 	// reaches the engine, e.g. {"options":{"num_ctx":16384}} for Ollama or
-	// {"keep_alive":"10m"}. Keys already present in the request win.
+	// {"keep_alive":"10m"}. Keys already present win in the default mode;
+	// enforced mode replaces each configured leaf, recursively merging objects.
 	RequestOptions json.RawMessage `json:"requestOptions,omitempty"`
+	// Enforced replaces configured leaves; defaults allows request overrides.
+	RequestOptionsMode RequestOptionsMode `json:"requestOptionsMode,omitempty"`
+	// LocalOnly protects these options, their mode and this profile's identity
+	// from peer policy writes. Only the target's local policy writer changes it.
+	LocalOnly bool `json:"localOnly,omitempty"`
 	// MaxOutputTokens is the most output a request for this model may ask for
 	// under strict admission. 0 means unset. It must be below ContextTokens.
 	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
@@ -387,6 +411,89 @@ type Profile struct {
 	// same engine, model, model content, launch configuration and request
 	// options. Concrete requests ignore it.
 	Qualification *QualificationRef `json:"qualification,omitempty"`
+}
+
+func (p *Profile) UnmarshalJSON(data []byte) error {
+	type wire Profile
+	var next wire
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for key, value := range fields {
+		if (strings.EqualFold(key, "localOnly") || strings.EqualFold(key, "requestOptionsMode")) && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return errors.New("profile inference settings have an invalid field type")
+		}
+	}
+	*p = Profile(next)
+	return nil
+}
+
+// copyProfiles separates mutable option bytes and profile metadata at policy
+// ownership boundaries. Qualification references and capabilities are mutable too.
+func copyProfiles(profiles []Profile) []Profile {
+	out := slices.Clone(profiles)
+	for i := range out {
+		out[i].RequestOptions = bytes.Clone(out[i].RequestOptions)
+		out[i].Capabilities = slices.Clone(out[i].Capabilities)
+		if out[i].Qualification != nil {
+			q := *out[i].Qualification
+			out[i].Qualification = &q
+		}
+	}
+	return out
+}
+
+// validateEnforcedOptions checks decoded keys before any object map can discard
+// duplicate evidence. Arrays and scalars are configured leaves, not merge paths.
+func validateEnforcedOptions(raw json.RawMessage, depth int) error {
+	const maxObjectDepth = 64
+	if depth >= maxObjectDepth {
+		return errors.New("requestOptions object nesting exceeds the enforced limit")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := dec.Token(); err != nil || token != json.Delim('{') {
+		return errors.New("enforced requestOptions must be a nonempty JSON object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		if len(seen) >= 1024 {
+			return errors.New("requestOptions object members exceed the enforced limit")
+		}
+		token, err := dec.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return errors.New("invalid enforced requestOptions")
+		}
+		for previous := range seen {
+			if strings.EqualFold(previous, key) {
+				return errors.New("ambiguous enforced requestOptions")
+			}
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return errors.New("invalid enforced requestOptions")
+		}
+		if bytes.HasPrefix(bytes.TrimSpace(value), []byte("{")) {
+			if err := validateEnforcedOptions(value, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return errors.New("invalid enforced requestOptions")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("invalid enforced requestOptions")
+	}
+	if depth == 0 && len(seen) == 0 {
+		return errors.New("enforced requestOptions must be a nonempty JSON object")
+	}
+	return nil
 }
 
 // QualificationRef names one revision of a local qualification. Revision is a
@@ -557,6 +664,15 @@ func (p Policy) Validate() error {
 		}
 		if err := pr.validateOutputAndQualification(); err != nil {
 			return fmt.Errorf("profiles[%d] %q: %w", i, pr.Name, err)
+		}
+		switch pr.RequestOptionsMode.Effective() {
+		case RequestOptionsDefaults:
+		case RequestOptionsEnforced:
+			if err := validateEnforcedOptions(pr.RequestOptions, 0); err != nil {
+				return fmt.Errorf("profiles[%d]: %w", i, err)
+			}
+		default:
+			return fmt.Errorf("profiles[%d]: invalid requestOptionsMode", i)
 		}
 		if len(pr.RequestOptions) > 0 {
 			var obj map[string]json.RawMessage
@@ -795,6 +911,9 @@ func (p *Policy) normalize() {
 	}
 	for i := range p.Profiles {
 		pr := &p.Profiles[i]
+		if pr.RequestOptionsMode == RequestOptionsDefaults {
+			pr.RequestOptionsMode = ""
+		}
 		pr.Capabilities = nilIfEmpty(pr.Capabilities)
 		if len(pr.RequestOptions) > 0 {
 			if canonical, err := json.Marshal(pr.RequestOptions); err == nil {
