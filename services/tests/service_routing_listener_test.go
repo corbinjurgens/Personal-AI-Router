@@ -244,8 +244,9 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 	})
 
 	t.Run("newest window survives process churn", func(t *testing.T) {
+		before := history(t, a, nodepolicy.MethodRoutingGetInitial)
 		lastID := uint64(0)
-		for _, record := range history(t, a, nodepolicy.MethodRoutingGetInitial).Requests {
+		for _, record := range before.Requests {
 			id, err := strconv.ParseUint(record.Request.RequestID, 10, 64)
 			if err != nil {
 				t.Fatal(err)
@@ -253,10 +254,37 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 			lastID = max(lastID, id)
 		}
 		lastID += nodepolicy.RoutingHistoryRecords + 4
+		var newest, other nodepolicy.RoutingHistoryInitial
+		completedRequests := 0
+		defer func() {
+			if !t.Failed() {
+				return
+			}
+			// Capture only bounded history metadata, without another RPC on the
+			// failure path. Numeric membership and timestamp rank are separate:
+			// these observations must distinguish intake lag from clock rollback
+			// or an incorrect expected request range before changing the oracle.
+			t.Logf("history churn: completed HTTP refusals=%d expected retained IDs=%d..%d origin=%s run=%s",
+				completedRequests, lastID-nodepolicy.RoutingHistoryRecords+1, lastID, run.OriginNodeID, run.ProxyRunID)
+			for _, window := range []struct {
+				name    string
+				initial nodepolicy.RoutingHistoryInitial
+			}{
+				{"before churn", before},
+				{"last client a snapshot", newest},
+				{"client b comparison snapshot", other},
+			} {
+				t.Logf("history churn %s: records=%d", window.name, len(window.initial.Requests))
+				for i, record := range window.initial.Requests[:min(len(window.initial.Requests), nodepolicy.RoutingHistoryRecords)] {
+					t.Logf("history churn %s[%d]: key=%+v createdAt=%d seq=%d state=%s reason=%s terminal=%t",
+						window.name, i, record.Request, record.CreatedAt, record.Seq, record.State, record.Reason, record.EndedAt != nil)
+				}
+			}
+		}()
 		for range nodepolicy.RoutingHistoryRecords + 4 {
 			egressProcessHTTP(t, f.client, http.MethodPost, f.port, "/v1/chat/completions", []byte(`{"model":"bad\nmodel"}`), http.StatusBadRequest)
+			completedRequests++
 		}
-		var newest nodepolicy.RoutingHistoryInitial
 		neEventually(t, "more than 256 actual requests converge to the retained window", 30*time.Second, func() bool {
 			newest = history(t, a, nodepolicy.MethodRoutingGetInitial)
 			if len(newest.Requests) != nodepolicy.RoutingHistoryRecords {
@@ -293,7 +321,7 @@ func TestRoutingHistoryProductionChain(t *testing.T) {
 			}
 			return true
 		})
-		other := history(t, b, nodepolicy.MethodRoutingGetInitial)
+		other = history(t, b, nodepolicy.MethodRoutingGetInitial)
 		if !reflect.DeepEqual(newest, other) {
 			t.Fatal("the two local subscriptions disagree on the newest retained window")
 		}

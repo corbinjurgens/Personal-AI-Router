@@ -751,7 +751,7 @@ func i7BuffersBroker(t *testing.T, capacity, wait int, setup ...func(*serviceFix
 	if err != nil {
 		t.Fatalf("locate registered empty scanner fixture: %v", err)
 	}
-	jointCopyExecutable(t, self, f.scannerPath)
+	f.copyExecutable(self, f.scannerPath)
 	scannerPort := freePort(t)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort), "USERPROFILE="+f.configDir, "OLLAMA_HOST=")
