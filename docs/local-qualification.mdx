@@ -137,6 +137,27 @@ itself.
 
 ## Installing strict capacity
 
+**Inference-settings draft status:** the shared policy declares
+`requestOptionsMode`; omitted mode means `defaults`, and explicit `defaults`
+normalizes to omission. Task 2's effective-mode binding into qualification
+evidence and installed strict capacity is **pending**. The existing checks
+below describe this draft's landed proxy. Do not treat a saved `enforced`
+profile as proof of runtime enforcement or qualification under that mode.
+
+The intended qualification rule requires equal options and equal effective
+mode in profile and evidence. Defaults-mode requests allow client overrides;
+enforced-mode requests replace configured leaves recursively before strict
+validation. This future runtime path must retain strict key/shape checks and
+refuse configured-key ambiguity with a fixed message. Unconfigured fields
+remain request-controlled within existing strict admission bounds.
+
+The separate `localOnly` flag is already a target-owned policy-edit lock. It
+does not supply qualification, force a request value or install capacity.
+See the [broker contract](../services/nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks-draft)
+for the landed administrative rules. The typed settings editor is **pending
+Task 4**; engine-specific typed numeric validation is not claimed here. Advanced
+policy validation does not establish that an engine accepts a sampler value.
+
 The proxy derives its strict capability whenever the policy or the engine identity
 changes, and reports it to the broker. A profile's model is installed only when
 all of the following hold:

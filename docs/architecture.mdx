@@ -922,6 +922,29 @@ new acceptance, including queued broker writes, while already accepted work
 can finish or reconcile and remains visible in progress and receipt reads.
 It does not stop or unpair the device.
 
+### Per-model inference settings (draft)
+
+Target policy profiles now carry `requestOptionsMode` and `localOnly`. Omitted
+mode means client-overridable `defaults`; omitted local-only means false.
+The shared `enforced` contract replaces each configured scalar/array leaf and
+merges objects recursively, leaving other request fields client-controlled.
+Proxy enforcement and qualification binding are **pending Task 2**; the typed
+desktop controls are **pending Task 4**, so this draft does not claim either
+runtime or GUI acceptance.
+
+The implemented target-owned `localOnly` lock protects the profile's complete
+options, effective mode, flag and existence at its engine/model identity from
+every peer. It does not force request values. Conversely, enforced precedence
+does not prevent granted remote edits when the profile is unlocked. Other
+profile metadata remains editable under existing rules. At remote acceptance,
+the broker checks permission, revision, existing recovery/validation and then
+the stored lock under the writer lock. A refused protected edit is
+`-32014` / `remote_setting_locked` with no partial save or publication, distinct
+from permission denial (`-32012`), local veto (`-32011`) and conflict (`-32010`).
+The existing code/message relay identifies only bounded stored engine/model,
+or uses a fixed generic explanation for a new-profile lock attempt.
+See the [broker policy contract](../services/nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks-draft).
+
 The broker owns one pause fence: an accepted pause of either origin, stored
 `paused`, or live `draining`/`paused`. It projects `managementBlocked` to the
 engine-manager under the existing projection ordering lock, including before

@@ -1664,6 +1664,17 @@ admission owner.
    `wake-timeout`.
 3. **Profile** by `(engine, normalized model)`. Its `requestOptions` merge into
    the body recursively for objects, with keys in the request winning.
+   **Inference-settings draft status:** shared policy now declares
+   `requestOptionsMode` (`defaults` when omitted, or `enforced`) and the separate
+   administrative `localOnly` flag. Task 2 proxy enforcement remains pending
+   at this draft's source. The paragraph above describes current request
+   behavior, not completed enforced-mode processing. Planned enforced mode
+   replaces configured leaves recursively, leaves unconfigured fields alone,
+   and refuses ambiguous configured keys before engine contact with a fixed
+   message. Qualification must bind the effective mode as well as option bytes;
+   that proxy binding is also pending. `localOnly` is already enforced by the
+   broker's peer policy writer and never means request precedence. See the
+   [target policy contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks-draft).
 4. **Concurrency**: `profile.maxConcurrent`, else
    `admission.maxConcurrentPerModel`; at the limit the request queues, then
    `busy`.

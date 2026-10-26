@@ -625,6 +625,17 @@ Engine switching also has two internal process-scoped requests:
 
 `spec.md` §12 is normative; in short:
 
+**Model inference settings draft:** the shared policy fields
+`requestOptionsMode` and `localOnly`, plus the broker's remote lock refusal,
+are implemented. Task 2's proxy enforcement and effective-mode qualification
+binding are pending, as is Task 4's typed desktop editor. Current profile merging
+below remains client-wins. The intended enforced mode replaces configured
+leaves recursively without changing unconfigured request fields. The serving
+node owns this processing: a request routed through the Mac to PC3 uses PC3's
+profile, not the Mac's peer-candidate defaults. See the
+[broker contract](../nvpair-ui-broker/README.md#model-inference-settings-and-target-owned-locks-draft)
+for the landed policy/lock behavior and the pending precedence example.
+
 - **Admission.** One controller for the whole process decides whether
   inference may run on this machine: in the cluster ingress before forwarding a
   peer's request, and before dispatching a local request to this node's own
