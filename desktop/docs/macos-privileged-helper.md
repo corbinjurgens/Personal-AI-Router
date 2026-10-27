@@ -125,7 +125,7 @@ NVIDIA-signed `.app`.
 **TOCTOU / symlink hardening.** Before mutating firewall state the daemon
 re-validates the derived bundle: reject path traversal, reject a symlinked
 `.app` / `cli-bin` (final component opened with `O_NOFOLLOW`), reject
-group/other-writable ancestor directories, and verify the bundle signature
+world-writable ancestor directories, and verify the bundle signature
 against `appCodeSigningRequirement`. Immediately before each `socketfilterfw`
 invocation it re-opens the individual binary with `O_NOFOLLOW` and re-verifies
 that binary's own NVIDIA signature, and it now **fails** (rather than ignoring)

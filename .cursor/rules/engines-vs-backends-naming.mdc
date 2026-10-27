@@ -13,7 +13,7 @@ SPDX-License-Identifier: Apache-2.0
 - New TypeScript names use `engine`, not `backend`.
 - Existing backend JSON-RPC method names, binary names, payload fields, and
   backend service symbols are external contracts; preserve their exact spelling.
-- `EngineType` is a closed union. Narrow strings at process, IPC, persisted
+- `EngineType` includes built-in and registered descriptor-backed engines. Narrow strings at process, IPC, persisted
   data, and network boundaries before using them as engine identifiers.
-- PAIR has no runtime plugin or custom-engine registry. Supported engines come
-  from the backend capability surface and the canonical shared engine list.
+- Supported engines come from the backend capability surface, including custom
+  descriptor registrations.

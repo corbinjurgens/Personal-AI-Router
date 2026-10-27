@@ -44,8 +44,9 @@ policies, bulletins, and disclosure information.
 PAIR is a LAN-first, multi-process application:
 
 - Electron renderer code uses a typed preload bridge to reach Electron main.
-- Electron main starts `nvpair-ui-broker` and exchanges newline-delimited
-  JSON-RPC 2.0 over the broker's standard input and output.
+- Electron main attaches to `nvpair-service`, starting it if needed. The service
+  owns `nvpair-ui-broker` and communicates with it over newline-delimited
+  JSON-RPC 2.0 on standard input and output.
 - The broker supervises Go workers and relays their control-plane methods and
   notifications.
 - Discovery and selected metadata endpoints operate on the local network.

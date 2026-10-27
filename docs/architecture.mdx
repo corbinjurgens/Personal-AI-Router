@@ -1053,9 +1053,9 @@ stale or hand-placed binary is caught rather than silently supervised.
 stamped from `versions.json`. Building one component by hand without restaging is
 the one thing to avoid: the broker keeps running whatever is in `build/bin/`.
 
-Both paths produce binaries you run on the machine that built them. This tree
-provides build materials only. There is no packaging, installer, or signing step
-here, and installable builds come from the
+Both paths produce binaries you run on the machine that built them. Reference
+installer tooling is available under `services/installer`; installable builds
+are also available from the
 [releases page](https://github.com/NVIDIA/Personal-AI-Router/releases). Refer to
 [Building PAIR](building.mdx).
 

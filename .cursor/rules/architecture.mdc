@@ -13,15 +13,15 @@ SPDX-License-Identifier: Apache-2.0
 
 - User-facing copy and all new code use **engine**, never **backend**.
 - Existing wire types such as `BackendInfo` may retain their contract name.
-- `EngineType` is a closed union. Narrow external strings with
-  `isEngineType()`.
-- PAIR has no plugin or custom-engine concept.
+- `EngineType` includes built-in and registered descriptor-backed engines.
+  Narrow external strings with `isEngineType()`.
 
 ## Runtime ownership
 
 The sibling `services/` tree is the backend source of truth.
 
-- Electron starts only `nvpair-ui-broker`.
+- Electron attaches to `nvpair-service`, starting it if needed; the service owns
+  `nvpair-ui-broker`.
 - The broker supervises all runtime workers.
 - PAIR must not reimplement backend services in TypeScript.
 - Never run a worker from both Electron and the broker.
@@ -35,9 +35,10 @@ The binary inventory and launch ownership live in
 - Renderer service data uses `window.pairApi`.
 - Electron-native operations use `window.windowApi`.
 - Preload transports service calls through `service-bridge:*` IPC.
-- Electron main talks to the broker over stdio JSON-RPC.
-- The `nvpair` terminal command launches the bundled Go `nvpair-tui`, which owns
-  its own broker. PAIR has no Electron-backed console client.
+- Electron main talks to the service over local JSON-RPC; the service talks to
+  the broker over stdio JSON-RPC.
+- The `nvpair` terminal command launches the bundled Go `nvpair-tui`, which attaches
+  to the same service. PAIR has no Electron-backed console client.
 - Renderer code (`src/ui/`) must not import from `src/electron/`.
 
 The only direct service-data HTTP polling in Electron is `/v1/node-info` for

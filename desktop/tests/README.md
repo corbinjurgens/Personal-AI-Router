@@ -41,7 +41,7 @@ test load:
 
 - **Network**: An axios request interceptor blocks any request whose host
   is not `127.0.0.1` / `localhost` / `::1`. Tests that
-  need HTTP must spin up a local fake (`tests/fixtures/release-server.ts`).
+  need HTTP must spin up a local fake.
 - **`PAIR_USER_DATA`** is set to a per-worker tmpdir so unit/contract tests
   that inject a `PathProvider` (via `initPlatform`) never write to the dev's
   real userData. Tests that want a different path can override it explicitly.
