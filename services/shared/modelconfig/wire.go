@@ -62,7 +62,9 @@ type RequestedLoad struct {
 // content digest. Path/ResolvedTarget correspond to servingFileBinding's source
 // and symlink target; size is positive signed-int64 decimal text and MtimeNS is
 // signed-int64 decimal text. Same-stat changes outside the samples are undetected.
-// Role order is model shards followed by optional draft shards, in native order.
+// Role order for resolved load bindings is model shards followed by optional
+// draft shards, in native order. Read-only ArtifactSummary also permits a
+// companion phase after model and draft artifacts.
 // The resolver must additionally prove completeness, regular files and confinement.
 type ArtifactBinding struct {
 	Role           string `json:"role"`
@@ -757,11 +759,21 @@ func (r InspectResult) Validate() error {
 	if len(r.Artifacts) > MaxArtifacts || r.Status == "resolved" && len(r.Artifacts) == 0 {
 		return fmt.Errorf("inspect.artifacts: bounded resolved artifacts required")
 	}
-	draft := false
+	phase := 0
 	for _, a := range r.Artifacts {
-		if a.Role == "draft" {
-			draft = true
-		} else if a.Role != "model" || draft {
+		switch a.Role {
+		case "model":
+			if phase != 0 {
+				return fmt.Errorf("inspect.artifacts: invalid role order")
+			}
+		case "draft":
+			if phase > 1 {
+				return fmt.Errorf("inspect.artifacts: invalid role order")
+			}
+			phase = 1
+		case "companion":
+			phase = 2
+		default:
 			return fmt.Errorf("inspect.artifacts: invalid role order")
 		}
 		if err := ValidateRevision(a.Size); err != nil || a.Size == "0" {

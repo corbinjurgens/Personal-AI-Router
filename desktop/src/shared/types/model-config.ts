@@ -74,7 +74,7 @@ export type ModelChange = {
     supersedesRequestId?: string
 }
 export type ArtifactSummary = {
-    role: string
+    role: 'model' | 'draft' | 'companion'
     identity: string
     size: string
     assurance: string

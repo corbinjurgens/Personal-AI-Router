@@ -17,7 +17,8 @@ func modelSettingsParamsError(err error) error {
 
 // InspectModel is a target-local read. The broker supplies authenticated node
 // identity after this reply; a worker never echoes a caller's target as proof.
-// The temporary bodies perform no file, network, native or lifecycle work.
+// Artifact inspection reads bounded local metadata and samples without native,
+// network, lifecycle, qualification or settings effects.
 func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectRequest) (modelconfig.InspectResult, error) {
 	if err := p.Validate(); err != nil {
 		return modelconfig.InspectResult{}, modelSettingsParamsError(err)
@@ -28,16 +29,15 @@ func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectReques
 	if err := ctx.Err(); err != nil {
 		return modelconfig.InspectResult{}, err
 	}
-	result := inspectModelArtifacts(p)
+	result, err := e.inspectModelArtifacts(ctx, p)
+	if err != nil {
+		return modelconfig.InspectResult{}, err
+	}
 	if p.Engine == "llamacpp" {
-		options, err := llamaModelSettingsOptions()
+		result.Options, err = modelInspectionOptions(result.Options)
 		if err != nil {
 			return modelconfig.InspectResult{}, err
 		}
-		for _, option := range options {
-			result.Options = append(result.Options, option.Descriptor.Clone())
-		}
-		result.Options = append(result.Options, modelSettingsExtraOptions()...)
 	}
 	estimate, err := estimateModelSettings(ctx, p, modelconfig.RequestedLoad{})
 	if err != nil {

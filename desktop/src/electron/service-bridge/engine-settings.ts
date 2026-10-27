@@ -315,7 +315,7 @@ function resolved(value: JsonValue | undefined): ResolvedLoad {
         throw new Error('Resolved options disagree with allocation.')
     if (!!result.resolverRevision !== !!result.reviewedInputId)
         throw new Error('Incomplete reviewed model identity.')
-    orderedArtifacts(result.artifacts)
+    orderedResolvedArtifacts(result.artifacts)
     if (
         new Set(result.artifacts.map(item => item.path)).size !== result.artifacts.length ||
         new Set(result.artifacts.map(item => item.resolvedTarget)).size !== result.artifacts.length
@@ -383,7 +383,7 @@ function strings(value: JsonValue | undefined, maximum = 256): string[] | undefi
         ? undefined
         : boundedArray(value, maximum).map(item => boundedText(item))
 }
-function orderedArtifacts(artifacts: Array<{ role: string }>): void {
+function orderedResolvedArtifacts(artifacts: Array<{ role: string }>): void {
     if (!artifacts.length || artifacts[0].role !== 'model')
         throw new Error('Model shards required first.')
     let draft = false
@@ -392,12 +392,25 @@ function orderedArtifacts(artifacts: Array<{ role: string }>): void {
         else if (item.role !== 'model' || draft) throw new Error('Invalid artifact role order.')
     }
 }
+function orderedSummaryArtifacts(artifacts: ArtifactSummary[]): void {
+    if (!artifacts.length || artifacts[0].role !== 'model')
+        throw new Error('Model shards required first.')
+    let phase = 0
+    for (const item of artifacts) {
+        if (item.role === 'model' && phase !== 0) throw new Error('Invalid artifact role order.')
+        if (item.role === 'draft') {
+            if (phase > 1) throw new Error('Invalid artifact role order.')
+            phase = 1
+        }
+        if (item.role === 'companion') phase = 2
+    }
+}
 function summary(value: JsonValue): ArtifactSummary {
     const row = shape(value, ['role', 'identity', 'size', 'assurance'])
     const size = revision(row.size)
     if (size === '0') throw new Error('Empty model artifact.')
     return {
-        role: choice(row.role, ['model', 'draft']),
+        role: choice(row.role, ['model', 'draft', 'companion']),
         identity: boundedText(row.identity, 256, true),
         size,
         assurance: boundedText(row.assurance, 256, true)
@@ -553,7 +566,7 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         estimate: estimate(row.estimate)
     }
     if (result.status === 'resolved' || result.artifacts?.length)
-        orderedArtifacts(result.artifacts ?? [])
+        orderedSummaryArtifacts(result.artifacts ?? [])
     if (new Set(result.options?.map(item => item.field)).size !== (result.options?.length ?? 0))
         throw new Error('Duplicate model option.')
     return result
@@ -825,7 +838,7 @@ export function parseEngineSettingsPreview(value: JsonValue | undefined): Engine
         row.requiredArtifacts === undefined
             ? undefined
             : boundedArray(row.requiredArtifacts, 1024).map(summary)
-    if (requiredArtifacts?.length) orderedArtifacts(requiredArtifacts)
+    if (requiredArtifacts?.length) orderedSummaryArtifacts(requiredArtifacts)
     return {
         settings: config(row.settings),
         serving: servingReadback(row.serving),
