@@ -48,6 +48,38 @@ func TestSnapshotCloneIsIndependent(t *testing.T) {
 	}
 }
 
+func TestMonitorSnapshotIPBytesAreIndependent(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   net.IP
+	}{
+		{name: "IPv4", ip: net.IP{192, 0, 2, 1}},
+		{name: "IPv6", ip: net.ParseIP("2001:db8::1")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := append(net.IP(nil), tt.ip...)
+			mon := &Monitor{snap: Snapshot{IfaceV4: map[int][]net.IP{1: {tt.ip}}}}
+			first := mon.Snapshot()
+			first.IfaceV4[1][0][0] ^= 0xff
+			if got := mon.Snapshot().IfaceV4[1][0]; !got.Equal(want) {
+				t.Errorf("fresh snapshot IP = %v, want %v", got, want)
+			}
+			if got := mon.snap.IfaceV4[1][0]; !got.Equal(want) {
+				t.Errorf("internal IP = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestMonitorSnapshotPreservesNilAndEmptyIPs(t *testing.T) {
+	mon := &Monitor{snap: Snapshot{IfaceV4: map[int][]net.IP{1: {nil, {}}}}}
+	got := mon.Snapshot().IfaceV4[1]
+	if got[0] != nil || got[1] == nil || len(got[1]) != 0 {
+		t.Errorf("snapshot IPs = %#v, want nil and non-nil empty", got)
+	}
+}
+
 func TestWatchProvidesInitialSnapshot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -79,7 +80,9 @@ func (s Snapshot) clone() Snapshot {
 	}
 	for idx, ips := range s.IfaceV4 {
 		cp := make([]net.IP, len(ips))
-		copy(cp, ips)
+		for i, ip := range ips {
+			cp[i] = slices.Clone(ip)
+		}
 		out.IfaceV4[idx] = cp
 	}
 	return out
