@@ -54,6 +54,18 @@ func InspectMetadata(path string) (Metadata, error) {
 	return inspectOpened(path, file, info)
 }
 
+// InspectOpenedMetadata inspects a caller-owned, verified descriptor without
+// reopening its pathname. The caller retains rooted path/inventory validation;
+// this parser preserves the same regular-file, identity and read-budget bounds.
+// It neither closes nor changes the descriptor's offset.
+func InspectOpenedMetadata(file *os.File) (Metadata, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return Metadata{}, err
+	}
+	return inspectOpened("", file, info)
+}
+
 func inspectOpened(path string, file *os.File, info os.FileInfo) (Metadata, error) {
 	opened, err := file.Stat()
 	if err != nil {
@@ -72,7 +84,10 @@ func inspectOpened(path string, file *os.File, info os.FileInfo) (Metadata, erro
 	}
 	build, readErr := filebuildinfo.Read(reader)
 	after, statErr := file.Stat()
-	pathAfter, pathErr := os.Lstat(path)
+	pathAfter, pathErr := after, statErr
+	if path != "" {
+		pathAfter, pathErr = os.Lstat(path)
+	}
 	if statErr != nil || pathErr != nil || !os.SameFile(opened, after) || !os.SameFile(opened, pathAfter) ||
 		!pathAfter.Mode().IsRegular() || opened.Size() != after.Size() || !opened.ModTime().Equal(after.ModTime()) ||
 		opened.Size() != pathAfter.Size() || !opened.ModTime().Equal(pathAfter.ModTime()) || reader.exhausted {
