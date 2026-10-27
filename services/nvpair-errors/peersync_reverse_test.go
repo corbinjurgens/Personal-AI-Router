@@ -76,10 +76,10 @@ func (c *errorSyncConn) Write(data []byte) (int, error) {
 
 func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 	t.Helper()
-	aCert, aKey := genLeaf(t, "uuid-a")
-	bCert, bKey := genLeaf(t, "uuid-b")
-	dirA := setupNode(t, aCert, aKey, map[string][]byte{"uuid-b": bCert})
-	dirB := setupNode(t, bCert, bKey, map[string][]byte{"uuid-a": aCert})
+	aCert, aKey := genLeaf(t, "node-a")
+	bCert, bKey := genLeaf(t, "node-b")
+	dirA := setupNode(t, aCert, aKey, map[string][]byte{"node-b": bCert})
+	dirB := setupNode(t, bCert, bKey, map[string][]byte{"node-a": aCert})
 	aMesh, bMesh := clustertrust.Open(dirA), clustertrust.Open(dirB)
 	f := &errorSyncFixture{sender: managerForNode("node-a"), receiver: managerForNode("node-b")}
 	f.ps = NewPeerSync(f.sender, aMesh, dirA)
@@ -137,7 +137,7 @@ func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 		t.Fatal(err)
 	}
 	f.event = DiscoveryEvent{Type: "discovered", Node: RawNode{
-		ID: "node-b", Host: "peer.example", Port: portNumber, TXT: []string{"cluster-uuid=uuid-b"},
+		ID: "node-b", Host: "peer.example", Port: portNumber, TXT: []string{"cluster-uuid=node-b"},
 	}}
 	f.expectedHost, f.expectedSNI = net.JoinHostPort("peer.example", port), "peer.example"
 	manager := func(uuid string, mesh *clustertrust.Mesh) *clustertrust.ReverseManager {
@@ -166,7 +166,7 @@ func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 		})
 		return m
 	}
-	f.local, f.remote = manager("uuid-a", aMesh), manager("uuid-b", bMesh)
+	f.local, f.remote = manager("node-a", aMesh), manager("node-b", bMesh)
 	f.ps.clients = clustertrust.NewPeerServiceClient(aMesh, clustertrust.PeerServiceClientOptions{
 		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: pushTimeout},
 		BaseConfigDir:     filepath.Dir(dirA), ResolveRoute: f.ps.resolveRoute,
@@ -191,7 +191,7 @@ func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 		},
 		DialReverse: func(ctx context.Context, base, uuid string, service noderec.ServiceKey) (net.Conn, error) {
 			f.reverseCalls.Add(1)
-			if base != filepath.Dir(dirA) || uuid != "uuid-b" || service != noderec.ServiceErrors {
+			if base != filepath.Dir(dirA) || uuid != "node-b" || service != noderec.ServiceErrors {
 				return nil, errors.New("unexpected private dial destination")
 			}
 			conn, err := f.local.Open(ctx, clustertrust.ReversePeer{UUID: uuid, Incarnation: "fixture-admission"}, service)
@@ -208,11 +208,11 @@ func newErrorSyncFixture(t *testing.T) *errorSyncFixture {
 func (f *errorSyncFixture) connect(t *testing.T, id string) {
 	t.Helper()
 	left, right := net.Pipe()
-	if err := f.local.Register(clustertrust.ReversePeer{UUID: "uuid-b", Incarnation: "fixture-admission"}, left, "uuid-a", id); err != nil {
+	if err := f.local.Register(clustertrust.ReversePeer{UUID: "node-b", Incarnation: "fixture-admission"}, left, "node-a", id); err != nil {
 		right.Close()
 		t.Fatalf("register local reverse session: %v", err)
 	}
-	if err := f.remote.Register(clustertrust.ReversePeer{UUID: "uuid-a", Incarnation: "fixture-admission"}, right, "uuid-a", id); err != nil {
+	if err := f.remote.Register(clustertrust.ReversePeer{UUID: "node-a", Incarnation: "fixture-admission"}, right, "node-a", id); err != nil {
 		t.Fatalf("register remote reverse session: %v", err)
 	}
 }
@@ -311,8 +311,8 @@ func TestErrorsSnapshotLostReplyDoesNotReplay(t *testing.T) {
 			if got := f.reverseCalls.Load(); got != wantReverse {
 				t.Fatalf("reverse dials after lost reply = %d, want %d (no fallback after dispatch)", got, wantReverse)
 			}
-			f.local.Revoke("uuid-b")
-			f.remote.Revoke("uuid-a")
+			f.local.Revoke("node-b")
+			f.remote.Revoke("node-a")
 			f.blocked.Store(true)
 			f.ps.pushAll(context.Background())
 			if got := f.accepted.Load(); got != 1 {
@@ -353,7 +353,7 @@ func TestErrorsSnapshotUnavailableFailsClosed(t *testing.T) {
 	}
 	test("missing reverse session", 1, 1, func(t *testing.T, f *errorSyncFixture) {})
 	test("missing pin", 0, 0, func(t *testing.T, f *errorSyncFixture) {
-		if err := os.Remove(filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json")); err != nil {
+		if err := os.Remove(filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -367,18 +367,18 @@ func TestErrorsSnapshotUnavailableFailsClosed(t *testing.T) {
 		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "admission.json"), "counter", 0)
 	})
 	test("pin belongs to another cluster", 0, 0, func(t *testing.T, f *errorSyncFixture) {
-		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json"), "clusterId", "other-cluster")
+		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "node-b.json"), "clusterId", "other-cluster")
 	})
 	test("invalid pin", 1, 1, func(t *testing.T, f *errorSyncFixture) {
 		f.connect(t, "11111111111111111111111111111111")
-		wrongCert, _ := genLeaf(t, "uuid-b")
-		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json"), "certPem", string(wrongCert))
+		wrongCert, _ := genLeaf(t, "node-b")
+		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "node-b.json"), "certPem", string(wrongCert))
 	})
 	test("pin revoked during setup", 1, 0, func(t *testing.T, f *errorSyncFixture) {
 		f.blocked.Store(false)
 		f.connect(t, "11111111111111111111111111111111")
 		f.beforeDial = func() {
-			if err := os.Remove(filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json")); err != nil {
+			if err := os.Remove(filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")); err != nil {
 				t.Error(err)
 			}
 		}
@@ -406,7 +406,7 @@ func TestErrorsSnapshotAuthorityChangesDuringSetup(t *testing.T) {
 		changeErrorSyncRecord(t, path, "epoch", 2)
 	})
 	test("peer readmission with same certificate", func(t *testing.T, f *errorSyncFixture) {
-		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json"), "admissionEpoch", 2)
+		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "node-b.json"), "admissionEpoch", 2)
 	})
 	test("endpoint withdrawn", func(t *testing.T, f *errorSyncFixture) {
 		event := f.event
@@ -475,7 +475,7 @@ func TestErrorsSnapshotCancellationAfterDispatch(t *testing.T) {
 func TestErrorsSnapshotAddressRecovery(t *testing.T) {
 	f := newErrorSyncFixture(t)
 	f.event.Node.Host = ""
-	f.event.Node.TXT = []string{"cluster-uuid=uuid-b", "ip=192.0.2.1"}
+	f.event.Node.TXT = []string{"cluster-uuid=node-b", "ip=192.0.2.1"}
 	f.event.Node.Addresses = []string{"127.0.0.1"}
 	f.expectedHost = net.JoinHostPort("127.0.0.1", strconv.Itoa(f.event.Node.Port))
 	f.expectedSNI = ""
@@ -492,7 +492,7 @@ func TestErrorsSnapshotAddressRecovery(t *testing.T) {
 	f.sender.upsert(localErr("a:one", "node-a", 1000))
 	f.ps.handleEvent(context.Background(), f.event)
 	assertErrorSnapshot(t, f.receiver, []ServiceError{localErr("a:one", "node-a", 1000)})
-	route, ok := f.ps.resolveRoute("uuid-b", noderec.ServiceErrors)
+	route, ok := f.ps.resolveRoute("node-b", noderec.ServiceErrors)
 	if !ok || route.Address != f.expectedHost {
 		t.Fatalf("resolved route = %+v, admitted=%t, want chosen loopback endpoint", route, ok)
 	}
@@ -516,7 +516,7 @@ func TestErrorsSnapshotDuplicatePrincipalFailsClosed(t *testing.T) {
 			// Both advertisements are present, even if only the first endpoint has
 			// been selected. Repeated resolution must never pick a map entry.
 			for range 20 {
-				if route, ok := f.ps.resolveRoute("uuid-b", noderec.ServiceErrors); ok || route != (clustertrust.PeerServiceRoute{}) {
+				if route, ok := f.ps.resolveRoute("node-b", noderec.ServiceErrors); ok || route != (clustertrust.PeerServiceRoute{}) {
 					t.Fatalf("ambiguous principal resolved: %+v admitted=%t", route, ok)
 				}
 			}
@@ -526,7 +526,7 @@ func TestErrorsSnapshotDuplicatePrincipalFailsClosed(t *testing.T) {
 			}
 			resolve(t, f, duplicate)
 			f.ps.pushAll(context.Background())
-			route, ok := f.ps.resolveRoute("uuid-b", noderec.ServiceErrors)
+			route, ok := f.ps.resolveRoute("node-b", noderec.ServiceErrors)
 			if !ok || route.Address != f.expectedHost || f.accepted.Load() != 2 {
 				t.Fatalf("resolved duplicate: route=%+v admitted=%t accepted=%d, want current endpoint and 2 snapshots", route, ok, f.accepted.Load())
 			}
@@ -649,16 +649,16 @@ func TestErrorsSnapshotPooledAuthorityChangesBeforeDispatch(t *testing.T) {
 		changeErrorSyncRecord(t, path, "epoch", 2)
 	}
 	peerReadmission := func(t *testing.T, f *errorSyncFixture) {
-		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json"), "admissionEpoch", 2)
+		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "node-b.json"), "admissionEpoch", 2)
 	}
 	revokePin := func(t *testing.T, f *errorSyncFixture) {
-		if err := os.Remove(filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json")); err != nil {
+		if err := os.Remove(filepath.Join(f.ps.clusterDir, "trusted", "node-b.json")); err != nil {
 			t.Error(err)
 		}
 	}
 	rotatePin := func(t *testing.T, f *errorSyncFixture) {
-		cert, _ := genLeaf(t, "uuid-b")
-		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json"), "certPem", string(cert))
+		cert, _ := genLeaf(t, "node-b")
+		changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "node-b.json"), "certPem", string(cert))
 	}
 	replaceEndpoint := func(t *testing.T, f *errorSyncFixture) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -823,7 +823,7 @@ func TestPeerSyncRunExitClosesIdleConnections(t *testing.T) {
 				t.Fatalf("create independent snapshot: %v", err)
 			}
 			req.Header.Set("Content-Type", "application/json")
-			response, err := f.ps.clients.Client("uuid-b", noderec.ServiceErrors).Do(req)
+			response, err := f.ps.clients.Client("node-b", noderec.ServiceErrors).Do(req)
 			if err != nil {
 				t.Fatalf("expose independent response: %v", err)
 			}
@@ -890,17 +890,17 @@ func TestErrorsSnapshotReadmissionRetiresPooledConnection(t *testing.T) {
 			f.connect(t, "11111111111111111111111111111111")
 			f.sender.upsert(localErr("a:one", "node-a", 1000))
 			f.ps.handleEvent(context.Background(), f.event)
-			before, ok := f.ps.resolveRoute("uuid-b", noderec.ServiceErrors)
+			before, ok := f.ps.resolveRoute("node-b", noderec.ServiceErrors)
 			if !ok {
 				t.Fatal("initial route unavailable")
 			}
-			changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json"), "admissionEpoch", 2)
-			members := mustJSON(t, []map[string]any{{"nodeUuid": "uuid-b", "state": "member", "clusterId": "test-cluster", "admissionEpoch": 2}})
+			changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "node-b.json"), "admissionEpoch", 2)
+			members := mustJSON(t, []map[string]any{{"nodeUuid": "node-b", "state": "member", "clusterId": "test-cluster", "admissionEpoch": 2}})
 			if err := os.WriteFile(filepath.Join(f.ps.clusterDir, "members.json"), members, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			after, ok := f.ps.resolveRoute("uuid-b", noderec.ServiceErrors)
-			incarnation, admitted := f.ps.mesh.PeerServiceIncarnation("uuid-b")
+			after, ok := f.ps.resolveRoute("node-b", noderec.ServiceErrors)
+			incarnation, admitted := f.ps.mesh.PeerServiceIncarnation("node-b")
 			if !ok || !admitted || after.Incarnation != incarnation || after.Incarnation == before.Incarnation || after.Generation != before.Generation || after.Address != before.Address {
 				t.Fatalf("readmission route: before=%+v after=%+v shared=%q admitted=%t/%t", before, after, incarnation, ok, admitted)
 			}

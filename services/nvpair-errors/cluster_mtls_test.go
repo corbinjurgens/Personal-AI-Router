@@ -191,3 +191,36 @@ func TestErrorsPeerSync_MTLSGate(t *testing.T) {
 		t.Fatal("an unpinned peer must not resolve a pin (cluster gate)")
 	}
 }
+
+func TestIngestRequiresPinnedCallerIdentity(t *testing.T) {
+	mgr := managerForNode("uuid-self")
+	keep := localErr("keep", "uuid-other", 1000)
+	mgr.ReconcilePeer("uuid-other", []ServiceError{keep})
+	srv, client := servePinnedErrorsMux(t, mgr)
+	post := func(env errors.SyncEnvelope) int {
+		t.Helper()
+		body, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal snapshot: %v", err)
+		}
+		resp, err := client.Post(srv.URL+"/v1/errors", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("post snapshot: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := post(errors.SyncEnvelope{NodeID: "uuid-other", Errors: []ServiceError{localErr("injected", "uuid-other", 2000)}}); got != http.StatusForbidden {
+		t.Errorf("mismatched identity status = %d, want 403", got)
+	}
+	assertErrorSnapshot(t, mgr, []ServiceError{keep})
+	if got := post(errors.SyncEnvelope{NodeID: "uuid-other"}); got != http.StatusForbidden {
+		t.Errorf("mismatched empty snapshot status = %d, want 403", got)
+	}
+	assertErrorSnapshot(t, mgr, []ServiceError{keep})
+	peer := localErr("peer", "uuid-peer", 1000)
+	if got := post(errors.SyncEnvelope{NodeID: "uuid-peer", Errors: []ServiceError{peer}}); got != http.StatusNoContent {
+		t.Fatalf("matched identity status = %d, want 204", got)
+	}
+	assertErrorSnapshot(t, mgr, []ServiceError{keep, peer})
+}
