@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // @vitest-environment jsdom
 
-import { act } from 'react'
+import { act, type ComponentProps } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -17,6 +17,20 @@ import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
+import type { EngineSettingsSnapshot } from '@/shared/types/engine-settings'
+import type { InspectModelResult } from '@/shared/types/model-config'
+import type { EngineProgress } from '@/shared/types/engines'
+import type { IEngineApi } from '@/ui/api/engine-api'
+import { ModelCopyModal } from '@/ui/components/ModelManager/ModelCopyModal'
+import { useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
+import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
+import { defaultPortableLoadFields } from '@/shared/utils/node-policy-model-copy'
+
+vi.mock('@/ui/components/ModelManager/ModelCopyModal', () => ({
+    ModelCopyModal: ({ open, onOpenChange }: ComponentProps<typeof ModelCopyModal>) =>
+        open ? <button onClick={() => onOpenChange(false)}>Close content copy owner</button> : null
+}))
 
 const identity = { engine: 'llamacpp', model: 'model' }
 const source =
@@ -123,6 +137,9 @@ beforeEach(() => {
         .mockResolvedValue({ version: 1, revision: '1', state: 'allowed', allowed: true })
     Object.defineProperty(window, 'pairApi', { configurable: true, value: api })
     useConnectionStore.setState({ connected: true, selfId: 'self' })
+    useEngineSettingsStore.setState({ entries: {}, modelDrafts: {} })
+    useClusterInvitationsStore.setState({ remoteManagementContext: 1 })
+    useEngineProgressStore.setState({ progress: new Map() })
     useNodesStore.setState({ nodes: new Map([['peer', node('peer')]]) })
     useNodeConfigurationStore.setState({
         management: new Map(),
@@ -383,5 +400,327 @@ describe('selective generation copy', () => {
         expect(written().request.nodeId).toBeUndefined()
         expect(container.textContent).toContain('This PC: Saved')
         expect(set).toHaveBeenCalledTimes(1)
+    })
+})
+
+describe('portable target-previewed copy', () => {
+    const getSettings = vi.fn<IEngineApi['getSettings']>()
+    const inspect = vi.fn<IEngineApi['inspectModel']>()
+    const review = vi.fn<IEngineApi['previewSettings']>()
+    const apply = vi.fn<IEngineApi['applySettings']>()
+    function settings(nodeId: string): EngineSettingsSnapshot {
+        return {
+            nodeId,
+            engine: 'llamacpp',
+            revision: 5,
+            appliedRevision: 5,
+            epoch: 'epoch',
+            sequence: 1,
+            settings: {
+                serverPort: nodeId === 'self' ? 1 : 77,
+                proxyPort: 2,
+                launchText:
+                    nodeId === 'self'
+                        ? '/source/local/path --device source-native-id'
+                        : 'destination launch',
+                modelLoads:
+                    nodeId === 'self'
+                        ? [
+                              {
+                                  modelId: 'model',
+                                  requested: { slots: 2, gpu: { mode: 'layers', layers: 20 } },
+                                  resolved: {
+                                      perSlotContext: 8192,
+                                      totalContext: 16384,
+                                      slots: 2,
+                                      gpu: { mode: 'layers', layers: 20 },
+                                      options: {},
+                                      artifacts: [
+                                          {
+                                              role: 'model',
+                                              path: '/source/local/model.gguf',
+                                              resolvedTarget: '/source/blob',
+                                              size: '1',
+                                              mtimeNs: '1',
+                                              sampleSha256: 'source approval'
+                                          }
+                                      ],
+                                      nativeBuildId: 'source-build',
+                                      sourceInputDigest: 'source-digest',
+                                      presetDigest: 'source-preset'
+                                  }
+                              }
+                          ]
+                        : undefined
+            },
+            effectiveServerPort: 77,
+            effectiveProxyPort: 2,
+            running: false,
+            adopted: false,
+            editable: true,
+            reason: '',
+            format: '',
+            phase: 'idle',
+            error: '',
+            requestId: ''
+        }
+    }
+    function inspected(nodeId: string, modelId = 'model'): InspectModelResult {
+        return {
+            engine: 'llamacpp',
+            nodeId,
+            modelId,
+            status: 'resolved',
+            source: `${nodeId} local resolver`,
+            estimate: { status: 'unknown' },
+            artifacts: [
+                {
+                    role: 'model',
+                    identity: `${nodeId}-artifact`,
+                    size: '1',
+                    assurance: 'local binding'
+                }
+            ],
+            options: [
+                {
+                    field: 'slots',
+                    label: 'Slots',
+                    kind: 'integer',
+                    supported: true,
+                    portable: true
+                },
+                {
+                    field: 'gpu',
+                    label: 'GPU placement',
+                    kind: 'enum',
+                    values: ['cpu', 'layers', 'native-default'],
+                    supported: true,
+                    portable: true
+                },
+                {
+                    field: 'native.device',
+                    label: 'Native device',
+                    kind: 'string',
+                    supported: false,
+                    portable: false,
+                    reason: 'Local only'
+                }
+            ]
+        }
+    }
+    beforeEach(() => {
+        getSettings.mockReset().mockImplementation(async target => settings(target.nodeId))
+        inspect
+            .mockReset()
+            .mockImplementation(async request =>
+                inspected(request.nodeId ?? 'self', request.modelId)
+            )
+        review.mockReset().mockImplementation(async request => ({
+            settings: { serverPort: 999, proxyPort: 998, launchText: 'not a baseline' },
+            revision: 5,
+            policyRevision: '1',
+            previewDigest: `target-digest-${request.nodeId}`,
+            errors: {},
+            restart: true,
+            rebind: false,
+            diff: [
+                {
+                    field: 'gpu',
+                    before: 'target native placement',
+                    after: 'target-resolved finite placement'
+                }
+            ],
+            impact: {
+                restartScope: 'whole-router',
+                affectedModels: ['target model'],
+                drainTimeoutSeconds: 60,
+                mayInterruptActive: true,
+                staysOff: true
+            }
+        }))
+        apply.mockReset().mockImplementation(async request => {
+            getSettings.mockResolvedValue({
+                ...settings(request.nodeId),
+                revision: 6,
+                sequence: 2,
+                requestId: request.requestId ?? '',
+                phase: 'succeeded'
+            })
+            return { revision: 6, phase: 'succeeded' }
+        })
+        window.pairApi.engines.getSettings = getSettings
+        window.pairApi.engines.inspectModel = inspect
+        window.pairApi.engines.previewSettings = review
+        window.pairApi.engines.applySettings = apply
+    })
+    async function extendedPreview() {
+        await render()
+        await click('Select portable load and routing preferences')
+        await check('Copy to peer')
+        await click('Preview selected targets')
+    }
+    it('centralizes tuning defaults and previews target-local placement with no source resolution authority', async () => {
+        expect(
+            defaultPortableLoadFields(inspected('self'), { slots: 2, gpu: { mode: 'cpu' } })
+        ).toEqual(['slots', 'gpu'])
+        await extendedPreview()
+        expect(review).toHaveBeenCalledOnce()
+        const request = review.mock.calls[0]?.[0]
+        expect(request?.settings).toEqual(settings('peer').settings)
+        expect(request?.modelChange?.load).toEqual({
+            set: { slots: 2, gpu: { mode: 'layers', layers: 20 } },
+            clear: []
+        })
+        expect(request?.modelChange?.policy).toEqual({ generation: { temperature: 0.25 } })
+        expect(JSON.stringify(request)).not.toContain('source-native-id')
+        expect(JSON.stringify(request)).not.toContain('/source/')
+        expect(JSON.stringify(request)).not.toContain('source-build')
+        expect(container.textContent).toContain('target-resolved finite placement')
+        await click('Confirm copy to peer')
+        expect(apply).toHaveBeenCalledOnce()
+        expect(set).not.toHaveBeenCalled()
+        expect(apply.mock.calls[0]?.[0]).toMatchObject({
+            settings: settings('peer').settings,
+            modelChange: { expectedPolicyRevision: '1', previewDigest: 'target-digest-peer' }
+        })
+    })
+    it('requires explicit destructive role selection and shows target diff and served semantics', async () => {
+        const routingSource = source.replace(
+            '"profiles":',
+            '"roles":{"weak":{"engine":"llamacpp","model":"model"}},"servedModels":[],"profiles":'
+        )
+        await render(routingSource)
+        await click('Select portable load and routing preferences')
+        await check('Explicitly copy weak')
+        await check('Explicitly copy served')
+        await check('Copy to peer')
+        await click('Preview selected targets')
+        expect(review.mock.calls[0]?.[0].modelChange?.policy).toMatchObject({
+            roles: { weak: true },
+            served: false
+        })
+        expect(container.textContent).toContain('can displace target tier')
+        expect(container.textContent).toContain('target nil/empty semantics reviewed')
+    })
+    it('permits load-only copy into a generation-locked target', async () => {
+        get.mockResolvedValue(snapshot({ localOnly: true }))
+        await render()
+        await click('Select portable load and routing preferences')
+        await check('Temperature:')
+        await check('Copy to peer')
+        await click('Preview selected targets')
+        expect(review).toHaveBeenCalledOnce()
+        expect(review.mock.calls[0]?.[0].modelChange?.policy).toBeUndefined()
+        await click('Confirm copy to peer')
+        expect(apply).toHaveBeenCalledOnce()
+        expect(set).not.toHaveBeenCalled()
+    })
+    it('copies portable load preferences without requiring a source generation profile', async () => {
+        await render('{}')
+        await click('Select portable load and routing preferences')
+        await check('Copy to peer')
+        await click('Preview selected targets')
+        expect(review).toHaveBeenCalledOnce()
+        expect(review.mock.calls[0]?.[0].modelChange?.policy).toBeUndefined()
+        expect(review.mock.calls[0]?.[0].modelChange?.load?.set.slots).toBe(2)
+        expect(set).not.toHaveBeenCalled()
+    })
+    it('preserves a readable paused source while current destination authority controls apply', async () => {
+        const pausedSource = source.replace(
+            '"profiles":',
+            '"availability":"paused","pausedBy":"peer","profiles":'
+        )
+        await render(pausedSource)
+        await click('Select portable load and routing preferences')
+        await check('Copy to peer')
+        await click('Preview selected targets')
+        expect(review).toHaveBeenCalledOnce()
+        await act(async () => useClusterInvitationsStore.setState({ remoteManagementContext: 2 }))
+        expect(
+            Array.from(container.querySelectorAll('button')).find(
+                item => item.textContent === 'Confirm copy to peer'
+            )
+        ).toBeUndefined()
+        expect(apply).not.toHaveBeenCalled()
+    })
+    it('hands missing content to its existing owner only explicitly, then requires fresh inspection/review', async () => {
+        inspect.mockImplementation(async request => ({
+            ...inspected(request.nodeId ?? 'self', request.modelId),
+            status: request.nodeId === 'peer' ? 'missing' : 'resolved'
+        }))
+        review.mockResolvedValue({
+            settings: settings('peer').settings,
+            revision: 5,
+            errors: { modelId: 'Missing content' },
+            restart: false,
+            rebind: false
+        })
+        await extendedPreview()
+        expect(container.textContent).toContain('Missing content')
+        expect(container.textContent).not.toContain('Close content copy owner')
+        expect(apply).not.toHaveBeenCalled()
+        await click('Copy model files')
+        expect(container.textContent).toContain('Close content copy owner')
+        const before = inspect.mock.calls.length
+        const progress: EngineProgress = {
+            engineType: 'llama-cpp',
+            nodeId: 'peer',
+            nodeName: 'peer',
+            operation: 'copy',
+            model: 'model',
+            status: 'done',
+            opId: 'content-op',
+            sourceNodeId: 'self',
+            destinationNodeId: 'peer',
+            copyResult: {
+                engine: 'llamacpp',
+                model: 'model',
+                files: 1,
+                filesSkipped: 0,
+                bytesTotal: 1,
+                bytesCopied: 1,
+                durability: 'confirmed'
+            }
+        }
+        await act(async () =>
+            useEngineProgressStore.setState({ progress: new Map([['content-op', progress]]) })
+        )
+        expect(inspect.mock.calls.length).toBeGreaterThan(before)
+        expect(review).toHaveBeenCalledOnce()
+        expect(apply).not.toHaveBeenCalled()
+        expect(container.textContent).toContain('Fresh inspection requested')
+        await click('Close content copy owner')
+        expect(container.textContent).toContain('Preview again for a fresh target inspection')
+    })
+    it('keeps one target refusal independent of another reviewed target', async () => {
+        useNodesStore.setState({
+            nodes: new Map([
+                ['peer', node('peer')],
+                ['other', node('other')]
+            ])
+        })
+        review.mockImplementation(async request => {
+            if (request.nodeId === 'peer') throw new Error('not ready on peer')
+            return {
+                settings: settings('other').settings,
+                revision: 5,
+                policyRevision: '1',
+                previewDigest: 'other-preview',
+                errors: {},
+                restart: false,
+                rebind: false
+            }
+        })
+        await render()
+        await click('Select portable load and routing preferences')
+        await check('Copy to peer')
+        await check('Copy to other')
+        await click('Preview selected targets')
+        expect(container.textContent).toContain('not ready on peer')
+        expect(button('Confirm copy to other').disabled).toBe(false)
+        await click('Confirm copy to other')
+        expect(apply).toHaveBeenCalledOnce()
+        expect(apply.mock.calls[0]?.[0].nodeId).toBe('other')
+        expect(set).not.toHaveBeenCalled()
     })
 })
