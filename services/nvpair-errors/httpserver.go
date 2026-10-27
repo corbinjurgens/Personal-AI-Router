@@ -51,13 +51,14 @@ func newErrorsMux(mgr *Manager, mesh *clustertrust.Mesh) *http.ServeMux {
 		// unclustered node serve this data in the clear, so there is no branch here
 		// for a future caller to widen.
 		mesh.Refresh()
-		if _, ok := mesh.VerifyClientPin(r); !ok {
+		peerID, ok := mesh.VerifyClientPin(r)
+		if !ok {
 			http.Error(w, "forbidden: not a pinned cluster peer", http.StatusForbidden)
 			return
 		}
 		switch r.Method {
 		case http.MethodPost:
-			handleIngest(w, r, mgr)
+			handleIngest(w, r, mgr, peerID)
 		case http.MethodGet:
 			handleServeLocal(w, mgr)
 		default:
@@ -73,7 +74,7 @@ func newErrorsMux(mgr *Manager, mesh *clustertrust.Mesh) *http.ServeMux {
 // peer reconcile our own origin (the manager rejects nodeId ==
 // localNodeID as a no-op, but we reject empty here so the client gets
 // a clear signal rather than a silent accept).
-func handleIngest(w http.ResponseWriter, r *http.Request, mgr *Manager) {
+func handleIngest(w http.ResponseWriter, r *http.Request, mgr *Manager, peerID string) {
 	defer r.Body.Close()
 	var env errors.SyncEnvelope
 	if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
@@ -83,6 +84,10 @@ func handleIngest(w http.ResponseWriter, r *http.Request, mgr *Manager) {
 	}
 	if env.NodeID == "" {
 		http.Error(w, `"nodeId" is required`, http.StatusBadRequest)
+		return
+	}
+	if env.NodeID != peerID {
+		http.Error(w, "forbidden: nodeId does not match pinned peer", http.StatusForbidden)
 		return
 	}
 

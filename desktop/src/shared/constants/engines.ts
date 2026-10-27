@@ -99,6 +99,7 @@ export const ENGINE_DESCRIPTOR_VERSION = 1
 export const EngineDescriptorProtocols = [
     'ollama-api',
     'openai-v1',
+    'openai-chat',
     'anthropic-messages',
     'llamacpp-router'
 ] as const

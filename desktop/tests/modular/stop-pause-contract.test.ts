@@ -143,16 +143,23 @@ describe('single typed availability request', () => {
         call.mockRejectedValueOnce(
             new Error('Immediate pause is unavailable until safe execution stopping is enabled.')
         )
+        call.mockResolvedValueOnce({ availability: 'available' })
         await expect(
             supervisor.setAvailability({ state: 'paused', pauseMode: 'immediate' })
         ).rejects.toThrow('unavailable')
-        expect(call).toHaveBeenLastCalledWith(
+        expect(call).toHaveBeenNthCalledWith(
+            2,
             'broker',
             'node:set-availability',
             { state: 'paused', pauseMode: 'immediate' },
             expect.any(Number)
         )
-        expect(supervisor.getAvailabilityMenuItem().enabled).toBe(false)
+        expect(call).toHaveBeenNthCalledWith(3, 'broker', 'policy:get', {})
+        expect(call).toHaveBeenCalledTimes(3)
+        expect(supervisor.getAvailabilityMenuItem()).toMatchObject({
+            request: 'paused',
+            enabled: true
+        })
         call.mockRestore()
     })
 })

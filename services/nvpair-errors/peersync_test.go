@@ -162,8 +162,8 @@ func TestHTTPIngestReconciles(t *testing.T) {
 	srv, client := servePinnedErrorsMux(t, m)
 
 	env := errors.SyncEnvelope{
-		NodeID: "node-b",
-		Errors: []ServiceError{localErr("b:one", "node-b", 1000)},
+		NodeID: "uuid-peer",
+		Errors: []ServiceError{localErr("b:one", "uuid-peer", 1000)},
 	}
 	body, _ := json.Marshal(env)
 	resp, err := client.Post(srv.URL+"/v1/errors", "application/json", bytes.NewReader(body))
@@ -176,8 +176,8 @@ func TestHTTPIngestReconciles(t *testing.T) {
 	}
 
 	got := m.snapshot()
-	if len(got) != 1 || got[0].ID != "b:one" || got[0].NodeID != "node-b" {
-		t.Fatalf("after ingest, snapshot = %+v, want single node-b entry", got)
+	if len(got) != 1 || got[0].ID != "b:one" || got[0].NodeID != "uuid-peer" {
+		t.Fatalf("after ingest, snapshot = %+v, want single uuid-peer entry", got)
 	}
 }
 

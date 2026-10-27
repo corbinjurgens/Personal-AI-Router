@@ -1319,7 +1319,7 @@ describe('permission controls', () => {
         await choosePeer()
         expect(document.body.textContent).toContain('blocked remote management')
         expect(document.body.textContent).toContain('available')
-        expect(button('Pause').disabled).toBe(true)
+        expect(button('Pause node').disabled).toBe(true)
         expect(button('Save').disabled).toBe(true)
         expect(
             document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Node policy JSON"]')
@@ -1571,12 +1571,13 @@ describe('permission controls', () => {
             availability.mockRejectedValueOnce(new ServiceCallError('refused', code))
             await act(async () => root.render(<RoutingSettings />))
             await choosePeer()
-            await act(async () => button('Pause').click())
+            await act(async () => button('Pause node').click())
             expect(document.body.textContent).toContain(message)
-            expect(button('Pause')).toBeDefined()
+            expect(button('Pause node')).toBeDefined()
             expect(availability).toHaveBeenCalledExactlyOnceWith({
                 state: 'paused',
-                nodeId: 'peer-1'
+                nodeId: 'peer-1',
+                pauseMode: 'configured'
             })
         }
     )

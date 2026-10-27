@@ -68,7 +68,7 @@ Two channels:
 | `--peer-sync` | _(off)_ | Enable cross-node sync: serve the ingest endpoint and push errors to peers discovered via the broker's discovery relay |
 | `--port <n>` | `14319` | HTTP port for the cross-node errors endpoint (only used with `--peer-sync`) |
 | `--cluster-dir <path>` | _(off)_ | Cluster config dir (the `.../cluster` dir with `node.crt`/`node.key` + `trusted/*.json`); when set, peer-sync runs over pin-based mTLS scoped to paired cluster members |
-| `--node-id <uuid>` | _(resolved locally)_ | This node's stable origin id. Stamped as `nodeId` on every local-origin entry and used as the authority for replace-by-origin reconciliation and loop prevention. The broker passes the node's UUID |
+| `--node-id <uuid>` | _(resolved locally)_ | This node's origin id, stamped as `nodeId` on local-origin entries and sync snapshots. The broker passes its resolved UUID; an explicit value takes precedence. When omitted with `--peer-sync`, resolves the shared stable UUID from the parent of `--cluster-dir` (or the shared default config root): `cluster/identity.json`, then `node-id.json`, otherwise mint and persist `node-id.json`. Without `--peer-sync`, omission keeps the local-only hostname default |
 | `--log-level <level>` | `info` | One of `error`/`warn`/`info`/`debug`; falls back to `$NVPAIR_LOG_LEVEL` |
 | `--version` | | Print version and exit |
 

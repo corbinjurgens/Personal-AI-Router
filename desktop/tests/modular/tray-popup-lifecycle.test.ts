@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
+import { availabilityMenuItem } from '@/electron/service-bridge/node-availability'
 
 interface FakeMenuItem {
     label?: string
@@ -86,12 +87,13 @@ const mocks = vi.hoisted(() => {
         }
     }
 
+    const item: ReturnType<ReturnType<typeof getModularSupervisor>['getAvailabilityMenuItem']> = {
+        label: 'Pause inference on this PC',
+        enabled: true,
+        request: 'paused'
+    }
     const supervisor = {
-        item: {
-            label: 'Pause inference on this PC',
-            enabled: true,
-            request: 'paused' as 'available' | 'paused' | null
-        },
+        item,
         listeners: new Set<() => void>(),
         getAvailabilityMenuItem: () => supervisor.item,
         onAvailabilityChanged: (listener: () => void) => {
@@ -100,6 +102,9 @@ const mocks = vi.hoisted(() => {
         },
         setAvailability: vi.fn<ReturnType<typeof getModularSupervisor>['setAvailability']>(() =>
             Promise.resolve(undefined)
+        ),
+        refreshAvailability: vi.fn<ReturnType<typeof getModularSupervisor>['refreshAvailability']>(
+            () => Promise.resolve()
         )
     }
     const destroyConnector = vi.fn(() => Promise.resolve())
@@ -346,7 +351,10 @@ describe('tray popup lifecycle', () => {
             expect(pause?.enabled).toBe(true)
 
             pause?.click?.({ checked: false })
-            expect(mocks.supervisor.setAvailability).toHaveBeenCalledWith({ state: 'paused' })
+            expect(mocks.supervisor.setAvailability).toHaveBeenCalledWith({
+                state: 'paused',
+                pauseMode: 'configured'
+            })
         })
 
         it('relabels the toggle when the availability changes', () => {
@@ -362,14 +370,94 @@ describe('tray popup lifecycle', () => {
             expect(menuItem('Pause inference on this PC')).toBeUndefined()
         })
 
-        it('shows a disabled Pausing... while draining, and clicking does nothing', () => {
-            mocks.supervisor.item = { label: 'Pausing…', enabled: false, request: null }
+        it('allows local Resume during a pending drain and ignores its late Pause failure', async () => {
+            let reject: ((error: Error) => void) | undefined
+            mocks.supervisor.setAvailability.mockImplementationOnce(
+                () =>
+                    new Promise((_resolve, fail) => {
+                        reject = fail
+                    })
+            )
+            menuItem('Pause inference on this PC')?.click?.({ checked: false })
+            mocks.supervisor.item = availabilityMenuItem('draining')
             for (const listener of mocks.supervisor.listeners) listener()
+            expect(menuItem('Retry pause on this PC')?.enabled).toBe(false)
+            const resume = menuItem('Resume inference on this PC (pausing)')
+            expect(resume?.enabled).toBe(true)
+            resume?.click?.({ checked: false })
+            await vi.advanceTimersByTimeAsync(0)
+            if (!reject) throw new Error('Missing held Pause')
+            reject(new Error('Superseded Pause failure'))
+            await vi.advanceTimersByTimeAsync(0)
+            expect(mocks.supervisor.setAvailability.mock.calls.map(args => args[0])).toEqual([
+                { state: 'paused', pauseMode: 'configured' },
+                { state: 'available' }
+            ])
+            expect(
+                mocks.state.lastMenu.some(item => item.label?.includes('Superseded Pause failure'))
+            ).toBe(false)
+            expect(mocks.state.windows).toHaveLength(0)
+        })
 
-            const pausing = menuItem('Pausing…')
-            expect(pausing?.enabled).toBe(false)
-            pausing?.click?.({ checked: false })
-            expect(mocks.supervisor.setAvailability).not.toHaveBeenCalled()
+        it('offers explicit configured retry after a failed local drain without automatically resending', async () => {
+            mocks.supervisor.setAvailability.mockRejectedValueOnce(new Error('Shutdown incomplete'))
+            menuItem('Pause inference on this PC')?.click?.({ checked: false })
+            mocks.supervisor.item = availabilityMenuItem('draining')
+            for (const listener of mocks.supervisor.listeners) listener()
+            await vi.advanceTimersByTimeAsync(0)
+            expect(mocks.supervisor.setAvailability).toHaveBeenCalledTimes(1)
+            expect(menuItem('Retry pause on this PC')?.enabled).toBe(true)
+            expect(
+                mocks.state.lastMenu.some(item => item.label?.includes('Shutdown incomplete'))
+            ).toBe(true)
+            menuItem('Retry pause on this PC')?.click?.({ checked: false })
+            await vi.advanceTimersByTimeAsync(0)
+            expect(mocks.supervisor.setAvailability.mock.calls.map(args => args[0])).toEqual([
+                { state: 'paused', pauseMode: 'configured' },
+                { state: 'paused', pauseMode: 'configured' }
+            ])
+        })
+
+        it('refreshes unknown self availability with no window and preserves the original operational error', async () => {
+            mocks.supervisor.setAvailability.mockImplementationOnce(async () => {
+                mocks.supervisor.item = availabilityMenuItem(null)
+                for (const listener of mocks.supervisor.listeners) listener()
+                throw new Error('Owned engine shutdown failed')
+            })
+            menuItem('Pause inference on this PC')?.click?.({ checked: false })
+            await vi.advanceTimersByTimeAsync(0)
+            const originalError = 'Availability request failed: Error: Owned engine shutdown failed'
+            expect(menuItem(originalError)).toBeDefined()
+            expect(menuItem('Pause inference on this PC')?.enabled).toBe(false)
+            let reject: ((error: Error) => void) | undefined
+            mocks.supervisor.refreshAvailability.mockImplementationOnce(
+                () =>
+                    new Promise((_resolve, fail) => {
+                        reject = fail
+                    })
+            )
+            const refresh = menuItem('Refresh availability on this PC')
+            expect(refresh?.enabled).toBe(true)
+            refresh?.click?.({ checked: false })
+            refresh?.click?.({ checked: false })
+            expect(mocks.supervisor.refreshAvailability).toHaveBeenCalledExactlyOnceWith()
+            expect(menuItem('Refresh availability on this PC')?.enabled).toBe(false)
+            if (!reject) throw new Error('Missing held availability Refresh')
+            reject(new Error('Readback still unavailable'))
+            await vi.advanceTimersByTimeAsync(0)
+            expect(menuItem(originalError)).toBeDefined()
+            expect(menuItem('Refresh availability on this PC')?.enabled).toBe(true)
+            mocks.supervisor.refreshAvailability.mockImplementationOnce(async () => {
+                mocks.supervisor.item = availabilityMenuItem('paused')
+                for (const listener of mocks.supervisor.listeners) listener()
+            })
+            menuItem('Refresh availability on this PC')?.click?.({ checked: false })
+            await vi.advanceTimersByTimeAsync(0)
+            expect(menuItem(originalError)).toBeDefined()
+            expect(menuItem('Resume inference on this PC')?.enabled).toBe(true)
+            expect(menuItem('Refresh availability on this PC')).toBeUndefined()
+            expect(mocks.supervisor.setAvailability).toHaveBeenCalledTimes(1)
+            expect(mocks.state.windows).toHaveLength(0)
         })
 
         it('stops the service before quitting from the stop item', async () => {

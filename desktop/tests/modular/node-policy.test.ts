@@ -1469,7 +1469,7 @@ describe('routing settings editor', () => {
     beforeEach(async () => {
         vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
         // Each case starts a fresh app session; drafts intentionally survive component unmounts.
-        useNodeConfigurationStore.setState({ policyDrafts: new Map() })
+        useNodeConfigurationStore.setState({ policyDrafts: new Map(), availability: new Map() })
         Object.defineProperty(HTMLDialogElement.prototype, 'show', {
             configurable: true,
             value: function (this: HTMLDialogElement) {
@@ -1845,8 +1845,17 @@ describe('routing settings editor', () => {
 
     describe('availability change', () => {
         beforeEach(() => {
+            vi.useFakeTimers()
             setAvailability.mockResolvedValue({ availability: 'paused' })
         })
+        afterEach(() => vi.useRealTimers())
+
+        async function pause(): Promise<void> {
+            await click('Pause node')
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(2_000)
+            })
+        }
 
         it('takes the new revision from the policy notification so the next save is not stale', async () => {
             get.mockResolvedValue(savedDocument('5'))
@@ -1856,7 +1865,7 @@ describe('routing settings editor', () => {
                 emitPolicy({ nodeId: SELF, ...snapshot('6') })
                 return { availability: 'paused' }
             })
-            await click('Pause')
+            await pause()
             await type(policyText('6', 'edited'))
             await click('Save')
             expect(lastBase()).toBe('6')
@@ -1867,7 +1876,7 @@ describe('routing settings editor', () => {
             get.mockResolvedValueOnce(savedDocument('5')).mockResolvedValue(savedDocument('6'))
             set.mockResolvedValue(snapshot('7'))
             await open()
-            await click('Pause')
+            await pause()
             await type(policyText('6', 'edited'))
             await click('Save')
             expect(lastBase()).toBe('6')
@@ -1882,7 +1891,7 @@ describe('routing settings editor', () => {
                 emitPolicy({ nodeId: SELF, ...snapshot('6') })
                 return { availability: 'paused' }
             })
-            await click('Pause')
+            await pause()
             await type(policyText('6', 'edited'))
             await click('Save')
             expect(lastBase()).toBe('6')
@@ -1893,7 +1902,7 @@ describe('routing settings editor', () => {
             set.mockRejectedValue(new Error('policy revision is stale'))
             await open()
             await type('{"draft": true}')
-            await click('Pause')
+            await pause()
             await click('Save')
             expect(lastBase()).toBe('5')
             expect(container.textContent).toContain(CONFLICT)
@@ -1904,7 +1913,7 @@ describe('routing settings editor', () => {
             get.mockResolvedValue(savedDocument('5'))
             await open()
             await act(async () => emitAvailability({ nodeId: SELF, availability: 'paused' }))
-            expect(container.textContent).toContain('paused')
+            expect(container.textContent).toContain('Paused')
         })
     })
 
