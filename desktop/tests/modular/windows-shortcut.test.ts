@@ -83,6 +83,56 @@ afterEach(() => {
 })
 
 describe('Windows Start Menu shortcut', () => {
+    const candidateRoot = 'C:\\Users\\Example\\AppData\\Local\\pair-candidates\\selected'
+    const installedTarget = path.win32.join(candidateRoot, 'windows-x64', 'PAIR.exe')
+    const installedDetails: Electron.ShortcutDetails = {
+        ...expected,
+        target: installedTarget,
+        cwd: path.win32.dirname(installedTarget),
+        icon: installedTarget
+    }
+
+    it('accepts a stable unpacked install under LocalAppData', async () => {
+        vi.mocked(fs.realpathSync).mockImplementation(value =>
+            value === 'C:\\Temporary' ? 'C:\\Temporary' : installedTarget
+        )
+        vi.mocked(shell.writeShortcutLink).mockImplementation(() => {
+            existing = { ...installedDetails }
+            return true
+        })
+        expect(await handleShortcutEntry(['--pair-shortcut=create'])).toBe(0)
+        expect(shell.writeShortcutLink).toHaveBeenCalledWith(link, 'create', installedDetails)
+        expect(await handleShortcutEntry(['--pair-shortcut=status'])).toBe(0)
+        ensureWindowsShortcut()
+        expect(shell.writeShortcutLink).toHaveBeenCalledTimes(1)
+    })
+
+    const refusesArchivedInstall = (name: string, folder: string): void => {
+        it(name, async () => {
+            existing = { ...installedDetails }
+            const archivedTarget = path.win32.join(candidateRoot, folder, 'PAIR.exe')
+            vi.mocked(fs.realpathSync).mockImplementation(value =>
+                value === 'C:\\Temporary' ? 'C:\\Temporary' : archivedTarget
+            )
+            for (const command of ['create', 'status', 'remove']) {
+                expect(await handleShortcutEntry(['--pair-shortcut=' + command])).toBe(1)
+            }
+            ensureWindowsShortcut()
+            expect(existing).toEqual(installedDetails)
+            expect(shell.readShortcutLink).not.toHaveBeenCalled()
+            expect(shell.writeShortcutLink).not.toHaveBeenCalled()
+            expect(fs.unlinkSync).not.toHaveBeenCalled()
+        })
+    }
+    refusesArchivedInstall(
+        'previous install cannot take over the live link',
+        'windows-x64.prev-01234567'
+    )
+    refusesArchivedInstall(
+        'backup install cannot take over the live link',
+        'windows-x64.backup-20261028'
+    )
+
     it('creates and reads back a link with the executable and app identity', async () => {
         expect(await handleShortcutEntry(['--pair-shortcut=create'])).toBe(0)
         expect(shell.writeShortcutLink).toHaveBeenCalledWith(link, 'create', expected)
