@@ -198,7 +198,8 @@ func (m *Manager) remoteClient(ctx context.Context, peer ecPeer) (*remoteClient,
 	if !m.mesh.Clustered() {
 		return nil, fmt.Errorf("this node is not clustered; remote engine management is unavailable")
 	}
-	if _, ok := m.mesh.PeerServiceIncarnation(peer.clusterUUID); !ok {
+	if _, ok, diagnostic := m.mesh.PeerServiceIncarnationWithDiagnostic(peer.clusterUUID); !ok {
+		logControlAuthorityRefusal("remote-client", peer.clusterUUID, diagnostic)
 		return nil, fmt.Errorf("node %q is not a pinned cluster peer", peer.nodeID)
 	}
 	// No total client timeout: install/pull run for minutes, bounded on the

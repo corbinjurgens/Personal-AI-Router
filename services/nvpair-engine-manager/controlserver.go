@@ -159,7 +159,7 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 			return
 		}
 		if route.class == controlRead {
-			logControlDecision(s.mesh, caller, route, "allowed", "", "read route")
+			logControlDecision(s.mesh, caller, route, "allowed", "", "read route", nil)
 			h(w, request, caller)
 			return
 		}
@@ -171,7 +171,7 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 		if permission.Allowed {
 			decision = "allowed"
 		}
-		logControlDecision(s.mesh, caller, route, decision, permission.Revision, permission.Reason)
+		logControlDecision(s.mesh, caller, route, decision, permission.Revision, permission.Reason, &permission)
 		if !permission.Allowed {
 			// A pinned peer's refused management operation. Typed 409 and a
 			// bounded explanation; never raw filesystem state.

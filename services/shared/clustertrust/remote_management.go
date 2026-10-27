@@ -252,7 +252,7 @@ func (p RemoteManagementPermission) refused(predicate string, err error) RemoteM
 
 func (m *Mesh) RemoteManagement(peerUUID string) RemoteManagementPermission {
 	return m.remoteManagement(peerUUID, func(path string) ([]byte, error) {
-		f, err := os.Open(path)
+		f, err := openAuthorityFile(path)
 		if err != nil {
 			return nil, err
 		}

@@ -51,11 +51,11 @@ type Identity struct {
 // plus its UUID. It does not mint: a missing keypair is an error (the caller
 // runs unclustered / plain-HTTP in that case).
 func LoadIdentity(clusterDir string) (*Identity, error) {
-	certPEM, err := os.ReadFile(filepath.Join(clusterDir, "node.crt"))
+	certPEM, err := readAuthorityFile(filepath.Join(clusterDir, "node.crt"))
 	if err != nil {
 		return nil, fmt.Errorf("read node.crt: %w", err)
 	}
-	keyPEM, err := os.ReadFile(filepath.Join(clusterDir, "node.key"))
+	keyPEM, err := readAuthorityFile(filepath.Join(clusterDir, "node.key"))
 	if err != nil {
 		return nil, fmt.Errorf("read node.key: %w", err)
 	}
@@ -116,7 +116,7 @@ func (t *Trust) Reload() {
 			continue
 		}
 		fileUUID := strings.TrimSuffix(name, ".json")
-		data, err := os.ReadFile(filepath.Join(t.dir, name))
+		data, err := readAuthorityFile(filepath.Join(t.dir, name))
 		if err != nil {
 			// The pin is listed but momentarily unreadable. Carry the value we
 			// already hold for the same reason the whole set is kept when the
