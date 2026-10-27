@@ -99,8 +99,9 @@ export function assertIsolated(): void {
     const tmp = os.tmpdir()
     const normalized = path.resolve(userData)
     const tmpNormalized = path.resolve(tmp)
+    const relative = path.relative(tmpNormalized, normalized)
     expect(
-        normalized.startsWith(tmpNormalized),
+        relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative),
         `[isolation] PAIR_USER_DATA="${userData}" must live under the OS tmpdir ("${tmp}")`
     ).toBe(true)
 }
