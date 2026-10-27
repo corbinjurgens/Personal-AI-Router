@@ -51,6 +51,12 @@ function targetPath(): string {
         throw new Error(`Shortcut target must be an absolute ${executableName}: ${target}`)
     if (!fs.statSync(target).isFile())
         throw new Error(`Shortcut target is not a regular file: ${target}`)
+    if (
+        /^windows-(?:x64|arm64)[.-](?:prev|backup|failed)-/i.test(
+            windowsPath.basename(windowsPath.dirname(target))
+        )
+    )
+        throw new Error('An archived PAIR install cannot own the live Start Menu shortcut')
     const temporary = fs.realpathSync(app.getPath('temp'))
     if (
         isInside(target, temporary) ||
