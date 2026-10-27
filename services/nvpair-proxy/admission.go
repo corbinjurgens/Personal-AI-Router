@@ -206,6 +206,7 @@ func (a *admissionController) setAvailability(state nodepolicy.Availability, can
 	var cancels []func()
 	if cancelActive {
 		for _, t := range a.tickets {
+			t.withdrawn = true
 			if t.cancel != nil {
 				cancels = append(cancels, t.cancel)
 			}
@@ -328,8 +329,22 @@ type admissionTicket struct {
 	id                uint64
 	key               admKey
 	cancel            func()
+	withdrawn         bool
 	once              sync.Once
 	resolvedInventory bool
+}
+
+// Registration and withdrawal share the admission linearization point. Strict
+// tickets are created before their transport exists; remember a withdrawal
+// across that interval, including a subsequent Resume.
+func (t *admissionTicket) setCancel(cancel func()) {
+	t.a.mu.Lock()
+	t.cancel = cancel
+	withdrawn := t.withdrawn
+	t.a.mu.Unlock()
+	if withdrawn && cancel != nil {
+		cancel()
+	}
 }
 
 // bounded returns the wait a policy timeout allows under the caller's cap.

@@ -530,7 +530,7 @@ func (t *strictTicket) BeforeStrictDispatch() error {
 		t.finishLocked(strictNotDispatched)
 		return errStrictUnavailable
 	}
-	if !ok || mc.Identity != t.identity || a.availability != nodepolicy.Available || a.drain[t.base.key.engine] || !a.healthy(t.base.key.engine) {
+	if !ok || mc.Identity != t.identity || t.base.withdrawn || a.availability != nodepolicy.Available || a.drain[t.base.key.engine] || !a.healthy(t.base.key.engine) {
 		return errStrictUnavailable
 	}
 	if on, known := a.intent[t.base.key.engine]; known && !on {

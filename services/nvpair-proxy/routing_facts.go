@@ -285,9 +285,9 @@ func (p *Proxy) attachRoutingFacts(request *routingRequest, start time.Time) {
 		r.mu.Unlock()
 		return
 	}
-	if r.cancelled {
+	if r.cancelled || r.cancelCause == factNodePaused {
 		state := factCancelled
-		if r.cancelCause == factDeadline {
+		if r.cancelCause == factDeadline || r.cancelCause == factNodePaused {
 			state = factFailed
 		}
 		f.disposition.Store(factDisposition(uint8(state), r.cancelCause, 0))
@@ -600,7 +600,7 @@ func (r *routingSpend) terminalFactLocked(result routingIngressResult, outcome r
 func (r *routingSpend) nativeCancelLocked(cause routingFactReason) {
 	r.cancelCause = cause
 	state := factCancelled
-	if cause == factDeadline {
+	if cause == factDeadline || cause == factNodePaused {
 		state = factFailed
 	}
 	r.observeIngressLocked(routingIngressResult{state, cause, 0})
@@ -816,6 +816,9 @@ func strictRoutingResult(sc *statusCapture, reader *streamFrameReader, returned 
 		if result.Reason == streamInterruptReasonPeerLink {
 			o.reason = factPeerFraming
 		}
+		if result.Reason == streamInterruptReasonNodePaused {
+			o.reason = factNodePaused
+		}
 	} else if sc.upstreamBody != nil && sc.upstreamBody.complete {
 		o.protocol, o.outcome = true, streamOutcomeCompleted
 	}
@@ -828,6 +831,9 @@ func strictRoutingResult(sc *statusCapture, reader *streamFrameReader, returned 
 		if o.reason == factReasonNone {
 			o.reason = factUnknown
 		}
+	}
+	if !o.protocol && ctx.Err() == nil && responseSinkFrom(ctx).executionWithdrawn() {
+		o.protocol, o.outcome, o.reason = false, streamOutcomeInterrupted, factNodePaused
 	}
 	if !returned && o.reason == factReasonNone && ctx.Err() == nil {
 		o.reason = factStreamInterrupted
@@ -853,6 +859,9 @@ func (s *responseSink) nativeFact() routingSinkFact {
 		}
 		if s.reason == streamInterruptReasonPeerLink {
 			o.reason = factPeerFraming
+		}
+		if s.reason == streamInterruptReasonNodePaused {
+			o.reason = factNodePaused
 		}
 	}
 	return o

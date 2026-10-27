@@ -180,12 +180,16 @@ func (a *publicAttemptLifecycle) admitInterruption(reason string) bool {
 	r := a.request
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.active != a || r.done || r.cancelled || !r.committed || a.aborted || a.terminal != nil || (a.ctx != nil && a.ctx.Err() != nil) {
+	if r.active != a || r.done || r.cancelled || !r.committed || a.aborted || a.terminal != nil || (a.ctx != nil && a.ctx.Err() != nil && !executionWasWithdrawn(a.ctx)) {
 		return false
 	}
 	a.state = routingEnding
 	r.transitionLocked(a.state, reason)
-	a.observeAttemptLocked(routingAttemptResult{factInterrupted, factStreamInterrupted, 0, true})
+	cause := factStreamInterrupted
+	if reason == streamInterruptReasonNodePaused {
+		cause = factNodePaused
+	}
+	a.observeAttemptLocked(routingAttemptResult{factInterrupted, cause, 0, true})
 	return true
 }
 
@@ -235,6 +239,7 @@ func (r *routingSpend) deadlineExpired() bool {
 // its winning reason when cancelling a dispatch, without bounding live streams.
 func (r *routingSpend) attemptContext(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(parent)
+	ctx = context.WithValue(ctx, executionCancelKey{}, cancel)
 	return ctx, func() {
 		if r.deadlineExpired() {
 			cancel(context.DeadlineExceeded)
@@ -402,13 +407,19 @@ func (r *routingSpend) cancelLockedCause(reason string, cause routingFactReason)
 func (r *routingSpend) abortLocal() { r.abortLocalIf(nil) }
 
 func (r *routingSpend) abortLocalIf(expected *publicAttemptLifecycle) {
+	r.withdrawLocalIf(expected, true)
+}
+
+// Peer ingress is terminal: only the origin's driver may redispatch.
+func (r *routingSpend) withdrawLocalIf(expected *publicAttemptLifecycle, redispatch bool) {
 	r.mu.Lock()
 	if r.done || r.cancelled || (expected != nil && (r.active != expected || expected.terminal != nil)) {
 		r.mu.Unlock()
 		return
 	}
+	r.foldCancellationLocked()
 	a := r.active
-	if a != nil && !r.committed && !a.aborted && a.terminal == nil {
+	if redispatch && a != nil && !r.committed && !a.aborted && a.terminal == nil {
 		a.aborted, a.redispatch = true, true
 		a.observeAttemptLocked(routingAttemptResult{factRedispatched, factNodePaused, 0, true})
 		a.state = routingEnding
@@ -417,15 +428,48 @@ func (r *routingSpend) abortLocalIf(expected *publicAttemptLifecycle) {
 			r.excluded = map[string]bool{}
 		}
 		r.excluded[a.nodeID] = true
-		cancel := a.cancel
 		r.mu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
+		withdrawExecution(a.ctx, a.cancel)
 		return
 	}
+	// Stop execution without cancelling the live delivery context. SC-a must
+	// still be able to emit its bounded failure ending after commitment.
+	if r.cancelCause == factReasonNone || r.cancelCause == factNodePaused {
+		r.nativeCancelLocked(factNodePaused)
+	}
+	r.transitionLocked(routingEnding, streamInterruptReasonNodePaused)
 	r.mu.Unlock()
-	r.cancelWithCause("cancelled: this node stopped accepting work", factNodePaused)
+	if a != nil {
+		withdrawExecution(a.ctx, a.cancel)
+	}
+}
+
+type executionCancelKey struct{}
+
+// An execution interruption is not a requester disconnect. Keep this typed
+// across transport cancellation rather than inferring it from context.Canceled.
+type executionInterruption struct{}
+
+func (executionInterruption) Error() string { return streamInterruptReasonNodePaused }
+
+func withdrawExecution(ctx context.Context, fallback context.CancelFunc) {
+	if ctx != nil {
+		if cancel, ok := ctx.Value(executionCancelKey{}).(context.CancelCauseFunc); ok {
+			cancel(executionInterruption{})
+			return
+		}
+	}
+	if fallback != nil {
+		fallback()
+	}
+}
+
+func executionWasWithdrawn(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	var interruption executionInterruption
+	return stderrors.As(context.Cause(ctx), &interruption)
 }
 
 // dispatch is the existing concrete inference retry loop, owned by this request.
@@ -1054,6 +1098,11 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				proxyErr = fmt.Sprintf("stream interrupted after output began on %s: %s", servedNodeID, result.Reason)
 			}
 		}
+		if committedStream == nil && ctl.sink != nil && ctl.sink.result().Reason == streamInterruptReasonNodePaused {
+			// Raw copies have no parser result. The execution withdrawal still
+			// fails the workload even when the HTTP copy returns normally.
+			proxyErr = fmt.Sprintf("stream interrupted after output began on %s: %s", servedNodeID, streamInterruptReasonNodePaused)
+		}
 		if aborted != nil && proxyErr == "" {
 			proxyErr = fmt.Sprintf("stream interrupted after output began on %s: upstream response copy aborted", servedNodeID)
 		}
@@ -1440,6 +1489,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			cancelAttempt()
 			break
 		}
+		if ctl.sink != nil {
+			ctl.sink.bindExecution(attemptCtx)
+		}
 		currentAttempt = att
 		admissionStarted := time.Now()
 		var bindingEvidence *boundEngineEvidence
@@ -1558,9 +1610,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			}
 			if refusal == nil {
 				t := strictHeld.(*strictTicket)
-				p.admission.mu.Lock()
-				t.base.cancel = func() { ctl.abortLocalIf(att) }
-				p.admission.mu.Unlock()
+				t.base.setCancel(func() { ctl.abortLocalIf(att) })
 				stopStrictWatch = t.watchPreOutput(cancelAttempt)
 				performanceWait = time.Since(admissionStarted)
 				u, ok := candFacade.localBackendTarget()
@@ -1842,7 +1892,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		var performance *performanceAttempt
 		if cand.self {
 			var err error
-			performance, err = candFacade.newPerformanceAttemptOwned(preparedCtx, candModel, r.URL.Path, sendBody, performanceWait)
+			performance, err = candFacade.newPerformanceAttemptOwned(rebasePerformancePreparation(r.Context(), preparedCtx), candModel, r.URL.Path, sendBody, performanceWait)
 			if err != nil {
 				att.ticket.release()
 				finishStrict()
@@ -1975,7 +2025,11 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 						if stderrors.Is(err, errFirstBodyTimeout) {
 							reason = streamInterruptReasonIdle
 						}
-						body = ctl.sink.interruptedBodyForAttempt(streamRequest.protocol, reason, att)
+						protocol := streamRequest.protocol
+						if managed, _ := streamRequest.manages(resp.Header.Get("Content-Type")); !managed {
+							protocol = streamProtocolUnknown
+						}
+						body = ctl.sink.interruptedBodyForAttempt(protocol, reason, att)
 						if body == nil {
 							return context.Canceled
 						}
