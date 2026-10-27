@@ -35,6 +35,7 @@ import type {
 import type {
     EngineCommandPayload,
     EngineHubSearchResponse,
+    EngineCredentialState,
     EngineInitialState,
     EngineIntentSnapshot,
     EngineStatePatch
@@ -185,6 +186,14 @@ export interface WsInvokeChannelMap {
     'engine:search-hub': {
         request: { engineType: EngineType; query?: string }
         response: EngineHubSearchResponse
+    }
+    'engine:set-credential': {
+        request: { nodeId: string; engineType: EngineType; credential: string }
+        response: EngineCredentialState
+    }
+    'engine:credential-state': {
+        request: { nodeId: string; engineType: EngineType }
+        response: EngineCredentialState
     }
 
     // Errors

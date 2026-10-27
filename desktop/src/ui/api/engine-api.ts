@@ -103,6 +103,12 @@ export interface IEngineApi {
     setModelExpiry(engineType: EngineType, nodeId: string, model: string, expiry: string): void
     /** Load an engine catalog or explicitly search its upstream registry. */
     searchHub(engineType: EngineType, query?: string): Promise<EngineHubSearchResponse>
+    setCredential(
+        request: WsInvokeRequest<'engine:set-credential'>
+    ): Promise<WsInvokeResponse<'engine:set-credential'>>
+    credentialState(
+        request: WsInvokeRequest<'engine:credential-state'>
+    ): Promise<WsInvokeResponse<'engine:credential-state'>>
 
     /** The local engine-manager's descriptor set changed (full replacement). */
     onDescriptorsChanged(callback: (descriptors: EngineDescriptor[]) => void): () => void
@@ -128,6 +134,9 @@ function fireCommand(transport: ServiceTransport, payload: EngineCommandPayload)
 }
 
 export function createEngineApi(transport: ServiceTransport): IEngineApi {
+    // Nonsecret settlement barriers survive row teardown. Never queue a second
+    // credential packet or read state ahead of an outstanding physical write.
+    const credentialWrites = new Map<string, Promise<void>>()
     return {
         getIntent: () => transport.invoke('engines:get-intent'),
         onIntentChanged: cb => transport.subscribePush('engines:intent-changed', cb),
@@ -196,6 +205,28 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
                 'engine:search-hub',
                 query === undefined ? { engineType } : { engineType, query }
             ),
+        setCredential: request => {
+            const target = `${request.nodeId}:${request.engineType}`
+            if (credentialWrites.has(target))
+                return Promise.reject(new Error('Credential update pending'))
+            const result = transport.invoke('engine:set-credential', request)
+            const settled = result.then(
+                () => {
+                    credentialWrites.delete(target)
+                },
+                () => {
+                    credentialWrites.delete(target)
+                }
+            )
+            credentialWrites.set(target, settled)
+            return result
+        },
+        credentialState: request => {
+            const settled = credentialWrites.get(`${request.nodeId}:${request.engineType}`)
+            return settled
+                ? settled.then(() => transport.invoke('engine:credential-state', request))
+                : transport.invoke('engine:credential-state', request)
+        },
 
         onDescriptorsChanged: cb => transport.subscribePush('engines:descriptors-changed', cb),
         onStateChanged: cb => transport.subscribePush('engines:state-changed', cb),
