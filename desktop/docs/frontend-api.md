@@ -5,6 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Frontend API
 
+`pairApi.engines.inspectModel({nodeId,engine,modelId})` invokes
+`engines:inspect-model` and returns the target's artifact status/source/assurance,
+bounded facts, option descriptors and advisory estimate. This is a read, usable
+without activating an engine. Unavailable data remains unavailable. Engine
+settings snapshots/previews also carry model loads, coupled state and explicit
+runtime impact, so desired intent is not confused with an applied/observed state.
+The contract adds no typed model Apply button.
+
 The supported renderer service API is `window.pairApi`. It is available only in
 Electron and is backed by the preload service bridge.
 

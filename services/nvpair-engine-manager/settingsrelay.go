@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 )
 
 // settingsReply is the broker's engine:settings-reply. Like policy:reply, a
@@ -28,12 +30,37 @@ type settingsRelay struct {
 }
 
 func (r *settingsRelay) call(ctx context.Context, method string, request settings.Request, caller string) (json.RawMessage, error) {
+	if method == "inspect" {
+		carrier := settings.Request{Engine: request.Engine, NodeID: request.NodeID, Resolution: request.Resolution}
+		if !reflect.DeepEqual(request, carrier) {
+			return nil, modelSettingsParamsError(fmt.Errorf("inspect: internal carrier must contain only target identity"))
+		}
+		return r.callInspect(ctx, modelconfig.InspectRequest{Engine: request.Engine, NodeID: request.NodeID, ModelID: request.Resolution}, caller)
+	}
+	return r.callRelay(ctx, settings.Relay{Method: method, Request: request, Caller: caller})
+}
+
+func (r *settingsRelay) callInspect(ctx context.Context, request modelconfig.InspectRequest, caller string) (json.RawMessage, error) {
+	if err := request.Validate(); err != nil {
+		return nil, modelSettingsParamsError(err)
+	}
+	return r.callRelay(ctx, settings.Relay{Method: "inspect", Inspect: &request, Caller: caller})
+}
+
+func (r *settingsRelay) callRelay(ctx context.Context, relay settings.Relay) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, settings.RelayBudget)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	id := newOpID()
+	relay.ID = id
+	// The public handler and receiving broker own request validation. This
+	// transport owns correlation/cancellation even for an ultimately refused
+	// request, and bounds the complete envelope before allocating a waiter.
+	if err := modelconfig.CheckPayloadSize(relay); err != nil {
+		return nil, err
+	}
 	ch := make(chan settingsReply, 1)
 	r.mu.Lock()
 	if err := ctx.Err(); err != nil {
@@ -53,7 +80,7 @@ func (r *settingsRelay) call(ctx context.Context, method string, request setting
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := r.send(ctx, "engine:settings-request", settings.Relay{ID: id, Method: method, Request: request, Caller: caller}); err != nil {
+	if err := r.send(ctx, "engine:settings-request", relay); err != nil {
 		return nil, err
 	}
 	var reply settingsReply
@@ -106,6 +133,9 @@ func (m *Manager) handleSettingsMessage(ctx context.Context, msg *Message) bool 
 		return false
 	}
 	switch msg.Method {
+	case "engine:inspect-model":
+		go m.inspectModel(ctx, msg)
+		return true
 	case "engine:configured-ports":
 		go func() {
 			type port struct {
@@ -123,22 +153,48 @@ func (m *Manager) handleSettingsMessage(ctx context.Context, msg *Message) bool 
 		return true
 	case "engine:get-launch", "engine:preview-launch", "engine:configure-launch":
 		go func() {
-			var p settings.Request
-			if !m.parse(msg, &p) {
-				return
-			}
 			switch msg.Method {
 			case "engine:get-launch":
+				p, err := decodeModelSettingsLaunch(msg.Params)
+				if err != nil {
+					m.respondOrErr(msg, nil, err)
+					return
+				}
 				result, err := m.exec.LaunchSettings(p.Engine, ctx)
 				m.respondOrErr(msg, result, err)
 			case "engine:preview-launch":
+				p, err := decodeModelSettingsLaunch(msg.Params)
+				if err != nil {
+					m.respondOrErr(msg, nil, err)
+					return
+				}
+				if err := m.exec.validateModelSettingsLaunch(ctx, p, false); err != nil {
+					m.respondOrErr(msg, nil, err)
+					return
+				}
 				result, err := m.exec.PreviewLaunch(p, ctx)
+				if err == nil {
+					if sizeErr := modelconfig.CheckPayloadSize(result); sizeErr != nil {
+						err = modelSettingsParamsError(fmt.Errorf("settings: complete preview exceeds 64 KiB; reduce the settings payload"))
+					}
+				}
 				m.respondOrErr(msg, result, err)
 			case "engine:configure-launch":
 				configureCtx, cancel := context.WithTimeout(ctx, settings.ConfigureBudget)
 				defer cancel()
 				var configure settings.Configure
-				if !m.parse(msg, &configure) {
+				if err := modelconfig.DecodeStrict(msg.Params, &configure); err != nil {
+					m.respondOrErr(msg, nil, modelSettingsParamsError(err))
+					return
+				}
+				canonical, err := configure.Settings.Canonical()
+				if err != nil {
+					m.respondOrErr(msg, nil, modelSettingsParamsError(err))
+					return
+				}
+				configure.Settings = canonical
+				if err := m.exec.validateModelSettingsLaunch(configureCtx, settings.Request{Engine: configure.Engine, RequestID: configure.OperationID, Settings: canonical}, true); err != nil {
+					m.respondOrErr(msg, nil, err)
 					return
 				}
 				result, err := m.exec.ConfigureLaunch(configureCtx, configure, func() error {
@@ -149,7 +205,7 @@ func (m *Manager) handleSettingsMessage(ctx context.Context, msg *Message) bool 
 			}
 		}()
 		return true
-	case "engine:remote-get-settings", "engine:remote-preview-settings", "engine:remote-apply-settings":
+	case "engine:remote-get-settings", "engine:remote-preview-settings", "engine:remote-apply-settings", "engine:remote-inspect-model":
 		go m.remoteSettings(ctx, msg)
 		return true
 	}

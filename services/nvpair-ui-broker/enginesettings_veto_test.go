@@ -90,7 +90,7 @@ func TestSettingsApplyWhilePausedNeverResumesAStoppedEngine(t *testing.T) {
 			if h.applies.Load() != applies+1 {
 				t.Fatalf("configure-launch ran %d times, want once", h.applies.Load()-applies)
 			}
-			if s := h.snapshot(); s.Running || s.Settings != p.Settings || s.AppliedRevision != s.Revision {
+			if s := h.snapshot(); s.Running || !s.Settings.Equal(p.Settings) || s.AppliedRevision != s.Revision {
 				t.Fatalf("snapshot after an apply while paused = %+v; want the settings applied and the engine still stopped", s)
 			}
 		})
@@ -115,7 +115,7 @@ func TestSettingsPairedApplyIsVetoedWhilePausedLocally(t *testing.T) {
 		t.Fatalf("paired apply while paused locally = %v, want the local veto (%d)", err, codeLocalVeto)
 	}
 	after := h.snapshot()
-	if h.applies.Load() != applies || after.Revision != before.Revision || after.Settings != before.Settings || after.Running {
+	if h.applies.Load() != applies || after.Revision != before.Revision || !after.Settings.Equal(before.Settings) || after.Running {
 		t.Fatalf("vetoed apply changed the node: applies %d -> %d, snapshot %+v -> %+v", applies, h.applies.Load(), before, after)
 	}
 	h.b.engineConfigMu.Lock()

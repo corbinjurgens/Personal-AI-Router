@@ -1941,7 +1941,7 @@ class ModularSupervisor {
             try {
                 emitBridgePush('engines:settings-changed', parseEngineSettings(notification.params))
             } catch {
-                /* Unsupported peer version. */
+                /* Invalid settings frames cannot replace authoritative readback. */
             }
             return
         }

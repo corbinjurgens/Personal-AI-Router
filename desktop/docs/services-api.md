@@ -26,6 +26,7 @@
 - ⚠️ nvpair-engine-manager → engine:remote-apply-settings
 - ⚠️ nvpair-engine-manager → engine:remote-copy-model
 - ⚠️ nvpair-engine-manager → engine:remote-get-settings
+- ⚠️ nvpair-engine-manager → engine:remote-inspect-model
 - ⚠️ nvpair-engine-manager → engine:remote-preview-settings
 - ⚠️ nvpair-engine-manager → engine:remote-switch
 - ⚠️ nvpair-engine-manager → engine:remote-switch-fence
@@ -151,6 +152,7 @@
 | `engine:errors` | request (we call) | ⚠️ not called |
 | `engine:get-installed` | request (we call) | ✅ yes |
 | `engine:get-launch` | request (we call) | ⚠️ not called |
+| `engine:inspect-model` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
 | `engine:intent` | request (we call) | ✅ yes |
 | `engine:load-model` | request (we call) | ✅ yes |
@@ -165,6 +167,7 @@
 | `engine:remote-delete-model` | request (we call) | ✅ yes |
 | `engine:remote-get-installed` | request (we call) | ✅ yes |
 | `engine:remote-get-settings` | request (we call) | ⚠️ not called |
+| `engine:remote-inspect-model` | request (we call) | ⚠️ not called |
 | `engine:remote-install` | request (we call) | ✅ yes |
 | `engine:remote-load-model` | request (we call) | ✅ yes |
 | `engine:remote-management-get` | request (we call) | ✅ yes |
@@ -425,6 +428,7 @@
 | `discovery:unsubscribe` | request (we call) | ⚠️ not called |
 | `engine:apply-settings` | request (we call) | ✅ yes |
 | `engine:get-settings` | request (we call) | ✅ yes |
+| `engine:inspect-model` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
 | `engine:intent-changed` | request (we call) | ✅ yes |
 | `engine:models-changed` | request (we call) | ✅ yes |

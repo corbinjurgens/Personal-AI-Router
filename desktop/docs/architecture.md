@@ -5,6 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Personal AI Router Architecture
 
+The model configuration contract keeps portable selected edits separate from
+target-owned artifacts, allocation resolution and runtime readback. The renderer
+uses `pairApi.engines.inspectModel`; Electron decodes the service reply without
+resolving native flags or estimating readiness. Engine settings editors preserve
+`modelLoads` on unrelated port/launch changes. Typed Apply is not exposed by this
+preparatory contract.
+
 Personal AI Router is an Electron desktop application backed by the modular Go
 services in the sibling `services/` directory of this repository. The renderer
 never connects directly to backend processes. Electron main owns process

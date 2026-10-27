@@ -20,6 +20,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 	"nvpair-shared/noderec"
 )
 
@@ -168,7 +169,7 @@ func (b *Broker) settingsWorkerCall(ctx context.Context, method string, params a
 		return err
 	}
 	if rpcErr != nil {
-		return fmt.Errorf("%s", rpcErr.Message)
+		return &settingsWorkerError{code: rpcErr.Code, message: rpcErr.Message}
 	}
 	if target != nil {
 		return json.Unmarshal(result, target)
@@ -409,6 +410,9 @@ func (b *Broker) previewSettingsSnapshotLocked(ctx context.Context, p settings.R
 			preview.Errors["ports"] = err.Error()
 		}
 	}
+	if err := modelconfig.CheckPayloadSize(preview); err != nil {
+		return settings.Preview{}, &invalidParamsError{err: fmt.Errorf("settings: complete preview exceeds 64 KiB; reduce the settings payload")}
+	}
 	return preview, nil
 }
 
@@ -559,6 +563,9 @@ func (b *Broker) getEngineSettings(ctx context.Context, p settings.Request, call
 // previewEngineSettings validates a proposed change and reports what applying
 // it would do, without touching the journal or the engine.
 func (b *Broker) previewEngineSettings(ctx context.Context, p settings.Request, caller string) (settings.Preview, error) {
+	if err := validateModelSettingsEntry(p); err != nil {
+		return settings.Preview{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, settings.CallBudget)
 	defer cancel()
 	b.engineConfigMu.Lock()
@@ -577,6 +584,9 @@ func (b *Broker) previewEngineSettings(ctx context.Context, p settings.Request, 
 // engine onto it. RequestID makes it idempotent: replaying one returns the
 // original receipt, and reusing it for different settings is refused.
 func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, caller string) (settingsReceipt, error) {
+	if err := validateModelSettingsEntry(p); err != nil {
+		return settingsReceipt{}, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, settings.CallBudget)
 	defer cancel()
 	// Serialize whole applies. Taken before engineConfigMu; see its comment.
@@ -712,8 +722,8 @@ func (b *Broker) dispatchEngineSettings(ctx context.Context, method string, p se
 }
 
 func (b *Broker) handleEngineSettings(msg *Message) {
-	var p settings.Request
-	if json.Unmarshal(msg.Params, &p) != nil {
+	p, decodeErr := settings.DecodeRequest(msg.Params)
+	if decodeErr != nil {
 		_ = b.codec.RespondError(msg.ID, -32602, "invalid settings request")
 		return
 	}
@@ -741,15 +751,15 @@ func (b *Broker) handleEngineSettings(msg *Message) {
 	method := strings.TrimSuffix(strings.TrimPrefix(msg.Method, "engine:"), "-settings")
 	result, err := b.dispatchEngineSettings(context.Background(), method, p, "")
 	if err != nil {
-		_ = b.codec.RespondError(msg.ID, -32000, err.Error())
+		_ = b.codec.RespondError(msg.ID, engineSettingsErrorCode(err), err.Error())
 	} else {
 		_ = b.codec.Respond(msg.ID, result)
 	}
 }
 
 func (b *Broker) handleSettingsRelay(source *engineManagerSource, raw json.RawMessage) {
-	var relay settings.Relay
-	if json.Unmarshal(raw, &relay) != nil || relay.ID == "" {
+	relay, decodeErr := settings.DecodeRelay(raw)
+	if decodeErr != nil {
 		return
 	}
 	if !b.engineManagerSourceCurrent(source) {
@@ -790,6 +800,8 @@ func (b *Broker) handleSettingsRelay(source *engineManagerSource, raw json.RawMe
 			// A peer relay must carry the caller engine-manager verified;
 			// otherwise it would take a local caller's empty-caller path.
 			err = callerErr
+		} else if relay.Method == "inspect" {
+			result, err = b.inspectModelSettings(ctx, *relay.Inspect, relay.Caller)
 		} else {
 			result, err = b.dispatchEngineSettings(ctx, relay.Method, relay.Request, relay.Caller)
 		}
@@ -801,7 +813,7 @@ func (b *Broker) handleSettingsRelay(source *engineManagerSource, raw json.RawMe
 		}{ID: relay.ID, Result: result}
 		if err != nil {
 			reply.Error = err.Error()
-			reply.ErrorCode = policyErrorCode(err)
+			reply.ErrorCode = engineSettingsErrorCode(err)
 		}
 		b.replyPeerRelay(source, worker, "engine:settings-reply", reply)
 	}()

@@ -406,7 +406,7 @@ func TestSettingsCoordinatorRevisionDedupNoopAndFailure(t *testing.T) {
 		t.Fatalf("failure receipt %+v %v", receipt, err)
 	}
 	s := h.b.engineSettings["ollama"].Snapshot
-	if s.Settings != p.Settings || s.Running || s.AppliedRevision >= s.Revision || s.Error == "" {
+	if !s.Settings.Equal(p.Settings) || s.Running || s.AppliedRevision >= s.Revision || s.Error == "" {
 		t.Fatalf("untruthful failed snapshot: %+v", s)
 	}
 	h.fail.Store(false)
@@ -468,7 +468,7 @@ func TestSettingsStoppedRetryPreservesPortReservation(t *testing.T) {
 	if _, err := h.b.applyEngineSettings(context.Background(), conflict, ""); err == nil {
 		t.Fatal("retry accepted a foreign occupied port")
 	}
-	if after := h.b.engineSettings["ollama"].Snapshot; after.Revision != before.Revision || after.Settings != before.Settings || h.applies.Load() != 1 {
+	if after := h.b.engineSettings["ollama"].Snapshot; after.Revision != before.Revision || !after.Settings.Equal(before.Settings) || h.applies.Load() != 1 {
 		t.Fatalf("rejected conflict changed settings or runtime: %+v, applies=%d", after, h.applies.Load())
 	}
 	receipt, err = h.b.applyEngineSettings(context.Background(), p, "")

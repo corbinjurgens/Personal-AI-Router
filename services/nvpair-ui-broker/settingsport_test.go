@@ -94,7 +94,7 @@ func TestBrokerLlamaCPPProxySetPortRejectsConflicts(t *testing.T) {
 			h.b.engineConfigMu.Lock()
 			after := h.b.engineSettings["llamacpp"].Snapshot
 			h.b.engineConfigMu.Unlock()
-			if after.Settings != before.Settings || after.Revision != before.Revision {
+			if !after.Settings.Equal(before.Settings) || after.Revision != before.Revision {
 				t.Fatalf("rejection changed desired settings: before=%+v after=%+v", before, after)
 			}
 		})
@@ -173,7 +173,7 @@ func TestBrokerLlamaCPPProxySetPortPersistsOnlyRequestedFacade(t *testing.T) {
 	record := records["llamacpp"]
 	want := before.Settings
 	want.ProxyPort = target
-	if record == nil || !record.Explicit || record.Snapshot.Settings != want || record.Snapshot.Phase != "succeeded" || record.Snapshot.Revision != before.Revision+1 {
+	if record == nil || !record.Explicit || !record.Snapshot.Settings.Equal(want) || record.Snapshot.Phase != "succeeded" || record.Snapshot.Revision != before.Revision+1 {
 		t.Fatalf("persisted record = %+v, want successful explicit proxy-port change", record)
 	}
 }

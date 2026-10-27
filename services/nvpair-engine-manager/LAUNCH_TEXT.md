@@ -5,6 +5,31 @@ SPDX-License-Identifier: Apache-2.0
 
 # PAIR engine arguments
 
+Typed per-model loads are declared as `runtime.modelLoads`, separately from
+argument text and serving qualifications. Their `requested` leaves are portable
+intent; `resolved` is target-owned finite readback, never copy input. The
+[option matrix](MANIFEST.md#typed-model-load-contract-and-option-matrix) records
+every native allocation entry plus generation/template/reasoning controls.
+Descriptors derive native spellings from the existing adapter table. A blank
+field inherits; showing a source-labelled default never saves an override.
+
+Until the native compiler/application bodies land, RPC launch preview/configure
+refuse typed loads and model changes before preparation, rebind or persistence.
+Ordinary RPC writes also refuse stored typed loads while preserving direct
+executor readback/persistence integration remains pending. These are temporary
+bodies, not persisted feature flags. Ordinary settings with no typed load state
+keep the existing path. Inspection is a read and reports unavailable artifact
+facts/estimates with descriptors; Auto selects no candidate or owner defaults.
+Typed requests expose no raw-extras field. Advanced launch retains its existing
+supported validation.
+
+The parent-only launch decoder accepts the broker's internal PreserveCORS guard;
+public and pinned callers cannot supply it as authority. New fields are strictly
+decoded within the existing 64 KiB settings budget. Direct `PreviewLaunch` and
+`ConfigureLaunch` plus `launchStateLocked` and `persistRuntimeServing` still need
+the same guard and modelLoads preservation at their existing owners. No restart
+or drain choice is inferred while O1 remains unanswered.
+
 The Settings editor uses this notation for local and paired-device engine
 configuration. Engine-manager assembles the manifest-owned command; the broker
 coordinates its saved revision, proxy port and lifecycle as one operation.

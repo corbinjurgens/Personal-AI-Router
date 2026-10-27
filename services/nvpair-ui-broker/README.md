@@ -5,6 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+Model inspection uses `engine:inspect-model` through the existing settings read
+relay. The shared model configuration contract preserves typed `modelLoads`
+beside ordinary settings, separates requested/resolved/readback state, and
+reserves a selected model patch and target preview for later coupled application.
+The preparatory implementation refuses typed mutations before journal/runtime
+effects. See [Engine settings protocol](ENGINE_SETTINGS.md) for transport bounds,
+impact/authorization fields and the pending apply-build maintenance exclusion.
+
 Bound engine preparation uses private correlated notifications
 `admission/prepare-bound-engine`, `admission/cancel-bound-engine` and
 `node/bound-engine-prepared`. Requests contain request/proxy-run IDs, active

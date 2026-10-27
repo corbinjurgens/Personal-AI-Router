@@ -17,6 +17,7 @@ import (
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 	"nvpair-shared/noderec"
 )
 
@@ -25,6 +26,7 @@ const settingsPath = "/v1/engine-settings/"
 func (s *controlServer) settingsRoutes() []controlRoute {
 	return []controlRoute{
 		{settingsPath + "get", http.MethodPost, controlRead, "settings-get", s.settingsHandler("get")},
+		{settingsPath + "inspect", http.MethodPost, controlRead, "settings-inspect", s.settingsHandler("inspect")},
 		{settingsPath + "preview", http.MethodPost, controlRead, "settings-preview", s.settingsHandler("preview")},
 		{settingsPath + "apply", http.MethodPost, controlMutation, "settings-apply", s.settingsHandler("apply")},
 		{settingsPath + "events", http.MethodGet, controlRead, "settings-events", ignoreCaller(s.streamSettings)},
@@ -46,19 +48,31 @@ func (s *controlServer) settingsHandler(method string) pinnedPeerHandler {
 			return
 		}
 		if err := validateServingModelsJSON(raw, "settings", "serving"); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, "invalid settings request", http.StatusBadRequest)
 			return
 		}
 		var p settings.Request
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		decoder.DisallowUnknownFields()
-		if decoder.Decode(&p) != nil || decoder.Decode(&struct{}{}) != io.EOF {
-			http.Error(w, "invalid settings request", 400)
-			return
+		if method == "inspect" {
+			inspect, err := modelconfig.DecodeInspectRequest(raw)
+			if err != nil {
+				http.Error(w, "invalid model inspection request", http.StatusBadRequest)
+				return
+			}
+			// settingsParent retains its existing executor signature. Resolution
+			// is an internal carrier only; settingsRelay.call converts it to the
+			// shared Relay.Inspect pointer (and no Relay.Request) before sending.
+			// NodeID is cleared here to prohibit forwarding another target hop.
+			p = settings.Request{Engine: inspect.Engine, Resolution: inspect.ModelID}
+		} else {
+			p, err = settings.DecodeRequest(raw)
+			if err != nil {
+				http.Error(w, "invalid settings request", http.StatusBadRequest)
+				return
+			}
 		}
 		// A peer can only address this target node, never forward another hop.
 		p.NodeID = ""
-		if method != "get" {
+		if method != "get" && method != "inspect" {
 			if err := s.exec.RejectRemoteCORSChange(p); err != nil {
 				http.Error(w, err.Error(), 403)
 				return
@@ -87,7 +101,9 @@ func (s *controlServer) settingsHandler(method string) pinnedPeerHandler {
 			// A local veto or a refused management operation is a typed 409
 			// the caller maps back to its code; anything else is a plain 409.
 			var relayErr *codedError
-			if errors.As(err, &relayErr) && wireCodes[relayErr.code] != "" {
+			if errors.As(err, &relayErr) && relayErr.code == -32602 {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			} else if errors.As(err, &relayErr) && wireCodes[relayErr.code] != "" {
 				writeCodedError(w, relayErr.code, err.Error())
 			} else {
 				http.Error(w, err.Error(), 409)
@@ -150,8 +166,13 @@ func (s *controlServer) streamSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) remoteSettings(ctx context.Context, msg *Message) {
-	var p settings.Request
-	if !m.parse(msg, &p) {
+	if msg.Method == "engine:remote-inspect-model" {
+		m.remoteInspectModel(ctx, msg)
+		return
+	}
+	p, err := settings.DecodeRequest(msg.Params)
+	if err != nil {
+		m.respondOrErr(msg, nil, modelSettingsParamsError(err))
 		return
 	}
 	peer, ok := m.peers.lookup(p.NodeID)

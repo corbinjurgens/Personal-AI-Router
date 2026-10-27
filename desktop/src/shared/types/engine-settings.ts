@@ -1,12 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type {
+    AutoProposal,
+    Estimate,
+    ArtifactSummary,
+    ModelChange,
+    ModelImpact,
+    ModelLoad
+} from '@/shared/types/model-config'
+import type { JsonValue } from '@/shared/types/json'
+
 export interface EngineSettingsConfig {
     serverPort: number
     proxyPort: number
     /** Arguments and leading environment assignments, without an executable/subcommand. */
     launchText: string
     serving?: EngineServingConfig
+    modelLoads?: ModelLoad[]
 }
 
 type ServingMemory = {
@@ -75,10 +86,12 @@ export interface EngineSettingsTarget {
 }
 
 export interface EngineSettingsRequest extends EngineSettingsTarget {
+    /** Existing engine counter, restricted to nonnegative safe JSON integers. */
     expectedRevision: number
     requestId?: string
     settings: EngineSettingsConfig
     resolution?: 'server' | 'launch'
+    modelChange?: ModelChange
 }
 
 export interface EngineSettingsSnapshot extends EngineSettingsTarget {
@@ -98,6 +111,10 @@ export interface EngineSettingsSnapshot extends EngineSettingsTarget {
     phase: 'idle' | 'applying' | 'succeeded' | 'failed'
     error: string
     requestId: string
+    coupledStage?: string
+    policyRevision?: string
+    unresolvedError?: string
+    effectiveSettings?: EngineSettingsConfig
 }
 
 export interface EngineSettingsPreview {
@@ -108,6 +125,13 @@ export interface EngineSettingsPreview {
     errors: Record<string, string>
     restart: boolean
     rebind: boolean
+    policyRevision?: string
+    previewDigest?: string
+    diff?: Array<{ field: string; before?: JsonValue; after?: JsonValue }>
+    requiredArtifacts?: ArtifactSummary[]
+    estimate?: Estimate
+    impact?: ModelImpact
+    auto?: AutoProposal
 }
 
 export interface EngineSettingsReceipt {

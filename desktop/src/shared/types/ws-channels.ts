@@ -53,6 +53,7 @@ import type {
     EngineSettingsPreview,
     EngineSettingsReceipt
 } from '@/shared/types/engine-settings'
+import type { InspectModelRequest, InspectModelResult } from '@/shared/types/model-config'
 import type { AppInitialSnapshot, ClusterInitialSnapshot } from '@/shared/types/bootstrap'
 import type { ServiceError } from '@/shared/types/errors'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -167,6 +168,7 @@ export interface WsInvokeChannelMap {
     'engines:get-initial': { request: void; response: EngineInitialState }
     'engines:get-intent': { request: void; response: EngineIntentSnapshot | null }
     'engines:get-settings': { request: EngineSettingsTarget; response: EngineSettingsSnapshot }
+    'engines:inspect-model': { request: InspectModelRequest; response: InspectModelResult }
     'engines:switch': { request: SwitchRequest; response: { receipt: SwitchReceipt } }
     'engines:switch-status': { request: SwitchStatusRequest; response: SwitchStatus }
     'engines:switch-fence': { request: SwitchFenceRequest; response: SwitchFenceResult }

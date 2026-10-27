@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 
 const mocks = vi.hoisted(() => ({
     state: {
@@ -12,7 +13,7 @@ const mocks = vi.hoisted(() => ({
     },
     supervisor: {
         hasProcess: vi.fn(() => true),
-        callProcess: vi.fn(),
+        callProcess: vi.fn<ReturnType<typeof getModularSupervisor>['callProcess']>(),
         callProxy: vi.fn(),
         sendProcess: vi.fn(),
         reportError: vi.fn()
@@ -32,8 +33,10 @@ vi.mock('@/electron/service-bridge/model-catalog', () => ({ getEngineHubModels: 
 
 import { handleServiceBridgeInvoke } from '@/electron/service-bridge/empty-handlers'
 import { MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS } from '@/shared/constants/modular-runtime'
-import type { EngineServingConfig } from '@/shared/types/engine-settings'
+import type { EngineServingConfig, EngineSettingsRequest } from '@/shared/types/engine-settings'
+import type { InspectModelRequest } from '@/shared/types/model-config'
 import type { JsonValue } from '@/electron/service-bridge/json-rpc-client'
+import { JsonRpcResponseError } from '@/electron/service-bridge/json-rpc-client'
 import {
     parseEngineSettings,
     parseEngineSettingsPreview
@@ -88,6 +91,103 @@ describe('unified settings bridge', () => {
         mocks.supervisor.callProcess.mockImplementation(async (_name: string, method: string) =>
             method === 'engine:get-settings' ? baseline : { revision: 5, phase: 'succeeded' }
         )
+    })
+
+    it('relays model inspection to the broker', async () => {
+        mocks.supervisor.callProcess.mockResolvedValue({
+            engine: 'ollama',
+            nodeId: 'remote',
+            modelId: 'exact/model',
+            status: 'unavailable',
+            estimate: { status: 'unknown' }
+        })
+        const request: InspectModelRequest = {
+            engine: 'ollama',
+            nodeId: 'remote',
+            modelId: 'exact/model'
+        }
+        const result = await handleServiceBridgeInvoke('engines:inspect-model', request)
+        expect(mocks.supervisor.callProcess).toHaveBeenCalledWith(
+            'broker',
+            'engine:inspect-model',
+            request
+        )
+        expect(result.status).toBe('unavailable')
+    })
+
+    it('refuses inspection readback for a different target identity', async () => {
+        mocks.supervisor.callProcess.mockResolvedValue({
+            engine: 'llamacpp',
+            nodeId: 'other-node',
+            modelId: 'exact/model',
+            status: 'unavailable',
+            estimate: { status: 'unavailable' }
+        })
+        await expect(
+            handleServiceBridgeInvoke('engines:inspect-model', {
+                engine: 'llamacpp',
+                nodeId: 'remote',
+                modelId: 'exact/model'
+            })
+        ).rejects.toThrow('target identity mismatch')
+    })
+
+    it.each([-32010, -32011, -32012, -32014])('preserves refusal code %s', async code => {
+        const error = new JsonRpcResponseError(code, 'Target refused the request')
+        mocks.supervisor.callProcess.mockRejectedValue(error)
+        await expect(
+            handleServiceBridgeInvoke('engines:inspect-model', {
+                engine: 'llamacpp',
+                nodeId: 'remote',
+                modelId: 'exact/model'
+            })
+        ).rejects.toBe(error)
+        await expect(
+            handleServiceBridgeInvoke('engines:apply-settings', {
+                nodeId: 'remote',
+                engine: 'llamacpp',
+                expectedRevision: 4,
+                requestId: 'refused-request',
+                settings: baseline.settings
+            })
+        ).rejects.toBe(error)
+    })
+
+    it('relays a selected model change and full baseline without aliasing the caller', async () => {
+        const request: EngineSettingsRequest = {
+            nodeId: 'remote',
+            engine: 'llamacpp',
+            expectedRevision: 4,
+            requestId: 'reviewed-request',
+            settings: {
+                ...baseline.settings,
+                modelLoads: [{ modelId: 'exact/model', requested: { slots: 2, kvOffload: false } }]
+            },
+            modelChange: {
+                modelId: 'exact/model',
+                expectedPolicyRevision: '9007199254740993',
+                load: { set: { slots: 3 }, clear: ['threads'] },
+                policy: { generation: { temperature: 0.5, top_k: null }, roles: { weak: false } },
+                previewDigest: 'd'.repeat(64),
+                supersedesRequestId: 'previous-request'
+            }
+        }
+        await handleServiceBridgeInvoke('engines:apply-settings', request)
+        expect(mocks.supervisor.callProcess).toHaveBeenCalledExactlyOnceWith(
+            'broker',
+            'engine:apply-settings',
+            request,
+            MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
+        )
+        const sent = mocks.supervisor.callProcess.mock.calls[0]?.[2]
+        if (!sent || typeof sent !== 'object' || Array.isArray(sent))
+            throw new Error('Relayed settings request missing')
+        expect(sent.settings).not.toBe(request.settings)
+        expect(sent.modelChange).not.toBe(request.modelChange)
+        expect(sent.settings).toEqual(request.settings)
+        expect(sent.modelChange).toEqual(request.modelChange)
+        expect(mocks.supervisor.callProxy).not.toHaveBeenCalled()
+        expect(mocks.supervisor.sendProcess).not.toHaveBeenCalled()
     })
 
     it('keeps a manager-accepted blank provenance reference readable', () => {

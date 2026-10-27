@@ -50,9 +50,10 @@ interface Draft {
     proxyPort: string
     launchText: string
     serving?: EngineSettingsConfig['serving']
+    modelLoads?: EngineSettingsConfig['modelLoads']
 }
 const asDraft = (config: EngineSettingsConfig): Draft => ({
-    ...config,
+    ...structuredClone(config),
     serverPort: String(config.serverPort),
     proxyPort: String(config.proxyPort)
 })
@@ -167,10 +168,11 @@ export function EngineSettingsSection({
             ...target,
             expectedRevision: base.revision,
             settings: {
+                ...structuredClone(base.settings),
                 serverPort,
                 proxyPort,
                 launchText: draft.launchText,
-                ...(draft.serving ? { serving: draft.serving } : {})
+                ...(draft.serving ? { serving: structuredClone(draft.serving) } : {})
             },
             resolution: useServerPort ? 'server' : 'launch'
         }
