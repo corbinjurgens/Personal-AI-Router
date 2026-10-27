@@ -4,6 +4,7 @@
 import fs from 'fs'
 import path from 'path'
 import { getPaths } from '@/electron/globals'
+import { currentPlatform } from '@/shared/utils/platform'
 import {
     MODULAR_DEFAULT_LOG_LEVEL,
     isModularLogLevel,
@@ -73,11 +74,12 @@ export function loadUiConfig(): void {
                     merged.firstRun = false
                 }
                 config = merged
-                save()
-                try {
-                    fs.unlinkSync(legacy)
-                } catch {
-                    /* best-effort remove after migrate */
+                if (save(true)) {
+                    try {
+                        fs.unlinkSync(legacy)
+                    } catch {
+                        /* best-effort remove after migrate */
+                    }
                 }
             }
         }
@@ -86,16 +88,37 @@ export function loadUiConfig(): void {
     }
 }
 
-function save(): void {
+function save(requireDurability = false): boolean {
     try {
         const filePath = getFilePath()
         const dir = path.dirname(filePath)
         fs.mkdirSync(dir, { recursive: true })
         const tmp = filePath + '.tmp'
-        fs.writeFileSync(tmp, JSON.stringify(config, null, 2), 'utf8')
+        const fd = fs.openSync(tmp, 'w')
+        try {
+            fs.writeFileSync(fd, JSON.stringify(config, null, 2), 'utf8')
+            if (requireDurability) fs.fsyncSync(fd)
+        } finally {
+            fs.closeSync(fd)
+        }
         fs.renameSync(tmp, filePath)
+        if (requireDurability) {
+            // Node's rename cannot confirm Windows metadata durability. Keep legacy.
+            if (currentPlatform() === 'win32') return false
+            // Confirm the rename and the configs directory's entry if just created.
+            for (const directory of [dir, path.dirname(dir)]) {
+                const directoryFd = fs.openSync(directory, 'r')
+                try {
+                    fs.fsyncSync(directoryFd)
+                } finally {
+                    fs.closeSync(directoryFd)
+                }
+            }
+        }
+        return true
     } catch {
         /* best-effort */
+        return false
     }
 }
 
