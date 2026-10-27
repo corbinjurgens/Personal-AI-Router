@@ -213,6 +213,10 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 // reconcilePresenceState leaves publication to its caller so status refresh can
 // combine installation and presence changes into one final notification.
 func (e *Executor) reconcilePresenceState(ctx context.Context, engine string, st *engineState, pathInstalled bool, port int, allowWhileStopping bool) (presenceResult, bool) {
+	return e.reconcilePresenceStateWithProcessProof(ctx, engine, st, pathInstalled, port, allowWhileStopping, pidOnPort, orphanPIDExited)
+}
+
+func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, engine string, st *engineState, pathInstalled bool, port int, allowWhileStopping bool, owner func(int) (int, string, bool), exited func(int) bool) (presenceResult, bool) {
 	executablePresent := st.detectExecutable() != ""
 	st.mu.Lock()
 	running := st.running
@@ -252,6 +256,16 @@ func (e *Executor) reconcilePresenceState(ctx context.Context, engine string, st
 			return presenceResult{}, false
 		}
 		st.mu.Lock()
+		// Refusing TCP proves only that the listener closed. An external
+		// process may still hold models; retain unknown ownership until its
+		// observed PID has positively exited. Command engines additionally
+		// have a separate native residency owner, which status cannot prove.
+		if st.plat.Runtime.modeOrDefault() == "command" || st.reclaimPID <= 0 || !exited(st.reclaimPID) {
+			changed := st.healthy
+			st.healthy = false
+			st.mu.Unlock()
+			return presenceResult{Occupied: true}, changed
+		}
 		changed := st.running || st.healthy || st.adopted || st.installed != pathInstalled
 		if st.healthStop != nil {
 			st.healthStop()
@@ -263,6 +277,7 @@ func (e *Executor) reconcilePresenceState(ctx context.Context, engine string, st
 		st.healthy = false
 		st.adopted = false
 		st.proc = nil
+		st.reclaimPID = 0
 		if !executablePresent {
 			// A service-only adoption has no managed image. Never leave a stale
 			// path that orphan reclamation could terminate.
@@ -313,6 +328,12 @@ func (e *Executor) reconcilePresenceState(ctx context.Context, engine string, st
 	// and explicit start) against pause just like owned readiness; the external
 	// listener is never stopped on refusal. Passive status checks and cleanup
 	// reconciliation keep adopting so reporting and stop stay truthful.
+	var externalPID int
+	if st.plat.Runtime.modeOrDefault() == "process" {
+		if pid, _, known := owner(port); known {
+			externalPID = pid
+		}
+	}
 	e.nodeProjection.mu.Lock()
 	st.mu.Lock()
 	if ctx.Err() != nil || ((automaticCrashRelaunch(ctx) || activationAdoption(ctx)) && e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked) {
@@ -333,6 +354,15 @@ func (e *Executor) reconcilePresenceState(ctx context.Context, engine string, st
 	// another process now, so its adoption is a new run.
 	if changed || st.runID == "" {
 		st.runID = newEngineRunID()
+	}
+	if !adopted || !running {
+		st.reclaimPID = externalPID
+	} else if st.reclaimPID != externalPID && !exited(st.reclaimPID) {
+		// Multiple or unidentified external incarnations cannot share one PID
+		// exit proof. Zero preserves uncertainty and never authorizes a signal.
+		st.reclaimPID = 0
+	} else {
+		st.reclaimPID = externalPID
 	}
 	st.installed = serviceInstalled
 	st.running = true

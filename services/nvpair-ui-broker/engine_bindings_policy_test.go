@@ -43,7 +43,9 @@ func TestEngineBindingsPolicySaveRestartWithoutLifecycleEffects(t *testing.T) {
 	}
 	// The fake records RPCs separately from policy projection notifications.
 	for _, call := range recorder.snapshot() {
-		t.Fatalf("binding-only save called engine lifecycle: %s", call.method)
+		if call.method != "engine:get-installed" {
+			t.Fatalf("binding-only save called engine lifecycle: %s", call.method)
+		}
 	}
 	restarted, _ := newPolicyBroker(t)
 	restarted.loadNodePolicy(ab.path)
@@ -127,7 +129,7 @@ func TestEngineBindingsPolicyMalformedDiskRequiresPausedRecovery(t *testing.T) {
 			b, _ := newPolicyBroker(t)
 			b.loadNodePolicy(path)
 			got := b.localPolicy()
-			if !got.RecoveryRequired || got.Availability != nodepolicy.Paused || len(got.Policy.EngineBindings) != 0 {
+			if !got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused || len(got.Policy.EngineBindings) != 0 {
 				t.Fatalf("recovery=%+v", got)
 			}
 			for _, file := range []string{path, path + ".bad"} {

@@ -92,19 +92,12 @@ func (b *Broker) setAvailabilityRequestAs(ctx context.Context, state nodepolicy.
 func (b *Broker) setAvailabilityModeLocked(ctx context.Context, r *policyRuntime, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, mode nodepolicy.PauseMode) (nodepolicy.Availability, error) {
 	var saveErr error
 	var saved bool
-	if state == nodepolicy.Paused && mode == nodepolicy.PauseImmediate {
-		policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Paused, origin)
-		if err != nil && !persisted {
-			r.mu.Unlock()
-			return "", fmt.Errorf("the paused state could not be saved: %w", err)
-		}
-		r.current = policy
+	immediate := state == nodepolicy.Paused && mode == nodepolicy.PauseImmediate
+	if immediate {
+		// Acceptance must stop execution even while durable replacement retries.
+		// Publish this volatile fence before entering the persistence barrier.
 		r.live = nodepolicy.Draining
 		r.cancelActive = true
-		saved = persisted
-		if err != nil {
-			saveErr = &policySaveError{err: err, revision: policy.Revision}
-		}
 	}
 	if state == nodepolicy.Paused {
 		r.pendingPauseRequested = true
@@ -124,9 +117,33 @@ func (b *Broker) setAvailabilityModeLocked(ctx context.Context, r *policyRuntime
 		// takes engineConfigMu -> r.mu, never the reverse; pending state closes
 		// the interval while already accepted work finishes its journal.
 		b.publishNodeProjection()
-		if mode == nodepolicy.PauseImmediate {
-			b.pushAvailabilityAndActivate(saved)
+		if immediate {
+			// No policy owner mutex may be held across these client calls.
+			b.pushAvailabilityAndActivate(false)
 			b.notifyAvailability()
+			r.mu.Lock()
+			if r.transitionGen != gen || tctx.Err() != nil {
+				r.mu.Unlock()
+				cancel()
+				return "", errAvailabilitySuperseded
+			}
+			policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Paused, origin)
+			if err == nil || persisted {
+				r.current = policy
+			}
+			saved = persisted
+			if err != nil {
+				saveErr = &policySaveError{err: err, revision: policy.Revision}
+			}
+			r.mu.Unlock()
+			if err != nil && !persisted {
+				// Keep the accepted volatile fence and cancellation on failure.
+				// A local retry or Resume is required to resolve it.
+				cancel()
+				return nodepolicy.Draining, saveErr
+			}
+			b.publishNodeProjection()
+			b.pushAvailabilityAndActivate(saved)
 		}
 		if err := b.vetoRemoteEngineSwitch("", false); err != nil {
 			cancel()
@@ -172,7 +189,10 @@ func (b *Broker) setAvailabilityModeLocked(ctx context.Context, r *policyRuntime
 	}()
 	select {
 	case o := <-done:
-		return o.availability, errors.Join(o.err, saveErr)
+		if saveErr != nil {
+			return o.availability, errors.Join(o.err, saveErr)
+		}
+		return o.availability, o.err
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}

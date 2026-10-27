@@ -1452,6 +1452,21 @@ func TestRoutingHistoryComponentMethodsStayLocal(t *testing.T) {
 						_, worker = attachFakeProxy(t, b)
 					}
 					manager := attachFakeEngine(t, b)
+					// Source binding publishes startup identity/projection state.
+					// Join that fixture work before measuring the denial corpus.
+					waitPushesSettled(t, b)
+					synctest.Wait()
+					if worker != nil {
+						worker.mu.Lock()
+						worker.calls = nil
+						worker.mu.Unlock()
+					}
+					manager.mu.Lock()
+					manager.calls, manager.projections = nil, nil
+					manager.mu.Unlock()
+					out.mu.Lock()
+					out.buf.Reset()
+					out.mu.Unlock()
 					workloads := &syncBuffer{}
 					b.setWorkloadMgr(&workloadManagerProcess{stdin: privacyWriteCloser{workloads}})
 					incarnation, retired := b.historyIncarnation, b.historyRetiredThrough

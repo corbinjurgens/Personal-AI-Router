@@ -67,6 +67,10 @@ func (e *Executor) Wake(ctx context.Context, engine string) error {
 // Sleep stops an engine the way Restart and StopAll do, without recording Off
 // intent, so a later Wake (or restore at the next launch) can start it again.
 func (e *Executor) Sleep(engine string) error {
+	return e.sleepWithNativeReadback(engine, e.runCommandOutput)
+}
+
+func (e *Executor) sleepWithNativeReadback(engine string, nativeReadback func(context.Context, []string) (string, error)) error {
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return err
@@ -138,6 +142,22 @@ func (e *Executor) Sleep(engine string) error {
 	st.mu.Lock()
 	adopted, running := st.adopted, st.running
 	st.mu.Unlock()
+	if rt.modeOrDefault() == "command" && adopted && running && st.manifest.FamilyOrDefault() == "lmstudio" {
+		// The external owner may have stopped its server and unloaded its own
+		// models since the previous refusal. Only observe it: never run an
+		// unload or unscoped stop against an adopted application.
+		if rt.Ready == nil || !e.waitUnavailableContext(ctx, rt.Ready, port, presenceRefusalWindow) {
+			return fmt.Errorf("cannot stop engine %q: it is running under external management; stop it in its own application, then retry", engine)
+		}
+		if err := stoppedLMStudioResidency(ctx, st, nativeReadback); err != nil {
+			return err
+		}
+		if !e.waitUnavailableContext(ctx, rt.Ready, port, presenceRefusalWindow) {
+			return fmt.Errorf("cannot pause engine %q: external endpoint changed during model residency proof", engine)
+		}
+		e.markStopped(st, engine)
+		return nil
+	}
 	if presence.Occupied && !presence.Identified {
 		return fmt.Errorf("cannot pause engine %q: listener ownership is unverified", engine)
 	}
@@ -149,13 +169,20 @@ func (e *Executor) Sleep(engine string) error {
 		// Prove empty residency at the native owner before its control endpoint
 		// disappears. Never issue automatic unloads to an adopted engine.
 		if installed || running {
-			if err := e.emptyCommandResidency(ctx, st, engine, running); err != nil {
+			if err := e.emptyCommandResidency(ctx, st, engine, running, nativeReadback); err != nil {
 				return err
 			}
 		}
 	}
 	if err := e.doStopContext(ctx, st, engine); err != nil {
 		return err
+	}
+	if rt.modeOrDefault() == "command" && running && st.manifest.FamilyOrDefault() == "lmstudio" {
+		// The server can be down while llmster still owns models. Read the native
+		// residency owner after stop as well, including on repeated/startup Pause.
+		if err := stoppedLMStudioResidency(ctx, st, nativeReadback); err != nil {
+			return err
+		}
 	}
 	if !e.switchTerminatedContext(ctx, st) {
 		return fmt.Errorf("cannot pause engine %q: physical termination is unverified", engine)
@@ -165,7 +192,10 @@ func (e *Executor) Sleep(engine string) error {
 
 // Caller holds opMu and has established ownership. This deliberately bypasses
 // Action's lifecycle admission: the sleep operation already owns that lock.
-func (e *Executor) emptyCommandResidency(ctx context.Context, st *engineState, engine string, unload bool) error {
+func (e *Executor) emptyCommandResidency(ctx context.Context, st *engineState, engine string, unload bool, nativeReadback func(context.Context, []string) (string, error)) error {
+	if !unload && st.manifest.FamilyOrDefault() == "lmstudio" {
+		return stoppedLMStudioResidency(ctx, st, nativeReadback)
+	}
 	loaded, ok := st.manifest.Actions["loaded_models"]
 	if !ok || loaded.Result == nil || loaded.RestartAfter {
 		return fmt.Errorf("cannot pause engine %q: model residency readback is unavailable", engine)
@@ -210,6 +240,25 @@ func (e *Executor) emptyCommandResidency(ctx context.Context, st *engineState, e
 	}
 	if len(models) != 0 {
 		return fmt.Errorf("cannot pause engine %q: model residency remains after unload", engine)
+	}
+	return nil
+}
+
+// lms ps observes model processes independently of the HTTP server. An empty,
+// successfully decoded native array is proof; a failed CLI, null, or occupied
+// inventory is never interpreted as an already stopped engine.
+func stoppedLMStudioResidency(ctx context.Context, st *engineState, run func(context.Context, []string) (string, error)) error {
+	cli := expandPath(st.plat.Runtime.CLI)
+	if cli == "" {
+		return fmt.Errorf("cannot pause engine %q: native model residency readback is unavailable", st.manifest.Engine)
+	}
+	raw, err := run(ctx, []string{cli, "ps", "--json"})
+	var rows []json.RawMessage
+	if err != nil || json.Unmarshal([]byte(raw), &rows) != nil || rows == nil {
+		return fmt.Errorf("cannot pause engine %q: native model residency readback is unverified", st.manifest.Engine)
+	}
+	if len(rows) != 0 {
+		return fmt.Errorf("cannot pause engine %q: native model residency remains", st.manifest.Engine)
 	}
 	return nil
 }

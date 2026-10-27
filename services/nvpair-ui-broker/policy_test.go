@@ -987,8 +987,11 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	if calls[0].method != nodepolicy.MethodSetAvailability {
 		t.Fatalf("first push after a restart = %s; availability must reach the proxy first", calls[0].method)
 	}
-	if p := availabilityPushes(calls); p[0].State != nodepolicy.Paused {
-		t.Fatalf("replayed availability = %+v, want paused", p[0])
+	if p := availabilityPushes(calls); p[0].State != nodepolicy.Draining || p[0].CancelActive {
+		t.Fatalf("replayed availability = %+v, want draining until current-manager physical proof", p[0])
+	}
+	if got := b.localPolicy(); got.Policy.Availability != nodepolicy.Paused {
+		t.Fatalf("manager replacement changed stored pause intent: %+v", got)
 	}
 	for _, c := range calls {
 		switch c.method {

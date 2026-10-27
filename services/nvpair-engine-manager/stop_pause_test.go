@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/testbin"
 )
 
@@ -106,11 +107,8 @@ func TestStopPauseOwnershipExternalEnginesHaveNoCleanupEffects(t *testing.T) {
 			}
 			server.Close() // The fixture's external owner stops its own listener.
 			err = ex.Sleep("fake")
-			if mode == "process" && err != nil {
-				t.Fatalf("retry after external process owner stopped: %v", err)
-			}
-			if mode == "command" && err == nil {
-				t.Fatal("closed command endpoint concealed unknown separate model residency")
+			if err == nil {
+				t.Fatal("listener closure concealed a surviving external owner or unknown model residency")
 			}
 		})
 	}
@@ -663,5 +661,453 @@ func TestStopPauseOwnershipQueuedChatRechecksFence(t *testing.T) {
 	}
 	if effects.Load() != 0 {
 		t.Fatal("queued chat executed after the pause fence")
+	}
+}
+
+func TestStopPauseOwnershipStoppedCommandRequiresPositiveResidency(t *testing.T) {
+	test := func(name, readback string, wantStopped bool) {
+		t.Run(name, func(t *testing.T) {
+			port, err := freePort()
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := testEngineManifest(fakeEngineBin)
+			p := m.Platforms[hostKey()]
+			p.Runtime.Mode, p.Runtime.Port = "command", port
+			p.Runtime.Ready = &Probe{HTTP: "http://127.0.0.1:" + strconv.Itoa(port), Status: http.StatusOK}
+			marker := filepath.Join(t.TempDir(), "unscoped-stop")
+			p.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", marker}}
+			m.Platforms[hostKey()] = p
+			m.Actions["loaded_models"] = Action{Cmd: []string{fakeEngineBin, "echo", readback}, Result: &ActionResult{Array: "models", Field: "name"}}
+			ex := newTestExecutor(t, m)
+			if err := ex.setDesiredEnabled("fake", true, intentLocal); err != nil {
+				t.Fatal(err)
+			}
+			ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+			check := func(owner *Executor) {
+				t.Helper()
+				err := owner.Sleep("fake")
+				if (err == nil) != wantStopped {
+					t.Fatalf("stopped command with readback %s: %v", readback, err)
+				}
+				if err != nil && !strings.Contains(err.Error(), `engine "fake"`) {
+					t.Fatalf("incomplete Pause omitted engine: %v", err)
+				}
+			}
+			check(ex)
+			check(ex) // A repeated Pause must obtain fresh native proof.
+			restarted := NewExecutor(ex.reg, NewReporter(nil), func(string, any) {}, ex.baseDir)
+			restarted.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+			check(restarted) // Paused startup has no running HTTP server.
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("stopped engine ran an unscoped stop: %v", err)
+			}
+			enabled, known, err := restarted.desired.get("fake")
+			if err != nil || !known || !enabled {
+				t.Fatalf("cleanup changed saved On: enabled=%v known=%v err=%v", enabled, known, err)
+			}
+		})
+	}
+	test("positive empty native inventory", `{"models":[]}`, true)
+	test("stopped server with resident model", `{"models":[{"name":"tiny"}]}`, false)
+	test("unknown residency", `{"models":null}`, false)
+}
+
+func TestStopPauseOwnershipStoppedLMStudioNativeReadback(t *testing.T) {
+	test := func(name, body string, readErr error, wantStopped bool) {
+		t.Run(name, func(t *testing.T) {
+			_, st := stopPauseOwnershipChatExecutor(t)
+			st.plat.Runtime.CLI = filepath.Join(t.TempDir(), "private-lms")
+			st.running, st.adopted = false, false
+			var calls int
+			err := stoppedLMStudioResidency(context.Background(), st, func(_ context.Context, argv []string) (string, error) {
+				calls++
+				want := []string{st.plat.Runtime.CLI, "ps", "--json"}
+				if !reflect.DeepEqual(argv, want) {
+					t.Fatalf("native residency argv=%v want=%v", argv, want)
+				}
+				return body, readErr
+			})
+			if calls != 1 || (err == nil) != wantStopped {
+				t.Fatalf("native readback: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+	test("empty model processes", `[]`, nil, true)
+	test("surviving model process", `[{"identifier":"tiny"}]`, nil, false)
+	test("unknown native schema", `{}`, nil, false)
+	test("null is unknown", `null`, nil, false)
+	test("lost native reply", `[]`, errors.New("lost readback"), false)
+}
+
+func TestStopPauseOwnershipExternalListenerClosureNeedsPIDExit(t *testing.T) {
+	test := func(name string, known, exited bool) {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+			t.Cleanup(server.Close)
+			parsed, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			port, err := strconv.Atoi(parsed.Port())
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := testEngineManifest(fakeEngineBin)
+			p := m.Platforms[hostKey()]
+			p.Runtime.Port, p.Runtime.Ready = port, &Probe{HTTP: server.URL, Status: http.StatusOK}
+			m.Platforms[hostKey()] = p
+			ex := newTestExecutor(t, m)
+			st, err := ex.state("fake")
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner := func(int) (int, string, bool) { return os.Getpid(), "private-fixture-owner", known }
+			pidExited := func(pid int) bool { return pid > 0 && exited }
+			presence, _ := ex.reconcilePresenceStateWithProcessProof(context.Background(), "fake", st, true, port, true, owner, pidExited)
+			if !presence.Identified {
+				t.Fatal("private fixture was not adopted")
+			}
+			server.Close() // Listener closes while the fixture owner stays alive.
+			presence, _ = ex.reconcilePresenceStateWithProcessProof(context.Background(), "fake", st, true, port, true, owner, pidExited)
+			status := ex.snapshot("fake", st)
+			wantStopped := known && exited
+			if status.Running == wantStopped || presence.Occupied == wantStopped || status.Healthy || status.TerminationVerified {
+				t.Fatalf("closure proof: status=%+v presence=%+v wantStopped=%v", status, presence, wantStopped)
+			}
+			ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+			err = ex.Sleep("fake")
+			if (err == nil) != wantStopped {
+				t.Fatalf("Sleep after external closure: %v wantStopped=%v", err, wantStopped)
+			}
+			if err != nil && !strings.Contains(err.Error(), `engine "fake"`) {
+				t.Fatalf("incomplete shutdown omitted engine: %v", err)
+			}
+		})
+	}
+	test("unknown external PID stays fenced", false, false)
+	test("observed external PID remains alive", true, false)
+	test("positive observed PID exit permits completion", true, true)
+}
+
+func TestStopPauseOwnershipRawOllamaUnloadUsesCanonicalBinding(t *testing.T) {
+	ex, st := stopPauseOwnershipChatExecutor(t)
+	st.manifest.Family = "ollama"
+	st.manifest.Actions["unload_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/generate"}}
+	st.manifest.Operations = map[string]OperationBinding{engines.OperationUnload: {Action: "unload_model", Params: map[string]json.RawMessage{"keep_alive": json.RawMessage(`0`)}}}
+	var calls int
+	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		var model string
+		var keepAlive int
+		if err := json.Unmarshal(body["model"], &model); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(body["keep_alive"], &keepAlive); err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 2 || model != "tiny" || keepAlive != 0 || r.URL.Path != "/api/generate" {
+			t.Fatalf("raw unload could execute generation: %s %v", r.URL.Path, body)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"done":true}`))}, nil
+	})
+	ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+	for _, params := range []string{`{"model":"tiny"}`, `{"model":"tiny","keep_alive":-1,"prompt":"must not execute"}`} {
+		if _, err := ex.Action(context.Background(), "fake", "unload_model", json.RawMessage(params)); err != nil {
+			t.Fatalf("safe paused unload: %v", err)
+		}
+	}
+	if _, err := ex.ModelUnload(context.Background(), "fake", "tiny"); err != nil {
+		t.Fatalf("explicit local unload: %v", err)
+	}
+	st.manifest.Operations[engines.OperationUnload] = OperationBinding{Action: "unload_model"}
+	if _, err := ex.Action(context.Background(), "fake", "unload_model", json.RawMessage(`{"model":"tiny"}`)); err == nil {
+		t.Fatal("unproven unload binding reached generate while paused")
+	}
+	if calls != 3 || !st.running || !st.adopted {
+		t.Fatalf("unload effects=%d external running=%v adopted=%v", calls, st.running, st.adopted)
+	}
+}
+
+func TestStopPauseOwnershipCommandSpawnOrdersAgainstProjection(t *testing.T) {
+	ex := wakeTestExecutor(t, t.TempDir(), nil)
+	st, err := ex.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.opMu.Lock()
+	defer st.opMu.Unlock()
+	ctx, finish := ex.startContext(context.Background(), st)
+	defer finish()
+	marker := filepath.Join(t.TempDir(), "late-command")
+	rt := st.plat.Runtime
+	rt.Mode, rt.Ready = "command", nil
+	rt.Start = [][]string{{fakeEngineBin, "touch", marker}}
+	st.plat.Runtime = rt
+	// activationVeto reads the available projection first, then waits on the
+	// desired-state mutex. This holds the actual start between check and spawn.
+	ex.desired.mu.Lock()
+	releaseDesired := sync.OnceFunc(ex.desired.mu.Unlock)
+	defer releaseDesired()
+	done := make(chan error, 1)
+	go func() { done <- ex.bringUpCommand(ctx, context.Background(), st, "fake", rt, 0, st.pathVars()) }()
+	if err := servingWaitForPhase(context.Background(), "(*Executor).activationVeto("); err != nil {
+		t.Fatal(err)
+	}
+	// The command has passed its early check. Pause stores the projection but
+	// cannot reach the cancellation sweep while remote work holds its mutex.
+	ex.remoteWork.mu.Lock()
+	releaseRemote := sync.OnceFunc(ex.remoteWork.mu.Unlock)
+	defer releaseRemote()
+	manager := &Manager{exec: ex}
+	applied := make(chan struct{})
+	go func() {
+		manager.applyNodeProjection(&Message{Params: json.RawMessage(`{"managementBlocked":true}`)})
+		close(applied)
+	}()
+	if err := servingWaitForPhase(context.Background(), "(*Executor).cancelVetoedRemoteWork("); err != nil {
+		t.Fatal(err)
+	}
+	if rpcCode(context.Cause(ctx)) != codeLocalVeto {
+		t.Fatal("stored projection did not cancel execution independently of remote bookkeeping")
+	}
+	releaseDesired()
+	if err := awaitLockCommand(t, done); rpcCode(err) != codeLocalVeto {
+		t.Fatalf("command spawned after accepted Pause: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("post-fence process effect: %v", err)
+	}
+	releaseRemote()
+	select {
+	case <-applied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("projection cancellation did not finish")
+	}
+}
+
+func TestStopPauseOwnershipCommandWaitDoesNotHoldProjectionGate(t *testing.T) {
+	ex := wakeTestExecutor(t, t.TempDir(), nil)
+	entered, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- runPrivateLaunchCommandWithStart(context.Background(), []string{helper, "command-test-helper", server.URL}, nil, nil, ex.startActivationCommand)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("private CLI did not reach wait barrier")
+	}
+	applied := make(chan struct{})
+	go func() { ex.nodeProjection.set(nodeProjection{ManagementBlocked: true}); close(applied) }()
+	select {
+	case <-applied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocking CLI prevented Pause publication")
+	}
+	unblock()
+	if err := awaitLockCommand(t, done); err != nil {
+		t.Fatalf("private CLI completion: %v", err)
+	}
+}
+
+func TestStopPauseOwnershipNativeDispatchRechecksFinalFence(t *testing.T) {
+	test := func(name, action string, cli bool) {
+		t.Run(name, func(t *testing.T) {
+			ex, st := stopPauseOwnershipChatExecutor(t)
+			marker := filepath.Join(t.TempDir(), "late-native-load")
+			if action == "load_model" {
+				if cli {
+					st.manifest.Actions[action] = Action{Cmd: []string{fakeEngineBin, "touch", marker}}
+				} else {
+					st.manifest.Actions[action] = Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/load"}}
+				}
+			}
+			var effects atomic.Int32
+			ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
+				effects.Add(1)
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+			})
+			params := json.RawMessage(`{"model":"tiny","messages":[]}`)
+			ctx, release, err := ex.guardActionExecution(context.Background(), st, action, params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			// Admission and lifecycle authorization have completed. Hold the
+			// final runner's saved-lock read, after its first projection check.
+			ex.desired.mu.Lock()
+			releaseDesired := sync.OnceFunc(ex.desired.mu.Unlock)
+			defer releaseDesired()
+			done := make(chan error, 1)
+			go func() {
+				_, err := ex.dispatchAction(ctx, st, "fake", action, st.manifest.Actions[action], params)
+				done <- err
+			}()
+			if err := servingWaitForPhase(context.Background(), "beginActivationEffect("); err != nil {
+				t.Fatal(err)
+			}
+			ex.remoteWork.mu.Lock()
+			releaseRemote := sync.OnceFunc(ex.remoteWork.mu.Unlock)
+			defer releaseRemote()
+			applied := make(chan struct{})
+			go func() {
+				(&Manager{exec: ex}).applyNodeProjection(&Message{Params: json.RawMessage(`{"managementBlocked":true}`)})
+				close(applied)
+			}()
+			if err := servingWaitForPhase(context.Background(), "(*Executor).cancelVetoedRemoteWork("); err != nil {
+				t.Fatal(err)
+			}
+			if rpcCode(context.Cause(ctx)) != codeLocalVeto {
+				t.Fatalf("execution cancellation waited for remote bookkeeping: %v", context.Cause(ctx))
+			}
+			releaseDesired()
+			if err := awaitLockCommand(t, done); rpcCode(err) != codeLocalVeto {
+				t.Fatalf("native dispatch after final-check barrier: %v", err)
+			}
+			if effects.Load() != 0 {
+				t.Fatal("native HTTP execution began after the fence")
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("native CLI execution began after the fence: %v", err)
+			}
+			release()
+			st.mu.Lock()
+			active := len(st.loads.active)
+			st.mu.Unlock()
+			if active != 0 {
+				t.Fatalf("final dispatch refusal leaked registered execution: %d", active)
+			}
+			releaseRemote()
+			select {
+			case <-applied:
+			case <-time.After(5 * time.Second):
+				t.Fatal("projection did not finish after bookkeeping release")
+			}
+		})
+	}
+	test("native CLI load", "load_model", true)
+	test("native HTTP load", "load_model", false)
+	test("native chat", "chat", false)
+}
+
+func TestStopPauseOwnershipExternalLMStudioOwnerShutdownAllowsRetry(t *testing.T) {
+	test := func(name, readback string, readErr error, wantStopped bool) {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+			t.Cleanup(server.Close)
+			unloadMarker, stopMarker := filepath.Join(t.TempDir(), "external-unload"), filepath.Join(t.TempDir(), "external-stop")
+			ex := commandStopTestExecutor(t, server.URL, []string{fakeEngineBin, "touch", stopMarker}, 1, true)
+			st, err := ex.state("command")
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.manifest.Family = "lmstudio"
+			st.plat.Runtime.CLI = filepath.Join(t.TempDir(), "private-native-owner")
+			st.manifest.Actions = map[string]Action{"unload_model": {Cmd: []string{fakeEngineBin, "touch", unloadMarker}}}
+			if err := ex.setDesiredEnabled("command", true, intentLocal); err != nil {
+				t.Fatal(err)
+			}
+			ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+			var reads int
+			read := func(_ context.Context, argv []string) (string, error) {
+				reads++
+				if !reflect.DeepEqual(argv, []string{st.plat.Runtime.CLI, "ps", "--json"}) {
+					t.Fatalf("external owner readback argv=%v", argv)
+				}
+				return readback, readErr
+			}
+			if err := ex.sleepWithNativeReadback("command", read); err == nil || reads != 0 {
+				t.Fatalf("live external owner was not protected: err=%v nativeReads=%d", err, reads)
+			}
+			server.Close()
+			status, err := ex.Status("command")
+			if err != nil || !status.Running || status.Healthy {
+				t.Fatalf("listener refusal alone claimed termination: %+v, %v", status, err)
+			}
+			err = ex.sleepWithNativeReadback("command", read)
+			if (err == nil) != wantStopped || reads != 1 {
+				t.Fatalf("owner shutdown retry: err=%v nativeReads=%d wantStopped=%v", err, reads, wantStopped)
+			}
+			st.mu.Lock()
+			running, adopted := st.running, st.adopted
+			st.mu.Unlock()
+			if running == wantStopped || adopted == wantStopped {
+				t.Fatalf("retry ownership: running=%v adopted=%v wantStopped=%v", running, adopted, wantStopped)
+			}
+			for _, marker := range []string{unloadMarker, stopMarker} {
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("Pause modified external ownership via %s: %v", filepath.Base(marker), err)
+				}
+			}
+			enabled, known, err := ex.desired.get("command")
+			if err != nil || !known || !enabled {
+				t.Fatalf("retry changed saved On: enabled=%v known=%v err=%v", enabled, known, err)
+			}
+			if blocked, _ := ex.nodeProjection.managementBlocked(); !blocked {
+				t.Fatal("physical proof implicitly resumed the node")
+			}
+		})
+	}
+	test("owner stopped server and unloaded models", `[]`, nil, true)
+	test("model residency survives server shutdown", `[{"identifier":"tiny"}]`, nil, false)
+	test("native readback unavailable", `[]`, errors.New("private owner readback failed"), false)
+}
+
+func TestStopPauseOwnershipNativeHTTPResponseDoesNotHoldProjection(t *testing.T) {
+	ex, _ := stopPauseOwnershipChatExecutor(t)
+	entered := make(chan struct{})
+	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+		close(entered)
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := ex.Action(ctx, "fake", "chat", json.RawMessage(`{"model":"tiny","messages":[]}`))
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("native HTTP dispatch did not reach response barrier")
+	}
+	ex.remoteWork.mu.Lock()
+	releaseRemote := sync.OnceFunc(ex.remoteWork.mu.Unlock)
+	defer releaseRemote()
+	applied := make(chan struct{})
+	go func() {
+		(&Manager{exec: ex}).applyNodeProjection(&Message{Params: json.RawMessage(`{"managementBlocked":true}`)})
+		close(applied)
+	}()
+	if err := servingWaitForPhase(context.Background(), "(*Executor).cancelVetoedRemoteWork("); err != nil {
+		t.Fatal(err)
+	}
+	if err := awaitLockCommand(t, done); rpcCode(err) != codeLocalVeto {
+		t.Fatalf("in-flight HTTP execution was not cancelled before remote bookkeeping: %v", err)
+	}
+	releaseRemote()
+	select {
+	case <-applied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("projection remained blocked after HTTP cancellation")
 	}
 }

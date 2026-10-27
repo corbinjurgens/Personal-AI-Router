@@ -345,8 +345,24 @@ func TestStopReconcilesAdoptedProcessAfterExternalStop(t *testing.T) {
 	}
 
 	srv.Close()
+	if err := ex.Stop("fake"); err == nil {
+		t.Fatal("listener closure alone proved external process termination")
+	}
+	if st, _ := ex.Status("fake"); !st.Running || st.Healthy || st.TerminationVerified || portServing(port) {
+		t.Fatalf("closed endpoint lost unknown external ownership: %+v", st)
+	}
+	state, err := ex.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	state.reclaimPID = os.Getpid()
+	state.mu.Unlock()
+	ex.reconcilePresenceStateWithProcessProof(t.Context(), "fake", state, true, port, true,
+		func(int) (int, string, bool) { return os.Getpid(), "fixture-owner", true },
+		func(pid int) bool { return pid == os.Getpid() })
 	if err := ex.Stop("fake"); err != nil {
-		t.Fatalf("retry after external stop: %v", err)
+		t.Fatalf("retry after positive external exit: %v", err)
 	}
 	if st, _ := ex.Status("fake"); st.Running || st.Healthy {
 		t.Fatalf("closed external endpoint must reconcile to stopped, got %+v", st)

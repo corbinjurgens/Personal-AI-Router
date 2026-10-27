@@ -96,14 +96,61 @@ func (m *Manager) applyNodeProjection(msg *Message) {
 		slog.Warn("ignoring an unreadable node projection", "err", err)
 		return
 	}
-	m.exec.nodeProjection.set(p)
-	// Preserve the typed pause cause before generic lifecycle/load cancellation
-	// can let an accepted peer operation return.
+	m.exec.nodeProjection.mu.Lock()
+	m.exec.nodeProjection.projection = &p
+	if p.ManagementBlocked {
+		// Local execution cancellation must not queue behind a paired operation's
+		// bookkeeping mutex. The stored fence and registered execution contexts
+		// already own native starts/loads/chat, including their final dispatch.
+		m.exec.cancelBlockedActivations()
+	}
+	m.exec.nodeProjection.mu.Unlock()
+	// Both cancellation owners preserve the same typed pause cause. Remote
+	// bookkeeping can wait independently after the execution fence is visible.
 	m.exec.cancelVetoedRemoteWork()
 	if p.ManagementBlocked {
 		m.exec.cancelPausedCrashRelaunches()
-		m.exec.cancelBlockedActivations()
 	}
+}
+
+type activationDispatchKey struct{}
+
+// Only execution admitted through the existing load registry carries this
+// marker. File transfers, metadata and explicit unloads retain their runners.
+type activationDispatch struct {
+	executor *Executor
+	engine   string
+}
+
+func (e *Executor) activationDispatchContext(ctx context.Context, engine string) context.Context {
+	return context.WithValue(ctx, activationDispatchKey{}, activationDispatch{e, engine})
+}
+
+// beginActivationEffect rechecks after saved-lock I/O, at the runner's effect
+// boundary. CLI callers hold the projection gate only through cmd.Start.
+// HTTP callers hand off inside client.Do at transport entry, before network or
+// response I/O; publication cancels the registered context independently of
+// remote-work bookkeeping.
+func beginActivationEffect(ctx context.Context) (func(), error) {
+	noop := func() {}
+	dispatch, guarded := ctx.Value(activationDispatchKey{}).(activationDispatch)
+	if !guarded {
+		return noop, nil
+	}
+	e := dispatch.executor
+	if err := e.activationVeto(dispatch.engine); err != nil {
+		return noop, err
+	}
+	e.nodeProjection.mu.Lock()
+	if e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked {
+		e.nodeProjection.mu.Unlock()
+		return noop, &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+	}
+	if err := vetoCause(ctx, ctx.Err()); err != nil {
+		e.nodeProjection.mu.Unlock()
+		return noop, err
+	}
+	return e.nodeProjection.mu.Unlock, nil
 }
 
 // localVetoError retains the typed refusal as a cancellation cause.

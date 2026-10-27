@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/durablefile"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -121,10 +122,16 @@ func TestStopPauseExecutionAcceptancePrecedesBarriers(t *testing.T) {
 	test := func(name string, lock func(*Broker) func()) {
 		t.Run(name, func(t *testing.T) {
 			rb, _ := stopPauseExecutionFixture(t, "owned")
+			before := len(availabilityPushes(rb.proxy.snapshot()))
 			unlock := sync.OnceFunc(lock(rb.b))
 			defer unlock()
 			done := stopPauseExecutionImmediate(rb.b)
 			rb.proxy.waitFor("immediate cancellation before barrier release", func(calls []policyCall) bool {
+				// Acceptance first publishes a volatile fence, then publishes
+				// the saved intent before waiting for configuration/transition.
+				if len(availabilityPushes(calls)) < before+2 {
+					return false
+				}
 				for _, p := range availabilityPushes(calls) {
 					if p.State == nodepolicy.Draining && p.CancelActive {
 						return true
@@ -161,6 +168,75 @@ func TestStopPauseExecutionAcceptancePrecedesBarriers(t *testing.T) {
 		r.transitionMu.Lock()
 		return r.transitionMu.Unlock
 	})
+}
+
+func TestStopPauseExecutionCancellationPrecedesDurableReplacement(t *testing.T) {
+	rb, _ := stopPauseExecutionFixture(t, "owned")
+	entered, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	errDisk := errors.New("held policy replacement failed")
+	setReplacer(rb.b, durablefile.Replacer{Replace: func(string, string) error {
+		close(entered)
+		<-release
+		return errDisk
+	}, IsTransient: func(error) bool { return false }})
+	done := stopPauseExecutionImmediate(rb.b)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Pause never reached durable replacement")
+	}
+	pushes := availabilityPushes(rb.proxy.snapshot())
+	if len(pushes) == 0 || pushes[len(pushes)-1].State != nodepolicy.Draining || !pushes[len(pushes)-1].CancelActive {
+		t.Fatalf("execution was not cancelled before held replacement: %+v", pushes)
+	}
+	rb.engine.waitFor("blocked manager projection during replacement", func([]policyCall) bool {
+		rb.engine.mu.Lock()
+		defer rb.engine.mu.Unlock()
+		for _, call := range rb.engine.projections {
+			var projection nodeProjection
+			if err := json.Unmarshal(call.params, &projection); err != nil {
+				t.Fatal(err)
+			}
+			if projection.ManagementBlocked && projection.PausedLocally {
+				return true
+			}
+		}
+		return false
+	})
+	rb.engine.mu.Lock()
+	projections := append([]policyCall(nil), rb.engine.projections...)
+	rb.engine.mu.Unlock()
+	if len(projections) == 0 {
+		t.Fatal("no manager fence before durable replacement")
+	}
+	var projection nodeProjection
+	if err := json.Unmarshal(projections[len(projections)-1].params, &projection); err != nil {
+		t.Fatal(err)
+	}
+	if !projection.ManagementBlocked || !projection.PausedLocally {
+		t.Fatalf("manager remained executable during replacement: %+v", projection)
+	}
+	if calls := rb.engine.methods(engineSleepMethod); len(calls) != 0 {
+		t.Fatalf("physical transition crossed persistence barrier: %+v", calls)
+	}
+	unblock()
+	got := stopPauseExecutionWait(t, done)
+	if got.state != nodepolicy.Draining || !errors.Is(got.err, errDisk) {
+		t.Fatalf("failed acceptance save: %+v", got)
+	}
+	r := rb.b.nodePolicyRuntime()
+	r.mu.Lock()
+	blocked, live, cancel, stored := r.managementBlockedLocked(), r.live, r.cancelActive, r.current.Availability
+	r.mu.Unlock()
+	if !blocked || live != nodepolicy.Draining || !cancel || stored != nodepolicy.Available {
+		t.Fatalf("save failure lost fence or claimed durability: blocked=%v live=%s cancel=%v stored=%s", blocked, live, cancel, stored)
+	}
+	setReplacer(rb.b, durablefile.Replacer{})
+	if retry := stopPauseExecutionWait(t, stopPauseExecutionImmediate(rb.b)); retry.err != nil || retry.state != nodepolicy.Paused {
+		t.Fatalf("local retry after durable failure: %+v", retry)
+	}
 }
 
 func TestStopPauseExecutionSkipsBothAdmissionWaits(t *testing.T) {
@@ -290,7 +366,7 @@ func TestStopPauseExecutionConfiguredEscalation(t *testing.T) {
 		t.Fatalf("configured finish skipped drain: %v", calls)
 	}
 	immediate := stopPauseExecutionImmediate(rb.b)
-	if got := stopPauseExecutionWait(t, configured); !errors.Is(got.err, errAvailabilitySuperseded) {
+	if got := stopPauseExecutionWait(t, configured); got.err != errAvailabilitySuperseded {
 		t.Fatalf("configured transition was not superseded: %+v", got)
 	}
 	if got := stopPauseExecutionWait(t, immediate); got.err != nil || got.state != nodepolicy.Paused {

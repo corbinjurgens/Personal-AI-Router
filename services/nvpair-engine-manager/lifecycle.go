@@ -718,12 +718,6 @@ func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineSta
 			}
 		}
 		argv := append([]string{launch.Bin}, launch.Args...)
-		run := e.runCommand
-		if rt.LaunchArgs != nil || rt.LaunchEnv != nil || len(launch.Env) > 0 {
-			run = func(ctx context.Context, argv []string) error {
-				return runPrivateLaunchCommand(ctx, argv, launch.Env, launchDiagnosticArgs(rt))
-			}
-		}
 		// A control CLI may detach its daemon before returning, then fail or
 		// be cancelled. Attempt official cleanup once any start command runs,
 		// even when that command never reports success.
@@ -733,8 +727,14 @@ func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineSta
 		if err := e.activationVeto(engine); err != nil {
 			return cleanup(err)
 		}
-		startAttempted = true
-		if err := run(ctx, argv); err != nil {
+		start := func(cmd *exec.Cmd) error {
+			err := e.startActivationCommand(cmd)
+			if err == nil {
+				startAttempted = true
+			}
+			return err
+		}
+		if err := runPrivateLaunchCommandWithStart(ctx, argv, launch.Env, launchDiagnosticArgs(rt), start); err != nil {
 			werr := fmt.Errorf("start command failed: %w", err)
 			werr = e.diagnoseStartFailure(ctx, st, port, err, werr)
 			e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
@@ -753,6 +753,21 @@ func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineSta
 
 // Capture vendor startup diagnostics without interpreting engine options.
 func runPrivateLaunchCommand(ctx context.Context, argv []string, environment map[string]string, privateArgs []string) error {
+	return runPrivateLaunchCommandWithStart(ctx, argv, environment, privateArgs, func(cmd *exec.Cmd) error { return cmd.Start() })
+}
+
+// The projection gate covers only creation of the control process. Waiting for
+// a CLI (which may detach a daemon) must not prevent Pause from being stored.
+func (e *Executor) startActivationCommand(cmd *exec.Cmd) error {
+	e.nodeProjection.mu.Lock()
+	defer e.nodeProjection.mu.Unlock()
+	if e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked {
+		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+	}
+	return cmd.Start()
+}
+
+func runPrivateLaunchCommandWithStart(ctx context.Context, argv []string, environment map[string]string, privateArgs []string, start func(*exec.Cmd) error) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("launch executable is missing")
 	}
@@ -762,7 +777,10 @@ func runPrivateLaunchCommand(ctx context.Context, argv []string, environment map
 	cmd.Stdout, cmd.Stderr = diagnostics, diagnostics
 	cmd.Env = childEnv(environment)
 	configureSysProcAttr(cmd)
-	if err := cmd.Run(); err != nil {
+	if err := start(cmd); err != nil {
+		return diagnostics.failure(fmt.Errorf("launch command failed: %w", err))
+	}
+	if err := cmd.Wait(); err != nil {
 		return diagnostics.failure(fmt.Errorf("launch command failed: %w", err))
 	}
 	return nil
@@ -989,7 +1007,10 @@ func (e *Executor) doStopOwnedContext(ctx context.Context, st *engineState, engi
 			if known && (evidence.PID == 0 || !orphanPIDExited(evidence.PID)) {
 				return fmt.Errorf("cannot stop engine %q: saved process identity is unverified", engine)
 			}
-			if rt.Ready != nil && e.waitUnavailableContext(ctx, rt.Ready, port, time.Second) {
+			st.mu.Lock()
+			externalPID := st.reclaimPID
+			st.mu.Unlock()
+			if externalPID > 0 && orphanPIDExited(externalPID) && rt.Ready != nil && e.waitUnavailableContext(ctx, rt.Ready, port, time.Second) {
 				e.markStopped(st, engine)
 				return nil
 			}
