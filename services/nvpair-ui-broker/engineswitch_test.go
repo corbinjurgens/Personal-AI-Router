@@ -28,6 +28,7 @@ type switchHarness struct {
 	b                  *Broker
 	engine, proxy      *fakeWorker
 	pp                 *proxyProcess
+	startupProxyCalls  []policyCall
 	output             *syncBuffer
 	mu                 sync.Mutex
 	cp                 *settings.SwitchCheckpoint
@@ -489,7 +490,23 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 		t.Fatal(err)
 	}
 	h := &switchHarness{b: b, output: output, sleeping: make(map[string]bool), config: settings.SwitchConfigurationSnapshot{ManagerIncarnation: "manager-run", RegistryRuntimeFingerprint: "runtime", Engines: []settings.SwitchConfigurationEngine{{Engine: "llamacpp", Intent: settings.SwitchIntentOn}, {Engine: "lmstudio", Intent: settings.SwitchIntentOff}}}}
+	// Manager activation schedules an identity push. Keep it behind the push
+	// slot until the fake proxy can receive and acknowledge that startup work.
+	r := b.nodePolicyRuntime()
+	startupCtx, cancelStartup := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelStartup()
+	if !r.acquirePush(startupCtx) {
+		t.Fatal("acquire startup push slot")
+	}
+	releaseStartupPush := sync.OnceFunc(r.releasePush)
+	defer releaseStartupPush()
 	h.engine = attachFakeEngine(t, b)
+	r.mu.Lock()
+	startupPending := r.pendingPush[pushIdentity] && len(r.pendingPush) == 1
+	r.mu.Unlock()
+	if !startupPending {
+		t.Fatal("manager activation did not schedule exactly one identity push")
+	}
 	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -665,8 +682,12 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 	})
 	h.pp, h.proxy = attachFakeProxy(t, b)
 	h.pp.facadeState = map[string]proxyFacadeState{"llamacpp": {ready: true, port: 12346}, "lmstudio": {ready: true, port: 12347}}
+	startupIdentity := make(chan struct{})
+	var startupOnce sync.Once
 	h.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
+		case nodepolicy.MethodSetModelIdentity:
+			startupOnce.Do(func() { close(startupIdentity) })
 		case nodepolicy.MethodInvalidateEngine:
 			return nodepolicy.InvalidateEngineResult{OK: true, RunID: "proxy-run"}, ""
 		case nodepolicy.MethodAdmissionSnapshot:
@@ -678,10 +699,33 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 		}
 		return map[string]bool{"ok": true}, ""
 	})
-	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.incarnation, r.runID = h.pp, "proxy-run"
 	r.mu.Unlock()
+	releaseStartupPush()
+	select {
+	case <-startupIdentity:
+	case <-startupCtx.Done():
+		t.Fatal("wait for startup identity request")
+	}
+	// Receiving the call precedes its reply. Taking the slot also waits for
+	// the scheduled push to consume that reply and finish.
+	if !r.acquirePush(startupCtx) {
+		t.Fatal("wait for startup identity acknowledgement")
+	}
+	r.releasePush()
+	startupCalls := h.proxy.snapshot()
+	if len(startupCalls) != 1 || startupCalls[0].method != nodepolicy.MethodSetModelIdentity || startupCalls[0].notify {
+		t.Fatalf("manager activation startup calls = %+v", startupCalls)
+	}
+	var startupParams nodepolicy.SetModelIdentityParams
+	if err := json.Unmarshal(startupCalls[0].params, &startupParams); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(startupParams, nodepolicy.SetModelIdentityParams{Engines: map[string]nodepolicy.EngineIdentity{}}) {
+		t.Fatalf("manager activation startup identity = %+v", startupParams)
+	}
+	h.startupProxyCalls = startupCalls
 	t.Cleanup(func() { h.waitIdle(t) })
 	return h
 }
@@ -914,8 +958,8 @@ func TestSwitchCoordinatorRejectsUnroutableTargetBeforeDrain(t *testing.T) {
 	if err == nil || result.Receipt.Phase != settings.SwitchRejected || result.Receipt.Error.Kind != settings.SwitchErrorUnroutable {
 		t.Fatalf("rejection = %+v, %v", result, err)
 	}
-	if len(h.proxy.snapshot()) != 0 || len(switchSteps(t, h.engine)) != 0 {
-		t.Fatal("unroutable request caused effects")
+	if calls := h.proxy.snapshot(); !reflect.DeepEqual(calls, h.startupProxyCalls) || len(switchSteps(t, h.engine)) != 0 {
+		t.Fatalf("unroutable request caused effects: proxy calls %+v", calls)
 	}
 }
 
@@ -1525,8 +1569,8 @@ func TestSwitchUncertainAcceptanceStillAllowsIdenticalRetryAndStatus(t *testing.
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err == nil {
 		t.Fatal("fresh mutation ignored storage fence")
 	}
-	if len(switchSteps(t, h.engine)) != 0 || len(h.proxy.snapshot()) != 0 {
-		t.Fatal("uncertain acceptance caused effects")
+	if calls := h.proxy.snapshot(); len(switchSteps(t, h.engine)) != 0 || !reflect.DeepEqual(calls, h.startupProxyCalls) {
+		t.Fatalf("uncertain acceptance caused effects: proxy calls %+v", calls)
 	}
 }
 
@@ -1978,7 +2022,7 @@ func TestSwitchRejectedReceiptWriteFailureHasNoEffects(t *testing.T) {
 			if exists != replaced || (exists && stored.Phase != settings.SwitchRejected) {
 				t.Fatalf("rejected receipt = %+v, exists %v", stored, exists)
 			}
-			if h.b.engineSwitch.err == nil || len(switchSteps(t, h.engine)) != 0 || len(h.proxy.snapshot()) != 0 {
+			if h.b.engineSwitch.err == nil || len(switchSteps(t, h.engine)) != 0 || !reflect.DeepEqual(h.proxy.snapshot(), h.startupProxyCalls) {
 				t.Fatal("rejection write failure did not halt effects")
 			}
 		})

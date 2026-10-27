@@ -385,8 +385,9 @@ func (b *Broker) handleMessage(msg *Message) {
 	}
 }
 
-// relayToEngine forwards an engine:<method> request to nvpair-engine-manager
-// and relays its eventual response to the client. engine-manager's methods
+// relayToEngine forwards a request from the private local service client to
+// nvpair-engine-manager over its stdio peer. Peer HTTP routes are separate.
+// It relays the eventual response to the client. engine-manager's methods
 // are already engine:-prefixed, so the method is forwarded verbatim (no
 // prefix translation). Unlike the proxy relay it imposes no broker-side
 // timeout: engine lifecycle ops (install, model pull, ...) run for minutes
@@ -573,14 +574,14 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	}
 	if isOllamaPortAssignment && requestedPort == managedOllamaFacadePort && b.ollamaState().managedFacade.Load() {
 		if err := b.codec.RespondError(msg.ID, -32000, "port 11434 is reserved by the managed Ollama proxy; choose another backend port or disable managed port ownership and restart NVPAIR"); err != nil {
-			log.Printf("failed to reject conflicting Ollama port assignment: %v", err)
+			log.Printf("failed to reject conflicting Ollama port assignment")
 		}
 		return
 	}
 	requestedLMStudioPort, isLMStudioSetPort := lmstudioSetPortRequest(msg.Method, msg.Params)
 	if isLMStudioSetPort && requestedLMStudioPort == managedLMStudioFacadePort && b.lmstudioState().managedFacade.Load() {
 		if err := b.codec.RespondError(msg.ID, -32000, "port 1234 is reserved by the managed LM Studio proxy; choose another backend port or disable managed port ownership and restart NVPAIR"); err != nil {
-			log.Printf("failed to reject conflicting LM Studio engine:set-port: %v", err)
+			log.Printf("failed to reject conflicting LM Studio engine:set-port")
 		}
 		return
 	}
@@ -595,7 +596,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	}
 	if em == nil {
 		if err := b.codec.RespondError(msg.ID, -32000, "engine-manager not available"); err != nil {
-			log.Printf("failed to respond to %s: %v", msg.Method, err)
+			log.Printf("failed to respond to %s: engine-manager unavailable", msg.Method)
 		}
 		return
 	}
@@ -656,11 +657,11 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	switch {
 	case err != nil:
 		if e := b.codec.RespondError(id, -32000, fmt.Sprintf("engine call failed: %v", err)); e != nil {
-			log.Printf("failed to relay engine error for %s: %v", method, e)
+			log.Printf("failed to relay engine transport error for %s", method)
 		}
 	case rpcErr != nil:
 		if e := b.codec.RespondError(id, rpcErr.Code, rpcErr.Message); e != nil {
-			log.Printf("failed to relay engine error for %s: %v", method, e)
+			log.Printf("failed to relay engine RPC error for %s", method)
 		}
 	default:
 		// A manager can return an unchanged running status without emitting a
@@ -688,7 +689,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			b.lmstudioState().backendPort.Store(int32(requestedLMStudioPort))
 		}
 		if e := b.codec.Respond(id, result); e != nil {
-			log.Printf("failed to relay engine result for %s: %v", method, e)
+			log.Printf("failed to relay engine result for %s", method)
 		}
 	}
 }

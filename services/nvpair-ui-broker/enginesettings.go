@@ -143,6 +143,7 @@ func (b *Broker) loadEngineSettingsLocked() error {
 			markModelAcceptanceUncertain(record)
 		}
 	}
+	b.invalidatePendingModelSettingsRunningLocked()
 	b.reconstructModelSettingsLocked()
 	return nil
 }

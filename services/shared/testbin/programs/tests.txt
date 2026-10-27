@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+tests/model-settings/model-settings-manager
 tests/performance-observations/observation-manager
 tests/performance-observations/observation-proxy
 tests/performance-observations/observation-scanner
