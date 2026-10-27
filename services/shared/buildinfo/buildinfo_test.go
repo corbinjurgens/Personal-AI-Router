@@ -14,7 +14,33 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+
+	"nvpair-shared/durablefile"
 )
+
+func TestOpenedMetadataDoesNotReadSubstitutedPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "candidate")
+	const revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	data := metadataFixture(t, "build\tvcs=git\nbuild\tvcs.revision="+revision+"\nbuild\tvcs.modified=false\n")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := durablefile.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := durablefile.WriteFile(path, []byte("substituted non-Go bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := InspectOpenedMetadata(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Revision == nil || *got.Revision != revision {
+		t.Fatalf("metadata did not come from held descriptor: %+v", got)
+	}
+}
 
 // A tiny inert ELF with a real inline Go build-info section, never compiled or
 // executed. The standard parser still decodes the actual embedded metadata.

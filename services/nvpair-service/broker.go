@@ -247,6 +247,7 @@ func (s *Service) brokerExited(run *brokerRun) {
 		s.historyBrokerExited(run)
 	}
 	if s.broker == run {
+		s.invalidateBuildApplyPreviewLocked(nil)
 		s.broker = nil
 	}
 	s.readyFrame = nil
