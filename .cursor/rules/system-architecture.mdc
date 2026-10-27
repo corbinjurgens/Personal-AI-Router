@@ -9,6 +9,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # System Architecture
 
+Model configuration keeps policy intent at the broker and native load settings
+at engine-manager. Shared modelconfig is wire/portable validation only;
+enginesettings composes the settings/preview/readback contract without an import
+cycle. Derived facts/estimates and receipts never supply runtime authority.
+Model-settings apply must join apply-build's maintenance exclusion when that
+owner lands; the preparatory contract has no such reservation and refuses typed
+mutations before effects.
+
 `docs/architecture.md` is the rendered current-state reference.
 
 ## Process model

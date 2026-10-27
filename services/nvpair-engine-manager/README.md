@@ -5,6 +5,47 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-engine-manager
 
+`engine:inspect-model` calls `Executor.InspectModel` for an exact local engine/model.
+It returns structured unavailable artifacts/facts/estimate plus service-owned
+llama.cpp option descriptors. No engine start, HTTP inventory, model read,
+download, full hash, native probe or settings write runs in the temporary bodies.
+`engine:remote-inspect-model` uses the existing pinned POST
+`/v1/engine-settings/inspect` read route; the target broker supplies node identity.
+The remote reply is strictly decoded and checked against the requested identity.
+See the [option matrix](MANIFEST.md#typed-model-load-contract-and-option-matrix)
+for supported B vocabulary, inherited defaults, explicit unsupported rows and
+generation/template/reasoning ownership. A descriptor is not apply readiness.
+
+The correlated shared `settings.Relay` union carries `Inspect: *InspectRequest`
+for `method: inspect`, with the value `Request` empty and omitted by MarshalJSON.
+Settings methods retain their value `Request` and no `Inspect`. Broker consumers
+must use `settings.DecodeRelay` before selecting the branch. The executor's
+existing `settingsParent(ctx, method, settings.Request, caller)` signature is
+unchanged: the pinned inspect adapter carries only engine and model ID in its
+private `Resolution` slot, then converts that into the actual `Inspect` pointer
+before emitting `engine:settings-request`. The model ID is not serialized as a
+settings resolution, and no mutation payload travels with the read. Caller
+identity comes from the pinned peer transport; target forwarding is cleared.
+
+`engine:preview-launch` and `engine:configure-launch` reject typed loads/model
+changes before preparation, mutation admission, rebind or persistence. Unknown,
+duplicate, incorrectly cased and oversized fields are invalid params (-32602).
+The parent-only launch decoder still permits the broker-owned PreserveCORS
+guard; public settings decoders refuse it. Existing engine counters remain exact
+numeric JSON within the shared safe-integer bound; new policy revisions and byte
+quantities are decimal strings. Auto returns no finite result or trade defaults.
+
+The remaining integration boundary is direct `PreviewLaunch`/`ConfigureLaunch`
+and `launchStateLocked` in `settings.go`, plus `persistRuntimeServing` in
+`setport.go`: add the same early guard, complete readback/cloning/change detection,
+then persist modelLoads with the existing override replacement and host-platform
+rules. Those files are outside this lane. Registry loading already validates and
+preserves the collection through shared/host-platform merging without rounding
+unrelated numbers. Ordinary RPC launch writes refuse stored typed loads until
+that preserving implementation exists. Apply-build must add model-settings apply
+to its maintenance exclusion when implemented; no exclusion symbol exists yet.
+O1-O5 remain unanswered and gate their behavior-bearing follow-on work.
+
 The broker-only parent request `engine:activate-bound-engine` supplies a
 zero-source bound activation with operation ID, engine/model, accepted policy
 revision, manager incarnation, absolute preparation deadline and optional

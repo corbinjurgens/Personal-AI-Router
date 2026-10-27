@@ -5,6 +5,68 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Model settings contract
+
+`engine:inspect-model` accepts `{engine,modelId}` at the target-local worker.
+The public broker request may also select `nodeId`; the broker resolves that
+target and supplies authenticated node identity in the reply. The worker rejects
+a nonempty node selector, rather than labelling local results as a remote node.
+`Executor.InspectModel(ctx, request)` validates exact identity and cancellation,
+then composes the artifact, descriptor and advisory-estimate seams. The temporary
+artifact/facts and estimate bodies return `unavailable` with reasons and no
+paths, bindings, sizes, native build, device mapping, memory or allocation claim.
+They do not call lifecycle, inventory, download, model hashing or native helpers.
+
+`engine:remote-inspect-model` accepts `{engine,nodeId,modelId}` with a required
+remote target. It uses POST `/v1/engine-settings/inspect`, a `controlRead` route on
+the existing pinned listener. Incoming fields use the strict inspect decoder,
+the body limit remains 64 KiB, and any supplied node selector is cleared before
+the target broker relay. Pin admission and active-call cancellation retain their
+existing owners. Reads require no remote-management mutation grant. The reply
+must pass the shared strict decoder and match engine/model/target node exactly.
+Grant, Pause, revision and inference-lock refusals retain -32012, -32011, -32010
+and -32014 through the existing coded transport. Invalid local ingress is
+-32602; target validation is HTTP 400 on the pinned endpoint (the existing
+generic remote HTTP client reports that as an operation error).
+
+The shared correlated relay has two branches: inspect has `Inspect` non-nil and
+an empty value `Request`, omitted from JSON; get/preview/apply/rebind have their
+value `Request` and nil `Inspect`. `settings.DecodeRelay` validates this union.
+The existing executor `settingsParent` function type remains unchanged. Only its
+private inspect adapter uses `Request.Resolution` to carry the model ID to
+`settingsRelay.callInspect`; the emitted wire record contains the real inspect
+shape, not a settings request. This avoids a second parent callback or endpoint.
+
+Llama descriptors are derived from every actual `llamaServingOptions` entry,
+including native rejection bits and all aliases/environment names. Model field
+metadata adds labels, portable ranges/enums, default provenance, ownership,
+phase and identity/estimate effects. No second native flag table lives in shared
+code or the UI. The [full matrix](MANIFEST.md#typed-model-load-contract-and-option-matrix)
+also covers generation, threads, template, reasoning, grammar and router owners.
+Unsupported rows are explicit refusals, not permission for raw extras. B support
+describes the manual field vocabulary; it does not advertise implemented Apply.
+Inherited finite-adapter defaults are labelled and never materialized as intent.
+
+`modelChange`/nonempty typed-load launch traffic currently fails with a clear
+invalid-parameters field error before native preparation, mutation admission,
+rebind or persistence. The guard also prevents an ordinary RPC write from dropping
+stored loads. Auto validates explicit preferences and returns no resolution,
+review identity, candidate or default trades. Task 5 replaces the artifact body,
+Task 6 the load body, Task 10 the estimate body and Task 11 the Auto body. Contract
+tests use missing artifacts/review data, so refusal remains required afterward.
+
+Direct executor calls in `settings.go` remain an explicit integration boundary:
+guard `PreviewLaunch` and `ConfigureLaunch` before preparation/admission; carry
+modelLoads in `launchStateLocked`, preview and readback; include them in change
+and no-op decisions; update `persistRuntimeServing` in `setport.go` to persist
+requested/accepted records with ports/launch/serving in the existing replacement.
+No new store, version or capability negotiation is present. The registry already
+strictly validates typed records, canonicalizes model order, preserves arrays
+under the existing shared/host-platform merge and retains numeric lexemes.
+O1-O5 are unanswered; no restart, Auto, lock scope, copy default or qualification
+behavior is selected. Apply-build must add this mutation to its future maintenance
+exclusion; coordinator amendment 2 defines no maintenance symbol today.
+
 ## Installation completeness
 
 Manifest version 2 adds optional shared/per-platform `detect_required` paths.

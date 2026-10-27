@@ -98,8 +98,12 @@ func writeCodedError(w http.ResponseWriter, code int, message string) {
 }
 
 // remoteStatusError is the error for an ec response with a non-2xx status. A
-// 409 whose body names a typed code keeps that code; any other is plain text.
+// 409 whose body names a typed code keeps that code. Settings validation uses
+// HTTP 400 and retains the invalid-parameters code at the origin.
 func remoteStatusError(prefix string, status int, body []byte) error {
+	if status == http.StatusBadRequest && strings.HasPrefix(prefix, "remote /v1/engine-settings/") {
+		return &codedError{code: -32602, message: fmt.Sprintf("%s: HTTP %d: %s", prefix, status, strings.TrimSpace(string(body)))}
+	}
 	var coded codedBody
 	if status == http.StatusConflict && json.Unmarshal(body, &coded) == nil {
 		if code, ok := codeOfWire(coded.Code); ok {

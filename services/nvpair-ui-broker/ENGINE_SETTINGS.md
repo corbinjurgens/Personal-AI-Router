@@ -5,6 +5,54 @@ SPDX-License-Identifier: Apache-2.0
 
 # Engine settings protocol
 
+## Model configuration contract
+
+`engine:inspect-model` accepts `{engine,nodeId?,modelId}` and is a read through
+the existing settings relay and pinned `POST /v1/engine-settings/inspect` route.
+It does not initialize a settings journal, start an engine, download content,
+change trust or authorize a load. Until the bounded inspector lands it returns
+structured unavailable facts and estimates, with service-owned option descriptors.
+
+`settings.modelLoads` is an exact-model-ID ordered collection of `requested`
+portable preferences and optional target-owned finite `resolved` records.
+Bindings, native build/source/preset digests and reviewed Auto inputs are target
+authority, not copyable preferences. Ordinary port/launch constructors preserve
+the collection. The complete settings request, not just this collection, must
+fit the existing 64 KiB transport limit. Unknown/ambiguous fields are rejected.
+The expanded complete preview must also fit; duplicating a large launch argument
+into parsed readback produces a field/size refusal before Apply acceptance, not
+a larger transport limit or a silently truncated preview.
+
+Existing engine revision, applied-revision and sequence counters remain numeric
+JSON, with marshal/decode refusal above `2^53-1`. New policy revisions, byte
+quantities and nanosecond file identities use decimal strings. A consumer must
+never round either representation.
+
+Preview/apply can carry `modelChange` with `modelId`, decimal
+`expectedPolicyRevision`, selected `load` set/clear leaves, selected `policy`
+leaves, `previewDigest` and optional `supersedesRequestId`. The full settings
+payload must echo the target baseline beside that patch. Generation numbers
+retain decimal precision; locks, qualification and admission bounds are not
+selected-copy fields. The future target merge must preserve unrestricted
+`servedModels` versus an explicit empty list and validate enforced-empty options.
+
+This contract commit refuses typed model changes before journal or runtime
+effects. It adds no model Apply control. Native compilation, coupled policy
+acceptance/recovery and Auto implementation remain separate work. Policy-only
+edits retain policy CAS without restart. Preview impact reports restart scope,
+affected models, optional drain bound/interruption/Off outcomes and unknowns;
+it does not approve the unanswered restart policy. A whole-router restart and
+60-second drain can be represented without being selected by the contract.
+
+Snapshots distinguish desired settings, effective readback, coupled stage,
+policy revision and unresolved error. A receipt is never evidence of runtime
+readiness. CAS/pending conflicts use `-32010`, Pause `-32011`, grant denial
+`-32012`, inference lock `-32014`; malformed fields use `-32602`.
+
+There is no build-maintenance exclusion at this source. Apply-build must add
+model-settings apply to its maintenance reservation before those mutation
+implementations are joined. There is no client-supplied bypass.
+
 The broker owns combined settings operations for Ollama, LM Studio, and
 llama.cpp. Each node owns its own configuration. `nodeId` selects a discovered,
 currently pinned peer; omission or the local host ID selects this node. Bulk

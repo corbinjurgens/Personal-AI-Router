@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"strings"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/modelconfig"
 )
 
 // ManifestSchemaVersion is the highest manifest_version this binary
@@ -184,17 +186,18 @@ type Runtime struct {
 	servingObservationSweep uint64
 	// Latched for this owned launch; inventory cannot restore withdrawn identity.
 	servingDrift   string
-	Serving        *engines.ServingConfig `json:"serving,omitempty"`
-	EditableLaunch *EditableLaunch        `json:"editable_launch,omitempty"`
-	LaunchArgs     *[]string              `json:"launch_args,omitempty"` // literal arguments after managed fields
-	LaunchEnv      *[]string              `json:"launch_env,omitempty"`  // complete literal explicit environment
-	Mode           string                 `json:"mode,omitempty"`
-	Bin            string                 `json:"bin,omitempty"`
-	Args           []string               `json:"args,omitempty"`
-	Env            map[string]string      `json:"env,omitempty"`
-	Port           int                    `json:"port"`            // 0 => auto-assign a free loopback port
-	Bind           string                 `json:"bind,omitempty"`  // listen addr, substituted as {host}; "" => 127.0.0.1
-	Start          [][]string             `json:"start,omitempty"` // command mode: ordered bring-up commands
+	Serving        *engines.ServingConfig  `json:"serving,omitempty"`
+	ModelLoads     []modelconfig.ModelLoad `json:"modelLoads,omitempty"`
+	EditableLaunch *EditableLaunch         `json:"editable_launch,omitempty"`
+	LaunchArgs     *[]string               `json:"launch_args,omitempty"` // literal arguments after managed fields
+	LaunchEnv      *[]string               `json:"launch_env,omitempty"`  // complete literal explicit environment
+	Mode           string                  `json:"mode,omitempty"`
+	Bin            string                  `json:"bin,omitempty"`
+	Args           []string                `json:"args,omitempty"`
+	Env            map[string]string       `json:"env,omitempty"`
+	Port           int                     `json:"port"`            // 0 => auto-assign a free loopback port
+	Bind           string                  `json:"bind,omitempty"`  // listen addr, substituted as {host}; "" => 127.0.0.1
+	Start          [][]string              `json:"start,omitempty"` // command mode: ordered bring-up commands
 	// CLI is the engine's control-CLI path for this platform, referenced
 	// elsewhere as {cli}. It lets the manifest's global actions resolve
 	// to the correct per-OS binary (e.g. lms.exe vs lms).
@@ -612,7 +615,7 @@ func (r *Registry) mergeOntoBundled(override []byte) ([]byte, error) {
 		return nil, err
 	}
 	var om map[string]any
-	if err := json.Unmarshal(override, &om); err != nil {
+	if err := decodeManifestMergeJSON(override, &om); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 	eng, _ := om["engine"].(string)
@@ -621,7 +624,7 @@ func (r *Registry) mergeOntoBundled(override []byte) ([]byte, error) {
 		return override, nil
 	}
 	var bm map[string]any
-	if err := json.Unmarshal(base, &bm); err != nil {
+	if err := decodeManifestMergeJSON(base, &bm); err != nil {
 		return nil, fmt.Errorf("bundled manifest for %q: %w", eng, err)
 	}
 	return json.Marshal(deepMerge(bm, om))
@@ -662,7 +665,7 @@ func applyPlatformDefaults(data []byte) ([]byte, error) {
 			continue
 		}
 		var v any
-		if err := json.Unmarshal(raw, &v); err != nil {
+		if err := decodeManifestMergeJSON(raw, &v); err != nil {
 			return nil, fmt.Errorf("top-level %s: %w", k, err)
 		}
 		base[k] = v
@@ -682,7 +685,7 @@ func applyPlatformDefaults(data []byte) ([]byte, error) {
 	merged := make(map[string]any, len(platforms))
 	for key, praw := range platforms {
 		var pv map[string]any
-		if err := json.Unmarshal(praw, &pv); err != nil {
+		if err := decodeManifestMergeJSON(praw, &pv); err != nil {
 			return nil, fmt.Errorf("platform %q: %w", key, err)
 		}
 		merged[key] = deepMerge(base, pv)
@@ -696,6 +699,9 @@ func applyPlatformDefaults(data []byte) ([]byte, error) {
 }
 
 func validateManifestModelIdentifiers(data []byte) error {
+	if err := validateRuntimeModelLoadsJSON(data); err != nil {
+		return err
+	}
 	if err := validateServingModelsJSON(data, "runtime", "serving"); err != nil {
 		return err
 	}
@@ -706,8 +712,66 @@ func validateManifestModelIdentifiers(data []byte) error {
 		return nil
 	}
 	for _, platform := range manifest.Platforms {
+		if err := validateRuntimeModelLoadsJSON(platform); err != nil {
+			return err
+		}
 		if err := validateServingModelsJSON(platform, "runtime", "serving"); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// Both override and platform-default mergers must preserve decimal lexemes,
+// including unrelated manifest fields, rather than round them through float64.
+func decodeManifestMergeJSON(data []byte, dst any) error {
+	if !json.Valid(data) {
+		return fmt.Errorf("invalid JSON")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return decoder.Decode(dst)
+}
+
+func validateRuntimeModelLoadsJSON(data []byte) error {
+	var record struct {
+		Runtime json.RawMessage `json:"runtime"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return err
+	}
+	if len(record.Runtime) == 0 {
+		return nil
+	}
+	var runtimeFields map[string]json.RawMessage
+	if err := json.Unmarshal(record.Runtime, &runtimeFields); err != nil {
+		return err
+	}
+	hasLoads := false
+	for key := range runtimeFields {
+		hasLoads = hasLoads || strings.EqualFold(key, "modelLoads")
+	}
+	if !hasLoads {
+		return nil // no new budget/field restrictions on unrelated manifests
+	}
+	// Inspect the uncollapsed runtime object too, so duplicate collection keys
+	// cannot turn a rejected typed record into a different accepted one.
+	if err := modelconfig.DecodeStrict(record.Runtime, &runtimeFields); err != nil {
+		return fmt.Errorf("runtime.modelLoads: %w", err)
+	}
+	for key, raw := range runtimeFields {
+		if !strings.EqualFold(key, "modelLoads") {
+			continue
+		}
+		if key != "modelLoads" || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("runtime.modelLoads: exact field spelling and an array required")
+		}
+		var loads []modelconfig.ModelLoad
+		if err := modelconfig.DecodeStrict(raw, &loads); err != nil {
+			return fmt.Errorf("runtime.modelLoads: %w", err)
+		}
+		if _, err := modelconfig.CanonicalLoads(loads); err != nil {
+			return fmt.Errorf("runtime.modelLoads: %w", err)
 		}
 	}
 	return nil
@@ -783,6 +847,7 @@ func (m *Manifest) Validate() error {
 		if err := p.validate(key); err != nil {
 			return err
 		}
+		m.Platforms[key] = p
 	}
 	for name, a := range m.Actions {
 		if err := a.validate(name); err != nil {
@@ -810,6 +875,11 @@ func (m *Manifest) Validate() error {
 }
 
 func (p *Platform) validate(key string) error {
+	loads, err := modelconfig.CanonicalLoads(p.Runtime.ModelLoads)
+	if err != nil {
+		return fmt.Errorf("platform %q: runtime.modelLoads: %w", key, err)
+	}
+	p.Runtime.ModelLoads = loads
 	if len(p.DetectRequired) > 0 && len(p.Detect) == 0 {
 		return fmt.Errorf("platform %q: detect_required requires detect executable alternatives", key)
 	}

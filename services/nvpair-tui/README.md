@@ -5,6 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-tui
 
+Ordinary engine settings edits preserve the target's typed `modelLoads` along
+with serving declarations. This client does not construct native resolutions,
+copy local artifact bindings or expose model-load Apply in the preparatory
+contract. Desired/effective settings and coupled stage/error remain distinct
+in the shared settings snapshot.
+
 Marked switch receipts display `Automatic engine switch` in the existing
 switch panel, retaining request identity, phases, current observations and
 refusal codes. Push notifications trigger authoritative readback. Automatic

@@ -5,6 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 
 # NVIDIA Personal AI Router Architecture
 
+Model configuration keeps generation/routing intent in broker node policy and
+typed native load preferences plus accepted finite resolutions in manager engine
+settings. `shared/modelconfig` is a portable wire/validation owner, not a native
+argument parser or another settings database. Inspection travels through the
+existing broker settings read relay and pinned engine-control listener; derived
+facts and advisory estimates never establish readiness or qualification.
+The preparatory contract refuses typed mutation until its target implementation
+lands. Future apply-build maintenance must exclude model-settings application.
+
 Personal AI Router (PAIR) is a desktop-or-headless control plane around local Go
 services and HTTP inference proxies. Its control traffic and inference traffic
 follow separate paths.

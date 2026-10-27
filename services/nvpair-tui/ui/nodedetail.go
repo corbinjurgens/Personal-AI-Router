@@ -1664,7 +1664,7 @@ func (d *nodeDetail) settingsRequest(
 	mode detailInputMode,
 	value string,
 ) (enginesettings.Request, bool) {
-	cfg := snap.Settings
+	cfg := snap.Settings.Clone()
 	resolution := resolutionLaunch
 	switch mode {
 	case detailInputEnginePort:

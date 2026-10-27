@@ -29,7 +29,8 @@ import { getModularSupervisor } from './modular-supervisor'
 import {
     parseEngineSettings,
     parseEngineSettingsPreview,
-    parseEngineSettingsReceipt
+    parseEngineSettingsReceipt,
+    parseInspectModel
 } from './engine-settings'
 import {
     nodeTargetParams,
@@ -968,12 +969,34 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
                 payload ? { ...payload } : undefined
             )
         ),
+    'engines:inspect-model': async payload => {
+        const result = parseInspectModel(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'engine:inspect-model',
+                payload ? { ...payload } : undefined
+            )
+        )
+        if (
+            payload &&
+            (result.engine !== payload.engine ||
+                result.modelId !== payload.modelId ||
+                (payload.nodeId && result.nodeId !== payload.nodeId))
+        )
+            throw new Error('Model inspection target identity mismatch.')
+        return result
+    },
     'engines:preview-settings': async payload =>
         parseEngineSettingsPreview(
             await getModularSupervisor().callProcess(
                 'broker',
                 'engine:preview-settings',
-                payload ? { ...payload, settings: { ...payload.settings } } : undefined
+                payload
+                    ? {
+                          ...structuredClone(payload),
+                          settings: { ...structuredClone(payload.settings) }
+                      }
+                    : undefined
             )
         ),
     'engines:apply-settings': async payload =>
@@ -981,7 +1004,12 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
             await getModularSupervisor().callProcess(
                 'broker',
                 'engine:apply-settings',
-                payload ? { ...payload, settings: { ...payload.settings } } : undefined,
+                payload
+                    ? {
+                          ...structuredClone(payload),
+                          settings: { ...structuredClone(payload.settings) }
+                      }
+                    : undefined,
                 MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
             )
         ),

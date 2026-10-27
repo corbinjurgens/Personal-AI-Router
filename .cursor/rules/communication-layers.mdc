@@ -9,6 +9,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Communication Layers
 
+Model inspection uses `pairApi.engines.inspectModel` via `engines:inspect-model`,
+the broker's correlated settings relay and the existing pinned engine-control
+`/v1/engine-settings/inspect` read route. Never add a renderer node-to-node path,
+accept client telemetry as native authority, or turn inspection into settings,
+trust, download or activation effects. Preserve every meaningful model-settings
+field across bridge decoding and ordinary preserving clients.
+
 ## Renderer
 
 - Renderer service calls use `window.pairApi`.

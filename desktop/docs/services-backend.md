@@ -5,6 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Services Backend Integration
 
+Model inspection is integrated as `engines:inspect-model` to
+`engine:inspect-model`, including the manager's pinned settings read route.
+Requested load preferences, finite resolutions, artifact assurance, option
+descriptors and advisory estimate status have distinct shared types. Missing
+inspection/estimation bodies return structured unavailable data. Typed mutation
+is refused before acceptance while those bodies are pending; no capability
+negotiation or renderer inference replaces a target implementation.
+
 The `services/` tree is Personal AI Router's backend and the source of truth for
 service behavior. It lives as a sibling directory in this monorepo, and Personal
 AI Router builds its bundled binaries directly from that source.

@@ -11,20 +11,87 @@ import {
     watchEngineSettings
 } from '@/ui/stores/engine-settings.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
-import type { EngineSettingsSnapshot, EngineServingConfig } from '@/shared/types/engine-settings'
+import type {
+    EngineSettingsConfig,
+    EngineSettingsSnapshot,
+    EngineServingConfig
+} from '@/shared/types/engine-settings'
 import type { IEngineApi } from '@/ui/api/engine-api'
 import { EngineSettingsSection } from '@/ui/components/BackendRow/EngineSettingsSection'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { redactSensitiveLogText } from '@/electron/redact-log'
 
 const target = { nodeId: 'remote', engine: 'ollama' } as const
+const modelLoads: NonNullable<EngineSettingsConfig['modelLoads']> = [
+    {
+        modelId: 'exact/model',
+        requested: {
+            context: { mode: 'fixed', tokens: 4096 },
+            slots: 2,
+            gpu: { mode: 'layers', layers: 24 },
+            cacheTypeK: 'f16',
+            cacheTypeV: 'f16',
+            flashAttention: 'on',
+            batchSize: 512,
+            ubatchSize: 128,
+            threads: 4,
+            threadsBatch: 8,
+            kvOffload: false,
+            opOffload: true,
+            sleepIdleSeconds: -1,
+            cacheRAM: 512
+        },
+        resolved: {
+            perSlotContext: 4096,
+            totalContext: 8192,
+            slots: 2,
+            kvUnified: false,
+            gpu: { mode: 'layers', layers: 24 },
+            options: {
+                context: { mode: 'fixed', tokens: 4096 },
+                slots: 2,
+                gpu: { mode: 'layers', layers: 24 },
+                cacheTypeK: 'f16',
+                cacheTypeV: 'f16',
+                flashAttention: 'on',
+                batchSize: 512,
+                ubatchSize: 128,
+                threads: 4,
+                threadsBatch: 8,
+                kvOffload: false,
+                opOffload: true,
+                sleepIdleSeconds: -1,
+                cacheRAM: 512
+            },
+            artifacts: [
+                {
+                    role: 'model',
+                    path: 'C:/models/model.gguf',
+                    resolvedTarget: 'C:/cache/model.gguf',
+                    size: '9007199254740993',
+                    mtimeNs: '1793000000000000001',
+                    sampleSha256: 'a'.repeat(64)
+                }
+            ],
+            nativeBuildId: 'llama-b11146',
+            sourceInputDigest: 'b'.repeat(64),
+            presetDigest: 'c'.repeat(64)
+        }
+    },
+    { modelId: 'another/model', requested: { kvOffload: false } }
+]
 const baseline: EngineSettingsSnapshot = {
     ...target,
     revision: 1,
     appliedRevision: 1,
     epoch: 'one',
     sequence: 1,
-    settings: { serverPort: 1235, proxyPort: 11434, launchText: 'managed serve' },
+    settings: {
+        serverPort: 1235,
+        proxyPort: 11434,
+        launchText: 'managed serve',
+        modelLoads: structuredClone(modelLoads)
+    },
     effectiveServerPort: 1235,
     effectiveProxyPort: 11434,
     running: true,
@@ -66,105 +133,148 @@ const serving: EngineServingConfig = {
     ]
 }
 
-describe('serving preservation in the settings editor', () => {
+describe('model load and serving preservation in the settings editor', () => {
     afterEach(() => {
         vi.unstubAllGlobals()
         vi.restoreAllMocks()
     })
 
-    it('carries serving through an actual unrelated form edit and failed apply', async () => {
-        const snapshot: EngineSettingsSnapshot = {
-            ...baseline,
-            settings: { ...baseline.settings, serving: structuredClone(serving) }
+    it.each([
+        { name: 'port', label: 'Proxy port', value: '12500', field: 'proxyPort' },
+        {
+            name: 'launch arguments',
+            label: 'Engine arguments',
+            value: 'managed serve --keep',
+            field: 'launchText'
         }
-        const get = vi.fn<IEngineApi['getSettings']>().mockResolvedValue(snapshot)
-        const preview = vi
-            .fn<IEngineApi['previewSettings']>()
-            .mockImplementation(async request => ({
-                settings: request.settings,
-                revision: 1,
-                errors: {},
-                restart: false,
-                rebind: false
-            }))
-        const apply = vi
-            .fn<IEngineApi['applySettings']>()
-            .mockRejectedValue(new Error('synthetic failure'))
-        Object.defineProperty(window, 'pairApi', {
-            configurable: true,
-            value: {
-                engines: {
-                    getSettings: get,
-                    previewSettings: preview,
-                    applySettings: apply,
-                    onSettingsChanged: () => () => {},
-                    onSettingsDisconnected: () => () => {}
+    ])(
+        'carries full model loads and serving through a $name edit and failed apply',
+        async ({ label, value, field }) => {
+            const snapshot: EngineSettingsSnapshot = {
+                ...baseline,
+                settings: { ...baseline.settings, serving: structuredClone(serving) }
+            }
+            const get = vi.fn<IEngineApi['getSettings']>().mockResolvedValue(snapshot)
+            const preview = vi
+                .fn<IEngineApi['previewSettings']>()
+                .mockImplementation(async request => ({
+                    settings: request.settings,
+                    revision: 1,
+                    errors: {},
+                    restart: false,
+                    rebind: false
+                }))
+            const apply = vi
+                .fn<IEngineApi['applySettings']>()
+                .mockRejectedValue(new Error('synthetic failure'))
+            Object.defineProperty(window, 'pairApi', {
+                configurable: true,
+                value: {
+                    engines: {
+                        getSettings: get,
+                        previewSettings: preview,
+                        applySettings: apply,
+                        onSettingsChanged: () => () => {},
+                        onSettingsDisconnected: () => () => {}
+                    }
                 }
-            }
-        })
-        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-        vi.stubGlobal('CSS', { supports: () => false })
-        Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
-            configurable: true,
-            value: function (this: HTMLDialogElement) {
-                this.open = true
-            }
-        })
-        Object.defineProperty(HTMLDialogElement.prototype, 'close', {
-            configurable: true,
-            value: function (this: HTMLDialogElement) {
-                this.open = false
-            }
-        })
-        useConnectionStore.setState({ connected: true, selfId: 'remote' })
-        store.setState({ entries: {} })
-        usePendingActionsStore.setState({ pending: new Map() })
-        const container = document.createElement('div')
-        document.body.appendChild(container)
-        const root = createRoot(container)
-        try {
-            await act(async () =>
-                root.render(
-                    createElement(EngineSettingsSection, {
-                        nodeId: 'remote',
-                        engineType: 'ollama',
-                        disabled: false
-                    })
-                )
-            )
-            const input = container.querySelector('input[aria-label="Proxy port"]')
-            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-            if (!input || !setter) throw new Error('Proxy port input missing')
-            await act(async () => {
-                setter.call(input, '12500')
-                input.dispatchEvent(new Event('input', { bubbles: true }))
             })
-            const button = container.querySelector('button[aria-label="Apply"]')
-            if (!(button instanceof HTMLButtonElement)) throw new Error('Apply button missing')
-            await act(async () => button.click())
-            expect(preview).toHaveBeenCalledWith(
-                expect.objectContaining({ settings: { ...snapshot.settings, proxyPort: 12500 } })
-            )
-            expect(apply).toHaveBeenCalledWith(
-                expect.objectContaining({ settings: { ...snapshot.settings, proxyPort: 12500 } })
-            )
-            expect(store.getState().entries[key].snapshot?.settings.serving).toEqual(serving)
-        } finally {
-            await act(async () => root.unmount())
-            container.remove()
+            vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+            vi.stubGlobal('CSS', { supports: () => false })
+            Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+                configurable: true,
+                value: function (this: HTMLDialogElement) {
+                    this.open = true
+                }
+            })
+            Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+                configurable: true,
+                value: function (this: HTMLDialogElement) {
+                    this.open = false
+                }
+            })
+            useConnectionStore.setState({ connected: true, selfId: 'remote' })
+            store.setState({ entries: {} })
+            usePendingActionsStore.setState({ pending: new Map() })
+            const container = document.createElement('div')
+            document.body.appendChild(container)
+            const root = createRoot(container)
+            try {
+                await act(async () =>
+                    root.render(
+                        createElement(EngineSettingsSection, {
+                            nodeId: 'remote',
+                            engineType: 'ollama',
+                            disabled: false
+                        })
+                    )
+                )
+                const input = container.querySelector(`[aria-label="${label}"]`)
+                const prototype =
+                    field === 'proxyPort'
+                        ? HTMLInputElement.prototype
+                        : HTMLTextAreaElement.prototype
+                const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
+                if (!input || !setter) throw new Error(`${label} input missing`)
+                await act(async () => {
+                    setter.call(input, value)
+                    input.dispatchEvent(new Event('input', { bubbles: true }))
+                })
+                const button = container.querySelector('button[aria-label="Apply"]')
+                if (!(button instanceof HTMLButtonElement)) throw new Error('Apply button missing')
+                await act(async () => button.click())
+                const expectedSettings = {
+                    ...snapshot.settings,
+                    [field]: field === 'proxyPort' ? 12500 : value
+                }
+                expect(preview).toHaveBeenCalledWith(
+                    expect.objectContaining({ settings: expectedSettings })
+                )
+                expect(apply).toHaveBeenCalledWith(
+                    expect.objectContaining({ settings: expectedSettings })
+                )
+                const previewRequest = preview.mock.calls[0]?.[0]
+                const applyRequest = apply.mock.calls[0]?.[0]
+                if (!previewRequest || !applyRequest) throw new Error('Settings requests missing')
+                expect(previewRequest.settings.modelLoads).toEqual(modelLoads)
+                expect(applyRequest.settings.modelLoads).toEqual(modelLoads)
+                expect(applyRequest.settings.modelLoads).not.toBe(
+                    store.getState().entries[key].snapshot?.settings.modelLoads
+                )
+                const resolved = applyRequest.settings.modelLoads?.[0].resolved
+                if (!resolved) throw new Error('Applied fixture resolution missing')
+                resolved.artifacts[0].path = 'changed by request consumer'
+                resolved.options.cacheRAM = 1
+                expect(store.getState().entries[key].snapshot?.settings.modelLoads).toEqual(
+                    modelLoads
+                )
+                expect(store.getState().entries[key].snapshot?.settings.serving).toEqual(serving)
+            } finally {
+                await act(async () => root.unmount())
+                container.remove()
+            }
         }
-    })
+    )
 
-    it('owns nested serving values received from a caller', () => {
+    it('owns nested serving and model load values received from a caller', () => {
         const snapshot: EngineSettingsSnapshot = {
             ...baseline,
-            settings: { ...baseline.settings, serving: structuredClone(serving) }
+            settings: {
+                ...baseline.settings,
+                serving: structuredClone(serving),
+                modelLoads: structuredClone(modelLoads)
+            }
         }
         store.setState({ entries: {} })
         store.getState().receive(snapshot)
         if (!snapshot.settings.serving) throw new Error('Missing fixture serving')
         snapshot.settings.serving.models[0].artifacts[0].provenance.kind = 'changed'
+        const load = snapshot.settings.modelLoads?.[0]
+        if (!load?.resolved) throw new Error('Missing fixture model resolution')
+        load.requested.context = { mode: 'fixed', tokens: 8192 }
+        load.resolved.artifacts[0].path = 'changed'
         expect(store.getState().entries[key].snapshot?.settings.serving).toEqual(serving)
+        expect(store.getState().entries[key].snapshot?.settings.modelLoads).toEqual(modelLoads)
     })
 })
 
@@ -340,6 +450,14 @@ describe('engine settings snapshot ordering and pending operations', () => {
         finish(baseline)
         await loading
         expect(store.getState().entries[key].snapshot?.epoch).toBe('two')
+    })
+
+    it('orders double-digit numeric sequences before rejecting a delayed frame', () => {
+        store.getState().receive({ ...baseline, sequence: 9, revision: 2 })
+        store.getState().receive({ ...baseline, sequence: 10, revision: 3 })
+        store.getState().receive({ ...baseline, sequence: 2, revision: 1 })
+        expect(store.getState().entries[key].snapshot?.sequence).toBe(10)
+        expect(store.getState().entries[key].snapshot?.revision).toBe(3)
     })
 
     it('acknowledgement alone cannot fabricate an applied snapshot', async () => {
