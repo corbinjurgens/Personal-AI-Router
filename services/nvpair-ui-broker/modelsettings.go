@@ -143,6 +143,19 @@ func (b *Broker) modelSettingsPendingLocked(engine string) bool {
 	return record != nil && record.Model != nil && record.Model.Stage != "completed"
 }
 
+// Pending snapshots bypass live readback. Their running observation belongs to
+// the old incarnation when loading a journal or replacing engine-manager, even
+// though the accepted intent and reconciliation state remain authoritative.
+// The caller holds engineConfigMu; same-incarnation acceptance uncertainty
+// deliberately does not invalidate the running observation.
+func (b *Broker) invalidatePendingModelSettingsRunningLocked() {
+	for engine, record := range b.engineSettings {
+		if b.modelSettingsPendingLocked(engine) {
+			record.Snapshot.Running = false
+		}
+	}
+}
+
 func modelSettingsNeedsReconciliation(record *engineSettingsRecord) bool {
 	return record.Model != nil && record.Model.Stage != "completed" && (record.Model.Stage == "activation-pending" || record.Model.Stage == "acceptance-uncertain" || record.Receipts[record.Snapshot.RequestID].Phase == "failed")
 }
