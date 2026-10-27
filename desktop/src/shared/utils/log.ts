@@ -22,9 +22,10 @@ const ROTATED_LOG_FILE_NAME = 'nvpair.1.jsonl'
 let logFilePath = ''
 let writer: BoundedLogWriter | null = null
 
-// Inherited console pipes can close independently of the app. Keep a listener
-// for asynchronous write errors; file logging does not depend on this mirror.
-process.stdout.on('error', () => {})
+// Inherited console pipes can close independently of the app. Keep listeners
+// for asynchronous errors from both our mirror and console-based libraries.
+// File logging does not depend on either inherited stream.
+for (const stream of [process.stdout, process.stderr]) stream.on('error', () => {})
 
 // ---------------------------------------------------------------------------
 // Internal helpers

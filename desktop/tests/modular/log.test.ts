@@ -4,6 +4,8 @@
 import { mkdtempSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { Console } from 'node:console'
+import electronLog from 'electron-log/node'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
     createStructuredLogger,
@@ -39,6 +41,56 @@ function readEntries(): object[] {
 }
 
 describe('logger console mirror', () => {
+    it('contains repeated stderr EPIPE errors from the electron-log console transport', async () => {
+        const logger = initializeLogger()
+        const console = new Console({ stdout: process.stdout, stderr: process.stderr })
+        const updaterLog = electronLog.create({ logId: 'stderr-pipe-test' })
+        updaterLog.transports.file.level = false
+        // Vitest replaces the global console. Use Node's console with the real
+        // inherited streams at electron-log's existing console transport seam.
+        updaterLog.transports.console.writeFn = ({ message }) => console.error(...message.data)
+        const pipeError = Object.assign(new Error('broken pipe'), { code: 'EPIPE' })
+        const emitted = vi.fn<() => void>()
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => {
+            queueMicrotask(() => {
+                process.stderr.emit('error', pipeError)
+                emitted()
+            })
+            return false
+        })
+        vi.spyOn(process.stdout, 'write').mockReturnValue(true)
+
+        expect(() => updaterLog.error('first updater failure')).not.toThrow()
+        await new Promise<void>(resolve => queueMicrotask(resolve))
+        expect(emitted).toHaveBeenCalledTimes(1)
+        logger.info({ sublevel: 'test', message: 'after first stderr error' })
+        expect(() => updaterLog.error('second updater failure')).not.toThrow()
+        await new Promise<void>(resolve => queueMicrotask(resolve))
+        expect(emitted).toHaveBeenCalledTimes(2)
+        logger.info({ sublevel: 'test', message: 'after second stderr error' })
+        await flushLogs(1000)
+
+        expect(readEntries()).toEqual([
+            expect.objectContaining({ message: 'after first stderr error', level: 'info' }),
+            expect.objectContaining({ message: 'after second stderr error', level: 'info' })
+        ])
+    })
+
+    it('tolerates synchronous stderr write failure through console.error', async () => {
+        const logger = initializeLogger()
+        const console = new Console({ stdout: process.stdout, stderr: process.stderr })
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => {
+            throw Object.assign(new Error('closed stderr'), { code: 'EPIPE' })
+        })
+        vi.spyOn(process.stdout, 'write').mockReturnValue(true)
+
+        expect(() => console.error('closed inherited pipe')).not.toThrow()
+        logger.info({ sublevel: 'test', message: 'file remains writable' })
+        await flushLogs(1000)
+        expect(readEntries()).toEqual([
+            expect.objectContaining({ message: 'file remains writable', level: 'info' })
+        ])
+    })
     it('preserves console formatting and structured file logging', async () => {
         const logger = initializeLogger()
         const write = vi.spyOn(process.stdout, 'write').mockReturnValue(true)
