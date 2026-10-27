@@ -545,6 +545,11 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 	if err := recheckContent(); err != nil {
 		return err
 	}
+	if serving {
+		if err := recheckPreparedServing(st, originalLaunch, rt, prepared); err != nil {
+			return fmt.Errorf("NE pre-spawn source recheck: %w", err)
+		}
+	}
 	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
 		if serving {
 			if prepared.Credential != "" {

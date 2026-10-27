@@ -16,6 +16,7 @@ import (
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engines"
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
 )
 
@@ -35,16 +36,6 @@ func canMoveAdoptedEngine(mode string, stop *StopSpec) bool {
 // A running, adopted process-mode engine is refused. An identified command-mode
 // engine may be moved only when its manifest provides an official stop command.
 func (e *Executor) SetPort(ctx context.Context, engine string, port int) (EngineStatus, error) {
-	state, err := e.state(engine)
-	if err != nil {
-		return EngineStatus{}, err
-	}
-	state.mu.Lock()
-	hasLoads := len(state.plat.Runtime.ModelLoads) != 0
-	state.mu.Unlock()
-	if hasLoads {
-		return EngineStatus{}, modelLoadError("", "modelLoads", "Port application with typed loads is unavailable pending O1 settings-apply restart integration.")
-	}
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return EngineStatus{}, err
@@ -65,6 +56,25 @@ func (e *Executor) SetPort(ctx context.Context, engine string, port int) (Engine
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
+	if len(st.plat.Runtime.ModelLoads) != 0 {
+		current := e.launchStateLocked(engine, st)
+		config := settings.ConfigFromLaunch(current, 0)
+		config.ServerPort = port
+		command, err := launchForState(st, port)
+		if err != nil {
+			return EngineStatus{}, err
+		}
+		config.LaunchText, err = command.argumentText(llamaServingBase(st.plat.Runtime))
+		if err != nil {
+			return EngineStatus{}, err
+		}
+		preview := e.previewLaunchLocked(st, settings.Request{Engine: engine, Settings: config, Resolution: "server"})
+		if len(preview.Errors) != 0 || preview.Conflict != nil {
+			return EngineStatus{}, modelLoadError("", "serverPort", "Port change requires a valid native settings preview.")
+		}
+		_, err = e.configureLaunchLocked(ctx, st, settings.Configure{Engine: engine, Settings: preview.Settings}, func() error { return nil })
+		return e.snapshot(engine, st), err
+	}
 
 	st.mu.Lock()
 	wasRunning := st.running

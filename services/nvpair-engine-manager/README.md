@@ -52,15 +52,20 @@ per-field/source diffs and a digest, refusing unsupported members without takeov
 same atomic port/launch/serving override write, preserving platform fields and
 opaque numeric precision. These helpers do not activate a stopped engine.
 
-O1 remains unanswered. `ConfigureLaunch` refuses typed input, stored typed
-echoes and removal before mutation admission; `SetPort` also refuses stored
-typed state. Change/no-op detection, accepted settings-apply stop/persist/rebind/
-conditional restart, broker acceptance/coupled-policy wiring and the running
-settings restart test remain unwired. RPC mutation and policy-edit guards remain
-closed; a successful worker load preview authorizes no application.
+The direct `ConfigureLaunch` path detects typed changes and uses the existing
+stop, persist, rebind and conditional restart sequence after revalidating typed
+inputs. An accepted complete-router conversion preserves the current external
+artifact set and unrelated launch settings, validates the reviewed finite
+resolution, and rechecks the source before stopping and restarting. `SetPort`
+uses the same configuration owner for typed settings. Worker RPC accepts frozen
+reviewed settings; selected-patch acceptance and coupled policy remain broker-owned.
+Previews disclose whole-router scope, affected configured models, the broker's
+60-second drain bound and possible interruption after timeout. Loaded-model
+observations remain an explicit unknown for the broker to resolve. Off, Pause,
+engine locks and adopted-process ownership keep their existing behavior.
 Apply-build must add model-settings apply to its maintenance exclusion when
-implemented; no exclusion symbol exists yet. Other owner questions retain their
-existing follow-on gates.
+implemented; no exclusion symbol exists yet. Auto remains unavailable, and native
+configuration does not create qualification or establish strict readiness.
 
 The broker-only parent request `engine:activate-bound-engine` supplies a
 zero-source bound activation with operation ID, engine/model, accepted policy

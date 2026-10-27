@@ -50,7 +50,11 @@ func runModelLoadChild() bool {
 		os.Exit(2)
 	}
 	for _, options := range sections {
-		if _, err := os.Stat(options["model"]); err != nil {
+		model := options["model"]
+		if !filepath.IsAbs(model) {
+			model = filepath.Join(filepath.Dir(os.Args[index+1]), model)
+		}
+		if _, err := os.Stat(model); err != nil {
 			os.Exit(2)
 		}
 	}
@@ -64,14 +68,11 @@ func runModelLoadChild() bool {
 	if err := os.WriteFile(os.Getenv("PAIR_TYPED_CAPTURE"), capture, 0o600); err != nil {
 		os.Exit(2)
 	}
-	address := os.Getenv("PAIR_TYPED_ADDR")
-	if address == "" {
-		port := slices.Index(os.Args, "--port")
-		if port < 0 || port+1 >= len(os.Args) {
-			os.Exit(2)
-		}
-		address = net.JoinHostPort("127.0.0.1", os.Args[port+1])
+	port := slices.Index(os.Args, "--port")
+	if port < 0 || port+1 >= len(os.Args) {
+		os.Exit(2)
 	}
+	address := net.JoinHostPort("127.0.0.1", os.Args[port+1])
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		os.Exit(2)
@@ -105,7 +106,7 @@ func newModelLoadFixture(t *testing.T) modelLoadFixture {
 	st.plat.DetectRequired = nil
 	rt := st.plat.Runtime
 	rt.Bin = bin
-	rt.Env = map[string]string{"LLAMA_CACHE": f.root, "PAIR_TYPED_LOAD_CHILD": "1", "PAIR_TYPED_CAPTURE": filepath.Join(f.root, "capture.json"), "PAIR_TYPED_ADDR": "127.0.0.1:{port}"}
+	rt.Env = map[string]string{"LLAMA_CACHE": f.root, "PAIR_TYPED_LOAD_CHILD": "1", "PAIR_TYPED_CAPTURE": filepath.Join(f.root, "capture.json")}
 	for _, id := range []string{"medium", "weak"} {
 		writeInspectionGGUF(t, filepath.Join(f.root, id+".gguf"), "llama", 0.25, 4096)
 	}
@@ -236,7 +237,6 @@ func TestModelSettingsLoadFreshExecutorAndCrashRegeneration(t *testing.T) {
 			f := newModelLoadFixture(t)
 			if automatic {
 				f.rt.Port = 0
-				delete(f.rt.Env, "PAIR_TYPED_ADDR")
 				f.st.plat.Runtime = f.rt
 				var err error
 				f.command, err = launchForState(f.st, 0)
@@ -399,6 +399,37 @@ func TestModelSettingsLoadPreSpawnContentSourceReplacementRefuses(t *testing.T) 
 	}
 }
 
+func TestModelSettingsLoadPreSpawnNativeBuildDriftRefuses(t *testing.T) {
+	f := newModelLoadFixture(t)
+	rt := convertModelLoadFixture(t, f)
+	native := filepath.Join(f.root, "synthetic-native-build")
+	writeTestFile(t, native, []byte("first native binding"))
+	rt.Bin = native
+	f.st.binPath = native
+	prepared, err := compilePreparedServing(f.st, typedFixtureCommand(t, f, rt), rt, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.ModelLoads = prepared.ModelLoads
+	f.st.plat.Runtime = rt
+	vars := f.st.pathVars()
+	vars["host"], vars["port"] = "127.0.0.1", strconv.Itoa(rt.Port)
+	err = f.ex.bringUpProcessWithSnapshot(context.Background(), f.st, "fake", rt, rt.Port, vars, func(dir string, data []byte) (string, func(), error) {
+		path, release, err := prepareServingSnapshot(dir, data)
+		if err != nil {
+			return "", nil, err
+		}
+		writeTestFile(t, native, []byte("replacement native binding"))
+		return path, release, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "nativeBuildId") && !strings.Contains(err.Error(), "resolved") {
+		t.Fatalf("native binding drift reached spawn: %v", err)
+	}
+	if f.st.proc != nil {
+		t.Fatal("changed native build installed a child")
+	}
+}
+
 func TestModelSettingsLoadResetAndDefaultSemantics(t *testing.T) {
 	f := newModelLoadFixture(t)
 	rt := convertModelLoadFixture(t, f)
@@ -432,34 +463,557 @@ func TestModelSettingsLoadResetAndDefaultSemantics(t *testing.T) {
 	}
 }
 
-func TestModelSettingsLoadApplyRefusalBeforeAdmission(t *testing.T) {
+func previewModelLoadFixture(t *testing.T, f modelLoadFixture, model string, patch modelconfig.LoadPatch) settings.Preview {
+	t.Helper()
+	state, err := f.ex.LaunchSettings("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := f.ex.PreviewLaunch(settings.Request{Engine: "fake", Settings: settings.ConfigFromLaunch(state, 54301), ModelChange: &modelconfig.ModelChange{ModelID: model, ExpectedPolicyRevision: "0", Load: &patch}})
+	if err != nil || len(preview.Errors) != 0 || preview.Conflict != nil {
+		t.Fatalf("model load preview: errors=%v conflict=%v err=%v", preview.Errors, preview.Conflict, err)
+	}
+	return preview
+}
+
+func readModelLoadRuntimeOverride(t *testing.T, e *Executor) Runtime {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(e.overrideDir, "fake.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = e.reg.mergeOntoBundled(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = applyPlatformDefaults(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	platform, ok := manifest.HostPlatform()
+	if !ok {
+		t.Fatal("persisted host platform missing")
+	}
+	return platform.Runtime
+}
+
+func TestModelSettingsLoadConversionPersistsWhileOff(t *testing.T) {
 	f := newModelLoadFixture(t)
-	rt := convertModelLoadFixture(t, f)
-	test := func(name string, stored, requested []modelconfig.ModelLoad) {
+	if err := f.ex.desired.set("fake", false, intentPeer); err != nil {
+		t.Fatal(err)
+	}
+	before, err := f.ex.desired.snapshot([]string{"fake"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two := int32(2)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+	rebinds := 0
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings, Resume: true}, func() error { rebinds++; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Running || f.st.proc != nil || rebinds != 1 || !settings.ConfigFromLaunch(result, preview.Settings.ProxyPort).Equal(preview.Settings) {
+		t.Fatalf("Off conversion result=%+v rebinds=%d", result, rebinds)
+	}
+	stored := readModelLoadRuntimeOverride(t, f.ex)
+	if !modelconfig.EqualLoads(stored.ModelLoads, preview.Settings.ModelLoads) || stored.Serving != nil || stored.Port != f.rt.Port {
+		t.Fatal("conversion lost typed settings, endpoint or serving independence")
+	}
+	after, err := f.ex.desired.snapshot([]string{"fake"})
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("Off conversion changed lifecycle intent: before=%+v after=%+v err=%v", before, after, err)
+	}
+	if _, err := os.Stat(f.capture); !os.IsNotExist(err) {
+		t.Fatal("Off conversion spawned native work", err)
+	}
+	if err := os.Remove(f.source); err != nil {
+		t.Fatal(err)
+	}
+	readback, err := f.ex.LaunchSettings("fake")
+	if err != nil || !modelconfig.EqualLoads(readback.ModelLoads, preview.Settings.ModelLoads) || readback.ServingReadback == nil || readback.ServingReadback.Status == "mismatch" {
+		t.Fatalf("converted readback depends on removed external source: readback=%+v err=%v", readback.ServingReadback, err)
+	}
+}
+
+func TestModelSettingsLoadConversionRejectsSourceChangedSincePreviewBeforeStop(t *testing.T) {
+	f := newModelLoadFixture(t)
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	f.st.mu.Lock()
+	previous := f.st.proc
+	f.st.mu.Unlock()
+	two := int32(2)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.Replace(data, []byte("ctx-size = 16384"), []byte("ctx-size = 32768"), 1)
+	if bytes.Equal(data, changed) {
+		t.Fatal("fixture did not change the unrelated model context")
+	}
+	writeTestFile(t, f.source, changed)
+	_, err = f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { t.Fatal("stale conversion reached rebind"); return nil })
+	if err == nil || !strings.Contains(err.Error(), "changed since preview; preview again") {
+		t.Fatalf("stale conversion refusal=%v", err)
+	}
+	f.st.mu.Lock()
+	current, running := f.st.proc, f.st.running
+	f.st.mu.Unlock()
+	if !running || current != previous || len(f.st.plat.Runtime.ModelLoads) != 0 {
+		t.Fatal("stale conversion stopped or changed the current router")
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadConfigureRestartsOwnedRouter(t *testing.T) {
+	f := newModelLoadFixture(t)
+	f.st.plat.Runtime = convertModelLoadFixture(t, f)
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	f.st.mu.Lock()
+	previous := f.st.proc
+	f.st.mu.Unlock()
+	if previous == nil {
+		t.Fatal("start did not install an owned child")
+	}
+	two := int32(2)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+	if !preview.Restart || preview.Impact == nil || preview.Impact.RestartScope != "router" || !slices.Equal(preview.Impact.AffectedModels, []string{"medium-model", "weak-model"}) || preview.Impact.DrainTimeoutSeconds == nil || *preview.Impact.DrainTimeoutSeconds != 60 || preview.Impact.MayInterruptActive == nil || !*preview.Impact.MayInterruptActive || preview.Impact.StaysOff == nil || *preview.Impact.StaysOff || preview.Impact.ActiveWorkPolicy != "proceed-after-timeout" {
+		t.Fatalf("incomplete running impact: %+v", preview.Impact)
+	}
+	rebinds := 0
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error {
+		rebinds++
+		select {
+		case <-previous.done:
+		default:
+			t.Fatal("rebind preceded owned termination")
+		}
+		if !modelconfig.EqualLoads(readSettingsOverride(t, f.ex).ModelLoads, preview.Settings.ModelLoads) {
+			t.Fatal("rebind preceded typed persistence")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.st.mu.Lock()
+	replacement := f.st.proc
+	f.st.mu.Unlock()
+	if !result.Running || replacement == nil || replacement == previous || rebinds != 1 || result.Serving != nil || !modelconfig.EqualLoads(result.ModelLoads, preview.Settings.ModelLoads) {
+		t.Fatalf("typed restart result=%+v replacement=%p previous=%p rebinds=%d", result, replacement, previous, rebinds)
+	}
+	_, data := captureModelLoadChild(t, f.capture)
+	sections, err := parseLlamaServingPreset(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sections["weak-model"]["ctx-size"] != "8192" || sections["weak-model"]["parallel"] != "2" || sections["medium-model"]["ctx-size"] != "16384" {
+		t.Fatal("replacement did not consume the complete reviewed allocation")
+	}
+	if enabled, known, err := f.ex.desired.get("fake"); err != nil || !known || !enabled {
+		t.Fatalf("restart changed saved On: enabled=%v known=%v err=%v", enabled, known, err)
+	}
+}
+
+func TestModelSettingsLoadConfigureNoOpPreservesOwnedProcess(t *testing.T) {
+	f := newModelLoadFixture(t)
+	f.st.plat.Runtime = convertModelLoadFixture(t, f)
+	request := settingsRequest(t, f.ex)
+	if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: request.Settings}, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	f.st.mu.Lock()
+	previous := f.st.proc
+	f.st.mu.Unlock()
+	path := filepath.Join(f.ex.overrideDir, "fake.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := int32(1)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &one}})
+	if preview.Restart || preview.Impact == nil || preview.Impact.RestartScope != "none" || preview.Impact.MayInterruptActive == nil || *preview.Impact.MayInterruptActive {
+		t.Fatalf("no-op proposed interruption: %+v", preview.Impact)
+	}
+	useEngineFileReplacer(t, durablefile.Replacer{Replace: func(string, string) error { t.Fatal("no-op attempted persistence"); return nil }})
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+	if err != nil || !result.Running {
+		t.Fatalf("no-op apply: result=%+v err=%v", result, err)
+	}
+	f.st.mu.Lock()
+	current := f.st.proc
+	f.st.mu.Unlock()
+	after, err := os.ReadFile(path)
+	if err != nil || current != previous || !bytes.Equal(before, after) {
+		t.Fatalf("no-op changed owned process or disk: err=%v", err)
+	}
+}
+
+func TestModelSettingsLoadConversionRestartsOwnedExternalRouter(t *testing.T) {
+	f := newModelLoadFixture(t)
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	f.st.mu.Lock()
+	previous := f.st.proc
+	f.st.mu.Unlock()
+	two := int32(2)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.st.mu.Lock()
+	replacement := f.st.proc
+	f.st.mu.Unlock()
+	if !result.Running || previous == nil || replacement == nil || replacement == previous || !modelconfig.EqualLoads(result.ModelLoads, preview.Settings.ModelLoads) {
+		t.Fatalf("external conversion did not replace the owned router: %+v", result)
+	}
+	args, data := captureModelLoadChild(t, f.capture)
+	index := slices.Index(args, "--models-preset")
+	if index < 0 || index+1 >= len(args) || args[index+1] == f.source {
+		t.Fatal("converted router still consumes the mutable external source")
+	}
+	sections, err := parseLlamaServingPreset(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sections["weak-model"]["parallel"] != "2" || sections["medium-model"]["ctx-size"] != "16384" {
+		t.Fatal("converted router lost reviewed or unrelated model settings")
+	}
+}
+
+func TestModelSettingsLoadConfigureVetoKeepsSavedConfigurationCold(t *testing.T) {
+	test := func(name string, veto func(*testing.T, modelLoadFixture)) {
 		t.Run(name, func(t *testing.T) {
-			f.st.plat.Runtime.ModelLoads = stored
-			f.ex.switchAdmission.Lock()
-			if f.ex.switchMutations == nil {
-				f.ex.switchMutations = make(map[string]int)
+			f := newModelLoadFixture(t)
+			veto(t, f)
+			before, err := f.ex.desired.snapshot([]string{"fake"})
+			if err != nil {
+				t.Fatal(err)
 			}
-			f.ex.switchMutations[""] = 1
-			f.ex.switchAdmission.Unlock()
-			defer func() { f.ex.switchAdmission.Lock(); delete(f.ex.switchMutations, ""); f.ex.switchAdmission.Unlock() }()
-			_, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: settings.Config{ServerPort: rt.Port, ModelLoads: requested}}, func() error { t.Fatal("gated apply rebound"); return nil })
-			if err == nil || !strings.Contains(err.Error(), "O1") {
-				t.Fatalf("missing O1 refusal before admission: %v", err)
+			two := int32(2)
+			preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+			if preview.Impact == nil || preview.Impact.StaysOff == nil || !*preview.Impact.StaysOff {
+				t.Fatalf("cold veto impact: %+v", preview.Impact)
 			}
-			if f.st.running || f.st.proc != nil {
-				t.Fatal("Off apply activated engine")
+			result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings, Resume: true}, func() error { return nil })
+			if err != nil || result.Running || f.st.proc != nil || !modelconfig.EqualLoads(result.ModelLoads, preview.Settings.ModelLoads) {
+				t.Fatalf("vetoed configuration result=%+v err=%v", result, err)
 			}
-			if _, err := os.Stat(filepath.Join(f.ex.overrideDir, "fake.json")); !os.IsNotExist(err) {
-				t.Fatalf("gated apply persisted: %v", err)
+			after, err := f.ex.desired.snapshot([]string{"fake"})
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("configuration changed intent or lock: before=%+v after=%+v err=%v", before, after, err)
+			}
+			if _, err := os.Stat(f.capture); !os.IsNotExist(err) {
+				t.Fatal("configuration bypassed activation veto", err)
 			}
 		})
 	}
-	test("new input", nil, rt.ModelLoads)
-	test("unchanged echo", rt.ModelLoads, rt.ModelLoads)
-	test("removal", rt.ModelLoads, nil)
+	test("paused by either origin", func(t *testing.T, f modelLoadFixture) {
+		f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+	})
+	test("local engine lock", func(t *testing.T, f modelLoadFixture) {
+		if _, err := f.ex.desired.setLocked("fake", true); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestModelSettingsLoadConfigureRejectsDriftBeforeStop(t *testing.T) {
+	test := func(name string, drift func(*testing.T, modelLoadFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelLoadFixture(t)
+			f.st.plat.Runtime = convertModelLoadFixture(t, f)
+			if err := f.ex.Start(context.Background(), "fake"); err != nil {
+				t.Fatal(err)
+			}
+			f.st.mu.Lock()
+			previous := f.st.proc
+			f.st.mu.Unlock()
+			threads := int32(6)
+			preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Threads: &threads}})
+			drift(t, f)
+			_, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { t.Fatal("drift reached rebind"); return nil })
+			if err == nil {
+				t.Fatal("stale typed resolution was accepted")
+			}
+			f.st.mu.Lock()
+			current, running := f.st.proc, f.st.running
+			f.st.mu.Unlock()
+			if !running || current != previous {
+				t.Fatal("source refusal stopped or replaced the owned child")
+			}
+			assertNoSettingsOverride(t, f.ex)
+		})
+	}
+	test("artifact binding", func(t *testing.T, f modelLoadFixture) {
+		writeInspectionGGUF(t, filepath.Join(f.root, "weak.gguf"), "llama", 0.75, 4096)
+	})
+	test("native build binding", func(t *testing.T, f modelLoadFixture) {
+		path := filepath.Join(f.root, "different-native-build")
+		writeTestFile(t, path, []byte("different synthetic native build"))
+		f.st.mu.Lock()
+		f.st.binPath = path
+		f.st.mu.Unlock()
+	})
+}
+
+func TestModelSettingsLoadConfigureAdoptedRouterHasNoEffects(t *testing.T) {
+	f := newModelLoadFixture(t)
+	f.st.plat.Runtime = convertModelLoadFixture(t, f)
+	threads := int32(6)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Threads: &threads}})
+	before := snapshotLlamaState(f.st)
+	f.st.mu.Lock()
+	f.st.running, f.st.adopted = true, true
+	f.st.mu.Unlock()
+	t.Cleanup(func() {
+		f.st.mu.Lock()
+		f.st.running, f.st.adopted = false, false
+		f.st.mu.Unlock()
+	})
+	if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { t.Fatal("adopted router reached rebind"); return nil }); err == nil {
+		t.Fatal("adopted router accepted a load change")
+	}
+	if !modelconfig.EqualLoads(before.plat.Runtime.ModelLoads, f.st.plat.Runtime.ModelLoads) || !f.st.running || !f.st.adopted || f.st.proc != nil {
+		t.Fatal("refused apply changed adopted ownership or settings")
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadConversionRechecksCompleteExternalSource(t *testing.T) {
+	f := newModelLoadFixture(t)
+	two := int32(2)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+	recheck, err := f.ex.validateTypedLlamaConversion(context.Background(), f.st, f.rt, preview.Settings)
+	if err != nil || recheck == nil {
+		t.Fatalf("conversion source not captured: %v", err)
+	}
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, f.source, append(data, []byte("\n# changed after preparation\n")...))
+	if err := recheck(); err == nil {
+		t.Fatal("external bytes changed without invalidating conversion")
+	}
+	assertNoSettingsOverride(t, f.ex)
+	if f.st.running || f.st.proc != nil {
+		t.Fatal("conversion revalidation activated the router")
+	}
+}
+
+func TestModelSettingsLoadConversionRefusesPartialRouterBeforeEffects(t *testing.T) {
+	f := newModelLoadFixture(t)
+	two := int32(2)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+	preview.Settings.ModelLoads = slices.Delete(preview.Settings.ModelLoads, 0, 1)
+	if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { t.Fatal("partial conversion reached rebind"); return nil }); err == nil {
+		t.Fatal("conversion dropped an existing router model")
+	}
+	if f.st.running || f.st.proc != nil || len(f.st.plat.Runtime.ModelLoads) != 0 {
+		t.Fatal("partial conversion changed native state")
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadConfigurePersistenceFailureRetainsOldRuntime(t *testing.T) {
+	f := newModelLoadFixture(t)
+	f.st.plat.Runtime = convertModelLoadFixture(t, f)
+	request := settingsRequest(t, f.ex)
+	if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: request.Settings}, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	before := modelconfig.CloneLoads(f.st.plat.Runtime.ModelLoads)
+	path := filepath.Join(f.ex.overrideDir, "fake.json")
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	threads := int32(6)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Threads: &threads}})
+	failure := errors.New("synthetic override preparation failure")
+	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(dir, base string, _ os.FileMode) (durablefile.File, error) {
+		if dir == f.ex.overrideDir {
+			return nil, failure
+		}
+		return os.CreateTemp(dir, base)
+	}})
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { t.Fatal("failed persistence reached rebind"); return nil })
+	if !errors.Is(err, failure) || result.Running || !modelconfig.EqualLoads(result.ModelLoads, before) {
+		t.Fatalf("failed persistence adopted the new configuration: result=%+v err=%v", result, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(disk, after) || !modelconfig.EqualLoads(f.st.plat.Runtime.ModelLoads, before) {
+		t.Fatalf("failed persistence changed disk or runtime: %v", err)
+	}
+}
+
+func TestModelSettingsLoadConversionSourceDriftBeforeRestartRefuses(t *testing.T) {
+	f := newModelLoadFixture(t)
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	two := int32(2)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error {
+		writeTestFile(t, f.source, []byte("external source replaced after native persistence"))
+		if err := os.Remove(f.capture); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	})
+	if err == nil || result.Running || f.st.proc != nil || !modelconfig.EqualLoads(result.ModelLoads, preview.Settings.ModelLoads) {
+		t.Fatalf("source drift was not retained as a cold accepted failure: result=%+v err=%v", result, err)
+	}
+	if _, err := os.Stat(f.capture); !os.IsNotExist(err) {
+		t.Fatal("changed conversion source spawned a replacement", err)
+	}
+}
+
+func TestModelSettingsLoadConfigureRechecksSourcesAfterRebind(t *testing.T) {
+	test := func(name string, drift func(*testing.T, modelLoadFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelLoadFixture(t)
+			f.st.plat.Runtime = convertModelLoadFixture(t, f)
+			if err := f.ex.Start(context.Background(), "fake"); err != nil {
+				t.Fatal(err)
+			}
+			threads := int32(6)
+			preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Threads: &threads}})
+			result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error {
+				drift(t, f)
+				if err := os.Remove(f.capture); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			})
+			if err == nil || result.Running || f.st.proc != nil || !modelconfig.EqualLoads(result.ModelLoads, preview.Settings.ModelLoads) {
+				t.Fatalf("post-rebind drift result=%+v err=%v", result, err)
+			}
+			if _, err := os.Stat(f.capture); !os.IsNotExist(err) {
+				t.Fatal("changed source spawned a replacement", err)
+			}
+		})
+	}
+	test("artifact binding", func(t *testing.T, f modelLoadFixture) {
+		writeInspectionGGUF(t, filepath.Join(f.root, "weak.gguf"), "llama", 0.75, 4096)
+	})
+	test("content source generation", func(t *testing.T, f modelLoadFixture) {
+		f.ex.downloads.mu.Lock()
+		f.ex.downloads.source = "replaced-during-rebind"
+		f.ex.downloads.mu.Unlock()
+	})
+	test("native build binding", func(t *testing.T, f modelLoadFixture) {
+		path := filepath.Join(f.root, "different-native-build")
+		writeTestFile(t, path, []byte("different synthetic native build"))
+		f.st.mu.Lock()
+		f.st.binPath = path
+		f.st.plat.Detect = []string{path}
+		f.st.mu.Unlock()
+	})
+}
+
+func TestModelSettingsLoadSetPortUsesTypedConfigurationOwner(t *testing.T) {
+	f := newModelLoadFixture(t)
+	f.st.plat.Runtime = convertModelLoadFixture(t, f)
+	before := modelconfig.CloneLoads(f.st.plat.Runtime.ModelLoads)
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := f.ex.SetPort(context.Background(), "fake", port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := readModelLoadRuntimeOverride(t, f.ex)
+	if result.Running || f.st.proc != nil || stored.Port != port || len(stored.ModelLoads) != len(before) || stored.Serving != nil {
+		t.Fatalf("typed port result=%+v stored=%+v", result, stored)
+	}
+	for i, load := range stored.ModelLoads {
+		if load.ModelID != before[i].ModelID || !reflect.DeepEqual(load.Requested, before[i].Requested) || !reflect.DeepEqual(load.Resolved.Artifacts, before[i].Resolved.Artifacts) {
+			t.Fatal("port change altered models, requested allocation or artifacts")
+		}
+	}
+	if _, err := compilePreparedServing(f.st, typedFixtureCommand(t, f, f.st.plat.Runtime), f.st.plat.Runtime, true); err != nil {
+		t.Fatal("port path persisted a stale native resolution", err)
+	}
+}
+
+func TestModelSettingsLoadPinsAutomaticPortWithRestartableIdentity(t *testing.T) {
+	f := newModelLoadFixture(t)
+	f.rt.Port = 0
+	f.st.plat.Runtime = f.rt
+	f.st.plat.Runtime = convertModelLoadFixture(t, f)
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	request := settingsRequest(t, f.ex)
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Settings.ServerPort = port
+	command, err := launchForState(f.st, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Settings.LaunchText, err = command.argumentText(llamaServingBase(f.st.plat.Runtime))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := f.ex.PreviewLaunch(request)
+	if err != nil || len(preview.Errors) != 0 || preview.Conflict != nil {
+		t.Fatalf("pin automatic port preview: errors=%v conflict=%v err=%v", preview.Errors, preview.Conflict, err)
+	}
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+	if err != nil || !result.Running || result.EffectivePort != port {
+		t.Fatalf("pin automatic port: result=%+v err=%v", result, err)
+	}
+	stored := readModelLoadRuntimeOverride(t, f.ex)
+	if stored.Port != port || !modelconfig.EqualLoads(stored.ModelLoads, result.ModelLoads) {
+		t.Fatal("pinned endpoint and native identity were not persisted together")
+	}
+	if err := f.ex.Stop("fake"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal("pinned native identity failed next start", err)
+	}
+}
+
+func TestModelSettingsLoadSetPortPinsAutomaticEndpoint(t *testing.T) {
+	f := newModelLoadFixture(t)
+	f.rt.Port = 0
+	f.st.plat.Runtime = f.rt
+	f.st.plat.Runtime = convertModelLoadFixture(t, f)
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := f.ex.SetPort(context.Background(), "fake", port)
+	if err != nil || result.Running || result.Port != port {
+		t.Fatalf("pin automatic endpoint: result=%+v err=%v", result, err)
+	}
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal("pinned port configuration failed start", err)
+	}
 }
 
 func TestModelSettingsLoadPersistencePreservesOpaqueFields(t *testing.T) {
@@ -624,8 +1178,8 @@ func TestModelSettingsLoadPreviewPreservesCompleteRouterAndSources(t *testing.T)
 	if preview.Settings.ServerPort != rt.Port || preview.Settings.ProxyPort != 54301 || !modelconfig.EqualLoads(preview.Settings.ModelLoads, rt.ModelLoads) || preview.Settings.Serving != nil {
 		t.Fatal("typed preview changed unrelated settings or accepted resolution")
 	}
-	if preview.Impact == nil || preview.Impact.RestartScope != "unknown" || preview.Restart {
-		t.Fatal("preview selected O1 restart behavior")
+	if preview.Restart {
+		t.Fatal("unchanged Off preview requested a restart")
 	}
 	if _, err := os.Stat(filepath.Join(f.ex.overrideDir, "fake.json")); !os.IsNotExist(err) {
 		t.Fatal("preview persisted settings", err)
@@ -691,7 +1245,7 @@ func TestModelSettingsLoadInheritedCapacityChangesApproval(t *testing.T) {
 	}
 }
 
-func TestModelSettingsLoadWorkerConversionPreviewAndApplyRefusal(t *testing.T) {
+func TestModelSettingsLoadWorkerConversionPreviewAndApply(t *testing.T) {
 	f := newModelLoadFixture(t)
 	state, err := f.ex.LaunchSettings("fake")
 	if err != nil {
@@ -706,6 +1260,20 @@ func TestModelSettingsLoadWorkerConversionPreviewAndApplyRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := &Manager{exec: f.ex, codec: NewCodec(server)}
+	rebinds := 0
+	manager.settingsRelay.send = func(_ context.Context, method string, value any) error {
+		relay, ok := value.(settings.Relay)
+		if !ok || method != "engine:settings-request" || relay.Method != "rebind" || !modelconfig.EqualLoads(relay.Request.Settings.ModelLoads, f.st.plat.Runtime.ModelLoads) {
+			return fmt.Errorf("unexpected rebind: %s", method)
+		}
+		rebinds++
+		raw, err := json.Marshal(settingsReply{ID: relay.ID, Result: json.RawMessage(`{}`)})
+		if err != nil {
+			return err
+		}
+		manager.settingsRelay.reply(raw)
+		return nil
+	}
 	call := func(method string, params any) Message {
 		t.Helper()
 		raw, err := json.Marshal(params)
@@ -730,7 +1298,7 @@ func TestModelSettingsLoadWorkerConversionPreviewAndApplyRefusal(t *testing.T) {
 	if err := modelconfig.DecodeStrict(reply.Result, &preview); err != nil {
 		t.Fatal(err)
 	}
-	if len(preview.Errors) != 0 || len(preview.Settings.ModelLoads) != 2 || len(preview.PreviewDigest) != 64 || preview.Restart || preview.Impact == nil || preview.Impact.RestartScope != "unknown" {
+	if len(preview.Errors) != 0 || len(preview.Settings.ModelLoads) != 2 || len(preview.PreviewDigest) != 64 || preview.Restart || preview.Impact == nil || preview.Impact.RestartScope != "router" || preview.Impact.DrainTimeoutSeconds == nil || *preview.Impact.DrainTimeoutSeconds != 60 || len(preview.Impact.AffectedModels) != 2 {
 		t.Fatalf("incomplete read-only preview: errors=%v digest=%s", preview.Errors, preview.PreviewDigest)
 	}
 	if preview.Settings.ModelLoads[0].ModelID != "medium-model" || preview.Settings.ModelLoads[0].Resolved.TotalContext != 24576 || preview.Settings.ModelLoads[1].Resolved.TotalContext != 4096 || preview.Settings.Serving != nil {
@@ -756,18 +1324,28 @@ func TestModelSettingsLoadWorkerConversionPreviewAndApplyRefusal(t *testing.T) {
 	if !found {
 		t.Fatal("conversion preview omitted changed native context")
 	}
-	refused := call("engine:configure-launch", settings.Configure{Engine: "fake", OperationID: "O1-still-refused", Settings: preview.Settings})
-	if refused.Error == nil {
-		t.Fatal("read-only preview opened typed application")
-	}
 	if !reflect.DeepEqual(before.plat.Runtime, f.st.plat.Runtime) || f.st.running || f.st.proc != nil {
-		t.Fatal("preview or refused apply changed runtime")
+		t.Fatal("preview changed runtime")
 	}
 	if _, err := os.Stat(f.capture); !os.IsNotExist(err) {
 		t.Fatal("preview spawned native work", err)
 	}
 	if _, err := os.Stat(filepath.Join(f.ex.overrideDir, "fake.json")); !os.IsNotExist(err) {
-		t.Fatal("preview or refused apply persisted settings", err)
+		t.Fatal("preview persisted settings", err)
+	}
+	applied := call("engine:configure-launch", settings.Configure{Engine: "fake", OperationID: "reviewed-conversion", Settings: preview.Settings})
+	if applied.Error != nil {
+		t.Fatalf("accepted conversion RPC refused: %+v", applied.Error)
+	}
+	var result settings.LaunchState
+	if err := modelconfig.DecodeStrict(applied.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !settings.ConfigFromLaunch(result, preview.Settings.ProxyPort).Equal(preview.Settings) || result.Running || f.st.proc != nil || rebinds != 1 || len(manager.settingsRelay.pending) != 0 {
+		t.Fatalf("conversion RPC lost reviewed settings or activated: %+v rebinds=%d", result, rebinds)
+	}
+	if !modelconfig.EqualLoads(readSettingsOverride(t, f.ex).ModelLoads, preview.Settings.ModelLoads) {
+		t.Fatal("conversion RPC did not persist accepted loads")
 	}
 	request.Settings.ServerPort++
 	stale := call("engine:preview-launch", request)

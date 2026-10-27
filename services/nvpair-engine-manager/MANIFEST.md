@@ -26,14 +26,15 @@ readback clones the stored collection. The existing atomic override owner can
 replace it alongside port/launch/serving fields, including an explicit empty
 host-platform mask. No second store or compatibility mechanism is introduced.
 
-Settings Apply remains refused pending O1, including direct ConfigureLaunch,
-stored typed echoes/removal and SetPort with stored loads. Worker load-only
-modelChange previews return complete target resolution and conversion diffs;
-mutation and policy edits remain guarded. Compiler, selected-leaf patch and
-conversion helpers are available for the later accepted operation; their existence
-does not enable the settings-apply restart path. Conversion refuses unsupported
-members rather than dropping router models, and reports every mapped field and
-removed source. A generated output pathname is never desired configuration.
+ConfigureLaunch accepts frozen reviewed typed settings through the existing
+stop, persist, rebind and conditional restart owner. Typed SetPort shares this
+owner. Worker load-only modelChange previews return complete target resolution
+and conversion diffs; the broker owns patch acceptance and policy application.
+Conversion validates the complete current external router and reviewed finite
+identity, refuses unsupported members without dropping models, and rechecks its
+source before stopping and restarting. A generated output pathname is never
+desired configuration. Unchanged typed settings do not restart the process;
+Off, Pause, engine locks and adopted ownership retain their existing behavior.
 
 The projection in `modelsettings_load.go` reads flags, aliases, environment,
 negative switches and native rejection status directly from
@@ -51,8 +52,7 @@ These identify source, not the installed build. Unsupported means no typed edito
 values, even when the native parser or existing Advanced launch accepts a value.
 No raw extras field bypasses this matrix.
 
-B descriptors describe the planned manual vocabulary and do not indicate that
-Task 4 can apply it. Target preview must validate artifacts, native build,
+B descriptors describe the manual vocabulary. Target preview validates artifacts, native build,
 architecture and interactions. Defaults shown here are inherited source labels,
 never newly saved intent or Auto defaults. Absence clears to inheritance; it is
 distinct from explicit false/zero, embedded recommendations and finite resolution.
@@ -62,8 +62,11 @@ The scalar GPU layer descriptor has a nonnegative int32 transport range, further
 bounded by target model facts. Shared validation remains authoritative for cross-
 field context/slot products, ubatch versus batch, positive repeat penalty and the
 idle-time sentinel (-1 or positive, excluding zero).
-O1-O5 remain unanswered: no restart/interruption, Auto trade, lock-scope, copy
-selection or qualified-readiness default is selected here.
+Manual load changes use whole-router restart with the broker's 60-second drain
+bound disclosed in preview. Generation locks retain their generation-only
+scope; engine locks still veto activation. Copy defaults to tuning only at its
+owner. Auto remains unavailable, and configuration makes no qualified-readiness
+claim.
 
 | Native key | Actual flags/aliases and environment | UI label | Owner | Valid range/enums or refusal | Default source | B/D status | Portability | Generated preset mapping | Estimate/identity effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

@@ -115,8 +115,8 @@ func decodeModelSettingsLaunch(raw []byte) (settings.Request, error) {
 	return p, nil
 }
 
-// This guard precedes even Strata preparation, mutation admission and rebind.
-// Direct Executor callers need the same guard at settings.go (integration owner).
+// The worker accepts frozen native settings from its parent. Coupled policy
+// acceptance belongs to the broker, and Auto remains unavailable here.
 func (e *Executor) validateModelSettingsLaunch(ctx context.Context, p settings.Request, applying bool) error {
 	if err := p.Validate(); err != nil {
 		return modelSettingsParamsError(err)
@@ -138,20 +138,12 @@ func (e *Executor) validateModelSettingsLaunch(ctx context.Context, p settings.R
 		}
 		return modelSettingsParamsError(fmt.Errorf("modelChange: reviewed model settings application is not ready"))
 	}
-	if len(p.Settings.ModelLoads) != 0 {
-		return modelSettingsParamsError(fmt.Errorf("settings.modelLoads: typed load application is not ready"))
-	}
-	// An ordinary empty payload must not erase stored typed authority while the
-	// direct launch/persistence owner still lacks modelLoads preservation.
-	st, err := e.state(p.Engine)
-	if err != nil {
-		return err
-	}
-	st.mu.Lock()
-	hasLoads := len(st.plat.Runtime.ModelLoads) != 0
-	st.mu.Unlock()
-	if hasLoads {
-		return modelSettingsParamsError(fmt.Errorf("settings.modelLoads: stored loads require the preserving launch implementation"))
+	if applying {
+		for _, load := range p.Settings.ModelLoads {
+			if load.Resolved == nil || load.Requested.Context != nil && load.Requested.Context.Mode == "auto" || load.Requested.GPU != nil && load.Requested.GPU.Mode == "auto" {
+				return modelSettingsParamsError(fmt.Errorf("settings.modelLoads: reviewed finite resolution required"))
+			}
+		}
 	}
 	return ctx.Err()
 }

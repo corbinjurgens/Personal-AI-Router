@@ -22,10 +22,12 @@ Ordinary typed settings never create memory declarations or qualifications.
 
 Worker load-only modelChange previews return target-resolved settings, complete
 conversion diffs and their digest. Direct previews and readback preserve typed
-records. ConfigureLaunch and SetPort application remain
-explicitly refused pending O1, including unchanged echoes and removal of stored
-loads. Compiler/conversion/persistence helpers select no settings-apply
-restart policy. Ordinary settings without typed state keep the existing path.
+records. ConfigureLaunch applies frozen reviewed settings through the existing
+owned stop, atomic persistence, proxy rebind and conditional restart sequence.
+Typed SetPort uses that same owner. Unchanged loads do not restart the process;
+Off, Pause and engine locks preserve non-activation, and adopted processes remain
+read-only. Accepted conversion validates the complete current external router
+and exact reviewed native resolution before removing conflicting sources.
 Inspection reads bounded artifact facts; estimates and Auto remain unavailable.
 Typed requests expose no raw-extras field. Advanced launch retains its existing
 supported validation.
@@ -39,7 +41,11 @@ preserves loads; an explicit empty collection clears them. The complete-router
 conversion preview reports mapped field/source changes or a field-specific
 refusal. Mixed external preset/typed authority and overlapping native CLI/env
 sources conflict; unrelated logging/CORS/router options retain their owners.
-No restart or drain choice is inferred while O1 remains unanswered.
+Changed running loads restart the whole router. Preview lists affected configured
+models, the broker's 60-second drain bound and possible interruption after its
+timeout. Loaded-model observations are explicitly unknown in worker preview.
+The broker owns acceptance and draining; the manager rechecks source bindings
+before stop and restart, and native build/artifact identity before spawn.
 
 The Settings editor uses this notation for local and paired-device engine
 configuration. Engine-manager assembles the manifest-owned command; the broker
