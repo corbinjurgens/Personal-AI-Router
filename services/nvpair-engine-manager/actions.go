@@ -332,6 +332,13 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	}
 	finishDispatch, err := beginActivationEffect(ctx)
 	if err != nil {
+		if err == context.Canceled || err == context.DeadlineExceeded {
+			// The final gate prevents dispatch, while retaining the action's
+			// ordinary HTTP cancellation envelope. Typed vetoes remain intact.
+			return nil, fmt.Errorf("action %q: %w", action, &url.Error{
+				Op: req.Method[:1] + strings.ToLower(req.Method[1:]), URL: req.URL.String(), Err: err,
+			})
+		}
 		return nil, err
 	}
 	if _, guarded := ctx.Value(activationDispatchKey{}).(activationDispatch); guarded {
