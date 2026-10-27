@@ -259,6 +259,106 @@ func TestModelSettingsContractIncompleteLaunchRPCsHaveNoEffects(t *testing.T) {
 	test("configure lacks accepted resolution", "engine:configure-launch", `{"engine":"llamacpp","operationId":"review-missing","settings":{"modelLoads":[{"modelId":"missing-exact-model","requested":{"slots":1}}]}}`)
 }
 
+func TestModelSettingsContractConfigureUsesValidatedTypedApplication(t *testing.T) {
+	test := func(name string, edit func(*testing.T, modelLoadFixture, *settings.Config), wantError bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelLoadFixture(t)
+			f.st.plat.Runtime = convertModelLoadFixture(t, f)
+			config := settingsRequest(t, f.ex).Settings
+			before := modelconfig.CloneLoads(f.st.plat.Runtime.ModelLoads)
+			edit(t, f, &config)
+			server, client := net.Pipe()
+			t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+			if err := client.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			m := &Manager{exec: f.ex, codec: NewCodec(server)}
+			rebinds := 0
+			m.settingsRelay.send = func(_ context.Context, method string, value any) error {
+				relay, ok := value.(settings.Relay)
+				if !ok || method != "engine:settings-request" || relay.Method != "rebind" {
+					return fmt.Errorf("unexpected settings relay: %s", method)
+				}
+				rebinds++
+				raw, err := json.Marshal(settingsReply{ID: relay.ID, Result: json.RawMessage(`{}`)})
+				if err != nil {
+					return err
+				}
+				m.settingsRelay.reply(raw)
+				return nil
+			}
+			raw, err := json.Marshal(settings.Configure{Engine: "fake", OperationID: "reviewed-typed-apply", Settings: config})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := json.RawMessage(`1`)
+			if !m.handleSettingsMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:configure-launch", Params: raw}) {
+				t.Fatal("configure-launch was not handled")
+			}
+			var reply Message
+			if err := json.NewDecoder(client).Decode(&reply); err != nil {
+				t.Fatal(err)
+			}
+			if (reply.Error != nil) != wantError {
+				t.Fatalf("configure-launch error=%+v wantError=%v", reply.Error, wantError)
+			}
+			if wantError {
+				if rebinds != 0 || !modelconfig.EqualLoads(before, f.st.plat.Runtime.ModelLoads) {
+					t.Fatal("refused typed RPC changed settings or rebound")
+				}
+				assertNoSettingsOverride(t, f.ex)
+			} else {
+				var state settings.LaunchState
+				if err := modelconfig.DecodeStrict(reply.Result, &state); err != nil {
+					t.Fatal(err)
+				}
+				if rebinds != 1 || !settings.ConfigFromLaunch(state, config.ProxyPort).Equal(config) || !modelconfig.EqualLoads(readSettingsOverride(t, f.ex).ModelLoads, config.ModelLoads) {
+					t.Fatalf("typed RPC did not apply exact reviewed settings: rebinds=%d state=%+v", rebinds, state)
+				}
+			}
+			if f.st.running || f.st.proc != nil || len(m.settingsRelay.pending) != 0 {
+				t.Fatal("typed configuration activated or leaked its relay")
+			}
+		})
+	}
+	test("reviewed typed echo", func(*testing.T, modelLoadFixture, *settings.Config) {}, false)
+	test("missing resolution", func(t *testing.T, f modelLoadFixture, config *settings.Config) {
+		config.ModelLoads[0].Resolved = nil
+	}, true)
+	test("forged finite resolution", func(t *testing.T, f modelLoadFixture, config *settings.Config) {
+		config.ModelLoads[0].Resolved.SourceInputDigest = strings.Repeat("a", 64)
+	}, true)
+	test("artifact drift", func(t *testing.T, f modelLoadFixture, config *settings.Config) {
+		writeInspectionGGUF(t, config.ModelLoads[0].Resolved.Artifacts[0].Path, "llama", 0.75, 4096)
+	}, true)
+}
+
+func TestModelSettingsContractCoupledAndAutoGuardsRemainClosed(t *testing.T) {
+	f := newModelLoadFixture(t)
+	p := settingsRequest(t, f.ex)
+	p.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", PreviewDigest: strings.Repeat("a", 64), Load: &modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "auto"}}}}
+	if err := f.ex.validateModelSettingsLaunch(context.Background(), p, false); err == nil {
+		t.Fatal("Auto guard opened without a resolver")
+	}
+	one := int32(1)
+	temperature := json.Number("0.5")
+	p.ModelChange.Load = &modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &one}}
+	p.ModelChange.Policy = &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": &temperature}}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("coupled guard fixture is invalid: %v", err)
+	}
+	if err := f.ex.validateModelSettingsLaunch(context.Background(), p, false); err == nil {
+		t.Fatal("worker accepted a coupled preview outside its owner")
+	}
+	if err := f.ex.validateModelSettingsLaunch(context.Background(), p, true); err == nil {
+		t.Fatal("worker accepted policy application outside its owner")
+	}
+	assertNoSettingsOverride(t, f.ex)
+	if f.st.running || f.st.proc != nil {
+		t.Fatal("refused model changes activated the engine")
+	}
+}
+
 func TestModelSettingsContractEstimateAndAutoIncompleteInputs(t *testing.T) {
 	p := modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "missing-exact-model"}
 	request := modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 8192}}

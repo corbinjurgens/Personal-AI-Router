@@ -151,7 +151,7 @@ func TestResolvedLoadValidationAtStoredDecodeBoundary(t *testing.T) {
 func TestResolvedAutoRequiresOnlyExplicitRangeAndReviewedIdentity(t *testing.T) {
 	m := testResolvedLoad()
 	m.Requested.Context = &Context{Mode: "auto", Floor: 8192, Cap: 16384}
-	m.Resolved.ResolverRevision = "source-revision"
+	m.Resolved.ResolverRevision = "auto/test"
 	m.Resolved.ReviewedInputID = "reviewed-memory-and-artifact-input"
 	got, err := DecodeLoads(mustJSON(t, []ModelLoad{m}))
 	if err != nil {
@@ -160,6 +160,11 @@ func TestResolvedAutoRequiresOnlyExplicitRangeAndReviewedIdentity(t *testing.T) 
 	if got[0].Requested.Context.Floor != 8192 || got[0].Resolved.PerSlotContext != 8448 {
 		t.Fatal("schema selected different Auto defaults")
 	}
+	m.Resolved.ResolverRevision = "external-conversion/llama"
+	if _, err := DecodeLoads(mustJSON(t, []ModelLoad{m})); err == nil {
+		t.Fatal("conversion provenance authorized an Auto resolution")
+	}
+	m.Resolved.ResolverRevision = "auto/test"
 	m.Requested.Context.Cap = 8192
 	if _, err := DecodeLoads(mustJSON(t, []ModelLoad{m})); err == nil {
 		t.Fatal("accepted resolution outside explicit Auto cap")
