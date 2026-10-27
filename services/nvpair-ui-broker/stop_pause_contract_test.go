@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,8 +21,6 @@ func TestStopPauseContractRefusalsHaveNoEffects(t *testing.T) {
 		code                 int
 		message              string
 	}{
-		{name: "local immediate unavailable", state: "paused", mode: `"immediate"`, code: -32000, message: errImmediatePauseUnavailable.Error()},
-		{name: "local escalation unavailable", state: "paused", mode: `"immediate"`, fenced: true, code: -32000, message: errImmediatePauseUnavailable.Error()},
 		{name: "remote immediate forged local target", state: "paused", mode: `"immediate"`, peer: true, code: -32602, message: "Immediate pause must be requested on this node."},
 		{name: "revoked permission precedes immediate", state: "paused", mode: `"immediate"`, peer: true, denied: true, code: -32012, message: remoteManagementDeniedMessage},
 		{name: "revoked permission precedes fence", state: "paused", mode: `"immediate"`, peer: true, denied: true, fenced: true, code: -32012, message: remoteManagementDeniedMessage},
@@ -106,6 +105,101 @@ func TestStopPauseContractRefusalsHaveNoEffects(t *testing.T) {
 			r.mu.Unlock()
 			if gen != 17 || pending || local || live != afterLive {
 				t.Fatalf("refused request registered transition: gen=%d pending=%t local=%t", gen, pending, local)
+			}
+		})
+	}
+}
+
+func TestStopPauseContractImmediateAcceptancePrecedesBarriers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lock func(*Broker) func()
+	}{
+		{"configuration", func(b *Broker) func() { b.engineConfigMu.Lock(); return b.engineConfigMu.Unlock }},
+		{"earlier transition", func(b *Broker) func() {
+			r := b.nodePolicyRuntime()
+			r.transitionMu.Lock()
+			return r.transitionMu.Unlock
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rb, _ := stopPauseExecutionFixture(t, "owned")
+			before := len(availabilityPushes(rb.proxy.snapshot()))
+			unlock := sync.OnceFunc(tc.lock(rb.b))
+			defer unlock()
+			done := make(chan error, 1)
+			go func() {
+				_, err := rb.b.dispatchPolicy(context.Background(), methodSetAvailability, policyParams{State: "paused", PauseMode: json.RawMessage(`"immediate"`)})
+				done <- err
+			}()
+			rb.proxy.waitFor("immediate cancellation before held barrier", func(calls []policyCall) bool {
+				pushes := availabilityPushes(calls)
+				if len(pushes) < before+2 {
+					return false
+				}
+				for _, push := range pushes[before:] {
+					if push.State == nodepolicy.Draining && push.CancelActive {
+						return true
+					}
+				}
+				return false
+			})
+			stopPauseExecutionRequireFence(t, rb.b, nodepolicy.Draining)
+			select {
+			case err := <-done:
+				t.Fatalf("transition crossed held barrier: %v", err)
+			default:
+			}
+			unlock()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("immediate dispatch did not finish")
+			}
+		})
+	}
+}
+
+func TestStopPauseContractImmediateBypassesAdmissionAndRequiresStopProof(t *testing.T) {
+	for _, active := range []nodepolicy.OnActive{nodepolicy.FinishActive, nodepolicy.CancelActive} {
+		t.Run(string(active), func(t *testing.T) {
+			rb, manager := stopPauseExecutionFixture(t, "owned")
+			r := rb.b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.current.Pause.OnActive = active
+			r.current.Pause.DrainTimeoutSeconds = 3600
+			r.haveAdmission = true
+			r.admission.Active = 1
+			r.mu.Unlock()
+			manager.mu.Lock()
+			manager.failure = "stop unproved"
+			manager.mu.Unlock()
+			done := make(chan error, 1)
+			go func() {
+				_, err := rb.b.dispatchPolicy(context.Background(), methodSetAvailability, policyParams{State: "paused", PauseMode: json.RawMessage(`"immediate"`)})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("unproved stop succeeded")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("immediate dispatch waited for admission")
+			}
+			stopPauseExecutionRequireFence(t, rb.b, nodepolicy.Draining)
+			manager.mu.Lock()
+			manager.failure = ""
+			manager.mu.Unlock()
+			result, err := rb.b.dispatchPolicy(context.Background(), methodSetAvailability, policyParams{State: "paused", PauseMode: json.RawMessage(`"immediate"`)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := result.(availabilitySetResult); !ok || got.Availability != nodepolicy.Paused || got.PausedBy != nodepolicy.PausedLocally {
+				t.Fatalf("proved stop result = %+v", result)
 			}
 		})
 	}

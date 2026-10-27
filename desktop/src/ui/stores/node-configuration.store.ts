@@ -381,7 +381,11 @@ interface BulkSelection {
 interface NodeConfigurationState {
     availability: Map<string, AvailabilityEntry>
     readAvailability(targetId: string, manual?: boolean): Promise<void>
-    requestAvailability(targetId: string, state: 'available' | 'paused'): Promise<void>
+    requestAvailability(
+        targetId: string,
+        state: 'available' | 'paused',
+        pauseMode?: NodeAvailabilityRequest['pauseMode']
+    ): Promise<void>
     /** Whole-policy drafts are session-only and have one visible editor owner. */
     policyDrafts: Map<string, PolicyDraft>
     claimPolicyDraft(targetId: string, owner: PolicyDraft['owner'], discard?: boolean): boolean
@@ -450,6 +454,7 @@ interface AvailabilityEntry {
     current: boolean
     reading: boolean
     pending?: 'available' | 'paused'
+    pendingPauseMode?: NodeAvailabilityRequest['pauseMode']
     stale: boolean
     error?: string
     readError?: string
@@ -606,7 +611,7 @@ function invalidateAvailability(
         current: false,
         reading: false,
         stale: false,
-        ...(retireAction ? { pending: undefined } : {})
+        ...(retireAction ? { pending: undefined, pendingPauseMode: undefined } : {})
     })
 }
 
@@ -748,6 +753,7 @@ export function watchNodeAvailability(
             reading: false,
             stale: false,
             pending: undefined,
+            pendingPauseMode: undefined,
             error: undefined,
             readError: undefined
         })
@@ -1013,12 +1019,15 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             scheduleAvailability(targetId, target)
             return target.request
         },
-        requestAvailability: async (targetId, state) => {
+        requestAvailability: async (targetId, state, pauseMode) => {
+            if (state !== 'paused' && pauseMode !== undefined) return
+            const mode = pauseMode ?? 'configured'
             const target = availabilityTargets.get(targetId)
             const entry = get().availability.get(targetId)
             if (!target || !visibleTarget(target) || !entry?.current || entry.stale) return
             const local = target.nodeId === undefined
             if (local && targetId !== useConnectionStore.getState().selfId) return
+            if (!local && mode === 'immediate') return
             if (
                 !local &&
                 (get().management.get(targetId)?.state !== 'allowed' ||
@@ -1026,14 +1035,15 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                     state !== 'paused')
             )
                 return
-            // Target-local Resume may supersede a configured drain already in flight.
+            // Local Resume or immediate stop can supersede a configured drain.
             if (
                 entry.pending &&
                 !(
                     local &&
-                    state === 'available' &&
                     entry.value === 'draining' &&
-                    entry.pending === 'paused'
+                    entry.pending === 'paused' &&
+                    (state === 'available' ||
+                        (mode === 'immediate' && entry.pendingPauseMode === 'configured'))
                 )
             )
                 return
@@ -1041,10 +1051,14 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             const action = ++target.action
             invalidateNodePolicyRead(target.nodeId)
             target.until = Date.now() + READ_WINDOW
-            putAvailability(targetId, { pending: state, error: undefined })
+            putAvailability(targetId, {
+                pending: state,
+                pendingPauseMode: state === 'paused' ? mode : undefined,
+                error: undefined
+            })
             const request: NodeAvailabilityRequest =
                 state === 'paused'
-                    ? { nodeId: target.nodeId, state, pauseMode: 'configured' }
+                    ? { nodeId: target.nodeId, state, pauseMode: mode }
                     : { nodeId: target.nodeId, state }
             try {
                 await window.pairApi.nodePolicy.setAvailability(request)
@@ -1062,7 +1076,11 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                     void get().readManagement(targetId, target.nodeId, true)
             } finally {
                 if (availabilityTargets.get(targetId) === target && target.action === action) {
-                    putAvailability(targetId, { pending: undefined, current: false })
+                    putAvailability(targetId, {
+                        pending: undefined,
+                        pendingPauseMode: undefined,
+                        current: false
+                    })
                     target.observation++
                     invalidateNodePolicyRead(target.nodeId)
                     // A read predating the mutation cannot confirm its outcome.
