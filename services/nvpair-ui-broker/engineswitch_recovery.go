@@ -239,6 +239,12 @@ func (b *Broker) recoverEngineSwitchPauseOnTransitionLocked(w *rpcWorker, resume
 		pendingPause = pendingPause || (o.Pause && !o.PauseApplied && !o.Discharged)
 	}
 	if resumeGen == 0 && storedPause && (recovering || pendingPause || draining) {
+		// Pin the worker's bound source before the shutdown proof. Publication
+		// must reject retirement or replacement even after readback succeeds.
+		provedWorker, provedSource := b.pauseManager()
+		if provedWorker != w {
+			return fail(fmt.Errorf("engine manager changed before pause shutdown"))
+		}
 		runtime.mu.Lock()
 		runtime.live = nodepolicy.Draining
 		runtime.mu.Unlock()
@@ -247,6 +253,9 @@ func (b *Broker) recoverEngineSwitchPauseOnTransitionLocked(w *rpcWorker, resume
 		// Sleep on a host-supported engine, including failed orphan reclaim.
 		err := b.pauseEnginesOn(ctx, w)
 		b.engineConfigMu.Lock()
+		if err == nil {
+			err = b.publishPhysicalPause(ctx, w, provedSource)
+		}
 		if err != nil {
 			b.engineConfigMu.Unlock()
 			b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
@@ -254,9 +263,6 @@ func (b *Broker) recoverEngineSwitchPauseOnTransitionLocked(w *rpcWorker, resume
 			b.engineConfigMu.Lock()
 			return fail(err)
 		}
-		runtime.mu.Lock()
-		runtime.live = nodepolicy.Paused
-		runtime.mu.Unlock()
 		b.engineConfigMu.Unlock()
 		err = b.completeSwitchPauseObligations()
 		b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))

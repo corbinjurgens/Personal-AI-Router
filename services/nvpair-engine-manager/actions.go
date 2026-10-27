@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"nvpair-shared/engines"
@@ -90,7 +91,7 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 		defer done()
 	}
 	run := func() (json.RawMessage, error) {
-		loadCtx, releaseServingLoad, err := e.guardServingLoad(ctx, st, action, params)
+		loadCtx, releaseServingLoad, err := e.guardActionExecution(ctx, st, action, params)
 		if err != nil {
 			return nil, err
 		}
@@ -136,6 +137,34 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 		return nil, err
 	}
 	return res, nil
+}
+
+// LM Studio chat can JIT-load a model without invoking its load binding. Share
+// the activation veto, cancellation registry and lifecycle lock with loads so
+// Pause also cancels an accepted native chat on a protected external listener.
+func (e *Executor) guardActionExecution(ctx context.Context, st *engineState, action string, params json.RawMessage) (context.Context, func(), error) {
+	if st.manifest.FamilyOrDefault() != "lmstudio" || action != "chat" {
+		return e.guardServingLoad(ctx, st, action, params)
+	}
+	noop := func() {}
+	if err := e.activationVeto(st.manifest.Engine); err != nil {
+		return ctx, noop, err
+	}
+	ctx, cleanup := registerServingLoad(ctx, st)
+	if !residentLock(ctx, &st.opMu) {
+		cleanup()
+		return ctx, noop, vetoCause(ctx, ctx.Err())
+	}
+	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup() })
+	if err := e.activationVeto(st.manifest.Engine); err != nil {
+		release()
+		return ctx, noop, err
+	}
+	if err := vetoCause(ctx, ctx.Err()); err != nil {
+		release()
+		return ctx, noop, err
+	}
+	return ctx, release, nil
 }
 
 // restartAfterAction restarts a running engine after one of its actions

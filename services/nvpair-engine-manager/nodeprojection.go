@@ -248,11 +248,16 @@ func (w *remoteWork) cancelEngine(engine string, veto *localVetoError) {
 
 func (e *Executor) cancelBlockedActivations() {
 	veto := &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
-	for _, engine := range e.reg.Names() {
-		st, err := e.state(engine)
-		if err != nil {
-			continue
-		}
+	// Snapshot existing owners without constructing or preparing engines on the
+	// notification reader. A later start/load checks the stored projection after
+	// registering and before effects, so it cannot miss this cancellation sweep.
+	e.mu.Lock()
+	states := make([]*engineState, 0, len(e.engines))
+	for _, st := range e.engines {
+		states = append(states, st)
+	}
+	e.mu.Unlock()
+	for _, st := range states {
 		st.mu.Lock()
 		if st.startCancel != nil {
 			st.startCancel(veto)

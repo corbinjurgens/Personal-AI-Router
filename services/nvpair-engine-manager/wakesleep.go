@@ -11,10 +11,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"nvpair-shared/engineintent"
 	"path/filepath"
+
+	"nvpair-shared/engineintent"
+	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
 
 const (
@@ -73,9 +77,180 @@ func (e *Executor) Sleep(engine string) error {
 		return e.sleepUnsupported(engine, err)
 	}
 	cancelCrashRelaunch(st)
+	// Cancel accepted execution before waiting for its lifecycle lock. The load
+	// fence also catches a registration racing this cancellation sweep.
+	veto := &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+	st.mu.Lock()
+	if st.startCancel != nil {
+		st.startCancel(veto)
+	}
+	st.mu.Unlock()
+	finishLoads := stopServingLoadsWithCause(st, veto)
+	defer finishLoads()
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	return e.doStop(st, engine)
+	ctx, cancel := context.WithTimeout(context.Background(), commandStopTimeout(st.plat.Runtime)+modelsTimeout)
+	defer cancel()
+	// Passive status may not have discovered a listener yet. Only the lifecycle
+	// owner can decide whether it is external or an exact managed orphan.
+	installed, err := e.Detect(engine)
+	if err != nil {
+		return err
+	}
+	st.mu.Lock()
+	rt, port := st.plat.Runtime, st.port
+	st.mu.Unlock()
+	if rt.modeOrDefault() == "process" {
+		evidence, known, err := e.desired.processStop(engine)
+		if err != nil {
+			return err
+		}
+		allocated, err := e.desired.allocatedPort(engine)
+		if err != nil {
+			return err
+		}
+		// Paused startup skips RestoreEnabled, so restore only its cleanup
+		// endpoint here. This record never authorizes activation or a signal.
+		if port == 0 {
+			if known {
+				port = evidence.Port
+			} else {
+				port = allocated
+			}
+			st.mu.Lock()
+			st.port = port
+			st.mu.Unlock()
+		}
+		reclaimed, err := e.reclaimOrphan(ctx, st, engine, port)
+		if err != nil {
+			return err
+		}
+		if !reclaimed {
+			st.mu.Lock()
+			owned := st.proc != nil
+			st.mu.Unlock()
+			if !owned && ((known && (evidence.PID == 0 || !orphanPIDExited(evidence.PID))) || (!known && allocated > 0)) {
+				return fmt.Errorf("cannot pause engine %q: saved process identity is unverified", engine)
+			}
+		}
+	}
+	presence := e.reconcilePresence(ctx, engine, st, installed, port, true)
+	st.mu.Lock()
+	adopted, running := st.adopted, st.running
+	st.mu.Unlock()
+	if presence.Occupied && !presence.Identified {
+		return fmt.Errorf("cannot pause engine %q: listener ownership is unverified", engine)
+	}
+	if rt.modeOrDefault() == "command" {
+		if adopted && running {
+			return fmt.Errorf("cannot stop engine %q: it is running under external management; stop it in its own application, then retry", engine)
+		}
+		// A command can stop just the HTTP server while model processes survive.
+		// Prove empty residency at the native owner before its control endpoint
+		// disappears. Never issue automatic unloads to an adopted engine.
+		if installed || running {
+			if err := e.emptyCommandResidency(ctx, st, engine, running); err != nil {
+				return err
+			}
+		}
+	}
+	if err := e.doStopContext(ctx, st, engine); err != nil {
+		return err
+	}
+	if !e.switchTerminatedContext(ctx, st) {
+		return fmt.Errorf("cannot pause engine %q: physical termination is unverified", engine)
+	}
+	return nil
+}
+
+// Caller holds opMu and has established ownership. This deliberately bypasses
+// Action's lifecycle admission: the sleep operation already owns that lock.
+func (e *Executor) emptyCommandResidency(ctx context.Context, st *engineState, engine string, unload bool) error {
+	loaded, ok := st.manifest.Actions["loaded_models"]
+	if !ok || loaded.Result == nil || loaded.RestartAfter {
+		return fmt.Errorf("cannot pause engine %q: model residency readback is unavailable", engine)
+	}
+	read := func() ([]string, error) {
+		raw, err := e.dispatchAction(ctx, st, engine, "loaded_models", loaded, nil)
+		if err != nil {
+			return nil, fmt.Errorf("cannot pause engine %q: model residency readback failed: %w", engine, err)
+		}
+		models, valid := commandResidentModels(raw, loaded.Result)
+		if !valid {
+			return nil, fmt.Errorf("cannot pause engine %q: model residency readback is incomplete", engine)
+		}
+		return models, nil
+	}
+	models, err := read()
+	if err != nil {
+		return err
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	if !unload {
+		return fmt.Errorf("cannot pause engine %q: uncontrolled model residency remains", engine)
+	}
+	binding, ok := st.manifest.operationBinding(engines.OperationUnload)
+	if !ok || st.manifest.Actions[binding.Action].RestartAfter {
+		return fmt.Errorf("cannot pause engine %q: controlled model unload is unavailable", engine)
+	}
+	for _, model := range models {
+		params, err := binding.params(model)
+		if err != nil {
+			return err
+		}
+		if _, err := e.dispatchAction(ctx, st, engine, binding.Action, st.manifest.Actions[binding.Action], params); err != nil {
+			return fmt.Errorf("cannot pause engine %q: model unload failed: %w", engine, err)
+		}
+	}
+	models, err = read()
+	if err != nil {
+		return err
+	}
+	if len(models) != 0 {
+		return fmt.Errorf("cannot pause engine %q: model residency remains after unload", engine)
+	}
+	return nil
+}
+
+// Shutdown proof cannot interpret an unclassifiable native row as unloaded.
+// Ordinary inventory extraction may omit such rows; physical pause must refuse.
+func commandResidentModels(raw json.RawMessage, spec *ActionResult) ([]string, bool) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		return nil, false
+	}
+	var rows []map[string]json.RawMessage
+	if json.Unmarshal(object[spec.Array], &rows) != nil || rows == nil {
+		return nil, false
+	}
+	for _, row := range rows {
+		if spec.Match != nil {
+			value, present := resolveObjectPath(row, spec.Match.Field)
+			if !present {
+				return nil, false
+			}
+			if spec.Match.Nonempty {
+				var instances []json.RawMessage
+				if json.Unmarshal(value, &instances) != nil || instances == nil {
+					return nil, false
+				}
+			} else {
+				var state *string
+				if json.Unmarshal(value, &state) != nil || state == nil {
+					return nil, false
+				}
+			}
+			if !matchRow(row, spec.Match) {
+				continue
+			}
+		}
+		if nodepolicy.ValidateModelIdentifierJSON(row[spec.Field]) != nil {
+			return nil, false
+		}
+	}
+	return extractStringsResult(raw, spec)
 }
 
 // unsupportedStopState reconstructs only the stop owner, never an activatable
@@ -193,6 +368,11 @@ func (m *Manager) handleLifecyclePolicyRequest(ctx context.Context, msg *Message
 				return
 			}
 			st, err := m.exec.Status(p.Engine)
+			if err == nil && msg.Method == sleepMethod && !st.Running {
+				// Sleep proved process termination and controlled residency under
+				// opMu. This reply is positive evidence, unlike running:false alone.
+				st.TerminationVerified = true
+			}
 			m.respondOrErr(msg, st, err)
 		}()
 		return true
