@@ -31,9 +31,6 @@ import (
 // replaced by a newer one before it finished.
 var errAvailabilitySuperseded = errors.New("superseded by a later node:set-availability request")
 
-// Task 5 enables immediate dispatch after physical-stop and interruption proof.
-var errImmediatePauseUnavailable = errors.New("Immediate pause is unavailable until safe execution stopping is enabled.")
-
 // pauseCancelSettle bounds how long a pause waits for cancelled work to
 // unwind after the drain timeout, before it unloads and stops anyway.
 var pauseCancelSettle = 10 * time.Second
@@ -76,18 +73,14 @@ func (b *Broker) setAvailabilityRequestAs(ctx context.Context, state nodepolicy.
 		r.mu.Unlock()
 		return "", &invalidParamsError{err}
 	}
-	if mode == nodepolicy.PauseImmediate {
+	if mode == nodepolicy.PauseImmediate && (caller != "" || origin != nodepolicy.PausedLocally) {
 		r.mu.Unlock()
-		if caller != "" || origin != nodepolicy.PausedLocally {
-			return "", &invalidParamsError{errors.New("Immediate pause must be requested on this node.")}
-		}
-		return "", errImmediatePauseUnavailable
+		return "", &invalidParamsError{errors.New("Immediate pause must be requested on this node.")}
 	}
 	return b.setAvailabilityModeLocked(ctx, r, state, origin, mode)
 }
 
-// setAvailabilityModeLocked is also the internal immediate entry point. The
-// public dispatcher above continues to refuse immediate until Task 5.
+// setAvailabilityModeLocked executes an accepted availability request.
 // Caller holds r.mu and has authorized the request.
 func (b *Broker) setAvailabilityModeLocked(ctx context.Context, r *policyRuntime, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, mode nodepolicy.PauseMode) (nodepolicy.Availability, error) {
 	var saveErr error
