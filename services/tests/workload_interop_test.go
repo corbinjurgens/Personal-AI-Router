@@ -558,7 +558,6 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 		"--scanner-path", scannerBin,
 		"--workload-manager-path", workloadMgrBin,
 		"--scanner-mdns=true", "--scanner-mdns-service", fx.namespace.Service,
-		"--test-scanner-scan-interval=250ms", "--test-scanner-scan-timeout=150ms",
 	)
 	t.Cleanup(cleanup)
 
@@ -602,11 +601,13 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	}
 	t.Log("peer workload tracked as running")
 
-	// Pull the peer off the network. Keep the production miss threshold and
-	// failed-liveness-probe requirement, but use this fixture's 250ms scan
-	// cadence instead of the production 5s interval. Once the peer is evicted,
-	// the broker marks the workload it can no longer hear about. The deadline
-	// still leaves room for probes and multicast jitter.
+	// Pull the peer off the network. Keep the production scan cadence, browse
+	// budget, miss threshold and failed-liveness-probe requirement. Once the
+	// peer is evicted, the broker marks the workload it can no longer hear about.
+	// The two-minute acceptance bound assumes healthy receive: self is seen on
+	// every scan, so each post-departure scan counts toward the 12 misses at 5s
+	// cadence (about 60s), leaving room for the final browse, probe and delivery.
+	// Intermittent receive can renew empty-scan grace and exceed this estimate.
 	stopAdv()
 	t.Log("peer advertisement withdrawn; awaiting node eviction + workload failure")
 

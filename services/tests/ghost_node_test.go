@@ -85,10 +85,9 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 
 	events := startScannerForGhostTest(t, namespace)
 
-	// The scanner must see the peer before there is anything to evict. A slow
-	// or lossy multicast environment is an inconclusive run, not a failure.
+	// The scanner must see the peer before there is anything to evict.
 	if !awaitNodeEvent(events, noderec.NotifyNodeDiscovered, originalUUID, 30*time.Second) {
-		t.Skip("peer record was never discovered; multicast is unavailable in this environment")
+		t.Fatal("peer record was not discovered within 30s")
 	}
 
 	// The wipe: the record stops being advertised under the old identity, and
@@ -96,8 +95,8 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 	stopResponder()
 	reported.Store(wipedUUID)
 
-	// Keep the production miss threshold and identity probe, but use the
-	// fixture's shorter scan cadence rather than waiting the production minute.
+	// Keep the production scan cadence, browse budget, miss threshold and
+	// identity probe.
 	if !awaitNodeEvent(events, noderec.NotifyNodeRemoved, originalUUID, 2*time.Minute) {
 		t.Fatalf("scanner never evicted %s after its address began answering as %s; "+
 			"a record whose machine was re-identified must not be kept alive by a TCP probe",
@@ -116,8 +115,7 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 // real cluster identity on the LAN while the test runs.
 func startScannerForGhostTest(t *testing.T, namespace noderec.MDNSNamespace) <-chan jsonrpc.Message {
 	t.Helper()
-	args := append([]string{"--cluster-dir", t.TempDir(),
-		"--test-scan-interval=250ms", "--test-scan-timeout=150ms"}, fixtureMDNSScannerArgs(namespace)...)
+	args := append([]string{"--cluster-dir", t.TempDir()}, fixtureMDNSScannerArgs(namespace)...)
 	cmd, err := fixtureScannerCommand(scannerBin, args...)
 	if err != nil {
 		t.Fatal(err)
