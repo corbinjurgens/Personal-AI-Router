@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { BrowserWindow, ipcMain, IpcMainInvokeEvent } from 'electron'
+import { is } from '@electron-toolkit/utils'
+import { fileURLToPath } from 'url'
+import { rendererPath } from '@/electron/renderer-path'
 import type {
     IpcResult,
     IpcChannelKey,
@@ -13,13 +16,28 @@ import { JsonRpcResponseError } from '@/electron/service-bridge/json-rpc-client'
 
 function isKnownSender(event: IpcMainInvokeEvent): boolean {
     const senderWindow = BrowserWindow.fromWebContents(event.sender)
-    if (!senderWindow) return false
+    if (!senderWindow || !event.senderFrame || event.senderFrame !== event.sender.mainFrame)
+        return false
 
-    const url = event.sender.getURL()
-    if (url.startsWith('file://')) return true
-    const rendererUrl = process.env.ELECTRON_RENDERER_URL
-    if (rendererUrl && url.startsWith(rendererUrl)) return true
-    return false
+    try {
+        const url = new URL(event.senderFrame.url)
+        if (url.protocol === 'file:') return fileURLToPath(url) === rendererPath()
+
+        const rendererUrl = process.env.ELECTRON_RENDERER_URL
+        if (!is.dev || !rendererUrl) return false
+        const expected = new URL(rendererUrl)
+        return (
+            (expected.protocol === 'http:' || expected.protocol === 'https:') &&
+            !expected.username &&
+            !expected.password &&
+            !url.username &&
+            !url.password &&
+            url.origin === expected.origin &&
+            url.pathname === expected.pathname
+        )
+    } catch {
+        return false
+    }
 }
 
 type Req<K extends IpcChannelKey> = IpcChannelMap[K]['request']
