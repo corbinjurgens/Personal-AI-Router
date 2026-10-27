@@ -16,6 +16,7 @@ import (
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engines"
+	"nvpair-shared/modelconfig"
 )
 
 var engineFileReplacer durablefile.Replacer
@@ -34,6 +35,16 @@ func canMoveAdoptedEngine(mode string, stop *StopSpec) bool {
 // A running, adopted process-mode engine is refused. An identified command-mode
 // engine may be moved only when its manifest provides an official stop command.
 func (e *Executor) SetPort(ctx context.Context, engine string, port int) (EngineStatus, error) {
+	state, err := e.state(engine)
+	if err != nil {
+		return EngineStatus{}, err
+	}
+	state.mu.Lock()
+	hasLoads := len(state.plat.Runtime.ModelLoads) != 0
+	state.mu.Unlock()
+	if hasLoads {
+		return EngineStatus{}, modelLoadError("", "modelLoads", "Port application with typed loads is unavailable pending O1 settings-apply restart integration.")
+	}
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return EngineStatus{}, err
@@ -127,7 +138,23 @@ func (e *Executor) persistRuntimeConfig(engine string, port int, args, environme
 
 // A nil outer pointer preserves serving; a pointer to nil explicitly removes
 // it, including any inherited shared-platform declaration.
-func (e *Executor) persistRuntimeServing(engine string, port int, args, environment *[]string, serving **engines.ServingConfig) error {
+// Omitted/nil modelLoads preserves the collection; a supplied empty collection
+// writes a host-platform mask. This private persistence helper never activates.
+func (e *Executor) persistRuntimeServing(engine string, port int, args, environment *[]string, serving **engines.ServingConfig, modelLoads ...*[]modelconfig.ModelLoad) error {
+	if len(modelLoads) > 1 {
+		return fmt.Errorf("modelLoads: one replacement is permitted")
+	}
+	var loads []modelconfig.ModelLoad
+	if len(modelLoads) == 1 && modelLoads[0] != nil {
+		var err error
+		loads, err = modelconfig.CanonicalLoads(*modelLoads[0])
+		if err != nil {
+			return err
+		}
+		if loads == nil {
+			loads = []modelconfig.ModelLoad{}
+		}
+	}
 	if e.overrideDir == "" {
 		return fmt.Errorf("no config directory available to persist the port")
 	}
@@ -206,6 +233,9 @@ func (e *Executor) persistRuntimeServing(engine string, port int, args, environm
 	}
 	if serving != nil {
 		hostRuntime["serving"] = (*serving).Clone()
+	}
+	if loads != nil {
+		hostRuntime["modelLoads"] = loads
 	}
 	setOverrideObject(platform, "runtime", hostRuntime)
 	setOverrideObject(platforms, host, platform)

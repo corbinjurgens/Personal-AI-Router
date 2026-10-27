@@ -20,13 +20,20 @@ including `[]`, replaces the inherited collection. Port-only overrides preserve
 it. Both JSON mergers retain decimal number lexemes for unrelated fields too.
 The complete settings/request transport remains bounded to 64 KiB.
 
-This declaration does not yet enable typed launch application. The manager RPC
-boundary refuses nonempty typed loads or `modelChange` before preparation,
-mutation admission, rebind or persistence. It also refuses ordinary launch writes
-when stored typed loads would otherwise be lost. Direct `PreviewLaunch`,
-`ConfigureLaunch`, launch readback and `persistRuntimeServing` still need the
-preserving integration in `settings.go` and its persistence owner. No second
-settings store, version, capability marker or compatibility path is introduced.
+Typed-only llama process launches consume manager-generated immutable presets,
+including fresh starts and crash relaunches. Direct previews compile and
+readback clones the stored collection. The existing atomic override owner can
+replace it alongside port/launch/serving fields, including an explicit empty
+host-platform mask. No second store or compatibility mechanism is introduced.
+
+Settings Apply remains refused pending O1, including direct ConfigureLaunch,
+stored typed echoes/removal and SetPort with stored loads. Worker load-only
+modelChange previews return complete target resolution and conversion diffs;
+mutation and policy edits remain guarded. Compiler, selected-leaf patch and
+conversion helpers are available for the later accepted operation; their existence
+does not enable the settings-apply restart path. Conversion refuses unsupported
+members rather than dropping router models, and reports every mapped field and
+removed source. A generated output pathname is never desired configuration.
 
 The projection in `modelsettings_load.go` reads flags, aliases, environment,
 negative switches and native rejection status directly from

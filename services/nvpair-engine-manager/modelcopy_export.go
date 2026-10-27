@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -351,8 +352,10 @@ func (e *Executor) llamaExportFiles(ctx context.Context, st *engineState, store 
 	}
 	// Approval and export hashing retain their existing owners. Inspection uses
 	// only the resolver below and never compiles every serving declaration.
-	if presetSelected && snapshot.plat.Runtime.Serving != nil {
-		compiled, err := compileLlamaServing(command, snapshot.plat.Runtime, true)
+	typedSelected := slices.ContainsFunc(snapshot.plat.Runtime.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ModelID == model })
+	if (presetSelected || typedSelected) && snapshot.plat.Runtime.Serving != nil {
+		snapshot.plat.Runtime.modelLoadOwner = e
+		compiled, err := compilePreparedServing(snapshot, command, snapshot.plat.Runtime, true)
 		if err != nil {
 			return modelFileList{}, fmt.Errorf("configured serving artifact binding failed: %w", err)
 		}
@@ -398,7 +401,7 @@ func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command l
 		return modelFileList{}, false, errNoArtifactBinding
 	}
 	rt := snapshot.plat.Runtime
-	presetConfigured := rt.Serving != nil
+	presetConfigured := rt.Serving != nil && len(rt.ModelLoads) == 0
 	for _, arg := range command.Args {
 		name, _, _ := strings.Cut(arg, "=")
 		if llamaLongOption(name) == "--models-preset" {

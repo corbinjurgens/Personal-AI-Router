@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -135,7 +136,7 @@ func servingEnvelopes(prepared *llamaServingLaunch) []engines.ServingEnvelope {
 func servingIdentityLocked(st *engineState) engineModelIdentity {
 	id := engineModelIdentity{EngineRunID: st.runID, LaunchDigest: st.launchDigest, ModelDigests: map[string]string{}}
 	rt := st.plat.Runtime
-	if rt.servingLaunch == nil || rt.servingDrift != "" || !rt.Serving.Equal(rt.servingLaunch.Config) {
+	if rt.servingLaunch == nil || rt.servingDrift != "" || !rt.Serving.Equal(rt.servingLaunch.Config) || !modelconfig.EqualLoads(rt.ModelLoads, rt.servingLaunch.ModelLoads) {
 		return id
 	}
 	envelopes := servingEnvelopes(rt.servingLaunch)
@@ -180,13 +181,14 @@ func snapshotServingRun(st *engineState) (servingRunSnapshot, error) {
 	}
 	config := rt.Serving
 	rt.Serving = rt.Serving.Clone()
+	rt.ModelLoads = modelconfig.CloneLoads(rt.ModelLoads)
 	return servingRunSnapshot{st.runID, st.proc, rt, config}, nil
 }
 
 // Caller holds st.mu. Replaced runs/configurations cannot inherit I/O results.
 func (s servingRunSnapshot) current(st *engineState) bool {
 	return st.running && !st.adopted && st.runID == s.run && st.proc == s.proc &&
-		st.plat.Runtime.servingLaunch == s.rt.servingLaunch && st.plat.Runtime.Serving == s.config && st.plat.Runtime.Serving.Equal(s.rt.Serving)
+		st.plat.Runtime.servingLaunch == s.rt.servingLaunch && st.plat.Runtime.Serving == s.config && st.plat.Runtime.Serving.Equal(s.rt.Serving) && modelconfig.EqualLoads(st.plat.Runtime.ModelLoads, s.rt.ModelLoads)
 }
 
 func validateServingSnapshot(ctx context.Context, st *engineState, s servingRunSnapshot) error {

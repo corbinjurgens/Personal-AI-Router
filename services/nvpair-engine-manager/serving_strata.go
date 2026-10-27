@@ -324,11 +324,14 @@ func strataServingRuntime(st *engineState, config *engines.ServingConfig) bool {
 	return config != nil && st.manifest.FamilyOrDefault() == "strata"
 }
 
-func preparedServingRuntime(st *engineState, config *engines.ServingConfig) bool {
-	return llamaServingRuntime(st, config) || strataServingRuntime(st, config)
+func preparedServingRuntime(st *engineState, rt Runtime) bool {
+	return llamaServingRuntime(st, rt) || strataServingRuntime(st, rt.Serving)
 }
 
 func compilePreparedServing(st *engineState, command launchCommand, rt Runtime, approved bool) (*llamaServingLaunch, error) {
+	if len(rt.ModelLoads) != 0 {
+		return compileTypedLlama(st, command, rt, approved)
+	}
 	if strataServingRuntime(st, rt.Serving) {
 		return compileStrataServing(command, rt, approved)
 	}
@@ -906,6 +909,12 @@ func preparedSnapshotCommand(st *engineState, command launchCommand, snapshot st
 			}
 		}
 		return command
+	}
+	if len(st.plat.Runtime.ModelLoads) != 0 {
+		cli, env, err := llamaLaunchOptions(command, st.plat.Runtime.EditableLaunch)
+		if err == nil && cli["models-max"] == "" && env["models-max"] == "" {
+			command.Args = append(slices.Clone(command.Args), "--models-max", "1")
+		}
 	}
 	return llamaSnapshotCommand(command, snapshot)
 }

@@ -133,6 +133,9 @@ func (e *Executor) validateModelSettingsLaunch(ctx context.Context, p settings.R
 				}
 			}
 		}
+		if !applying && p.ModelChange.Load != nil && p.ModelChange.Policy == nil {
+			return ctx.Err()
+		}
 		return modelSettingsParamsError(fmt.Errorf("modelChange: reviewed model settings application is not ready"))
 	}
 	if len(p.Settings.ModelLoads) != 0 {

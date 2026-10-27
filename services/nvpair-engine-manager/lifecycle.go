@@ -397,6 +397,9 @@ func (e *Executor) bringUp(ctx context.Context, st *engineState, engine string, 
 }
 
 func (e *Executor) bringUpWithCleanup(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
+	if len(rt.ModelLoads) != 0 && (st.manifest.FamilyOrDefault() != "llamacpp" || rt.modeOrDefault() != "process") {
+		return modelLoadError("", "modelLoads", "Typed loads require an owned llama.cpp process.")
+	}
 	if strataServingRuntime(st, rt.Serving) && rt.modeOrDefault() != "process" {
 		return servingError("Prepared Strata requires an owned process launch.")
 	}
@@ -419,8 +422,21 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 }
 
 func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string, prepareSnapshot func(string, []byte) (string, func(), error)) error {
-	serving := preparedServingRuntime(st, rt.Serving)
-	if llamaServingRuntime(st, rt.Serving) {
+	rt.modelLoadOwner = e
+	recheckContent := func() error { return nil }
+	if len(rt.ModelLoads) != 0 {
+		if e.downloads == nil {
+			return modelLoadError("", "artifacts", "Model content admission is unavailable.")
+		}
+		release, recheck, err := e.modelLoadContentRead(engine)
+		if err != nil {
+			return modelLoadError("", "artifacts", "Model content is busy or unsafe.")
+		}
+		defer release()
+		recheckContent = recheck
+	}
+	serving := preparedServingRuntime(st, rt)
+	if llamaServingRuntime(st, rt) {
 		rt = llamaServingBase(rt)
 	}
 	st.mu.Lock()
@@ -526,6 +542,9 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 	if err := e.desired.setProcessStop(engine, evidence); err != nil {
 		return fmt.Errorf("persist %s process stop evidence: %w", engine, err)
 	}
+	if err := recheckContent(); err != nil {
+		return err
+	}
 	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
 		if serving {
 			if prepared.Credential != "" {
@@ -569,6 +588,9 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 	st.proc = proc
 	st.launchDigest = digest
 	st.plat.Runtime.servingLaunch = prepared
+	if len(rt.ModelLoads) != 0 {
+		st.plat.Runtime.modelLoadOwner = e
+	}
 	st.plat.Runtime.servingCommand = originalLaunch
 	st.plat.Runtime.servingBaseDigest = baseDigest
 	st.plat.Runtime.servingDrift = ""

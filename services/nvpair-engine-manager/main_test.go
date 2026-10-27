@@ -25,6 +25,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if runModelLoadChild() {
+		return
+	}
 	secretenvtest.RunChild()
 	if len(os.Args) >= 3 && os.Args[1] == "notification-transport-helper" {
 		os.Exit(runNotificationTransportHelper(os.Args[2:]))

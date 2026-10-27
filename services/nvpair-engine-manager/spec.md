@@ -26,8 +26,8 @@ existing owners. Reads require no remote-management mutation grant. The reply
 must pass the shared strict decoder and match engine/model/target node exactly.
 Grant, Pause, revision and inference-lock refusals retain -32012, -32011, -32010
 and -32014 through the existing coded transport. Invalid local ingress is
--32602; target validation is HTTP 400 on the pinned endpoint (the existing
-generic remote HTTP client reports that as an operation error).
+-32602; target validation is HTTP 400 on the pinned engine-settings endpoint,
+which the remote client preserves as invalid parameters (-32602).
 
 The shared correlated relay has two branches: inspect has `Inspect` non-nil and
 an empty value `Request`, omitted from JSON; get/preview/apply/rebind have their
@@ -47,25 +47,56 @@ Unsupported rows are explicit refusals, not permission for raw extras. B support
 describes the manual field vocabulary; it does not advertise implemented Apply.
 Inherited finite-adapter defaults are labelled and never materialized as intent.
 
-`modelChange`/nonempty typed-load launch traffic currently fails with a clear
-invalid-parameters field error before native preparation, mutation admission,
-rebind or persistence. The guard also prevents an ordinary RPC write from dropping
-stored loads. Auto validates explicit preferences and returns no resolution,
+Worker load-only `modelChange` preview traffic reaches target-baseline validation
+and bounded conversion/compilation, returning diffs and a review digest without
+persistence or activation. Typed mutation and policy-edit traffic still fails
+before mutation admission, rebind or persistence. The guard also prevents an
+ordinary RPC write from dropping stored loads. Auto validates preferences and returns no resolution,
 review identity, candidate or default trades. Task 5 replaces the artifact body,
 Task 6 the load body, Task 10 the estimate body and Task 11 the Auto body. Contract
 tests use missing artifacts/review data, so refusal remains required afterward.
 
-Direct executor calls in `settings.go` remain an explicit integration boundary:
-guard `PreviewLaunch` and `ConfigureLaunch` before preparation/admission; carry
-modelLoads in `launchStateLocked`, preview and readback; include them in change
-and no-op decisions; update `persistRuntimeServing` in `setport.go` to persist
-requested/accepted records with ports/launch/serving in the existing replacement.
-No new store, version or capability negotiation is present. The registry already
-strictly validates typed records, canonicalizes model order, preserves arrays
-under the existing shared/host-platform merge and retains numeric lexemes.
-O1-O5 are unanswered; no restart, Auto, lock scope, copy default or qualification
-behavior is selected. Apply-build must add this mutation to its future maintenance
-exclusion; coordinator amendment 2 defines no maintenance symbol today.
+Direct previews compile typed records without persistence or activation.
+`launchStateLocked` clones stored requested/resolved records; configured native
+readback is distinct from accepted settings and strict declaration evidence.
+`persistRuntimeServing` can replace modelLoads with ports/launch/serving in the
+existing atomic override, including the host-platform precedence mask. Omitted
+replacement preserves the collection; an explicit empty array clears it.
+Unrelated fields and numeric lexemes survive the replacement.
+
+The full Runtime selects typed compilation at the existing prepared-serving
+owner, including Serving=nil. Exact Task 5 artifact resolution, bounded GGUF
+facts and repeated binding checks run under engine content-read admission.
+The compiler emits sorted complete model sections, checked finite padded context
+(per request times native slots), non-unified KV, fitting off and disabled
+startup loading. Reset removes requested leaves; inherited finite adapter
+defaults are regenerated, never retained in a hidden old source. Explicit CPU
+does not require estimate facts; finite layers/native-default resolution needs
+bounded layer facts. Only f16 KV precision is currently mapped; unmapped
+precision and Auto are field refusals. Batch compatibility is checked against
+the pinned effective native defaults. Metadata context is a fact, not a
+universal training hard cap or permission to add unsupported scaling controls.
+
+Typed launch conflicts with external presets and overlapping CLI, explicit env
+or inherited native allocation sources. Router capacity and unrelated router
+options remain at their existing owners. The complete-router conversion
+preview parses the bounded subset, returns field/source diffs and source digest,
+and refuses unrepresentable sections/options without partial takeover. Inherited
+allocation sources that settings cannot remove are refused. Generated preset
+paths are outputs, never approval inputs. Native executable bindings, canonical
+typed inputs, ordered sampled artifact bindings and generated bytes participate
+in identity. Pre-spawn rechecks and the existing immutable generation lease
+apply on fresh/manual starts and crash relaunches. Existing declarations retain
+their exact model/artifact/output/memory checks against generated bytes; typed
+settings do not create serving declarations, content hashes or qualifications.
+
+O1 keeps typed ConfigureLaunch and SetPort application refused before mutation
+admission, including stored echoes/removal. Change/no-op detection and the
+settings-apply stop/persist/rebind/conditional-restart integration remain unwired,
+as does the running settings restart test. The worker's read-only load preview
+does not enable broker acceptance or coupled policy application. No restart/drain, Auto,
+lock scope, copy default or qualification behavior is selected. Apply-build must
+add this mutation to its future maintenance exclusion; no symbol exists today.
 
 ## Installation completeness
 
