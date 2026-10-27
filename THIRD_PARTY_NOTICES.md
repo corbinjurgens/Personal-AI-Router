@@ -125,7 +125,7 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `argparse` | 2.0.1 | Python-2.0 |
 | `aria-hidden` | 1.2.6 | MIT |
 | `asynckit` | 0.4.0 | MIT |
-| `axios` | 1.18.0 | MIT |
+| `axios` | 1.21.0 | MIT |
 | `bidi-js` | 1.0.3 | MIT |
 | `builder-util-runtime` | 9.7.0 | MIT |
 | `call-bind-apply-helpers` | 1.0.2 | MIT |
@@ -147,9 +147,9 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `dequal` | 2.0.3 | MIT |
 | `detect-node-es` | 1.1.0 | MIT |
 | `devlop` | 1.1.0 | MIT |
-| `dompurify` | 3.4.13 | (MPL-2.0 OR Apache-2.0) |
+| `dompurify` | 3.4.17 | (MPL-2.0 OR Apache-2.0) |
 | `dunder-proto` | 1.0.1 | MIT |
-| `electron` | 42.10.0 | MIT |
+| `electron` | 42.11.18 | MIT |
 | `electron-log` | 5.4.4 | MIT |
 | `electron-updater` | 6.8.9 | MIT |
 | `entities` | 8.0.0 | BSD-2-Clause |
@@ -159,7 +159,7 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `es-object-atoms` | 1.1.1 | MIT |
 | `es-set-tostringtag` | 2.1.0 | MIT |
 | `flip-toolkit` | 7.2.4 | MIT |
-| `follow-redirects` | 1.16.0 | MIT |
+| `follow-redirects` | 1.16.2 | MIT |
 | `form-data` | 4.0.6 | MIT |
 | `fs-extra` | 10.1.0 | MIT |
 | `function-bind` | 1.1.2 | MIT |
@@ -219,7 +219,7 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `is-potential-custom-element-name` | 1.0.1 | MIT |
 | `isomorphic-dompurify` | 3.13.0 | MIT |
 | `js-tokens` | 4.0.0 | MIT |
-| `js-yaml` | 4.2.0 | MIT |
+| `js-yaml` | 4.3.2 | MIT |
 | `jsdom` | 29.1.1 | MIT |
 | `jsonfile` | 6.2.1 | MIT |
 | `lazy-val` | 1.0.5 | MIT |
@@ -270,7 +270,7 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `scheduler` | 0.27.0 | MIT |
 | `semver` | 7.7.4 | ISC |
 | `semver` | 7.8.5 | ISC |
-| `source-map-js` | 1.2.1 | BSD-3-Clause |
+| `source-map-js` | 1.2.2 | BSD-3-Clause |
 | `space-separated-tokens` | 2.0.2 | MIT |
 | `stringify-entities` | 4.0.4 | MIT |
 | `sumchecker` | 3.0.1 | Apache-2.0 |
@@ -282,7 +282,7 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `tr46` | 6.0.0 | MIT |
 | `trim-lines` | 3.0.1 | MIT |
 | `tslib` | 2.8.1 | 0BSD |
-| `undici` | 7.28.0 | MIT |
+| `undici` | 7.30.1 | MIT |
 | `undici-types` | 7.18.2 | MIT |
 | `unist-util-is` | 6.0.1 | MIT |
 | `unist-util-position` | 5.0.0 | MIT |
@@ -3939,13 +3939,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### axios 1.18.0
+### axios 1.21.0
 
 License: MIT
 
 Repository: https://github.com/axios/axios
 
-License source: axios@1.18.0/LICENSE
+License source: axios@1.21.0/LICENSE
 
 ```text
 # Copyright (c) 2014-present Matt Zabriskie & Collaborators
@@ -4769,13 +4769,13 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### dompurify 3.4.13
+### dompurify 3.4.17
 
 License: (MPL-2.0 OR Apache-2.0)
 
 Repository: https://github.com/cure53/DOMPurify
 
-License source: dompurify@3.4.13/LICENSE
+License source: dompurify@3.4.17/LICENSE
 
 ```text
 Apache License
@@ -5013,7 +5013,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### electron 42.10.0
+### electron 42.11.18
 
 License: MIT
 
@@ -5309,13 +5309,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### follow-redirects 1.16.0
+### follow-redirects 1.16.2
 
 License: MIT
 
 Repository: https://github.com/follow-redirects/follow-redirects
 
-License source: follow-redirects@1.16.0/LICENSE
+License source: follow-redirects@1.16.2/LICENSE
 
 ```text
 Copyright 2014–present Olivier Lalonde <olalonde@gmail.com>, James Talmage <james@talmage.io>, Ruben Verborgh
@@ -8291,13 +8291,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### js-yaml 4.2.0
+### js-yaml 4.3.2
 
 License: MIT
 
 Repository: https://github.com/nodeca/js-yaml
 
-License source: js-yaml@4.2.0/LICENSE
+License source: js-yaml@4.3.2/LICENSE
 
 ```text
 (The MIT License)
@@ -10188,13 +10188,13 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
 IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-### source-map-js 1.2.1
+### source-map-js 1.2.2
 
 License: BSD-3-Clause
 
 Repository: https://github.com/7rulnik/source-map-js
 
-License source: source-map-js@1.2.1/LICENSE
+License source: source-map-js@1.2.2/LICENSE
 
 ```text
 Copyright (c) 2009-2011, Mozilla Foundation and contributors
@@ -10727,13 +10727,13 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 ```
 
-### undici 7.28.0
+### undici 7.30.1
 
 License: MIT
 
 Repository: https://github.com/nodejs/undici
 
-License source: undici@7.28.0/LICENSE
+License source: undici@7.30.1/LICENSE
 
 ```text
 MIT License

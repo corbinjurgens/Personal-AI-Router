@@ -54,6 +54,31 @@ func TestValidateAcceptsValid(t *testing.T) {
 	}
 }
 
+func TestManifestUserCredential(t *testing.T) {
+	reg := NewRegistry()
+	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		engine string
+		want   bool
+	}{{"lmstudio", true}, {"ollama", false}, {"llamacpp", false}} {
+		t.Run(tc.engine, func(t *testing.T) {
+			m, ok := reg.Get(tc.engine)
+			if !ok {
+				t.Fatal("manifest not loaded")
+			}
+			p, ok := m.HostPlatform()
+			if !ok {
+				t.Fatal("host platform missing")
+			}
+			if p.Runtime.UserCredential != tc.want {
+				t.Errorf("runtime.user_credential = %t, want %t", p.Runtime.UserCredential, tc.want)
+			}
+		})
+	}
+}
+
 func TestManifestAuthStatuses(t *testing.T) {
 	t.Run("bundled manifests", func(t *testing.T) {
 		reg := NewRegistry()

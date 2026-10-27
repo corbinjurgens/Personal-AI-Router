@@ -4,7 +4,8 @@
 import { app, BrowserWindow } from 'electron'
 import log from 'electron-log'
 import electronUpdater from 'electron-updater'
-import { destroyConnector } from '@/electron/connector'
+import fs from 'node:fs'
+import path from 'node:path'
 import type { UpdateStatus } from '@/shared/types/update'
 import pkg from '../../../package.json'
 import getErrorString from '@/shared/utils/get-error-string'
@@ -14,19 +15,41 @@ import {
     userFacingUpdateError
 } from '@/electron/updater/update-error-message'
 import {
-    devMockCheckForUpdates,
-    devMockDownloadUpdate,
-    devMockQuitAndInstall,
-    devMockUpdaterEnabled,
-    initializeDevMockUpdater
-} from '@/electron/updater/dev-mock'
-import {
     clearPendingUpdate,
     readPendingUpdateVersion,
     writePendingUpdateVersion
 } from '@/electron/updater/pending-update-store'
 
 const { autoUpdater } = electronUpdater
+// The application error listener owns the sanitized, deduplicated report.
+// electron-updater's built-in error listener otherwise logs the same raw stack.
+autoUpdater.logger = null
+const UNCONFIGURED = 'Distribution updates are not configured for this build'
+
+function distributionEligibility(): string | null {
+    if (!app.isPackaged) return UNCONFIGURED
+    const configuration = path.join(process.resourcesPath, 'app-update.yml')
+    try {
+        fs.statSync(configuration)
+        return null
+    } catch (error) {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOENT')
+            return UNCONFIGURED
+        return 'Distribution update configuration is invalid or unreadable. Check resources/app-update.yml.'
+    }
+}
+
+function allowExplicitDistribution(operation: UpdateOperation): boolean {
+    const error = distributionEligibility()
+    if (!error) {
+        autoUpdater.autoDownload = false
+        autoUpdater.autoInstallOnAppQuit = false
+        return true
+    }
+    if (error === UNCONFIGURED) setStatus({ phase: 'error', error })
+    else failUpdate(new Error(error), operation, true)
+    return false
+}
 
 let status: UpdateStatus = {
     phase: 'idle',
@@ -37,21 +60,49 @@ let status: UpdateStatus = {
 }
 
 let activeUpdateOperation: UpdateOperation | null = null
+let initialized = false
 
 /**
  * Version of an update already downloaded to disk in a prior session (loaded
  * from the pending-update marker). When the next check reports this same
  * version is available, we re-arm electron-updater from its cache so the
- * "Restart & install" button reappears without a fresh download.
+ * downloaded state reappears without a fresh download. Applying it requires
+ * a future verified-package adapter to the build lifecycle.
  */
 let pendingDownloadedVersion: string | null = null
 
-function failUpdate(err: unknown, operation: UpdateOperation): void {
-    log.error(`[updater] ${userFacingUpdateError(operation)}: ${getErrorString(err)}`)
+function failUpdate(err: Error, operation: UpdateOperation, configurationError = false): void {
+    const code = 'code' in err ? err.code : ''
+    const configError =
+        configurationError ||
+        err.name === 'YAMLException' ||
+        err.name === 'TypeError' ||
+        [
+            'EACCES',
+            'EPERM',
+            'ENOENT',
+            'ENOTDIR',
+            'EISDIR',
+            'ERR_INVALID_URL',
+            'ERR_UPDATER_INVALID_PROVIDER_CONFIGURATION',
+            'ERR_UPDATER_UNSUPPORTED_PROVIDER'
+        ].includes(typeof code === 'string' ? code : '')
+    const message = configError
+        ? 'Distribution update configuration is invalid or unreadable. Check resources/app-update.yml.'
+        : userFacingUpdateError(operation)
+    if (configError) {
+        if (startupCheckTimer) clearTimeout(startupCheckTimer)
+        if (periodicCheckTimer) clearInterval(periodicCheckTimer)
+        startupCheckTimer = null
+        periodicCheckTimer = null
+    }
+    if (status.phase === 'error' && status.error === message && activeUpdateOperation === null)
+        return
+    log.error(`[updater] ${message}`)
     activeUpdateOperation = null
     setStatus({
         phase: 'error',
-        error: userFacingUpdateError(operation)
+        error: message
     })
 }
 
@@ -83,11 +134,14 @@ export function getUpdateStatus(): UpdateStatus {
 
 const STARTUP_UPDATE_CHECK_DELAY_MS = 5000
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
+let startupCheckTimer: ReturnType<typeof setTimeout> | null = null
 
 function scheduleStartupUpdateCheck(): void {
-    if (!app.isPackaged && !devMockUpdaterEnabled()) return
+    if (distributionEligibility() !== null || startupCheckTimer) return
 
-    setTimeout(() => {
+    startupCheckTimer = setTimeout(() => {
+        startupCheckTimer = null
+        if (distributionEligibility() === UNCONFIGURED) return
         void checkForUpdates()
     }, STARTUP_UPDATE_CHECK_DELAY_MS)
 }
@@ -95,10 +149,11 @@ function scheduleStartupUpdateCheck(): void {
 let periodicCheckTimer: ReturnType<typeof setInterval> | null = null
 
 function startPeriodicUpdateCheck(): void {
-    if (!app.isPackaged && !devMockUpdaterEnabled()) return
+    if (distributionEligibility() !== null) return
     if (periodicCheckTimer) return
 
     periodicCheckTimer = setInterval(() => {
+        if (distributionEligibility() === UNCONFIGURED) return
         // Never clobber an in-progress or ready-to-install state.
         if (
             status.phase === 'checking' ||
@@ -128,18 +183,18 @@ function loadPendingDownloadedVersion(): void {
 }
 
 export function initializeUpdater(): void {
-    if (devMockUpdaterEnabled()) {
-        loadPendingDownloadedVersion()
-        initializeDevMockUpdater(setStatus, pendingDownloadedVersion)
-        scheduleStartupUpdateCheck()
-        startPeriodicUpdateCheck()
+    if (initialized) return
+    const eligibility = distributionEligibility()
+    if (eligibility !== null) {
+        if (eligibility !== UNCONFIGURED) {
+            failUpdate(new Error(eligibility), 'check', true)
+        }
         return
     }
-    if (!app.isPackaged) return
+    initialized = true
 
     loadPendingDownloadedVersion()
 
-    autoUpdater.logger = log
     autoUpdater.autoDownload = false
     autoUpdater.autoInstallOnAppQuit = false
 
@@ -155,8 +210,7 @@ export function initializeUpdater(): void {
             error: null
         })
         // A previously downloaded update is still cached on disk; re-arm
-        // electron-updater so `quitAndInstall` works and the install button
-        // returns without a real re-download.
+        // electron-updater's downloaded state returns without a real re-download.
         if (pendingDownloadedVersion === info.version) {
             void downloadUpdate()
         }
@@ -197,26 +251,18 @@ export function initializeUpdater(): void {
 }
 
 export async function checkForUpdates(): Promise<void> {
-    if (devMockUpdaterEnabled()) {
-        await devMockCheckForUpdates(setStatus, pendingDownloadedVersion)
-        return
-    }
-    if (!app.isPackaged) return
+    if (!allowExplicitDistribution('check')) return
     activeUpdateOperation = 'check'
     try {
         await autoUpdater.checkForUpdates()
         activeUpdateOperation = null
     } catch (err) {
-        failUpdate(err, 'check')
+        failUpdate(err instanceof Error ? err : new Error(getErrorString(err)), 'check')
     }
 }
 
 export async function downloadUpdate(): Promise<void> {
-    if (devMockUpdaterEnabled()) {
-        await devMockDownloadUpdate(setStatus)
-        return
-    }
-    if (!app.isPackaged) return
+    if (!allowExplicitDistribution('download')) return
     // Re-entrancy guard: a second click while a download is in flight is a no-op.
     if (status.phase === 'downloading') return
     activeUpdateOperation = 'download'
@@ -227,16 +273,13 @@ export async function downloadUpdate(): Promise<void> {
         await autoUpdater.downloadUpdate()
         activeUpdateOperation = null
     } catch (err) {
-        failUpdate(err, 'download')
+        failUpdate(err instanceof Error ? err : new Error(getErrorString(err)), 'download')
     }
 }
 
 export async function quitAndInstallUpdate(): Promise<void> {
-    if (devMockUpdaterEnabled()) {
-        devMockQuitAndInstall()
-        return
-    }
-    if (!app.isPackaged) return
-    await destroyConnector({ force: true })
-    autoUpdater.quitAndInstall()
+    setStatus({
+        phase: 'error',
+        error: 'Installing downloaded updates is unavailable until verified packages can be applied through the build lifecycle.'
+    })
 }

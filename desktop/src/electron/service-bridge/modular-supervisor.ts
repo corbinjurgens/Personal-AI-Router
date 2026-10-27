@@ -719,6 +719,46 @@ class ModularSupervisor {
     }
 
     /** Local service calls use the existing attachment, never launch on failure. */
+    getBuildApplyGeneration(): number {
+        return this.brokerSessionGeneration
+    }
+
+    /** A finite attachment for the early GUI hook, with no service-start path. */
+    async acknowledgeBuildApplyGui(params: JsonObject): Promise<JsonValue | undefined> {
+        const client = new JsonRpcSocketClient(
+            'build-apply-gui',
+            () => this.dialService(),
+            [],
+            () => this.dialService()
+        )
+        try {
+            return await new Promise<JsonValue | undefined>((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    reject(new Error('GUI acknowledgement unavailable.'))
+                }, 10_000)
+                let sent = false
+                const fail = (): void => {
+                    clearTimeout(timer)
+                    void client.detach()
+                    reject(new Error('GUI acknowledgement disconnected.'))
+                }
+                client.once('exit', fail)
+                client.once('disconnected', fail)
+                client.on('notification', notification => {
+                    if (sent || notification.method !== 'app:ready') return
+                    sent = true
+                    void client
+                        .call('service/build-apply-gui-ready', params)
+                        .then(resolve, reject)
+                        .finally(() => clearTimeout(timer))
+                })
+                client.start()
+            })
+        } finally {
+            await client.detach()
+        }
+    }
+
     async callBuildApply(
         method:
             | 'service/build-apply-preview'
