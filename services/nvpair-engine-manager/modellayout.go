@@ -459,34 +459,11 @@ func llamaRepoDir(root, repo string) string {
 // llamaCachedRef returns the snapshot commit llama.cpp would use for a cached
 // repo: refs/main, else the first valid ref.
 func llamaCachedRef(repoDir string) string {
-	refs := filepath.Join(repoDir, "refs")
-	read := func(name string) string {
-		data, err := readSmallFile(filepath.Join(refs, name), 4096)
-		if err != nil {
-			return ""
-		}
-		line, _, _ := strings.Cut(string(data), "\n")
-		line = strings.TrimSpace(line)
-		if !commitRe.MatchString(line) {
-			return ""
-		}
-		return line
-	}
-	if c := read("main"); c != "" {
-		return c
-	}
-	entries, err := os.ReadDir(refs)
+	commit, err := (&modelArtifactScan{}).cachedRef(context.Background(), repoDir, servingFileAccess{})
 	if err != nil {
 		return ""
 	}
-	for _, entry := range entries {
-		if entry.Type().IsRegular() {
-			if c := read(entry.Name()); c != "" {
-				return c
-			}
-		}
-	}
-	return ""
+	return commit
 }
 
 type ggufSplit struct {
@@ -645,31 +622,175 @@ func llamaBestSibling(paths []string, model, keyword string) string {
 }
 
 func llamacppSourceFiles(root, model string) (modelFileList, error) {
+	return boundedLlamaCacheArtifacts(context.Background(), engineModelStore{root: root, adapter: engines.NameLlamaCPP}, model, servingFileAccess{})
+}
+
+// ReadDir(n) bounds each allocation; the shared budget covers refs and every
+// visited snapshot entry, including entries which are not model artifacts.
+const modelArtifactScanEntries = 100000
+
+type modelArtifactScan struct{ entries int }
+
+func (b *modelArtifactScan) directory(ctx context.Context, path string, visit func(os.DirEntry) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for {
+		entries, err := f.ReadDir(128)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if b.entries >= modelArtifactScanEntries {
+				return errModelArtifactLimit
+			}
+			b.entries++
+			if len(entry.Name()) > 1024 {
+				return errModelArtifactLimit
+			}
+			if err := visit(entry); err != nil {
+				return err
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func (b *modelArtifactScan) cachedRef(ctx context.Context, repoDir string, access servingFileAccess) (string, error) {
+	refs := filepath.Join(repoDir, "refs")
+	read := func(name string) (string, error) {
+		path := filepath.Join(refs, name)
+		_, info, err := confinedRegularFile(repoDir, path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return "", os.ErrNotExist
+			}
+			return "", errNoArtifactBinding
+		}
+		if info.Size() > 4096 {
+			return "", errModelArtifactLimit
+		}
+		if info.Size() == 0 {
+			return "", nil
+		}
+		data, _, err := access.source(ctx, path)
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", errModelInspectionChanged
+		}
+		line, _, _ := strings.Cut(string(data), "\n")
+		line = strings.TrimSpace(line)
+		if !commitRe.MatchString(line) {
+			return "", nil
+		}
+		return line, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	commit, err := read("main")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if commit != "" {
+		return commit, nil
+	}
+	var names []string
+	if err := b.directory(ctx, refs, func(entry os.DirEntry) error {
+		if entry.Type().IsRegular() {
+			names = append(names, entry.Name())
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		commit, err := read(name)
+		if err != nil {
+			return "", err
+		}
+		if commit != "" {
+			return commit, nil
+		}
+	}
+	return "", errModelNotFound
+}
+
+func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, model string, access servingFileAccess) (modelFileList, error) {
+	root := store.root
 	repo, tag, err := splitLlamaModel(model)
 	if err != nil {
 		return modelFileList{}, fmt.Errorf("%w: %v", errModelNotFound, err)
 	}
 	repoDir := llamaRepoDir(root, repo)
-	commit := llamaCachedRef(repoDir)
-	if commit == "" {
+	scan := access.scan
+	if scan == nil {
+		scan = &modelArtifactScan{}
+	}
+	commit, err := scan.cachedRef(ctx, repoDir, access)
+	if err != nil {
+		if errors.Is(err, errModelArtifactLimit) || errors.Is(err, errNoArtifactBinding) || ctx.Err() != nil {
+			return modelFileList{}, err
+		}
 		return modelFileList{}, fmt.Errorf("%w: llama.cpp has no cached %q on this node", errModelNotFound, repo)
 	}
 	snap := filepath.Join(repoDir, "snapshots", commit)
+	realRepo, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		return modelFileList{}, err
+	}
 	var rels []string
-	err = filepath.WalkDir(snap, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	seenPaths := map[string]bool{}
+	var walk func(string, int) error
+	walk = func(dir string, depth int) error {
+		if depth > 64 {
+			return errModelArtifactLimit
 		}
-		if d.IsDir() || (!d.Type().IsRegular() && d.Type()&fs.ModeSymlink == 0) {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil || !pathWithinRoot(realRepo, resolved) {
+			return fmt.Errorf("unsafe cache directory")
+		}
+		return scan.directory(ctx, dir, func(d os.DirEntry) error {
+			path := filepath.Join(dir, d.Name())
+			if d.IsDir() {
+				return walk(path, depth+1)
+			}
+			if !strings.HasSuffix(d.Name(), ".gguf") {
+				return nil
+			}
+			if len(rels) >= maxCopyArtifacts {
+				return errModelArtifactLimit
+			}
+			rel, err := filepath.Rel(snap, path)
+			if err != nil || !validModelRelPath(filepath.ToSlash(rel)) {
+				return fmt.Errorf("unsafe cache artifact path")
+			}
+			key := copyPathKey(filepath.ToSlash(rel))
+			if seenPaths[key] {
+				return errNoArtifactBinding
+			}
+			seenPaths[key] = true
+			rels = append(rels, filepath.ToSlash(rel))
 			return nil
-		}
-		rel, err := filepath.Rel(snap, path)
-		if err != nil {
-			return err
-		}
-		rels = append(rels, filepath.ToSlash(rel))
-		return nil
-	})
+		})
+	}
+	err = walk(snap, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return modelFileList{}, fmt.Errorf("%w: llama.cpp has no cached %q on this node", errModelNotFound, repo)
@@ -681,8 +802,11 @@ func llamacppSourceFiles(root, model string) (modelFileList, error) {
 		return modelFileList{}, fmt.Errorf("%w: llama.cpp has no cached GGUF for %q on this node", errModelNotFound, model)
 	}
 	blobs, _ := filepath.EvalSymlinks(filepath.Join(repoDir, "blobs"))
-	list := modelFileList{Revision: commit}
+	list := modelFileList{Engine: store.engine, Model: model, Revision: commit}
 	for _, rel := range selected {
+		if err := ctx.Err(); err != nil {
+			return modelFileList{}, err
+		}
 		if !validModelRelPath(rel) {
 			return modelFileList{}, fmt.Errorf("cached file %q has a name this service cannot copy safely", rel)
 		}
@@ -690,13 +814,29 @@ func llamacppSourceFiles(root, model string) (modelFileList, error) {
 		if err != nil {
 			return modelFileList{}, err
 		}
-		f := modelFile{Path: rel, Size: info.Size(), abs: real}
+		path := filepath.Join(snap, filepath.FromSlash(rel))
+		if !artifactPathSafe(path) || !artifactPathSafe(real) {
+			return modelFileList{}, errNoArtifactBinding
+		}
+		binding, err := access.binding(ctx, path)
+		if err != nil || binding.ResolvedTarget != real {
+			return modelFileList{}, fmt.Errorf("cache artifact missing or changed")
+		}
+		role := "model"
+		if !ggufIsModel(rel) {
+			role = "companion"
+		}
+		f := modelFile{Path: rel, Role: role, Size: info.Size(), abs: real, configured: binding.SourcePath, sample: binding.SampleSHA256, info: info}
 		// A snapshot entry that links to an LFS blob is named by its sha256.
 		if blobs != "" && filepath.Dir(real) == blobs && validSHA256(filepath.Base(real)) {
 			f.SHA256 = filepath.Base(real)
 		}
 		list.Files = append(list.Files, f)
 	}
+	if err := validateResolvedArtifacts(list); err != nil {
+		return modelFileList{}, err
+	}
+	list.binding = exportBinding(list, struct{ Root, Revision string }{root, commit})
 	return list, nil
 }
 

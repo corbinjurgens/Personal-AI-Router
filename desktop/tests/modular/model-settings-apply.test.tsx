@@ -8,7 +8,7 @@ import type {
     EngineSettingsSnapshot,
     EngineSettingsTarget
 } from '@/shared/types/engine-settings'
-import type { InspectModelResult, ModelChange } from '@/shared/types/model-config'
+import type { ArtifactSummary, InspectModelResult, ModelChange } from '@/shared/types/model-config'
 import type { NodePolicyDocument } from '@/shared/types/node-policy'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi } from '@/ui/api/pair-api'
@@ -375,7 +375,12 @@ describe('reviewed model operations', () => {
         expect(engine.applySettings).toHaveBeenCalledOnce()
     })
     it('refuses changed artifact identity even when advisory estimates stay identical', async () => {
-        const artifact = { role: 'model', identity: 'old artifact', size: '10', assurance: 'bound' }
+        const artifact: ArtifactSummary = {
+            role: 'model',
+            identity: 'old artifact',
+            size: '10',
+            assurance: 'bound'
+        }
         engine.inspectModel.mockResolvedValue(inspection({ artifacts: [artifact] }))
         await useEngineSettingsStore.getState().previewModel(target, change, 'authority')
         engine.inspectModel.mockResolvedValue(

@@ -268,6 +268,25 @@ describe('model settings readback', () => {
         expect(result.estimate.domains?.[0].freeBytes).toBe('9007199254740993')
     })
 
+    it.each([
+        ['model, draft, companion', ['model', 'draft', 'companion']],
+        ['model and companion', ['model', 'companion']]
+    ])('accepts ordered read-only artifact summaries: %s', (_name, roles) => {
+        const artifacts = roles.map(role => ({
+            role,
+            identity: 'opaque-local-binding',
+            size: '4096',
+            assurance: 'sampled-local-binding'
+        }))
+        expect(parseInspectModel({ ...inspection(), artifacts }).artifacts).toEqual(artifacts)
+        expect(
+            parseEngineSettingsPreview({
+                ...preview(),
+                requiredArtifacts: artifacts
+            }).requiredArtifacts
+        ).toEqual(artifacts)
+    })
+
     it('preserves complete preview review data without filling unresolved impact', () => {
         const wire = preview()
         const result = parseEngineSettingsPreview(wire)
@@ -370,6 +389,23 @@ describe('model contract validation', () => {
         { name: 'bad digest', value: { ...resolvedLoad(), presetDigest: 'c' } },
         { name: 'missing model shards', value: { ...resolvedLoad(), artifacts: [] } },
         {
+            name: 'companion is not a resolved load artifact',
+            value: {
+                ...resolvedLoad(),
+                artifacts: [
+                    ...resolvedLoad().artifacts,
+                    {
+                        role: 'companion',
+                        path: 'C:/models/projector.gguf',
+                        resolvedTarget: 'C:/cache/projector.gguf',
+                        size: '1',
+                        mtimeNs: '0',
+                        sampleSha256: 'f'.repeat(64)
+                    }
+                ]
+            }
+        },
+        {
             name: 'duplicate bindings',
             value: {
                 ...resolvedLoad(),
@@ -411,6 +447,42 @@ describe('model contract validation', () => {
     const invalidInspections: Array<{ name: string; value: JsonValue }> = [
         { name: 'fake ready status', value: { ...inspection(), status: 'ready' } },
         { name: 'missing resolved artifacts', value: { ...inspection(), artifacts: [] } },
+        {
+            name: 'model after draft',
+            value: {
+                ...inspection(),
+                artifacts: ['model', 'draft', 'model'].map(role => ({
+                    role,
+                    identity: 'opaque',
+                    size: '1',
+                    assurance: 'sampled'
+                }))
+            }
+        },
+        {
+            name: 'draft after companion',
+            value: {
+                ...inspection(),
+                artifacts: ['model', 'companion', 'draft'].map(role => ({
+                    role,
+                    identity: 'opaque',
+                    size: '1',
+                    assurance: 'sampled'
+                }))
+            }
+        },
+        {
+            name: 'unknown artifact role',
+            value: {
+                ...inspection(),
+                artifacts: ['model', 'sidecar'].map(role => ({
+                    role,
+                    identity: 'opaque',
+                    size: '1',
+                    assurance: 'sampled'
+                }))
+            }
+        },
         {
             name: 'negative dimension',
             value: { ...inspection(), facts: { status: 'partial', dimensions: { layers: '-1' } } }

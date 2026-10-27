@@ -438,8 +438,7 @@ describe('load editor and target impact', () => {
         const artifacts: InspectModelResult['artifacts'] = [
             { role: 'model', identity: 'main', size: '9007199254740993', assurance: 'bound' },
             { role: 'draft', identity: 'draft', size: '1', assurance: 'bound' },
-            { role: 'companion', identity: 'mmproj', size: '2', assurance: 'bound' },
-            { role: 'future-role', identity: 'future', size: '3', assurance: 'unknown' }
+            { role: 'companion', identity: 'mmproj', size: '2', assurance: 'bound' }
         ]
         await act(async () =>
             root.render(
@@ -455,7 +454,6 @@ describe('load editor and target impact', () => {
         expect(container.textContent).toContain('Active request interruption: Unknown')
         expect(container.textContent).toContain('Off behavior: Unknown')
         expect(container.textContent).toContain('Companion file: mmproj')
-        expect(container.textContent).toContain('Artifact file (future-role): future')
         expect(container.textContent).toContain('9007199254740993 bytes')
         expect(container.textContent?.indexOf('Main model file')).toBeLessThan(
             container.textContent?.indexOf('Draft model file') ?? -1

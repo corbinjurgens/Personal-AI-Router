@@ -267,6 +267,48 @@ func TestInspectResultPreservesBytePrecisionAndUnknownImpact(t *testing.T) {
 	}
 }
 
+func TestInspectArtifactSummariesAllowOrderedCompanions(t *testing.T) {
+	artifact := func(role string) ArtifactSummary {
+		return ArtifactSummary{Role: role, Identity: "opaque-identity", Size: "1", Assurance: "sampled-local-binding"}
+	}
+	for name, artifacts := range map[string][]ArtifactSummary{
+		"model draft companion": {artifact("model"), artifact("draft"), artifact("companion")},
+		"model companion":       {artifact("model"), artifact("companion")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := InspectResult{Engine: "llamacpp", ModelID: "m", Status: "resolved", Artifacts: artifacts, Estimate: Estimate{Status: "unknown"}}
+			if _, err := DecodeInspectResult(mustJSON(t, r)); err != nil {
+				t.Fatalf("rejected ordered read-only summaries: %v", err)
+			}
+		})
+	}
+	for name, artifacts := range map[string][]ArtifactSummary{
+		"model after draft":      {artifact("model"), artifact("draft"), artifact("model")},
+		"draft after companion":  {artifact("model"), artifact("companion"), artifact("draft")},
+		"companion before model": {artifact("companion"), artifact("model")},
+		"missing model":          {artifact("draft")},
+		"unknown role":           {artifact("model"), artifact("sidecar")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := InspectResult{Engine: "llamacpp", ModelID: "m", Status: "resolved", Artifacts: artifacts, Estimate: Estimate{Status: "unknown"}}
+			if _, err := DecodeInspectResult(mustJSON(t, r)); err == nil {
+				t.Fatal("accepted invalid read-only artifact role order")
+			}
+		})
+	}
+}
+
+func TestResolvedLoadRejectsCompanionArtifact(t *testing.T) {
+	load := testResolvedLoad()
+	load.Resolved.Artifacts = append(load.Resolved.Artifacts, ArtifactBinding{
+		Role: "companion", Path: "/models/projector.gguf", ResolvedTarget: "/blobs/projector",
+		Size: "1", MtimeNS: "0", SampleSHA256: strings.Repeat("f", 64),
+	})
+	if _, err := CanonicalLoads([]ModelLoad{load}); err == nil {
+		t.Fatal("accepted companion artifact in resolved serving load")
+	}
+}
+
 func TestInspectRejectsInvalidArtifactAndEstimateBytes(t *testing.T) {
 	test := func(name string, edit func(*InspectResult)) {
 		t.Run(name, func(t *testing.T) {

@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"nvpair-shared/durablefile"
+	"nvpair-shared/modelconfig"
 )
 
 const llamaArtifactsLayout = "llama-artifacts-v1"
@@ -307,7 +308,7 @@ func llamaConsumedPaths(source string, options map[string]string, model string, 
 				}
 			}
 			if count > limit-len(paths) {
-				return nil, nil, servingError("Custom artifact count exceeds the copy limit.")
+				return nil, nil, errModelArtifactLimit
 			}
 		}
 		shards, err := llamaArtifactPaths(path)
@@ -331,7 +332,7 @@ func llamaConsumedPaths(source string, options map[string]string, model string, 
 func copyLaunchSnapshot(st *engineState) (*engineState, launchCommand, error) {
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	snapshot := strataPreparationState(st)
+	snapshot := snapshotLlamaState(st)
 	command, err := launchForState(snapshot, snapshot.plat.Runtime.Port)
 	return snapshot, command, err
 }
@@ -343,6 +344,58 @@ func (e *Executor) llamaExportFiles(ctx context.Context, st *engineState, store 
 	snapshot, command, err := copyLaunchSnapshot(st)
 	if err != nil {
 		return modelFileList{}, errNoArtifactBinding
+	}
+	list, presetSelected, err := resolveLlamaArtifacts(ctx, snapshot, command, store, model, servingFileAccess{})
+	if err != nil {
+		return modelFileList{}, err
+	}
+	// Approval and export hashing retain their existing owners. Inspection uses
+	// only the resolver below and never compiles every serving declaration.
+	if presetSelected && snapshot.plat.Runtime.Serving != nil {
+		compiled, err := compileLlamaServing(command, snapshot.plat.Runtime, true)
+		if err != nil {
+			return modelFileList{}, fmt.Errorf("configured serving artifact binding failed: %w", err)
+		}
+		matched := false
+		for _, declared := range compiled.Config.Models {
+			if declared.ModelID != model {
+				continue
+			}
+			matched = true
+			if len(declared.Artifacts) != len(list.Files) {
+				return modelFileList{}, fmt.Errorf("configured artifact set changed during resolution")
+			}
+			for i, artifact := range declared.Artifacts {
+				list.Files[i].asserted = artifact.SHA256
+			}
+		}
+		if !matched {
+			return modelFileList{}, errNoArtifactBinding
+		}
+	}
+	current, currentCommand, currentErr := copyLaunchSnapshot(st)
+	if currentErr != nil || !reflect.DeepEqual(command, currentCommand) || !snapshot.plat.Runtime.Serving.Equal(current.plat.Runtime.Serving) || !modelconfig.EqualLoads(snapshot.plat.Runtime.ModelLoads, current.plat.Runtime.ModelLoads) {
+		return modelFileList{}, fmt.Errorf("custom artifact configuration changed during export resolution")
+	}
+	return list, nil
+}
+
+// resolveLlamaArtifacts is the single pre-hash path-selection seam. Inputs are
+// immutable snapshots, and the caller owns content admission and final recheck.
+// The boolean identifies a matching preset so copy approval applies to that
+// source, without making receipt-only exports depend on unrelated declarations.
+func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command launchCommand, store engineModelStore, model string, access servingFileAccess) (modelFileList, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return modelFileList{}, false, err
+	}
+	if access.scan == nil {
+		access.scan = &modelArtifactScan{}
+	}
+	if !artifactPathSafe(store.root) {
+		return modelFileList{}, false, errNoArtifactBinding
+	}
+	if err := validateLlamaModelID(model); err != nil {
+		return modelFileList{}, false, errNoArtifactBinding
 	}
 	rt := snapshot.plat.Runtime
 	presetConfigured := rt.Serving != nil
@@ -361,28 +414,30 @@ func (e *Executor) llamaExportFiles(ctx context.Context, st *engineState, store 
 		presetConfigured = true
 	}
 	var candidates []modelFileList
+	presetSelected := false
 	if presetConfigured {
 		cli, env, parseErr := llamaLaunchOptions(command, rt.EditableLaunch)
 		if parseErr != nil {
-			return modelFileList{}, fmt.Errorf("custom artifact configuration is unsupported: %w", parseErr)
+			return modelFileList{}, false, fmt.Errorf("custom artifact configuration is unsupported: %w", parseErr)
 		}
 		source := env["models-preset"]
 		if v, ok := cli["models-preset"]; ok {
 			source = v
 		}
-		if !filepath.IsAbs(source) {
-			return modelFileList{}, errNoArtifactBinding
+		if !artifactPathSafe(source) {
+			return modelFileList{}, false, errNoArtifactBinding
 		}
-		data, binding, readErr := servingSource(source)
+		data, binding, readErr := access.source(ctx, source)
 		if readErr != nil {
-			return modelFileList{}, fmt.Errorf("configured custom preset is missing or unstable")
+			return modelFileList{}, false, fmt.Errorf("configured custom preset is missing or unstable")
 		}
 		sections, parseErr := parseLlamaServingPreset(data)
 		if parseErr != nil {
-			return modelFileList{}, fmt.Errorf("custom artifact configuration is unsupported: %w", parseErr)
+			return modelFileList{}, false, fmt.Errorf("custom artifact configuration is unsupported: %w", parseErr)
 		}
 		preset, found := sections[model]
 		if found && model != "*" {
+			presetSelected = true
 			options := map[string]string{}
 			for _, values := range []map[string]string{env, sections["*"], preset, cli} {
 				for key, value := range values {
@@ -391,50 +446,29 @@ func (e *Executor) llamaExportFiles(ctx context.Context, st *engineState, store 
 			}
 			paths, roles, pathErr := llamaConsumedPaths(source, options, model, maxCopyArtifacts)
 			if pathErr != nil {
-				return modelFileList{}, pathErr
+				return modelFileList{}, false, pathErr
 			}
 			list := modelFileList{Engine: store.engine, Model: model, Layout: llamaArtifactsLayout}
 			for i, path := range paths {
 				if err := ctx.Err(); err != nil {
-					return modelFileList{}, err
+					return modelFileList{}, false, err
 				}
-				if !strings.HasSuffix(path, ".gguf") {
-					return modelFileList{}, fmt.Errorf("custom copies require local GGUF model and draft artifacts")
+				if !artifactPathSafe(path) || !strings.HasSuffix(path, ".gguf") {
+					return modelFileList{}, false, fmt.Errorf("custom copies require local GGUF model and draft artifacts")
 				}
-				current, bindErr := servingFileBinding(path)
+				current, bindErr := access.binding(ctx, path)
 				if bindErr != nil {
-					return modelFileList{}, fmt.Errorf("configured model or draft shard is missing or unstable")
+					return modelFileList{}, false, fmt.Errorf("configured model or draft shard is missing or unstable")
 				}
 				info, statErr := os.Stat(current.ResolvedTarget)
 				if statErr != nil {
-					return modelFileList{}, fmt.Errorf("configured artifact is unavailable")
+					return modelFileList{}, false, fmt.Errorf("configured artifact is unavailable")
 				}
 				list.Files = append(list.Files, modelFile{Role: roles[i], Path: roles[i] + "/" + filepath.Base(path), Size: info.Size(), abs: current.ResolvedTarget, configured: current.SourcePath, sample: current.SampleSHA256, info: info})
 			}
-			if rt.Serving != nil {
-				compiled, compileErr := compileLlamaServing(command, rt, true)
-				if compileErr != nil {
-					return modelFileList{}, fmt.Errorf("configured serving artifact binding failed: %w", compileErr)
-				}
-				matched := false
-				for _, declared := range compiled.Config.Models {
-					if declared.ModelID == model {
-						matched = true
-						if len(declared.Artifacts) != len(list.Files) {
-							return modelFileList{}, fmt.Errorf("configured artifact set changed during resolution")
-						}
-						for i, a := range declared.Artifacts {
-							list.Files[i].asserted = a.SHA256
-						}
-					}
-				}
-				if !matched {
-					return modelFileList{}, errNoArtifactBinding
-				}
-			}
-			after, afterErr := servingFileBinding(source)
+			after, afterErr := access.binding(ctx, source)
 			if afterErr != nil || *binding != *after {
-				return modelFileList{}, fmt.Errorf("configured preset changed during export resolution")
+				return modelFileList{}, false, fmt.Errorf("configured preset changed during export resolution")
 			}
 			candidates = append(candidates, list)
 			candidates[len(candidates)-1].binding = exportBinding(list, struct {
@@ -446,59 +480,82 @@ func (e *Executor) llamaExportFiles(ctx context.Context, st *engineState, store 
 		} else if rt.Serving != nil {
 			for _, declared := range rt.Serving.Models {
 				if declared.ModelID == model {
-					return modelFileList{}, fmt.Errorf("declared model has no exact configured preset")
+					return modelFileList{}, false, fmt.Errorf("declared model has no exact configured preset")
 				}
 			}
 		}
 	}
-	current, currentCommand, currentErr := copyLaunchSnapshot(st)
-	if currentErr != nil || !reflect.DeepEqual(command, currentCommand) || !rt.Serving.Equal(current.plat.Runtime.Serving) {
-		return modelFileList{}, fmt.Errorf("custom artifact configuration changed during export resolution")
-	}
-	receipt, receiptErr := readCopyReceipt(store, model)
+	receipt, receiptErr := readCopyReceiptWithAccess(ctx, store, model, access)
 	if receiptErr != nil && !errors.Is(receiptErr, os.ErrNotExist) {
-		return modelFileList{}, receiptErr
+		return modelFileList{}, false, receiptErr
 	}
 	if receiptErr == nil {
 		list := receipt.List
 		for i := range list.Files {
 			f := &list.Files[i]
 			path := filepath.Join(copyAliasDir(store.root, model), list.ExportID, filepath.FromSlash(f.Path))
-			if err := safeCopyDestination(store.root, path); err != nil {
-				return modelFileList{}, fmt.Errorf("copied artifact location is unsafe")
+			if !artifactPathSafe(path) {
+				return modelFileList{}, false, errNoArtifactBinding
 			}
-			binding, err := servingFileBinding(path)
+			if err := safeCopyDestinationBounded(ctx, store.root, path, access.scan); err != nil {
+				return modelFileList{}, false, fmt.Errorf("copied artifact location is unsafe: %w", err)
+			}
+			binding, err := access.binding(ctx, path)
 			if err != nil {
-				return modelFileList{}, fmt.Errorf("committed copy artifact is missing or unstable")
+				return modelFileList{}, false, fmt.Errorf("committed copy artifact is missing or unstable")
 			}
 			info, err := os.Stat(binding.ResolvedTarget)
 			if err != nil {
-				return modelFileList{}, fmt.Errorf("committed copy artifact unavailable")
+				return modelFileList{}, false, fmt.Errorf("committed copy artifact unavailable")
 			}
 			f.abs, f.configured, f.info, f.asserted, f.SHA256 = binding.ResolvedTarget, binding.SourcePath, info, f.SHA256, ""
 			f.sample = binding.SampleSHA256
 		}
 		candidates = append(candidates, list)
-		candidates[len(candidates)-1].binding = exportBinding(list, receipt)
+		candidates[len(candidates)-1].binding = exportBinding(list, struct {
+			Receipt copyReceipt
+			Binding string
+		}{receipt, receipt.binding})
+	}
+	for _, load := range rt.ModelLoads {
+		if load.ModelID != model || load.Resolved == nil {
+			continue
+		}
+		list, err := resolvedLoadArtifacts(ctx, store, model, load, access)
+		if err != nil {
+			return modelFileList{}, false, err
+		}
+		candidates = append(candidates, list)
 	}
 	if len(candidates) > 0 {
 		for _, candidate := range candidates[1:] {
 			if len(candidate.Files) != len(candidates[0].Files) {
-				return modelFileList{}, errNoArtifactBinding
+				return modelFileList{}, false, errNoArtifactBinding
 			}
 			for i, f := range candidate.Files {
 				first := candidates[0].Files[i]
 				if f.Role != first.Role || f.abs != first.abs {
-					return modelFileList{}, errNoArtifactBinding
+					return modelFileList{}, false, errNoArtifactBinding
 				}
 			}
 		}
-		return candidates[0], nil
+		if err := validateResolvedArtifacts(candidates[0]); err != nil {
+			return modelFileList{}, false, err
+		}
+		// Bind every agreeing source, so changing even the receipt beside a
+		// preset invalidates derived cache entries and in-flight inspections.
+		bindings := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			bindings = append(bindings, candidate.binding)
+		}
+		candidates[0].binding = exportBinding(candidates[0], bindings)
+		return candidates[0], presetSelected, nil
 	}
 	if _, _, err := splitLlamaModel(model); err == nil {
-		return llamacppSourceFiles(store.root, model)
+		list, err := boundedLlamaCacheArtifacts(ctx, store, model, access)
+		return list, false, err
 	}
-	return modelFileList{}, errNoArtifactBinding
+	return modelFileList{}, false, errNoArtifactBinding
 }
 
 func copyAliasDir(root, model string) string {
@@ -509,22 +566,29 @@ func copyAliasDir(root, model string) string {
 type copyReceipt struct {
 	Version int           `json:"version"`
 	List    modelFileList `json:"manifest"`
+	binding string
 }
 
 func readCopyReceipt(store engineModelStore, model string) (copyReceipt, error) {
+	return readCopyReceiptWithAccess(context.Background(), store, model, servingFileAccess{scan: &modelArtifactScan{}})
+}
+
+func readCopyReceiptWithAccess(ctx context.Context, store engineModelStore, model string, access servingFileAccess) (copyReceipt, error) {
 	path := filepath.Join(copyAliasDir(store.root, model), "copy.json")
-	if err := safeCopyDestination(store.root, path); err != nil {
-		return copyReceipt{}, fmt.Errorf("copy receipt location is unsafe")
+	if err := safeCopyDestinationBounded(ctx, store.root, path, access.scan); err != nil {
+		return copyReceipt{}, fmt.Errorf("copy receipt location is unsafe: %w", err)
 	}
-	f, err := os.Open(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return copyReceipt{}, os.ErrNotExist
 		}
 		return copyReceipt{}, fmt.Errorf("copy receipt is unavailable")
 	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxCopyManifest+1))
+	if !info.Mode().IsRegular() || info.Size() > maxCopyManifest {
+		return copyReceipt{}, fmt.Errorf("invalid copy receipt")
+	}
+	data, binding, err := access.source(ctx, path)
 	if err != nil || len(data) > maxCopyManifest {
 		return copyReceipt{}, fmt.Errorf("invalid copy receipt")
 	}
@@ -544,7 +608,7 @@ func readCopyReceipt(store engineModelStore, model string) (copyReceipt, error) 
 	if err != nil {
 		return copyReceipt{}, fmt.Errorf("invalid copy receipt")
 	}
-	receipt := copyReceipt{Version: envelope.Version, List: list}
+	receipt := copyReceipt{Version: envelope.Version, List: list, binding: binding.SampleSHA256}
 	id, err := artifactExportID(receipt.List)
 	if err != nil || receipt.Version != 1 || receipt.List.Engine != store.engine || receipt.List.Model != model || receipt.List.Layout != llamaArtifactsLayout || id != receipt.List.ExportID {
 		return copyReceipt{}, fmt.Errorf("invalid copy receipt identity")
@@ -643,6 +707,13 @@ func (e *Executor) completedCopy(ctx context.Context, engine, model, expected st
 // and files. Reject symlinks (including .part and receipt paths) and Windows
 // case aliases before any creation, and repeat under each writer lock.
 func safeCopyDestination(root, dest string) error {
+	return safeCopyDestinationBounded(context.Background(), root, dest, &modelArtifactScan{})
+}
+
+func safeCopyDestinationBounded(ctx context.Context, root, dest string, scan *modelArtifactScan) error {
+	if scan == nil {
+		scan = &modelArtifactScan{}
+	}
 	if !pathWithinRoot(root, dest) || filepath.Clean(root) == filepath.Clean(dest) {
 		return fmt.Errorf("copy destination escapes model store")
 	}
@@ -652,14 +723,17 @@ func safeCopyDestination(root, dest string) error {
 	}
 	p := root
 	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
-		entries, err := os.ReadDir(p)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("cannot inspect copy destination")
-		}
-		for _, entry := range entries {
+		err := scan.directory(ctx, p, func(entry os.DirEntry) error {
 			if strings.EqualFold(entry.Name(), seg) && entry.Name() != seg {
 				return fmt.Errorf("copy destination has a case-colliding path")
 			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			if errors.Is(err, errModelArtifactLimit) || ctx.Err() != nil {
+				return err
+			}
+			return fmt.Errorf("cannot inspect copy destination")
 		}
 		p = filepath.Join(p, seg)
 		info, err := os.Lstat(p)
