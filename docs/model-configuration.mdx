@@ -39,11 +39,20 @@ a model, and this editor does not create qualification.
 Main, draft and companion files are labelled separately. A companion such as a
 projector is not presented as another main-model shard.
 
-The currently integrated service reports bounded inspection unavailable and
-refuses reviewed native load application as not ready. You can inspect the
-reported descriptors and prepare a session draft. A refused preview does not
-enable Apply or produce a success receipt. Generation-only policy editing
-continues through its existing Save path.
+The service resolves available local artifacts and reads bounded metadata for
+inspection. Missing, ambiguous or unavailable content remains a reported
+condition. Manual finite llama.cpp load changes require a successful target
+preview; reviewed Auto and advisory estimates remain unavailable. A refused
+preview does not enable Apply or produce a success receipt. Generation-only
+policy editing continues through its existing Save path.
+
+Typed manual settings currently cover finite llama.cpp allocation and the
+service's supported batch, thread, KV/Flash Attention and idle/cache controls.
+RoPE/YaRN extension, explicit device/split selection, NUMA/RPC, tensor/MoE
+overrides, adapters, speculative/multimodal presets and remaining native
+allocation modes require later engine-specific support. Unsupported controls
+cannot be supplied as raw typed extras. Ollama and LM Studio native load
+configuration and automatic qualification are outside this workflow.
 
 ## Review before applying load changes
 
@@ -58,7 +67,8 @@ Use **Preview model changes**, then review the result before choosing
 
 Runtime impact comes from the service. When it reports a whole-router restart,
 the preview says **Restarts the whole llama.cpp engine**, lists affected models
-and shows the reported drain bound and interruption warning. An omitted impact
+and shows the existing 60-second drain bound and interruption warning. Active
+requests can be interrupted when that bound expires. An omitted impact
 value is Unknown, not zero, an empty model list or a promise that active work
 will finish. A reported Off-preserving operation stays Off; Saved never means
 Loaded.
@@ -69,6 +79,9 @@ After a lost response, status/readback checks that identity before any explicit
 retry. Failed or unresolved operations require local reconciliation and a fresh
 preview for explicit supersession; the editor never rolls them back, resumes a
 node or silently retries them.
+An operation interrupted at bare acceptance before any changes requires a fresh
+local preview and explicit supersession. Progressed operations recover their
+frozen target resolution; they do not recalculate preferences during restart.
 
 The saved inference lock protects generation preferences only. Readable load
 settings retain their separate permission and Pause rules. Routing and
@@ -172,8 +185,8 @@ and settings revisions. A failed or not-ready target does not authorize another
 target's Apply. Missing content is handed to the existing content-copy flow only
 when chosen; after that flow, inspect and preview the destination again. A
 content-copy receipt is not a settings approval and never triggers automatic
-Apply. This build's not-ready native application refusal applies to load copy
-as well.
+Apply. Load copy requires the destination to resolve its own content and
+produce a successful preview.
 
 Saved, activation pending and activation error are distinct outcomes. Remote
 policy replies provide no activation status. A lost Save reply triggers a
