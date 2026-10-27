@@ -229,6 +229,8 @@ describe('build apply payloads', () => {
         const git = vi.mocked(childProcess.execFileSync)
         git.mockReset()
         try {
+            git.mockReturnValueOnce('a'.repeat(40)).mockReturnValueOnce('')
+            expect(buildIdentity('/inert-build-source')).toBe('git:' + 'a'.repeat(40))
             git.mockReturnValueOnce('a'.repeat(40)).mockReturnValueOnce(' M desktop/source.ts')
             expect(buildIdentity('/inert-build-source')).toBe('git:' + 'a'.repeat(40) + '+dirty')
             expect(git).toHaveBeenCalledWith(

@@ -47,8 +47,23 @@ function copyIconsPlugin() {
 
 export default defineConfig({
     main: {
-        define: { __PAIR_GUI_BUILD_ID__: JSON.stringify(buildIdentity(resolve(__dirname, '..'))) },
-        plugins: [copyIconsPlugin()],
+        plugins: [
+            copyIconsPlugin(),
+            {
+                name: 'pair-gui-build-identity',
+                // electron-vite removes its temporary bundled config before
+                // invoking Vite plugins. Do not count that file as source dirt.
+                config() {
+                    return {
+                        define: {
+                            __PAIR_GUI_BUILD_ID__: JSON.stringify(
+                                buildIdentity(resolve(__dirname, '..'))
+                            )
+                        }
+                    }
+                }
+            }
+        ],
         build: {
             externalizeDeps: false,
             rollupOptions: {
