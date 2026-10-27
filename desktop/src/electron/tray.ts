@@ -47,7 +47,7 @@ class TrayManager {
     private displayChangeListener: (() => void) | undefined
     private visibilityInterval: ReturnType<typeof setInterval> | undefined
     private unsubscribeAvailability: (() => void) | undefined
-    private availabilityRequest: 'available' | 'paused' | null = null
+    private availabilityRequest: 'available' | 'paused' | 'immediate' | null = null
     private availabilityError: string | null = null
     private availabilityReadError: string | null = null
     private availabilityReading = false
@@ -138,8 +138,18 @@ class TrayManager {
                 enabled:
                     pause.enabled &&
                     (this.availabilityRequest === null ||
-                        (pause.retryPause === true && this.availabilityRequest === 'paused')),
+                        (pause.retryPause === true &&
+                            (this.availabilityRequest === 'paused' ||
+                                this.availabilityRequest === 'immediate'))),
                 click: () => this.requestAvailability(pause.request)
+            },
+            {
+                label: 'Stop local models now',
+                enabled:
+                    pause.enabled &&
+                    (this.availabilityRequest === null ||
+                        (pause.retryPause === true && this.availabilityRequest === 'paused')),
+                click: () => this.requestAvailability('paused', true)
             },
             ...(pause.retryPause
                 ? [
@@ -192,14 +202,21 @@ class TrayManager {
     }
 
     /** Pause or resume inference on this PC. The label follows the broker's own notifications. */
-    private requestAvailability(request: 'available' | 'paused' | null): void {
+    private requestAvailability(request: 'available' | 'paused' | null, immediate = false): void {
         if (request === null) return
+        const pause = getModularSupervisor().getAvailabilityMenuItem()
+        if (!pause.enabled) return
         if (
             this.availabilityRequest !== null &&
-            !(this.availabilityRequest === 'paused' && request === 'available')
+            !(
+                pause.retryPause === true &&
+                ((this.availabilityRequest === 'paused' &&
+                    (request === 'available' || immediate)) ||
+                    (this.availabilityRequest === 'immediate' && request === 'available'))
+            )
         )
             return
-        this.availabilityRequest = request
+        this.availabilityRequest = immediate ? 'immediate' : request
         const action = ++this.availabilityAction
         this.availabilityError = null
         this.availabilityReadError = null
@@ -207,7 +224,7 @@ class TrayManager {
         getModularSupervisor()
             .setAvailability(
                 request === 'paused'
-                    ? { state: request, pauseMode: 'configured' }
+                    ? { state: request, pauseMode: immediate ? 'immediate' : 'configured' }
                     : { state: request }
             )
             .catch((error: unknown) => {

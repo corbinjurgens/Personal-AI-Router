@@ -24,9 +24,13 @@ func (s *Service) handleBuildApply(c *client, msg *jsonrpc.Message) {
 		c.respondError(msg.ID, -32602, err.Error())
 		return
 	}
-	// No broker calls, files, reservations, notifications or process launches.
 	if msg.Method == "service/build-apply-preview" {
-		c.respond(msg.ID, buildapply.Unavailable[buildapply.BuildApplyPreview]())
+		previewRequest, ok := request.(*buildapply.PreviewRequest)
+		if !ok {
+			c.respondError(msg.ID, -32602, "invalid preview request")
+			return
+		}
+		s.respondBuildApplyPreview(c, msg.ID, *previewRequest)
 	} else {
 		c.respond(msg.ID, buildapply.Unavailable[buildapply.BuildApplyOperation]())
 	}
@@ -37,8 +41,8 @@ func (s *Service) publishBuildApplyChanged(operation buildapply.BuildApplyOperat
 	s.broadcast("service/build-apply-changed", operation)
 }
 
-// These local methods have no side effects until their transaction owner is
-// implemented. In particular, neither preview nor start launches a process.
+// Transaction methods remain unavailable until their owner is implemented.
+// Neither preview nor unavailable start launches a process.
 func isBuildApplyMethod(method string) bool {
 	switch method {
 	case "service/build-apply-preview", "service/build-apply-start", "service/build-apply-status", "service/build-apply-gui-ready":

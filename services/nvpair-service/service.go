@@ -106,13 +106,14 @@ type Service struct {
 	restarts    int
 	stopping    bool
 
-	stopCh     chan struct{}
-	stopOnce   sync.Once
-	stopped    chan struct{}
-	exitCh     chan struct{}
-	exitOnce   sync.Once
-	brokerDone chan struct{}
-	history    *serviceHistory
+	stopCh       chan struct{}
+	stopOnce     sync.Once
+	stopped      chan struct{}
+	exitCh       chan struct{}
+	exitOnce     sync.Once
+	brokerDone   chan struct{}
+	history      *serviceHistory
+	buildPreview *buildApplyPreviewState
 }
 
 // pendingRequest is a request in flight at the broker under a service id.
@@ -285,6 +286,7 @@ func (s *Service) detach(c *client, graceful bool) {
 	s.mu.Lock()
 	_, ok := s.clients[c]
 	delete(s.clients, c)
+	s.invalidateBuildApplyPreviewLocked(c)
 	if s.history != nil {
 		s.cancelHistoryRefetchIfUnused()
 	}

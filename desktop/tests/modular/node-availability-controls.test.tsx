@@ -11,6 +11,7 @@ import type {
     NodePolicyDocument
 } from '@/shared/types/node-policy'
 import type { AvailableNode } from '@/shared/types/cluster'
+import type { NodeItem } from '@/shared/types/nodes'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi, type INodePolicyApi } from '@/ui/api/pair-api'
 import NodeAvailabilityControls, {
@@ -23,6 +24,21 @@ import {
 } from '@/ui/stores/node-configuration.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
+import { useNodesStore } from '@/ui/stores/nodes.store'
+import NodeCardDetails from '@/ui/components/NodeList/NodeCardDetails'
+import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
+
+vi.mock('@/ui/components/NodeList/NodeEnginesInline', () => ({ default: () => null }))
+vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
+vi.mock('@/ui/components/NodeList/NodeDeclaredRoles', () => ({ default: () => null }))
+vi.mock('@/ui/components/NodeList/NodePerformance', () => ({ default: () => null }))
+vi.mock('@/ui/components/RoutingSettings/RoleEditor', () => ({ default: () => null }))
+vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
+vi.mock('@/ui/components/RoutingSettings/ModelEngineBindingsEditor', () => ({
+    default: () => null
+}))
+vi.mock('@/ui/components/ModelSettings/ModelSettingsPanel', () => ({ default: () => null }))
+vi.mock('@/ui/components/RoutingSettings/RoutingHistory', () => ({ default: () => null }))
 
 const getPolicy = vi.fn<INodePolicyApi['get']>()
 const setAvailability = vi.fn<INodePolicyApi['setAvailability']>()
@@ -60,6 +76,24 @@ function advertisement(revision: string, pausedBy?: 'local' | 'peer'): Available
     }
 }
 
+function node(id: string, name: string): NodeItem {
+    return {
+        id,
+        name,
+        status: 'active',
+        ipAddress: '127.0.0.1',
+        port: 1,
+        allIpAddresses: [],
+        os: 'Windows',
+        topology: {
+            cpu: { model: 'CPU', cores: 4, threads: 4 },
+            gpus: [],
+            ram: 4096,
+            storage: []
+        }
+    }
+}
+
 function button(label: string): HTMLButtonElement {
     const result = Array.from(container.querySelectorAll('button')).find(
         item => item.getAttribute('aria-label') === label || item.textContent?.trim() === label
@@ -87,6 +121,13 @@ beforeEach(() => {
     vi.useFakeTimers()
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     vi.stubGlobal('CSS', { supports: () => true })
+    vi.stubGlobal(
+        'ResizeObserver',
+        class {
+            observe = vi.fn<() => void>()
+            disconnect = vi.fn<() => void>()
+        }
+    )
     getPolicy.mockReset().mockResolvedValue(documentFor('available'))
     setAvailability.mockReset().mockResolvedValue({ availability: 'paused' })
     changes.clear()
@@ -112,6 +153,7 @@ beforeEach(() => {
     Object.defineProperty(window, 'pairApi', { configurable: true, value: api })
     useConnectionStore.setState({ connected: true, selfId: 'self' })
     useDiscoveredNodesStore.setState({ nodes: [] })
+    useNodesStore.setState({ nodes: new Map() })
     useNodeConfigurationStore.setState({
         availability: new Map(),
         management: new Map(),
@@ -134,7 +176,7 @@ afterEach(async () => {
 })
 
 describe('node availability presentation', () => {
-    it('sends the exact configured target and has no mounted immediate action', async () => {
+    it('sends the exact configured peer target and hides local stop', async () => {
         await act(async () =>
             root.render(
                 <NodeAvailabilityControls targetId="peer" nodeId="peer" name="Peer" online />
@@ -182,9 +224,8 @@ describe('node availability presentation', () => {
         expect(setAvailability).not.toHaveBeenCalled()
     })
 
-    it('isolates immediate escalation and permits local Resume during a configured drain', async () => {
+    it('offers immediate escalation and local Resume during a configured drain', async () => {
         const onRequest = vi.fn<(request: NodeAvailabilityRequest) => void>()
-        const onImmediate = vi.fn<(request: NodeAvailabilityRequest) => void>()
         await act(async () =>
             root.render(
                 <AvailabilityControls
@@ -196,10 +237,10 @@ describe('node availability presentation', () => {
                         value: 'draining',
                         reading: false,
                         stale: false,
-                        pending: 'paused'
+                        pending: 'paused',
+                        pendingPauseMode: 'configured'
                     }}
                     onRequest={onRequest}
-                    onImmediate={onImmediate}
                     onRefresh={() => {}}
                 />
             )
@@ -208,11 +249,10 @@ describe('node availability presentation', () => {
             button('Stop local models now').click()
             button('Resume node: This PC').click()
         })
-        expect(onImmediate).toHaveBeenCalledExactlyOnceWith({
-            state: 'paused',
-            pauseMode: 'immediate'
-        })
-        expect(onRequest).toHaveBeenCalledExactlyOnceWith({ nodeId: undefined, state: 'available' })
+        expect(onRequest.mock.calls.map(call => call[0])).toEqual([
+            { state: 'paused', pauseMode: 'immediate' },
+            { nodeId: undefined, state: 'available' }
+        ])
         expect(setAvailability).not.toHaveBeenCalled()
     })
 
@@ -236,7 +276,6 @@ describe('node availability presentation', () => {
                         }}
                         onRequest={onRequest}
                         onRefresh={() => {}}
-                        onImmediate={onRequest}
                     />
                 )
             )
@@ -264,6 +303,284 @@ describe('node availability presentation', () => {
             container.querySelector('[aria-label="Availability for A device with a long name"]')
                 ?.className
         ).toContain('min-w-0')
+    })
+})
+
+describe('mounted local stop controls', () => {
+    it('mounts immediate stop outside the collapsed Overview engine settings for self only', async () => {
+        await act(async () => root.render(<NodeCardDetails node={node('self', 'This PC')} />))
+        const stop = button('Stop local models now')
+        expect(stop.disabled).toBe(false)
+        expect(stop.closest('[style*="grid-template-rows"]')).toBeNull()
+        stop.focus()
+        expect(document.activeElement).toBe(stop)
+        await act(async () => stop.click())
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            nodeId: undefined,
+            state: 'paused',
+            pauseMode: 'immediate'
+        })
+
+        await act(async () => root.render(<NodeCardDetails node={node('peer', 'Peer')} />))
+        expect(container.textContent).not.toContain('Stop local models now')
+        expect(container.querySelector('[aria-label="Resume node: Peer"]')).toBeNull()
+        await act(async () => button('Pause node: Peer').click())
+        expect(setAvailability).toHaveBeenLastCalledWith({
+            nodeId: 'peer',
+            state: 'paused',
+            pauseMode: 'configured'
+        })
+        expect(setAvailability).toHaveBeenCalledTimes(2)
+    })
+
+    it('mounts immediate stop in Settings and changes actions with the selected target', async () => {
+        useNodesStore.setState({ nodes: new Map([['peer', node('peer', 'Peer')]]) })
+        await act(async () => root.render(<RoutingSettings />))
+        await act(async () => button('Stop local models now').click())
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            nodeId: undefined,
+            state: 'paused',
+            pauseMode: 'immediate'
+        })
+        await act(async () => button('Select node').click())
+        const peer = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+            item => item.textContent?.trim() === 'Peer'
+        )
+        if (!peer) throw new Error('Missing peer option')
+        await act(async () => peer.click())
+        expect(container.textContent).not.toContain('Stop local models now')
+        expect(container.querySelector('[aria-label="Resume node: Peer"]')).toBeNull()
+        await act(async () => button('Pause node: Peer').click())
+        expect(setAvailability).toHaveBeenLastCalledWith({
+            nodeId: 'peer',
+            state: 'paused',
+            pauseMode: 'configured'
+        })
+        expect(setAvailability).toHaveBeenCalledTimes(2)
+    })
+
+    it('retains incomplete stop errors and enables explicit local retry and Resume after readback', async () => {
+        await act(async () =>
+            root.render(<NodeAvailabilityControls targetId="self" name="This PC" online />)
+        )
+        setAvailability.mockRejectedValueOnce(new Error('External engine remains running'))
+        getPolicy.mockResolvedValue(documentFor('draining', '2', 'local'))
+        await act(async () => button('Stop local models now').click())
+        expect(button('Stop local models now').disabled).toBe(true)
+        await tick()
+        expect(container.textContent).toContain('External engine remains running')
+        expect(container.textContent).toContain('Pausing')
+        expect(button('Stop local models now').disabled).toBe(false)
+        expect(button('Resume node: This PC').disabled).toBe(false)
+        expect(setAvailability).toHaveBeenCalledTimes(1)
+        getPolicy.mockResolvedValue(documentFor('paused', '2', 'local'))
+        await act(async () => button('Stop local models now').click())
+        await tick()
+        expect(useNodeConfigurationStore.getState().availability.get('self')).toMatchObject({
+            current: true,
+            value: 'paused',
+            error: undefined
+        })
+        getPolicy.mockResolvedValue(documentFor('available', '3'))
+        await act(async () => button('Resume node: This PC').click())
+        await tick()
+        expect(setAvailability.mock.calls.map(call => call[0])).toEqual([
+            { nodeId: undefined, state: 'paused', pauseMode: 'immediate' },
+            { nodeId: undefined, state: 'paused', pauseMode: 'immediate' },
+            { nodeId: undefined, state: 'available' }
+        ])
+        expect(useNodeConfigurationStore.getState().availability.get('self')?.value).toBe(
+            'available'
+        )
+    })
+
+    it.each([
+        { name: 'offline', online: false, connected: true, known: true },
+        { name: 'disconnected', online: true, connected: false, known: true },
+        { name: 'unconfirmed', online: true, connected: true, known: false }
+    ])('disables mounted local stop while $name', async ({ online, connected, known }) => {
+        useConnectionStore.setState({ connected })
+        if (!known) getPolicy.mockRejectedValueOnce(new Error('Availability unreadable'))
+        await act(async () =>
+            root.render(<NodeAvailabilityControls targetId="self" name="This PC" online={online} />)
+        )
+        expect(button('Stop local models now').disabled).toBe(true)
+        await act(async () => button('Stop local models now').click())
+        expect(setAvailability).not.toHaveBeenCalled()
+    })
+})
+
+describe('availability request modes', () => {
+    it('keeps the configured default for existing callers', async () => {
+        await watch('self', undefined)
+        await act(async () =>
+            useNodeConfigurationStore.getState().requestAvailability('self', 'paused')
+        )
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            nodeId: undefined,
+            state: 'paused',
+            pauseMode: 'configured'
+        })
+    })
+
+    it('refuses remote immediate without sending even when management permits configured Pause', async () => {
+        await act(async () =>
+            root.render(
+                <NodeAvailabilityControls targetId="peer" nodeId="peer" name="Peer" online />
+            )
+        )
+        expect(useNodeConfigurationStore.getState().management.get('peer')?.state).toBe('allowed')
+        expect(button('Pause node: Peer').disabled).toBe(false)
+        await act(async () =>
+            useNodeConfigurationStore.getState().requestAvailability('peer', 'paused', 'immediate')
+        )
+        expect(setAvailability).not.toHaveBeenCalled()
+        expect(
+            useNodeConfigurationStore.getState().availability.get('peer')?.pending
+        ).toBeUndefined()
+    })
+
+    it('rejects a pause mode on Resume without sending', async () => {
+        getPolicy.mockResolvedValue(documentFor('paused', '2', 'local'))
+        await watch('self', undefined)
+        await act(async () =>
+            useNodeConfigurationStore
+                .getState()
+                .requestAvailability('self', 'available', 'immediate')
+        )
+        expect(setAvailability).not.toHaveBeenCalled()
+    })
+
+    it('supersedes only a configured drain and ignores its late failure while immediate stop is pending', async () => {
+        let failConfigured: ((error: Error) => void) | undefined
+        let finishImmediate: ((result: { availability: 'paused' }) => void) | undefined
+        setAvailability
+            .mockImplementationOnce(
+                () =>
+                    new Promise((_resolve, reject) => {
+                        failConfigured = reject
+                    })
+            )
+            .mockImplementationOnce(
+                () =>
+                    new Promise(resolve => {
+                        finishImmediate = resolve
+                    })
+            )
+        await act(async () =>
+            root.render(<NodeAvailabilityControls targetId="self" name="This PC" online />)
+        )
+        await act(async () => button('Pause node: This PC').click())
+        expect(button('Stop local models now').disabled).toBe(true)
+        await act(async () =>
+            useNodeConfigurationStore.getState().requestAvailability('self', 'paused', 'immediate')
+        )
+        expect(setAvailability).toHaveBeenCalledTimes(1)
+        await act(async () =>
+            changes.forEach(listener =>
+                listener({ nodeId: 'self', availability: 'draining', pausedBy: 'local' })
+            )
+        )
+        expect(button('Stop local models now').disabled).toBe(false)
+        await act(async () => button('Stop local models now').click())
+        expect(setAvailability.mock.calls.map(call => call[0])).toEqual([
+            { nodeId: undefined, state: 'paused', pauseMode: 'configured' },
+            { nodeId: undefined, state: 'paused', pauseMode: 'immediate' }
+        ])
+        expect(button('Stop local models now').disabled).toBe(true)
+        expect(button('Resume node: This PC').disabled).toBe(false)
+        await act(async () => {
+            button('Stop local models now').click()
+            void useNodeConfigurationStore
+                .getState()
+                .requestAvailability('self', 'paused', 'immediate')
+            void useNodeConfigurationStore.getState().requestAvailability('self', 'paused')
+        })
+        expect(setAvailability).toHaveBeenCalledTimes(2)
+        if (!failConfigured || !finishImmediate) throw new Error('Missing pending pause callbacks')
+        await act(async () => failConfigured?.(new Error('Superseded configured pause')))
+        expect(useNodeConfigurationStore.getState().availability.get('self')).toMatchObject({
+            current: true,
+            value: 'draining',
+            pending: 'paused',
+            pendingPauseMode: 'immediate',
+            error: undefined
+        })
+        expect(getPolicy).toHaveBeenCalledTimes(1)
+        getPolicy.mockResolvedValue(documentFor('paused', '2', 'local'))
+        await act(async () => finishImmediate?.({ availability: 'paused' }))
+        expect(useNodeConfigurationStore.getState().availability.get('self')?.current).toBe(false)
+        await tick()
+        expect(useNodeConfigurationStore.getState().availability.get('self')).toMatchObject({
+            current: true,
+            value: 'paused',
+            pending: undefined,
+            pendingPauseMode: undefined,
+            error: undefined
+        })
+    })
+
+    it('does not let immediate stop or configured Pause supersede pending local Resume', async () => {
+        getPolicy.mockResolvedValue(documentFor('draining', '2', 'local'))
+        let finish: ((result: { availability: 'available' }) => void) | undefined
+        setAvailability.mockImplementationOnce(
+            () =>
+                new Promise(resolve => {
+                    finish = resolve
+                })
+        )
+        await act(async () =>
+            root.render(<NodeAvailabilityControls targetId="self" name="This PC" online />)
+        )
+        await act(async () => button('Resume node: This PC').click())
+        expect(button('Stop local models now').disabled).toBe(true)
+        await act(async () => {
+            button('Stop local models now').click()
+            void useNodeConfigurationStore
+                .getState()
+                .requestAvailability('self', 'paused', 'immediate')
+            void useNodeConfigurationStore.getState().requestAvailability('self', 'paused')
+        })
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            nodeId: undefined,
+            state: 'available'
+        })
+        if (!finish) throw new Error('Missing pending Resume')
+        await act(async () => finish?.({ availability: 'available' }))
+        await tick()
+    })
+
+    it('allows local Resume to supersede pending immediate stop and ignores its late success', async () => {
+        getPolicy.mockResolvedValue(documentFor('draining', '2', 'local'))
+        let finish: ((result: { availability: 'paused' }) => void) | undefined
+        setAvailability.mockImplementationOnce(
+            () =>
+                new Promise(resolve => {
+                    finish = resolve
+                })
+        )
+        await act(async () =>
+            root.render(<NodeAvailabilityControls targetId="self" name="This PC" online />)
+        )
+        await act(async () => button('Stop local models now').click())
+        expect(button('Resume node: This PC').disabled).toBe(false)
+        getPolicy.mockResolvedValue(documentFor('available', '3'))
+        await act(async () => button('Resume node: This PC').click())
+        await tick()
+        if (!finish) throw new Error('Missing superseded immediate stop')
+        await act(async () => finish?.({ availability: 'paused' }))
+        expect(setAvailability.mock.calls.map(call => call[0])).toEqual([
+            { nodeId: undefined, state: 'paused', pauseMode: 'immediate' },
+            { nodeId: undefined, state: 'available' }
+        ])
+        expect(useNodeConfigurationStore.getState().availability.get('self')).toMatchObject({
+            current: true,
+            value: 'available',
+            pending: undefined,
+            pendingPauseMode: undefined,
+            error: undefined
+        })
+        expect(getPolicy).toHaveBeenCalledTimes(2)
     })
 })
 

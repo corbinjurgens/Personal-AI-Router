@@ -20,8 +20,6 @@ interface ControlsProps {
     onRequest(request: NodeAvailabilityRequest): void
     onRefresh(): void
     nodeId?: string
-    /** Isolated presentation only. Task 5 owns native wiring and mounted exposure. */
-    onImmediate?: (request: NodeAvailabilityRequest) => void
 }
 
 export function AvailabilityControls({
@@ -32,14 +30,19 @@ export function AvailabilityControls({
     entry,
     nodeId,
     onRequest,
-    onRefresh,
-    onImmediate
+    onRefresh
 }: ControlsProps) {
     const value = entry?.value
     const known = enabled && entry?.current && !entry.stale && value !== undefined
     const busy = entry?.pending !== undefined
     const resume = local && value !== 'available' && value !== undefined
     const canResume = known && (!busy || (entry.pending === 'paused' && value === 'draining'))
+    const canStop =
+        known &&
+        (!busy ||
+            (entry.pending === 'paused' &&
+                entry.pendingPauseMode === 'configured' &&
+                value === 'draining'))
     const origin =
         value === 'available'
             ? ''
@@ -101,14 +104,15 @@ export function AvailabilityControls({
                         Resume
                     </Button>
                 )}
-                {local && onImmediate && (
+                {local && (
                     <Button
                         kind="primary"
                         color="brand"
                         size="tiny"
                         className="max-w-full whitespace-normal break-words"
-                        disabled={!known || (busy && entry.pending !== 'paused')}
-                        onClick={() => onImmediate({ state: 'paused', pauseMode: 'immediate' })}
+                        disabled={!canStop}
+                        aria-busy={entry?.pendingPauseMode === 'immediate'}
+                        onClick={() => onRequest({ state: 'paused', pauseMode: 'immediate' })}
                     >
                         Stop local models now
                     </Button>
@@ -198,7 +202,7 @@ export default function NodeAvailabilityControls({
                 onRequest={request =>
                     void useNodeConfigurationStore
                         .getState()
-                        .requestAvailability(targetId, request.state)
+                        .requestAvailability(targetId, request.state, request.pauseMode)
                 }
                 onRefresh={() =>
                     void useNodeConfigurationStore.getState().readAvailability(targetId, true)
