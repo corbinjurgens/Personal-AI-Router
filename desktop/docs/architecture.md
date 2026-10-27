@@ -168,8 +168,8 @@ with `safeHandle()`.
 ### Terminal use
 
 Personal AI Router has no Electron-backed console client. The terminal interface
-is the bundled Go `nvpair-tui`, which owns its own broker and worker tree and is
-independent of the desktop app.
+is the bundled Go `nvpair-tui`, which attaches to `nvpair-service`, starting it
+if needed. The service owns the broker and its worker tree.
 
 On packaged builds the app generates an `nvpair` launcher on PATH that execs
 `resources/cli-bin/nvpair-tui` (`src/electron/nvpair-command.ts`): a `.cmd`
