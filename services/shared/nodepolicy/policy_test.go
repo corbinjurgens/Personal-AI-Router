@@ -14,6 +14,36 @@ import (
 	"nvpair-shared/engines"
 )
 
+func TestPauseModeRequestValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		state   Availability
+		raw     string
+		want    PauseMode
+		invalid bool
+	}{
+		{name: "omitted pause", state: Paused, want: PauseConfigured},
+		{name: "configured pause", state: Paused, raw: `"configured"`, want: PauseConfigured},
+		{name: "immediate pause", state: Paused, raw: `"immediate"`, want: PauseImmediate},
+		{name: "omitted resume", state: Available, want: PauseConfigured},
+		{name: "null", state: Paused, raw: `null`, invalid: true},
+		{name: "empty", state: Paused, raw: `""`, invalid: true},
+		{name: "unknown", state: Paused, raw: `"fast"`, invalid: true},
+		{name: "number", state: Paused, raw: `1`, invalid: true},
+		{name: "object", state: Paused, raw: `{}`, invalid: true},
+		{name: "configured resume", state: Available, raw: `"configured"`, invalid: true},
+		{name: "immediate resume", state: Available, raw: `"immediate"`, invalid: true},
+		{name: "null resume", state: Available, raw: `null`, invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mode, err := ParsePauseMode(tc.state, json.RawMessage(tc.raw))
+			if (err != nil) != tc.invalid || mode != tc.want {
+				t.Fatalf("mode = %q, error = %v; want %q, invalid %t", mode, err, tc.want, tc.invalid)
+			}
+		})
+	}
+}
+
 func TestProfileInferenceSettingsSchemaAndDefaults(t *testing.T) {
 	for _, version := range []int{1, 2} {
 		for _, mode := range []RequestOptionsMode{"", RequestOptionsDefaults, RequestOptionsEnforced} {

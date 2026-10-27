@@ -345,7 +345,10 @@ export default function RoutingSettings() {
             setLoadError(null)
             let operationError: string | null = null
             try {
-                await window.pairApi.nodePolicy.setAvailability(requested, nodeId ?? undefined)
+                await window.pairApi.nodePolicy.setAvailability({
+                    state: requested,
+                    nodeId: nodeId ?? undefined
+                })
             } catch (err) {
                 const code = serviceErrorCode(err)
                 operationError =

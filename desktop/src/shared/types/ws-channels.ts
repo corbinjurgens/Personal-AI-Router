@@ -59,7 +59,7 @@ import type { ServiceError } from '@/shared/types/errors'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { NodeItemMetrics } from '@/shared/types/metrics'
 import type {
-    NodeAvailability,
+    NodeAvailabilityResult,
     NodeAvailabilityChange,
     NodeAvailabilityRequest,
     NodePolicyChange,
@@ -214,7 +214,7 @@ export interface WsInvokeChannelMap {
     'policy:set': { request: NodePolicyWrite; response: NodePolicySnapshot }
     'node:set-availability': {
         request: NodeAvailabilityRequest
-        response: { availability: NodeAvailability }
+        response: NodeAvailabilityResult
     }
 }
 

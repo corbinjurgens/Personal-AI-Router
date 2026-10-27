@@ -43,6 +43,34 @@ They do not imply a WebSocket connection. Browser clients are not supported.
 
 ## Renderer API
 
+### Node availability
+
+`pairApi.nodePolicy.setAvailability(request)` takes the single
+`NodeAvailabilityRequest` object `{nodeId?, state, pauseMode?}` through the
+supervisor and `node:set-availability` transport. `state` is `available` or
+`paused`. Omitted `pauseMode` means `configured`, using the saved active-work
+and drain options. Settings and the self-only tray retain that configured
+behavior. Resume must omit mode. Null or unknown modes are invalid.
+
+`immediate` is recognized but currently unavailable locally (`-32000`,
+`Immediate pause is unavailable until safe execution stopping is enabled.`).
+It performs no save, transition supersession, proxy or engine effect. It is
+not exposed as an enabled control. An authorized peer receives `-32602`,
+`Immediate pause must be requested on this node.` The target rechecks actual
+peer authority: management denial (`-32012`) and the pause fence (`-32011`)
+precede mode refusal. A peer cannot Resume or repeat Pause through that fence.
+
+`NodeAvailabilityResult`, `NodeAvailabilityChange`, and `NodePolicyDocument`
+retain live `availability` and optional actual `pausedBy` (`local` or `peer`).
+Unknown provenance stays absent; available clears it. `policy:get` supplies
+initial/live readback. Local activation fields stay intact; remote projection
+does not expose them or private routing. Tray projection filters peer pushes.
+Availability mutation results never supply durable engine lifecycle state.
+
+Pause affects this target's execution while routing remains available.
+Immediate physical stopping and clean interrupted-stream failure are not yet
+enabled; seamless committed-stream continuation remains separate work.
+
 ### Model engine bindings in Routing & resources
 
 The single-node **Model engine bindings** editor changes only `engineBindings`
