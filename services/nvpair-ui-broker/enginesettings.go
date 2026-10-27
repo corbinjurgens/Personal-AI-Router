@@ -35,6 +35,7 @@ type engineSettingsRecord struct {
 	Resume   bool                       `json:"resume"`
 	Explicit bool                       `json:"explicit"`
 	Receipts map[string]settingsReceipt `json:"receipts"`
+	Model    *modelSettingsOperation    `json:"model,omitempty"`
 }
 
 func (r *engineSettingsRecord) clone() *engineSettingsRecord {
@@ -44,6 +45,13 @@ func (r *engineSettingsRecord) clone() *engineSettingsRecord {
 	copy := *r
 	copy.Snapshot = r.Snapshot.Clone()
 	copy.Previous = r.Previous.Clone()
+	if r.Model != nil {
+		model := *r.Model
+		model.Change = r.Model.Change.Clone()
+		model.Review = r.Model.Review.Clone()
+		model.NativeBefore = r.Model.NativeBefore.Clone()
+		copy.Model = &model
+	}
 	copy.Receipts = make(map[string]settingsReceipt, len(r.Receipts))
 	for id, receipt := range r.Receipts {
 		copy.Receipts[id] = receipt
@@ -75,7 +83,10 @@ func (b *Broker) loadEngineSettingsLocked() error {
 	}
 	b.engineSettingsLoaded = true
 	b.engineSettingsEpoch = settingsID()
-	b.engineSettings = make(map[string]*engineSettingsRecord)
+	previous := b.engineSettings
+	if b.engineSettings == nil {
+		b.engineSettings = make(map[string]*engineSettingsRecord)
+	}
 	path, err := b.engineSettingsPath()
 	if err != nil {
 		b.engineSettingsError = err
@@ -83,18 +94,40 @@ func (b *Broker) loadEngineSettingsLocked() error {
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
+		if b.knownModelSettingsFenceLocked() {
+			b.engineSettingsError = fmt.Errorf("settings journal disappeared while a model reservation was known")
+			return b.engineSettingsError
+		}
+		b.engineSettings = make(map[string]*engineSettingsRecord)
 		return nil
 	}
+	var records map[string]*engineSettingsRecord
 	if err == nil {
-		err = json.Unmarshal(data, &b.engineSettings)
+		err = json.Unmarshal(data, &records)
 	}
-	if err != nil || b.engineSettings == nil {
+	if err != nil || records == nil {
 		b.engineSettingsError = fmt.Errorf("settings operation journal could not be read; existing settings were preserved")
 		return b.engineSettingsError
 	}
+	b.engineSettings = records
+	// An invalid replacement cannot erase a model reservation already known
+	// in this process. The error blocks writes; this does not merge stores.
+	defer func() {
+		if b.engineSettingsError != nil {
+			for engine, record := range previous {
+				if record != nil && record.Model != nil && record.Model.Stage != "completed" {
+					b.engineSettings[engine] = record
+				}
+			}
+		}
+	}()
 	for _, record := range b.engineSettings {
 		if record == nil {
 			b.engineSettingsError = fmt.Errorf("invalid settings journal")
+			return b.engineSettingsError
+		}
+		if err := validateStoredModelSettings(record); err != nil {
+			b.engineSettingsError = fmt.Errorf("invalid model settings journal: %w", err)
 			return b.engineSettingsError
 		}
 		record.Snapshot.NodeID = b.nodeID
@@ -103,7 +136,14 @@ func (b *Broker) loadEngineSettingsLocked() error {
 		if record.Receipts == nil {
 			record.Receipts = make(map[string]settingsReceipt)
 		}
+		// No progress after acceptance is indistinguishable from a landed
+		// acceptance whose durability was never confirmed. Never replay effects
+		// from that ambiguity, even if saving the uncertainty also failed.
+		if record.Model != nil && record.Model.Stage == "accepted" && record.Receipts[record.Snapshot.RequestID].Phase != "failed" {
+			markModelAcceptanceUncertain(record)
+		}
 	}
+	b.reconstructModelSettingsLocked()
 	return nil
 }
 
@@ -137,26 +177,7 @@ func (b *Broker) saveEngineSettingsLocked() error {
 	if err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".engine-settings-*")
-	if err != nil {
-		return err
-	}
-	tmp := file.Name()
-	defer os.Remove(tmp)
-	if err = file.Chmod(0o600); err == nil {
-		_, err = file.Write(data)
-	}
-	if err == nil {
-		err = file.Sync()
-	}
-	closeErr := file.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return b.engineSettingsReplacer.WriteFile(path, data, 0o600)
 }
 
 func (b *Broker) settingsWorkerCall(ctx context.Context, method string, params any, target any) error {
@@ -195,6 +216,9 @@ func isEngineDiscoveryService(service noderec.ServiceKey) bool {
 }
 
 func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (settings.Snapshot, error) {
+	if b.modelSettingsPendingLocked(engine) {
+		return b.engineSettings[engine].Snapshot.Clone(), nil
+	}
 	record, save, err := b.prepareSettingsSnapshotLocked(ctx, engine)
 	if err != nil {
 		return settings.Snapshot{}, err
@@ -253,6 +277,9 @@ func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine strin
 		record = &engineSettingsRecord{Snapshot: settings.Snapshot{NodeID: b.nodeID, Engine: engine, Revision: 1, AppliedRevision: 1, Epoch: b.engineSettingsEpoch, Phase: "idle", Settings: current}, Receipts: make(map[string]settingsReceipt)}
 		save = true
 	} else if record.Snapshot.Phase != "applying" && record.Snapshot.Phase != "failed" && !record.Snapshot.Settings.Equal(current) {
+		record.Model = nil
+		record.Snapshot.CoupledStage, record.Snapshot.PolicyRevision, record.Snapshot.UnresolvedError = "", "", ""
+		record.Snapshot.EffectiveSettings = nil
 		record.Snapshot.Settings = current
 		record.Snapshot.Revision++
 		record.Snapshot.AppliedRevision = record.Snapshot.Revision
@@ -287,28 +314,43 @@ func (b *Broker) publishSettingsLocked() {
 		if record := b.engineSettings[profile.Name]; record != nil {
 			record.Snapshot.Sequence++
 			all = append(all, record.Snapshot.Clone())
-			if b.codec != nil {
-				_ = b.codec.Notify("engine:settings-changed", record.Snapshot)
-			}
 		}
 	}
 	// This is a state projection, not permission to execute forward work.
 	b.workersMu.Lock()
 	worker := b.engineMgr
 	b.workersMu.Unlock()
-	if worker != nil {
-		_ = worker.Notify("engine:settings-projection", all)
-	}
 	identities := make([]settings.Snapshot, 0, len(all))
 	c := b.switchCoordinator()
 	for _, snapshot := range all {
 		// A settings refresh must not undo an acknowledged switch withdrawal
 		// while forward work or conservative cleanup still reserves the engine.
-		if c.store == nil || b.pendingSwitchLocked(snapshot.Engine) == nil {
+		if !b.modelSettingsPendingLocked(snapshot.Engine) && (c.store == nil || b.pendingSwitchLocked(snapshot.Engine) == nil) {
 			identities = append(identities, snapshot)
 		}
 	}
 	b.observeSettingsIdentity(identities)
+	// Register order while assigning sequences. Wait and deliver off the
+	// configuration mutex, and finish before trying to reacquire that mutex.
+	previous := b.settingsPublicationTail
+	done := make(chan struct{})
+	b.settingsPublicationTail = done
+	b.engineConfigMu.Unlock()
+	func() {
+		defer close(done)
+		if previous != nil {
+			<-previous
+		}
+		for _, snapshot := range all {
+			if b.codec != nil {
+				_ = b.codec.Notify("engine:settings-changed", snapshot)
+			}
+		}
+		if worker != nil {
+			_ = worker.Notify("engine:settings-projection", all)
+		}
+	}()
+	b.engineConfigMu.Lock()
 }
 
 func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string, config settings.Config, current settings.Snapshot) error {
@@ -390,6 +432,9 @@ func (b *Broker) previewSettingsLocked(ctx context.Context, p settings.Request) 
 }
 
 func (b *Broker) previewSettingsSnapshotLocked(ctx context.Context, p settings.Request, current settings.Snapshot) (settings.Preview, error) {
+	if err := p.ValidateModelChange(current.Settings, false); err != nil {
+		return settings.Preview{}, &invalidParamsError{err: err}
+	}
 	if current.Revision != p.ExpectedRevision {
 		return settings.Preview{}, fmt.Errorf("settings changed on this device; reload before applying")
 	}
@@ -566,6 +611,9 @@ func (b *Broker) previewEngineSettings(ctx context.Context, p settings.Request, 
 	if err := validateModelSettingsEntry(p); err != nil {
 		return settings.Preview{}, err
 	}
+	if p.ModelChange != nil {
+		return b.previewModelSettings(ctx, p, caller)
+	}
 	ctx, cancel := context.WithTimeout(ctx, settings.CallBudget)
 	defer cancel()
 	b.engineConfigMu.Lock()
@@ -586,6 +634,9 @@ func (b *Broker) previewEngineSettings(ctx context.Context, p settings.Request, 
 func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, caller string) (settingsReceipt, error) {
 	if err := validateModelSettingsEntry(p); err != nil {
 		return settingsReceipt{}, err
+	}
+	if p.ModelChange != nil {
+		return b.applyModelSettings(ctx, p, caller)
 	}
 	ctx, cancel := context.WithTimeout(ctx, settings.CallBudget)
 	defer cancel()
@@ -610,6 +661,9 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	}
 	if err := b.loadEngineSettingsLocked(); err != nil {
 		return settingsReceipt{}, err
+	}
+	if b.modelSettingsPendingLocked(p.Engine) {
+		return settingsReceipt{}, modelSettingsConflict("model settings reconciliation is pending")
 	}
 	fingerprint := sha256.Sum256(settingsJSON(struct {
 		Caller  string
@@ -654,6 +708,9 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 		return settingsReceipt{}, fmt.Errorf("resolve settings errors and port conflicts before applying")
 	}
 	previous := b.engineSettings[p.Engine]
+	record.Model = nil
+	record.Snapshot.CoupledStage, record.Snapshot.PolicyRevision, record.Snapshot.UnresolvedError = "", "", ""
+	record.Snapshot.EffectiveSettings = nil
 	b.engineSettings[p.Engine] = record
 	rollback := func() {
 		if previous == nil {

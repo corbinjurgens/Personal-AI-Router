@@ -8,9 +8,9 @@ SPDX-License-Identifier: Apache-2.0
 Model inspection uses `engine:inspect-model` through the existing settings read
 relay. The shared model configuration contract preserves typed `modelLoads`
 beside ordinary settings, separates requested/resolved/readback state, and
-reserves a selected model patch and target preview for later coupled application.
-The preparatory implementation refuses typed mutations before journal/runtime
-effects. See [Engine settings protocol](ENGINE_SETTINGS.md) for transport bounds,
+applies selected model patches through reviewed, recoverable settings operations.
+Unresolved native/policy steps retain admission and writer fences until recovery
+or explicit local supersession. See [Engine settings protocol](ENGINE_SETTINGS.md) for transport bounds,
 impact/authorization fields and the pending apply-build maintenance exclusion.
 
 Bound engine preparation uses private correlated notifications

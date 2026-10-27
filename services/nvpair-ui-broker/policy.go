@@ -678,6 +678,10 @@ func withoutRevision(raw json.RawMessage) json.RawMessage {
 // adopted and applied the same way, then reported to the caller as a server error.
 func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.Policy, error)) (nodepolicy.Policy, error) {
 	b.engineConfigMu.Lock()
+	if err := b.modelPolicyReservationLocked(); err != nil {
+		b.engineConfigMu.Unlock()
+		return nodepolicy.Policy{}, err
+	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	policy, err := build(r.current)
@@ -1462,6 +1466,16 @@ func (b *Broker) activatePolicyNow() {
 // before the proxy's facades are enabled, so a paused node is paused before it
 // can admit anything. Availability goes first for the same reason.
 func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool {
+	b.engineConfigMu.Lock()
+	err := b.loadEngineSettingsLocked()
+	blocked := err != nil && b.knownModelSettingsFenceLocked()
+	if err == nil {
+		b.reconstructModelSettingsLocked()
+	}
+	b.engineConfigMu.Unlock()
+	if blocked {
+		return false
+	}
 	r := b.nodePolicyRuntime()
 	if !r.acquirePush(ctx) {
 		return false
