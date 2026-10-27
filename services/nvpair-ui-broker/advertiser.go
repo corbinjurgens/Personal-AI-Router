@@ -97,7 +97,10 @@ func (b *Broker) reconcileAdvertise(client *http.Client) {
 	defer b.refreshBindingAdvertisement()
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
-	if b.advertisementWithdrawnLocked("ollama") {
+	if b.loadEngineSettingsLocked() != nil && b.knownModelSettingsFenceLocked() {
+		return
+	}
+	if b.modelSettingsPendingLocked("ollama") || b.advertisementWithdrawnLocked("ollama") {
 		return
 	}
 	// During the managed bind -> backend-move transition, engine:status would
@@ -171,7 +174,10 @@ func (b *Broker) reconcileAdvertiseLMStudio(client *http.Client) {
 	defer b.refreshBindingAdvertisement()
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
-	if b.advertisementWithdrawnLocked("lmstudio") {
+	if b.loadEngineSettingsLocked() != nil && b.knownModelSettingsFenceLocked() {
+		return
+	}
+	if b.modelSettingsPendingLocked("lmstudio") || b.advertisementWithdrawnLocked("lmstudio") {
 		return
 	}
 	enginePort, probe := b.localEnginePort("lmstudio")
@@ -219,7 +225,10 @@ func (b *Broker) reconcileAdvertiseEngine(profile engineProxyProfile, client *ht
 	defer b.refreshBindingAdvertisement()
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
-	if b.advertisementWithdrawnLocked(profile.Name) {
+	if b.loadEngineSettingsLocked() != nil && b.knownModelSettingsFenceLocked() {
+		return
+	}
+	if b.modelSettingsPendingLocked(profile.Name) || b.advertisementWithdrawnLocked(profile.Name) {
 		return
 	}
 
@@ -279,6 +288,15 @@ func (b *Broker) setProxyLocalBackend(p *proxyProcess, engine string, port int, 
 func (b *Broker) setProxyLocalBackendKeyed(p *proxyProcess, engine string, port int, healthy bool, credential string) {
 	if p == nil {
 		return
+	}
+	if healthy {
+		r := b.nodePolicyRuntime()
+		r.mu.Lock()
+		healthy = !r.drains[engine]
+		r.mu.Unlock()
+		if !healthy {
+			credential = ""
+		}
 	}
 	if healthy {
 		if profile, ok := b.frontedEngineProfile(engine); ok {

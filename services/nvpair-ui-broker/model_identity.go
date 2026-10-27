@@ -41,10 +41,10 @@ const rpcMethodNotFound = -32601
 
 // A nonzero-sized allocation gives each worker a distinct, immutable source,
 // including before startRPCWorker has returned its handle.
-type engineManagerSource struct{ marker byte }
+type engineManagerSource struct{ settingsEpoch string }
 
 func (b *Broker) activateEngineManagerSource() *engineManagerSource {
-	source := &engineManagerSource{}
+	source := &engineManagerSource{settingsEpoch: settingsID()}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.engineManagerSource = source
@@ -139,7 +139,7 @@ func (b *Broker) identityChanged() {
 // journal epoch, the applied revision and the settings. A revision being
 // applied, a failed one, or one not yet applied has none.
 func settingsFingerprint(s settings.Snapshot) (string, bool) {
-	if s.Epoch == "" || s.Revision == 0 || s.AppliedRevision != s.Revision || s.Phase == "applying" || s.Phase == "failed" {
+	if s.Epoch == "" || s.Revision == 0 || s.AppliedRevision != s.Revision || s.Phase == "applying" || s.Phase == "failed" || s.UnresolvedError != "" || (s.CoupledStage != "" && s.CoupledStage != "completed") {
 		return "", false
 	}
 	doc, err := json.Marshal(struct {

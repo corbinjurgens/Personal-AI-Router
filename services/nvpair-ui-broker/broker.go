@@ -22,6 +22,7 @@ import (
 	"nvpair-shared/applog"
 	"nvpair-shared/buildinfo"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/durablefile"
 	"nvpair-shared/engines"
 	"nvpair-shared/errors"
 	"nvpair-shared/jsonrpc"
@@ -182,19 +183,22 @@ type Broker struct {
 	settingsApplyMu sync.Mutex
 	engineConfigMu  sync.Mutex
 	// Only live install continuations are retained, under engineConfigMu.
-	pendingInstallStarts map[*pendingInstallStart]struct{}
-	switchInit           sync.Once
-	engineSwitch         *engineSwitchCoordinator
-	boundInit            sync.Once
-	boundEngines         *boundEngineCoordinator
-	engineSettingsLoaded bool
-	engineSettingsError  error
-	engineSettingsEpoch  string
-	engineSettings       map[string]*engineSettingsRecord
-	settingsRelayMu      sync.Mutex
-	settingsCancels      map[string]context.CancelFunc
-	activeSettings       map[string]activeSettingsOperation
-	codec                *Codec
+	pendingInstallStarts   map[*pendingInstallStart]struct{}
+	switchInit             sync.Once
+	engineSwitch           *engineSwitchCoordinator
+	boundInit              sync.Once
+	boundEngines           *boundEngineCoordinator
+	engineSettingsLoaded   bool
+	engineSettingsError    error
+	engineSettingsEpoch    string
+	engineSettings         map[string]*engineSettingsRecord
+	engineSettingsReplacer durablefile.Replacer
+	// Assigned under engineConfigMu; awaited and closed without that mutex.
+	settingsPublicationTail <-chan struct{}
+	settingsRelayMu         sync.Mutex
+	settingsCancels         map[string]context.CancelFunc
+	activeSettings          map[string]activeSettingsOperation
+	codec                   *Codec
 	// Published before workers start; the service-facing session owns the
 	// relay and its physical transport interruption, including blocked writes.
 	engineNotifications  *engineNotificationRelay
@@ -817,12 +821,13 @@ func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
 	if w == nil {
 		return
 	}
-	// An unreadable journal must not discard the component stores' enabled
-	// intent. Recovery logs the failure; restore still uses the saved runtime.
+	// Reconstruct settings withdrawal before restoring enabled intent.
 	if !b.recoverEngineSwitch() {
 		return
 	}
-	b.recoverEngineSettings()
+	if !b.recoverEngineSettings() {
+		return
+	}
 	if b.skipRestoreWhilePaused() {
 		slog.Info("node is paused; engines are restored when it resumes")
 		return
