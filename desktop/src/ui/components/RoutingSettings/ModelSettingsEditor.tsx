@@ -55,10 +55,7 @@ export default function ModelSettingsEditor({
     )
     const fields = inputs.text === text && inputs.profile === profile?.key ? inputs.fields : {}
     const hasErrors = Object.values(fields).some(field => field.message !== undefined)
-    useEffect(
-        () => onValidityChange(!hasErrors && draft.ok),
-        [hasErrors, draft.ok, onValidityChange]
-    )
+    useEffect(() => onValidityChange(!hasErrors), [hasErrors, onValidityChange])
 
     // Only target-reported settings establish a peer lock. Raw draft edits cannot lift it.
     const stored =

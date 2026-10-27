@@ -167,7 +167,7 @@ export default function ModelSettingsPanel({
                         Discard draft and reload
                     </Button>
                     <Button
-                        disabled={routing ? !routing.canSave : disabled || !valid || !profiles.ok}
+                        disabled={!profiles.ok || (routing ? !routing.canSave : disabled || !valid)}
                         onClick={() =>
                             routing
                                 ? routing.onSave()
