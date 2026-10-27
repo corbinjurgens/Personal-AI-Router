@@ -434,13 +434,9 @@ describe('native local build apply registration', () => {
         expect(start).toMatchObject({
             available: false,
             value: null,
-            refusal: { code: 'unavailable' }
+            refusal: { code: 'consent_required' }
         })
-        expect(call).toHaveBeenLastCalledWith('service/build-apply-start', {
-            previewId: 'preview_1',
-            consent: { allowInterruption: true, allowEngineStop: false },
-            gui: { pid: process.pid, executable: process.execPath, buildId: '' }
-        })
+        expect(call.mock.calls.map(([method]) => method)).toEqual(['service/build-apply-preview'])
         expect(vi.mocked(JsonRpcSocketClient.prototype.start)).toHaveBeenCalledTimes(1)
     })
     it('does not launch or request anything without an attached ready service', async () => {
@@ -480,8 +476,17 @@ describe('native local build apply registration', () => {
         })
         await expect(pending).rejects.toThrow('connection changed')
     })
-    it('exits unavailable command modes before any service request', async () => {
+    it('acknowledges build startup through an attach-only client', async () => {
+        const ready = vi.spyOn(supervisor, 'acknowledgeBuildApplyGui').mockResolvedValue({
+            available: false,
+            value: null,
+            refusal: { code: 'unavailable', detail: 'GUI acknowledgement unavailable.' }
+        })
         expect(await handleBuildApplyEntry(['--pair-build-apply=operation_1'])).toBe(69)
+        expect(ready).toHaveBeenCalledExactlyOnceWith({
+            operationId: 'operation_1',
+            gui: { pid: process.pid, executable: process.execPath, buildId: '' }
+        })
         expect(await handleBuildApplyEntry(['--pair-build-apply=../bad'])).toBe(64)
         expect(await handleBuildApplyEntry([])).toBeNull()
         expect(JsonRpcSocketClient.prototype.call).not.toHaveBeenCalled()
