@@ -74,7 +74,7 @@ func policyPeerServer(t *testing.T, peerDir string) (*httptest.Server, func() []
 		mu.Lock()
 		calls = append(calls, policyCall{method: method, caller: caller, params: p})
 		mu.Unlock()
-		return json.RawMessage(`{"policy":{"revision":"9007199254740993123"},"availability":"paused"}`), nil
+		return json.RawMessage(`{"policy":{"revision":"9007199254740993123"},"availability":"paused","pausedBy":"peer"}`), nil
 	}
 	mesh := clustertrust.Open(peerDir)
 	server := httptest.NewUnstartedServer((&controlServer{exec: exec, mesh: mesh}).mux())
@@ -387,6 +387,62 @@ func TestPolicyRelayCorrelatesReplies(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("abandoned call sent no policy:cancel")
+	}
+}
+
+func TestPolicyRelayPauseModeAndProvenance(t *testing.T) {
+	selfDir, peerDir := pairedPolicyDirs(t)
+	grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
+	server, calls := policyPeerServer(t, peerDir)
+	config, ok := clustertrust.Open(selfDir).ClientTLSConfig("uuid-peer")
+	if !ok {
+		t.Fatal("fixture pin unavailable")
+	}
+	transport := &http.Transport{TLSClientConfig: config}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &remoteClient{base: server.URL, controlReadyHTTP: &http.Client{Transport: transport}}
+	for _, tc := range []struct{ name, raw string }{
+		{"omitted", ""}, {"configured", `"configured"`}, {"immediate", `"immediate"`},
+		{"explicit null retained for target validation", `null`},
+		{"invalid mode retained for target validation", `"fast"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(calls())
+			result, err := client.postPolicy(context.Background(), controlAvailabilitySetPath, policyBody{NodeID: "forged-local-node", State: "paused", PauseMode: json.RawMessage(tc.raw)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response struct{ Availability, PausedBy string }
+			if err := json.Unmarshal(result, &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Availability != "paused" || response.PausedBy != "peer" {
+				t.Fatalf("lost target provenance: %+v", response)
+			}
+			got := calls()[before:]
+			if len(got) != 1 || got[0].caller != "uuid-self" || got[0].params.NodeID != "" || got[0].params.State != "paused" || string(got[0].params.PauseMode) != tc.raw {
+				t.Fatalf("relay lost authenticated caller or request mode: %+v", got)
+			}
+		})
+	}
+}
+
+func TestPolicyRelayImmediateRefusalDiagnostic(t *testing.T) {
+	selfDir, peerDir := pairedPolicyDirs(t)
+	grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
+	const message = "Immediate pause must be requested on this node."
+	server := policyReplyPeerServer(t, peerDir, -32602, message)
+	config, ok := clustertrust.Open(selfDir).ClientTLSConfig("uuid-peer")
+	if !ok {
+		t.Fatal("fixture pin unavailable")
+	}
+	transport := &http.Transport{TLSClientConfig: config}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &remoteClient{base: server.URL, controlReadyHTTP: &http.Client{Transport: transport}}
+	_, err := client.postPolicy(context.Background(), controlAvailabilitySetPath, policyBody{State: "paused", PauseMode: json.RawMessage(`"immediate"`)})
+	var refusal *codedError
+	if !errors.As(err, &refusal) || refusal.code != -32602 || refusal.message != message {
+		t.Fatalf("immediate refusal = %v; want exact target diagnostic", err)
 	}
 }
 

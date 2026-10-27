@@ -434,6 +434,7 @@ type policyGetResult struct {
 	ModelConfiguration nodepolicy.ModelConfiguration `json:"modelConfiguration"`
 	Policy             nodepolicy.Policy             `json:"policy"`
 	Availability       nodepolicy.Availability       `json:"availability"`
+	PausedBy           nodepolicy.PauseOrigin        `json:"pausedBy,omitempty"`
 	// RecoveryRequired is true while the node runs on the recovery policy
 	// because its file was unusable; an explicit policy:set clears it.
 	RecoveryRequired bool `json:"recoveryRequired"`
@@ -452,6 +453,7 @@ type policySetResult struct {
 // and whether the proxy enforces the persisted revision that carries it.
 type availabilitySetResult struct {
 	Availability nodepolicy.Availability `json:"availability"`
+	PausedBy     nodepolicy.PauseOrigin  `json:"pausedBy,omitempty"`
 	// Revision is the persisted revision the activation fields describe.
 	Revision string `json:"revision"`
 	policyActivation
@@ -459,9 +461,10 @@ type availabilitySetResult struct {
 
 // policyParams is the params shape of every policy method.
 type policyParams struct {
-	NodeID string          `json:"nodeId,omitempty"`
-	Policy json.RawMessage `json:"policy,omitempty"`
-	State  string          `json:"state,omitempty"`
+	NodeID    string          `json:"nodeId,omitempty"`
+	Policy    json.RawMessage `json:"policy,omitempty"`
+	State     string          `json:"state,omitempty"`
+	PauseMode json.RawMessage `json:"pauseMode,omitempty"`
 	// ExpectedPersistedRevision is the policy.revision of the policy:get the
 	// caller's draft is based on. Only policy:set reads it; it stays raw so a
 	// stray value on another method is ignored rather than rejected.
@@ -518,7 +521,11 @@ func (b *Broker) localPolicy() policyGetResult {
 	e := b.captureModelConfig()
 	e.Policy.EngineBindings = slices.Clone(e.Policy.EngineBindings)
 	configuration := b.modelConfiguration(e)
-	return policyGetResult{ModelConfiguration: configuration, Policy: e.Policy, Availability: e.Live, RecoveryRequired: e.Recovery, policyActivation: e.Activation}
+	origin := e.Policy.PausedBy
+	if e.Live == nodepolicy.Available {
+		origin = ""
+	}
+	return policyGetResult{ModelConfiguration: configuration, Policy: e.Policy, Availability: e.Live, PausedBy: origin, RecoveryRequired: e.Recovery, policyActivation: e.Activation}
 }
 
 // activationOf is the activation of one revision right now. A result or
@@ -538,11 +545,12 @@ type peerPolicyGetResult struct {
 	ModelConfiguration nodepolicy.ModelConfiguration `json:"modelConfiguration"`
 	Policy             nodepolicy.PeerPolicy         `json:"policy"`
 	Availability       nodepolicy.Availability       `json:"availability"`
+	PausedBy           nodepolicy.PauseOrigin        `json:"pausedBy,omitempty"`
 }
 
 func (b *Broker) peerPolicy() peerPolicyGetResult {
 	local := b.localPolicy()
-	return peerPolicyGetResult{ModelConfiguration: local.ModelConfiguration, Policy: local.Policy.PeerProjection(), Availability: local.Availability}
+	return peerPolicyGetResult{ModelConfiguration: local.ModelConfiguration, Policy: local.Policy.PeerProjection(), Availability: local.Availability, PausedBy: local.PausedBy}
 }
 
 // setLocalPolicy validates, persists and applies a new policy. Availability and
@@ -871,12 +879,12 @@ func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyPara
 		}
 		return policySetResult{ModelConfiguration: b.modelConfigurationFor(policy), Policy: policy, policyActivation: b.activationOf(policy.Revision)}, nil
 	case methodSetAvailability:
-		availability, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedLocally, "")
+		_, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedLocally, "")
 		if err != nil {
 			return nil, err
 		}
 		local := b.localPolicy()
-		return availabilitySetResult{Availability: availability, Revision: local.Policy.Revision, policyActivation: local.policyActivation}, nil
+		return availabilitySetResult{Availability: local.Availability, PausedBy: local.PausedBy, Revision: local.Policy.Revision, policyActivation: local.policyActivation}, nil
 	default:
 		return nil, fmt.Errorf("unsupported policy method %q", method)
 	}
@@ -886,11 +894,7 @@ func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyPara
 // method and the paired node's relayed one; origin says which of the two made it
 // and caller is the verified paired node (empty for a local caller).
 func (b *Broker) setAvailabilityParams(ctx context.Context, p policyParams, origin nodepolicy.PauseOrigin, caller string) (nodepolicy.Availability, error) {
-	state := nodepolicy.Availability(p.State)
-	if state != nodepolicy.Available && state != nodepolicy.Paused {
-		return "", &invalidParamsError{fmt.Errorf("state must be %q or %q", nodepolicy.Available, nodepolicy.Paused)}
-	}
-	return b.setAvailabilityAs(ctx, state, origin, caller)
+	return b.setAvailabilityRequestAs(ctx, nodepolicy.Availability(p.State), origin, caller, p.PauseMode)
 }
 
 // relayPolicyToPeer forwards a policy call aimed at another node through
@@ -956,6 +960,7 @@ func (b *Broker) announceRemotePolicyChange(method, nodeID string, result json.R
 		ModelConfiguration *nodepolicy.ModelConfiguration `json:"modelConfiguration,omitempty"`
 		Policy             json.RawMessage                `json:"policy"`
 		Availability       string                         `json:"availability"`
+		PausedBy           nodepolicy.PauseOrigin         `json:"pausedBy,omitempty"`
 	}
 	if json.Unmarshal(result, &r) != nil {
 		return
@@ -971,7 +976,10 @@ func (b *Broker) announceRemotePolicyChange(method, nodeID string, result json.R
 		}
 	case methodSetAvailability:
 		if r.Availability != "" {
-			b.notifyClients(notifyAvailabilityChanged, map[string]any{"nodeId": nodeID, "availability": r.Availability})
+			if r.Availability == string(nodepolicy.Available) {
+				r.PausedBy = ""
+			}
+			b.notifyClients(notifyAvailabilityChanged, map[string]any{"nodeId": nodeID, "availability": r.Availability, "pausedBy": r.PausedBy})
 		}
 	}
 }
@@ -1073,11 +1081,12 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 	// The peer sees what its policy:get shows of this node, which has no
 	// activation fields. A resume of a node paused on the node itself is
 	// refused (setAvailability).
-	availability, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedByPeer, req.Caller)
+	_, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedByPeer, req.Caller)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"availability": availability}, nil
+	local := b.localPolicy()
+	return map[string]any{"availability": local.Availability, "pausedBy": local.PausedBy}, nil
 }
 
 func (b *Broker) cancelPolicyRelay(raw json.RawMessage) {

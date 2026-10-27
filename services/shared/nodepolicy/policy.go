@@ -48,6 +48,30 @@ const legacySchemaVersion = 1
 // other machines.
 type Availability string
 
+// PauseMode selects timing for one availability request, never saved policy.
+type PauseMode string
+
+const (
+	PauseConfigured PauseMode = "configured"
+	PauseImmediate  PauseMode = "immediate"
+)
+
+// ParsePauseMode defaults an omitted pause mode to configured. Explicit null,
+// unknown values and any mode on Resume are invalid.
+func ParsePauseMode(state Availability, raw json.RawMessage) (PauseMode, error) {
+	if len(raw) == 0 {
+		return PauseConfigured, nil
+	}
+	if state != Paused {
+		return "", errors.New("pauseMode is only valid with state paused")
+	}
+	var mode PauseMode
+	if err := json.Unmarshal(raw, &mode); err != nil || (mode != PauseConfigured && mode != PauseImmediate) {
+		return "", errors.New("pauseMode must be configured or immediate")
+	}
+	return mode, nil
+}
+
 const (
 	// Available accepts work.
 	Available Availability = "available"

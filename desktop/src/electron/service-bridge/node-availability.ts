@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { NodeAvailability } from '@/shared/types/node-policy'
+import type { NodeAvailability, NodeAvailabilityResult } from '@/shared/types/node-policy'
 import type { JsonValue } from './json-rpc-client'
 
 /** What the tray's pause toggle shows and does for an availability. */
@@ -18,6 +18,10 @@ const PAUSING_LABEL = 'Pausing…'
 
 export function availabilityValue(value: JsonValue | undefined): NodeAvailability | null {
     return value === 'available' || value === 'draining' || value === 'paused' ? value : null
+}
+
+export function pauseOriginValue(value: JsonValue | undefined): NodeAvailabilityResult['pausedBy'] {
+    return value === 'local' || value === 'peer' ? value : undefined
 }
 
 function objectValue(value: JsonValue | undefined): Record<string, JsonValue> | null {
@@ -47,12 +51,17 @@ export function availabilityMenuItem(availability: NodeAvailability | null): Ava
  */
 export class NodeAvailabilityState {
     private current: NodeAvailability | null = null
+    private origin: NodeAvailabilityResult['pausedBy']
     private readonly listeners = new Set<() => void>()
 
     constructor(private readonly getSelfId: () => string | null) {}
 
     get availability(): NodeAvailability | null {
         return this.current
+    }
+
+    get pausedBy(): NodeAvailabilityResult['pausedBy'] {
+        return this.origin
     }
 
     menuItem(): AvailabilityMenuItem {
@@ -67,8 +76,9 @@ export class NodeAvailabilityState {
 
     /** Apply a `policy:get` or `node:set-availability` result; both carry `availability`. */
     applyResult(result: JsonValue | undefined): void {
-        const next = availabilityValue(objectValue(result)?.availability)
-        if (next) this.set(next)
+        const body = objectValue(result)
+        const next = availabilityValue(body?.availability)
+        if (next) this.set(next, pauseOriginValue(body?.pausedBy))
     }
 
     /** Apply `node:availability-changed {nodeId, availability, active}`. */
@@ -78,7 +88,7 @@ export class NodeAvailabilityState {
         const selfId = this.getSelfId()
         if (selfId === null || body.nodeId !== selfId) return
         const next = availabilityValue(body.availability)
-        if (next) this.set(next)
+        if (next) this.set(next, pauseOriginValue(body.pausedBy))
     }
 
     /** Forget the state, as when the broker is gone and the real one is unknown. */
@@ -86,9 +96,14 @@ export class NodeAvailabilityState {
         this.set(null)
     }
 
-    private set(next: NodeAvailability | null): void {
-        if (next === this.current) return
+    private set(
+        next: NodeAvailability | null,
+        pausedBy?: NodeAvailabilityResult['pausedBy']
+    ): void {
+        const origin = next === 'available' || next === null ? undefined : pausedBy
+        if (next === this.current && origin === this.origin) return
         this.current = next
+        this.origin = origin
         for (const listener of Array.from(this.listeners)) listener()
     }
 }

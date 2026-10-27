@@ -176,8 +176,7 @@ export interface NodePolicySnapshot {
 }
 
 /** A node's saved policy and live availability. */
-export interface NodePolicyDocument extends NodePolicySnapshot {
-    availability: NodeAvailability
+export interface NodePolicyDocument extends NodePolicySnapshot, NodeAvailabilityResult {
     /** The saved file was unreadable and defaults are in use. */
     recoveryRequired: boolean
 }
@@ -194,9 +193,14 @@ export interface NodePolicyWrite extends NodePolicyTarget {
 }
 
 /** A node's availability changed; the broker relays every node's changes under its id. */
-export interface NodeAvailabilityChange {
+export interface NodeAvailabilityChange extends NodeAvailabilityResult {
     nodeId: string
+}
+
+/** Target-authoritative live state; absent provenance remains unknown. */
+export interface NodeAvailabilityResult {
     availability: NodeAvailability
+    pausedBy?: 'local' | 'peer'
 }
 
 /** A node's saved policy changed, as JSON text like {@link NodePolicySnapshot.policy}. */
@@ -206,6 +210,8 @@ export interface NodePolicyChange extends NodePolicySnapshot {
 
 export interface NodeAvailabilityRequest extends NodePolicyTarget {
     state: RequestedAvailability
+    /** Omission uses saved drain options. Immediate is local-only and currently unavailable. */
+    pauseMode?: 'configured' | 'immediate'
 }
 
 /** Cancels one job; only the node the job originated on acts on it. */
