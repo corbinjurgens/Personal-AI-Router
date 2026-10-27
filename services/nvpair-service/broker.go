@@ -217,24 +217,23 @@ func (s *Service) runBroker(run *brokerRun) {
 	run.code = run.proc.wait()
 	close(run.exited)
 
-	drain := time.After(outputDrainTimeout)
-	for _, done := range []chan struct{}{stdoutDone, stderrDone} {
-		select {
-		case <-done:
-		case <-drain:
+	drain := func() {
+		timer := time.NewTimer(outputDrainTimeout)
+		defer timer.Stop()
+		for _, done := range []chan struct{}{stdoutDone, stderrDone} {
+			select {
+			case <-done:
+			case <-timer.C:
+				return
+			}
 		}
 	}
+	drain()
 	run.proc.closeOutput()
 	// Bounded again: on Windows closing a pipe does not interrupt a read that
 	// is already blocked, so a straggler holding the write end could otherwise
 	// stall supervision. A pump left behind exits when that straggler does.
-	drain = time.After(outputDrainTimeout)
-	for _, done := range []chan struct{}{stdoutDone, stderrDone} {
-		select {
-		case <-done:
-		case <-drain:
-		}
-	}
+	drain()
 	s.brokerExited(run)
 }
 
