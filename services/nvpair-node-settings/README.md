@@ -39,8 +39,8 @@ SPDX-License-Identifier: Apache-2.0
 
 A typed key-value store for per-node NVPAIR preferences, persisted to a
 JSON file in the user's config directory and exposed to the supervising
-broker over JSON-RPC. Pure datastore: no business logic, no
-auto-generation, no defaulting beyond Go zero-values.
+broker over JSON-RPC. It is a datastore with product defaults and no
+auto-generation.
 
 ## Communication
 
@@ -61,7 +61,7 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 - Writes use the shared `durablefile` helper: write a unique temporary sibling, sync it, replace the destination, then confirm replacement durability. A failure before replacement preserves the old file and in-memory settings. On `ErrReplaced`, the complete new bytes are already on disk: setters adopt the new settings while returning the persistence error, with no success notification. Getters report the applied value. A crash cannot leave a half-file; durability failures can still lose the replacement after power loss.
 - File mode is pinned to `0o600` (parent directory `0o700`) regardless of umask. The previous cluster-secret rationale is gone, but per-user settings still shouldn't be world-readable on shared hosts.
 - A malformed file on load is renamed aside as `settings.json.corrupt-<unix-ts>` and the subprocess starts with product defaults — refusing to start used to wedge every UI settings call behind a parse error.
-- Unknown JSON keys on load are silently ignored, and missing fields take Go zero-values. Adding or removing a setting is a non-breaking on-disk change: older settings.json files with the removed `auto_join_invites` / `cluster_secret` keys load cleanly under the new schema and those keys are dropped on the next save.
+- Unknown JSON keys on load are silently ignored, and missing fields take product defaults (`force_ports` is true; the other fields use zero-values). Removed `auto_join_invites` / `cluster_secret` keys are dropped on the next save.
 
 ## Settings schema
 
@@ -77,7 +77,7 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 The four stored fields:
 
 - `force_ports` (bool) — when true, NVPAIR attempts to reserve the Ollama compatibility port for its proxy. Running or unidentified owners are left untouched and reported as blocked; this setting does not authorize a generic process kill. An explicitly saved `false` is preserved as an opt-out.
-- `cluster_auto_sync` (bool) — when true, this node accepts automatic syncs of cluster-managed state from peers.
+- `cluster_auto_sync` (bool) — stored preference; no service currently acts on it or grants peer management permission because of it.
 - `cluster_id` (string) — opaque, stable identifier for the cluster this node belongs to. Empty means "not in a cluster". The wire format is byte-for-byte (no normalization, no trimming) so a future migration of the id format doesn't have to coordinate with the datastore.
 - `cluster_friendly_name` (string) — human-presentable label for the cluster (e.g. "Lab 3 desks"). Display only — anything operational keys off `cluster_id`.
 
@@ -128,7 +128,7 @@ as a simple ack so React-init code can rely on a single round-trip.
 
 ```json
 // force-ports (bool)
-{"jsonrpc":"2.0","id":1,"method":"settings/get-force-ports"}                                            // -> {"value": false}
+{"jsonrpc":"2.0","id":1,"method":"settings/get-force-ports"}                                            // -> {"value": true} by default
 {"jsonrpc":"2.0","id":2,"method":"settings/set-force-ports","params":{"value": true}}                   // -> {"ok": true}
 
 // cluster-auto-sync (bool)

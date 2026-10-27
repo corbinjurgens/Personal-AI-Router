@@ -4,11 +4,238 @@
 package buildinfo
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"testing"
 )
+
+// A tiny inert ELF with a real inline Go build-info section, never compiled or
+// executed. The standard parser still decodes the actual embedded metadata.
+func metadataFixture(t *testing.T, settings string) []byte {
+	t.Helper()
+	framed := "0123456789abcdef" + "path\tfixture\n" + settings + "0123456789abcdef"
+	blob := make([]byte, 32)
+	copy(blob, []byte("\xff Go buildinf:"))
+	blob[14], blob[15] = 8, 2
+	blob = binary.AppendUvarint(blob, uint64(len("go1.25.0")))
+	blob = append(blob, "go1.25.0"...)
+	blob = binary.AppendUvarint(blob, uint64(len(framed)))
+	blob = append(blob, framed...)
+	names := []byte("\x00.go.buildinfo\x00.shstrtab\x00")
+	data := make([]byte, 312)
+	copy(data, []byte{0x7f, 'E', 'L', 'F', 2, 1, 1})
+	le := binary.LittleEndian
+	le.PutUint16(data[16:], 2)
+	le.PutUint16(data[18:], 62)
+	le.PutUint32(data[20:], 1)
+	le.PutUint64(data[32:], 64)
+	le.PutUint64(data[40:], 120)
+	le.PutUint16(data[52:], 64)
+	le.PutUint16(data[54:], 56)
+	le.PutUint16(data[56:], 1)
+	le.PutUint16(data[58:], 64)
+	le.PutUint16(data[60:], 3)
+	le.PutUint16(data[62:], 2)
+	program := data[64:120]
+	le.PutUint32(program, 1) // PT_LOAD makes the build-info address readable.
+	le.PutUint32(program[4:], 6)
+	le.PutUint64(program[8:], 312)
+	le.PutUint64(program[16:], 4096)
+	le.PutUint64(program[24:], 4096)
+	le.PutUint64(program[32:], uint64(len(blob)))
+	le.PutUint64(program[40:], uint64(len(blob)))
+	le.PutUint64(program[48:], 16)
+	section := data[184:248]
+	le.PutUint32(section, 1)
+	le.PutUint32(section[4:], 1)
+	le.PutUint64(section[8:], 3)
+	le.PutUint64(section[16:], 4096)
+	le.PutUint64(section[24:], 312)
+	le.PutUint64(section[32:], uint64(len(blob)))
+	le.PutUint64(section[48:], 16)
+	section = data[248:312]
+	le.PutUint32(section, 15)
+	le.PutUint32(section[4:], 3)
+	le.PutUint64(section[24:], uint64(312+len(blob)))
+	le.PutUint64(section[32:], uint64(len(names)))
+	data = append(data, blob...)
+	return append(data, names...)
+}
+
+func TestEmbeddedFileIdentityKeepsMissingVCSUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inert-service")
+	data := metadataFixture(t, "")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := InspectMetadata(path)
+	if err != nil {
+		t.Fatalf("inspect inert fixture: %v", err)
+	}
+	if got.ID != "" || got.Revision != nil || got.Dirty != nil {
+		t.Fatalf("missing VCS = %+v", got)
+	}
+	// The artifact remains measurable independently of the absent source stamp.
+	hash := sha256.Sum256(data)
+	if hash == ([sha256.Size]byte{}) {
+		t.Fatal("missing artifact hash")
+	}
+	id, err := InspectFile(path)
+	if err != nil || id != "" {
+		t.Fatalf("optional ID = %q, err %v", id, err)
+	}
+}
+
+func TestMetadataRevisionDoesNotAcceptBuildIDSuffix(t *testing.T) {
+	got := metadataFromSettings([]debug.BuildSetting{
+		{Key: "vcs", Value: "git"},
+		{Key: "vcs.revision", Value: "0123456789abcdef0123456789abcdef01234567+dirty"},
+		{Key: "vcs.modified", Value: "false"},
+	})
+	if got.ID != "" || got.Revision != nil {
+		t.Fatalf("malformed revision = %+v", got)
+	}
+}
+
+func TestEmbeddedFileIdentityPreservesActualSourceFields(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	test := func(name, modified string, wantDirty *bool, wantID ID) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			settings := "build\tvcs=git\nbuild\tvcs.revision=" + revision + "\n"
+			if modified != "" {
+				settings += "build\tvcs.modified=" + modified + "\n"
+			}
+			path := filepath.Join(t.TempDir(), "inert-service")
+			if err := os.WriteFile(path, metadataFixture(t, settings), 0600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := InspectMetadata(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ID != wantID || got.Revision == nil || *got.Revision != revision {
+				t.Fatalf("source = %+v", got)
+			}
+			if wantDirty == nil {
+				if got.Dirty != nil {
+					t.Fatalf("invented dirty state %v", *got.Dirty)
+				}
+			} else if got.Dirty == nil || *got.Dirty != *wantDirty {
+				t.Fatalf("dirty = %v, want %v", got.Dirty, *wantDirty)
+			}
+		})
+	}
+	clean, dirty := false, true
+	test("clean", "false", &clean, ID("git:"+revision))
+	test("dirty", "true", &dirty, ID("git:"+revision+"+dirty"))
+	test("missing dirty does not mean clean", "", nil, "")
+}
+
+func TestMetadataReaderEnforcesReadBudgetAndDescriptorRange(t *testing.T) {
+	data := bytes.NewReader(make([]byte, 128))
+	reader := &metadataReader{reader: io.NewSectionReader(data, 0, data.Size()), remaining: 16}
+	if _, err := reader.ReadAt(make([]byte, 16), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.ReadAt(make([]byte, 1), 0); err == nil || !reader.exhausted {
+		t.Fatal("read budget not enforced")
+	}
+	reader = &metadataReader{reader: io.NewSectionReader(data, 0, data.Size()), remaining: 1024}
+	if _, err := reader.ReadAt(make([]byte, 2), 127); err == nil || !reader.exhausted {
+		t.Fatal("descriptor range not enforced")
+	}
+}
+
+func TestMetadataInspectionRejectsNonRegularAndOversizedFiles(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InspectMetadata(root); err == nil {
+		t.Fatal("accepted a directory")
+	}
+	path := filepath.Join(root, "oversized")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(MaxExecutableBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMetadata(path); err == nil {
+		t.Fatal("accepted an oversized regular file")
+	}
+}
+
+func TestMetadataInspectionRejectsSubstitutedPath(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "candidate")
+	data := metadataFixture(t, "")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Supply a different path after opening, without relying on the host's
+	// ability to rename an open executable. The held descriptor is unchanged.
+	replacement := filepath.Join(root, "replacement")
+	if err := os.WriteFile(replacement, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectOpened(replacement, file, info); err == nil {
+		t.Fatal("accepted substituted candidate path")
+	}
+}
+
+func TestMetadataInspectionRejectsMalformedAllocationHeaders(t *testing.T) {
+	test := func(name string, data []byte) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "inert")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := InspectMetadata(path); err == nil {
+				t.Fatal("accepted malformed metadata")
+			}
+		})
+	}
+	elf := metadataFixture(t, "")
+	binary.LittleEndian.PutUint16(elf[60:], 0xffff)
+	test("ELF section count", elf)
+	pe := make([]byte, 128)
+	copy(pe, "MZ")
+	binary.LittleEndian.PutUint32(pe[60:], 64)
+	copy(pe[64:], []byte{'P', 'E', 0, 0})
+	binary.LittleEndian.PutUint32(pe[80:], 0xffffffff)
+	test("PE symbol count", pe)
+	macho := make([]byte, 128)
+	binary.LittleEndian.PutUint32(macho, 0xfeedfacf)
+	binary.LittleEndian.PutUint32(macho[16:], 1)
+	binary.LittleEndian.PutUint32(macho[20:], 80)
+	binary.LittleEndian.PutUint32(macho[32:], 0xb)
+	binary.LittleEndian.PutUint32(macho[36:], 80)
+	binary.LittleEndian.PutUint32(macho[92:], 0xffffffff)
+	test("Mach-O indirect symbol allocation", macho)
+	test("truncated header", []byte("MZ"))
+	test("not executable", []byte(strings.Repeat("inert", 32)))
+}
 
 func TestFromSettingsRequiresCompleteGitMetadata(t *testing.T) {
 	test := func(name, vcs, revision, modified string, want ID) {

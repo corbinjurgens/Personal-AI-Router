@@ -362,6 +362,8 @@ func (s *Service) handleClientRequest(c *client, msg *jsonrpc.Message) bool {
 		c.respond(msg.ID, s.status())
 	case msg.Method == methodStop:
 		go s.handleStop(c, msg.ID)
+	case isBuildApplyMethod(msg.Method):
+		s.handleBuildApply(c, msg)
 	case msg.Method == methodShutdown:
 		// A client's shutdown means "I am leaving", not "stop the broker".
 		c.respond(msg.ID, nil)
@@ -569,6 +571,10 @@ func isBaseline(method string) bool {
 // handleBrokerNotification caches what late clients need and broadcasts the
 // frame to every client.
 func (s *Service) handleBrokerNotification(run *brokerRun, method string, frame []byte) {
+	// Only the service transaction owner may publish this local operation state.
+	if method == "service/build-apply-changed" {
+		return
+	}
 	if method == notifyEngineNotificationsReset {
 		s.resetEngineNotifications(run)
 		return

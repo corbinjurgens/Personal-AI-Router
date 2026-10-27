@@ -452,20 +452,24 @@ describe('intent typed API and renderer store', () => {
         expect(fixture.unsubscribe).toHaveBeenCalledOnce()
         expect(fixture.removed).toHaveBeenCalledOnce()
     })
-    it('does not install late lifecycle subscriptions after teardown during the initial fetch', async () => {
+    it('removes lifecycle subscriptions after teardown during the initial fetch', async () => {
         const { api } = apiFixture()
         const pending = deferred<EngineInitialState>()
         vi.spyOn(api, 'getInitialState').mockReturnValue(pending.promise)
         const descriptors = vi.spyOn(api, 'onDescriptorsChanged')
         const states = vi.spyOn(api, 'onStateChanged')
-        vi.stubGlobal('window', { pairApi: { engines: api, nodes: { onRemove: vi.fn() } } })
+        const unsubscribe = vi.fn<() => void>()
+        vi.stubGlobal('window', {
+            pairApi: { engines: api, nodes: { onRemove: () => unsubscribe } }
+        })
         const initializing = useEngineStatusStore.getState().initialize()
         useEngineStatusStore.getState().cleanup()
         pending.resolve(initial)
         await initializing
         expect(useEngineStatusStore.getState().intent).toBeNull()
-        expect(descriptors).not.toHaveBeenCalled()
-        expect(states).not.toHaveBeenCalled()
+        expect(descriptors).toHaveBeenCalledOnce()
+        expect(states).toHaveBeenCalledOnce()
+        expect(unsubscribe).toHaveBeenCalledOnce()
     })
     it('cleans subscriptions and ignores read and callback completion after teardown', async () => {
         const fixture = storeFixture()

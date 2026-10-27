@@ -148,8 +148,8 @@ write your own client against its API.
 ### Start with the Terminal Interface
 
 This is the recommended way to use a services-only build, and the interface
-intended for headless systems. `nvpair-tui` launches and supervises its own
-broker, so nothing else needs to be running and there is no wiring to do:
+intended for headless systems. `nvpair-tui` attaches to `nvpair-service`,
+starting it if needed; the service owns the broker:
 
 Linux and macOS:
 
@@ -165,9 +165,9 @@ cd services
 build\bin\nvpair-tui.exe
 ```
 
-Pass `--broker-path` if the broker is not beside the `nvpair-tui` executable. Do
-not run the terminal interface and the desktop application at the same time. They
-compete for the same services, engines, and ports.
+Pass `--service-path` if `nvpair-service` is not beside the `nvpair-tui`
+executable. The terminal interface and desktop application can attach to the
+same service at the same time.
 
 [Using the PAIR terminal interface](terminal-interface.mdx) covers what to do
 after it opens: pairing, engines, models, routing, and settings. It also lists

@@ -9,6 +9,7 @@ import { ipcRenderer } from 'electron'
 import { PlatformDisplayName } from '@/shared/types/platform'
 import { platformDisplayName, currentPlatform } from '@/shared/utils/platform'
 import { inferenceDemoApi, type IInferenceDemoApi } from '@/preload/api/inference-demo.api'
+import { buildApplyApi, type IBuildApplyApi } from '@/preload/api/build-apply.api'
 
 export type { IWindowActionApi } from '@/preload/api/window.api'
 export type { IServiceApi } from '@/preload/api/service.api'
@@ -22,6 +23,8 @@ export type { IInferenceDemoApi } from '@/preload/api/inference-demo.api'
  * operations that require Electron main process access.
  */
 export interface IWindowApi {
+    /** Native staged-build picker, local service handoff and operation readback. */
+    buildApply: IBuildApplyApi
     /** OS of the machine running the service ('Windows' | 'Linux' | 'MacOS'). */
     platform: PlatformDisplayName
     /** Electron window management, clipboard, external links, tray. */
@@ -49,6 +52,7 @@ export interface IWindowApi {
 }
 
 export const windowApi: IWindowApi = {
+    buildApply: buildApplyApi,
     platform: platformDisplayName(currentPlatform()),
     window: windowActionApi,
     service: serviceApi,

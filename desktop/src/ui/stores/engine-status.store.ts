@@ -30,7 +30,7 @@ interface EngineStatusState {
     intent: EngineIntentSnapshot | null
     statusByNode: EngineStatusByNode
     descriptors: Map<EngineType, EngineDescriptor>
-    initialize(initial?: EngineInitialState): Promise<void>
+    initialize(initial?: EngineInitialState | Promise<EngineInitialState>): Promise<void>
     cleanup(): void
     /** Always defined; uses {@link emptyEngineStatus} when the service has not reported this pair. */
     getStatus(nodeId: string, engineType: EngineType): EngineStatusData
@@ -53,6 +53,9 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
         unsubs = []
         const generation = ++initializationGeneration
         const intentRead = ++intentGeneration
+        const changes: Array<{ status: EngineStatusData } | { removed: string }> = []
+        let loading = true
+        let pushedDescriptors: EngineDescriptor[] | undefined
         set({ intent: null })
         if (!window.pairApi) return
         unsubs.push(
@@ -60,6 +63,31 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
                 if (generation !== initializationGeneration) return
                 intentGeneration++
                 set({ intent })
+            }),
+            window.pairApi.engines.onDescriptorsChanged(descriptors => {
+                if (generation !== initializationGeneration) return
+                if (loading) pushedDescriptors = descriptors
+                set({ descriptors: descriptorMap(descriptors) })
+            }),
+            window.pairApi.engines.onStateChanged(patch => {
+                if (generation !== initializationGeneration || !patch.status) return
+                const status = patch.status
+                if (loading) changes.push({ status })
+                const outer = new Map(get().statusByNode)
+                const inner = new Map(
+                    outer.get(status.nodeId) ?? new Map<EngineType, EngineStatusData>()
+                )
+                inner.set(status.engineType, status)
+                outer.set(status.nodeId, inner)
+                set({ statusByNode: outer })
+            }),
+            window.pairApi.nodes.onRemove(nodeId => {
+                if (generation !== initializationGeneration) return
+                if (loading) changes.push({ removed: nodeId })
+                if (!get().statusByNode.has(nodeId)) return
+                const outer = new Map(get().statusByNode)
+                outer.delete(nodeId)
+                set({ statusByNode: outer })
             })
         )
         const hydrateIntent = window.pairApi.engines.getIntent().then(
@@ -75,7 +103,7 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
             }
         )
         try {
-            const initial = initialSnapshot ?? (await window.pairApi.engines.getInitialState())
+            const initial = await (initialSnapshot ?? window.pairApi.engines.getInitialState())
             if (generation !== initializationGeneration) return
             const byNode: EngineStatusByNode = new Map()
             for (const s of initial.statuses) {
@@ -86,36 +114,25 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
                 }
                 inner.set(s.engineType, s)
             }
-            set({ statusByNode: byNode, descriptors: descriptorMap(initial.descriptors) })
+            for (const change of changes) {
+                if ('removed' in change) byNode.delete(change.removed)
+                else {
+                    const status = change.status
+                    const inner =
+                        byNode.get(status.nodeId) ?? new Map<EngineType, EngineStatusData>()
+                    inner.set(status.engineType, status)
+                    byNode.set(status.nodeId, inner)
+                }
+            }
+            set({
+                statusByNode: byNode,
+                descriptors: descriptorMap(pushedDescriptors ?? initial.descriptors)
+            })
         } catch {
             console.error('Failed to initialize engine status store')
+        } finally {
+            loading = false
         }
-
-        if (generation !== initializationGeneration) return
-
-        unsubs.push(
-            window.pairApi.engines.onDescriptorsChanged(descriptors => {
-                set({ descriptors: descriptorMap(descriptors) })
-            }),
-            window.pairApi.engines.onStateChanged(patch => {
-                const status = patch.status
-                if (!status) return
-                const { nodeId, engineType } = status
-                const outer = new Map(get().statusByNode)
-                const inner = new Map(outer.get(nodeId) ?? new Map<EngineType, EngineStatusData>())
-                inner.set(engineType, status)
-                outer.set(nodeId, inner)
-                set({ statusByNode: outer })
-            }),
-            // Drop a departed node's status so a later rejoin never renders stale
-            // installed/running state from before it left.
-            window.pairApi.nodes.onRemove(nodeId => {
-                if (!get().statusByNode.has(nodeId)) return
-                const outer = new Map(get().statusByNode)
-                outer.delete(nodeId)
-                set({ statusByNode: outer })
-            })
-        )
         await hydrateIntent
     },
 
