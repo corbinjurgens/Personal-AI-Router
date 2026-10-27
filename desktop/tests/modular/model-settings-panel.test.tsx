@@ -456,22 +456,38 @@ describe('composed model settings', () => {
     })
 
     it('subscribes before Routing reads and does not rewind a newer policy push', async () => {
-        let finish: ((snapshot: NodePolicyDocument) => void) | undefined
-        getPolicy.mockImplementationOnce(() => {
-            expect(policyListeners.size).toBe(1)
-            return new Promise(resolve => {
-                finish = resolve
+        vi.useFakeTimers()
+        try {
+            let finish: ((snapshot: NodePolicyDocument) => void) | undefined
+            getPolicy.mockImplementationOnce(() => {
+                expect(policyListeners.size).toBe(1)
+                return new Promise(resolve => {
+                    finish = resolve
+                })
             })
-        })
-        await render(<RoutingSettings />)
-        const latest = saved({ profiles: [] }, '3')
-        await act(async () => push(latest))
-        if (!finish) throw new Error('Missing Routing read')
-        await act(async () => finish?.(saved({}, '1')))
-        expect(draft().baseline?.revision).toBe('3')
-        expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe(latest.policy)
-        expect(button('Pause', container).disabled).toBe(false)
-        expect(button('Save', container).disabled).toBe(false)
+            await render(<RoutingSettings />)
+            const latest = saved({ profiles: [] }, '3')
+            await act(async () => push(latest))
+            if (!finish) throw new Error('Missing Routing read')
+            await act(async () => finish?.(saved({}, '1')))
+            expect(draft().baseline?.revision).toBe('3')
+            expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe(
+                latest.policy
+            )
+            getPolicy.mockResolvedValue(latest)
+            await act(async () => button('Refresh', container).click())
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(2_000)
+            })
+            expect(draft().baseline?.revision).toBe('3')
+            expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe(
+                latest.policy
+            )
+            expect(button('Pause node', container).disabled).toBe(false)
+            expect(button('Save', container).disabled).toBe(false)
+        } finally {
+            vi.useRealTimers()
+        }
     })
 
     it('requires explicit discard before a model row can replace a dirty Routing baseline', async () => {
