@@ -19,6 +19,7 @@ import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.stor
 import { useInferenceDemoStore } from '@/ui/stores/inference-demo.store'
 import { useServiceStatusStore } from '@/ui/stores/service-status.store'
 import { isTrayWindow } from '@/ui/utils/window-kind'
+import { initializeNodeAvailability } from '@/ui/stores/node-configuration.store'
 
 /**
  * The tray popup shows node rows (nodes, cluster members, metrics, engine
@@ -32,6 +33,7 @@ const overviewStores = !isTrayWindow
 
 let unsubStateRefresh: (() => void) | null = null
 let unsubServiceStatus: (() => void) | null = null
+let unsubNodeAvailability: (() => void) | null = null
 
 export async function connectAndInitialize(): Promise<void> {
     // Backed by `windowApi`, not the service bridge, so it initializes before
@@ -77,6 +79,7 @@ async function initializeAllStores(): Promise<void> {
     await useNodesStore.getState().initialize()
     if (overviewStores) await useDiscoveredNodesStore.getState().initialize()
     await useClusterInvitationsStore.getState().initialize(clusterInitial)
+    if (overviewStores) unsubNodeAvailability = initializeNodeAvailability()
     useMetricsStore.getState().initialize()
 
     const engineInitial = fetchEngineInitial()
@@ -114,6 +117,8 @@ function enqueueResync(): void {
 }
 
 function cleanupAllStores(): void {
+    unsubNodeAvailability?.()
+    unsubNodeAvailability = null
     unsubStateRefresh?.()
     unsubStateRefresh = null
     useConnectionStore.getState().cleanup()

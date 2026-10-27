@@ -576,7 +576,7 @@ func residentRPC(ctx context.Context, pp *proxyProcess, method string, params an
 func (b *Broker) residentCurrent(op *modelConfigAttempt) bool {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	active := r.models.active == op && r.now().Before(op.deadline)
+	active := r.models.active == op && r.now().Before(op.deadline) && !r.drains[op.prepare.Engine]
 	r.mu.Unlock()
 	return active && op.ctx.Err() == nil && b.residentSourceCurrent(op)
 }

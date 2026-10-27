@@ -10,11 +10,68 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"nvpair-shared/nodepolicy"
 )
+
+// Typed settings retain this fence after every uncertain or failed operation.
+// Only a successful operation releases it. A timeout may interrupt active work
+// only after the live proxy acknowledged the drain; a failed ACK is a failure.
+func (b *Broker) drainModelSettings(ctx context.Context, engine string, wait bool) error {
+	profile, ok := engineProxyProfileFor(engine)
+	if !ok {
+		return fmt.Errorf("engine has no inference facade")
+	}
+	if b.regCache != nil {
+		b.unregisterService(profile.DiscoveryService)
+	}
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.drains[engine] = true
+	r.mu.Unlock()
+	pp := b.policyProxy()
+	if err := b.switchProxySetLocal(ctx, pp, engine, 0, false); err != nil {
+		return err
+	}
+	run, err := b.pushSwitchDrain(ctx, engine, true)
+	if err != nil {
+		return err
+	}
+	if err := b.withdrawSettingsIdentity(ctx, engine); err != nil {
+		return err
+	}
+	if wait {
+		var snapshot nodepolicy.AdmissionSnapshotResult
+		raw, rpcErr, err := pp.Call(ctx, nodepolicy.MethodAdmissionSnapshot, settingsJSON(nodepolicy.AdmissionSnapshotParams{}))
+		if err != nil {
+			return err
+		}
+		if rpcErr != nil || json.Unmarshal(raw, &snapshot) != nil || snapshot.RunID != run || snapshot.ActiveByEngine == nil || snapshot.ActiveByEngine[engine] < 0 {
+			return fmt.Errorf("current admission readback is unavailable after drain")
+		}
+		if b.policyProxy() != pp {
+			return fmt.Errorf("proxy changed during admission readback")
+		}
+		b.observeAdmission(snapshot.AdmissionState)
+		b.waitAdmission(ctx, settingsDrainTimeout, func(st nodepolicy.AdmissionState) bool {
+			return st.ActiveByEngine[engine] == 0
+		})
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	current := r.incarnation == pp && r.runID == run
+	r.mu.Unlock()
+	if !current || b.policyProxy() != pp {
+		return fmt.Errorf("proxy changed after drain acknowledgement")
+	}
+	return nil
+}
 
 // settingsDrainTimeout bounds how long an apply waits for the engine's running
 // requests. After it the restart goes ahead and those requests fail, exactly as

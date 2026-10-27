@@ -276,8 +276,10 @@ describe('modular supervisor readiness', () => {
 
         notify('node:availability-changed', { nodeId: 'self', availability: 'draining', active: 2 })
         expect(supervisor.getAvailabilityMenuItem()).toMatchObject({
-            label: 'Pausing…',
-            enabled: false
+            label: 'Resume inference on this PC (pausing)',
+            enabled: true,
+            request: 'available',
+            retryPause: true
         })
     })
 

@@ -25,6 +25,7 @@ import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-infere
 import NodeEnginesInline from './NodeEnginesInline'
 import NodeEngineSettings from './NodeEngineSettings'
 import NodeDeclaredRoles from './NodeDeclaredRoles'
+import NodeAvailabilityControls from './NodeAvailabilityControls'
 
 const MAX_CHART_SIZE = 60
 
@@ -304,6 +305,12 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                         <div className="ml-1 -mt-1 empty:hidden">
                             <NodeDeclaredRoles nodeId={node.id} />
                         </div>
+                        <NodeAvailabilityControls
+                            targetId={node.id}
+                            nodeId={isLocal ? undefined : node.id}
+                            name={node.name}
+                            online={node.status !== 'offline'}
+                        />
                         <Text kind="body/regular/sm" className="ml-1 text-subtle-color break-all">
                             Reported service build: {node.serviceBuildId ?? '--'}
                             {node.status === 'offline' &&

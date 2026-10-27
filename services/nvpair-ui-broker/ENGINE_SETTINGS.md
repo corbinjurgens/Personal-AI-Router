@@ -10,8 +10,8 @@ SPDX-License-Identifier: Apache-2.0
 `engine:inspect-model` accepts `{engine,nodeId?,modelId}` and is a read through
 the existing settings relay and pinned `POST /v1/engine-settings/inspect` route.
 It does not initialize a settings journal, start an engine, download content,
-change trust or authorize a load. Until the bounded inspector lands it returns
-structured unavailable facts and estimates, with service-owned option descriptors.
+change trust or authorize a load. Artifact inspection reports its bounded source
+assurance separately from advisory estimates and service-owned option descriptors.
 
 `settings.modelLoads` is an exact-model-ID ordered collection of `requested`
 portable preferences and optional target-owned finite `resolved` records.
@@ -33,16 +33,18 @@ Preview/apply can carry `modelChange` with `modelId`, decimal
 leaves, `previewDigest` and optional `supersedesRequestId`. The full settings
 payload must echo the target baseline beside that patch. Generation numbers
 retain decimal precision; locks, qualification and admission bounds are not
-selected-copy fields. The future target merge must preserve unrestricted
+selected-copy fields. The target merge preserves unrestricted
 `servedModels` versus an explicit empty list and validate enforced-empty options.
 
-This contract commit refuses typed model changes before journal or runtime
-effects. It adds no model Apply control. Native compilation, coupled policy
-acceptance/recovery and Auto implementation remain separate work. Policy-only
-edits retain policy CAS without restart. Preview impact reports restart scope,
-affected models, optional drain bound/interruption/Off outcomes and unknowns;
-it does not approve the unanswered restart policy. A whole-router restart and
-60-second drain can be represented without being selected by the contract.
+Typed Preview performs worker reads without the configuration or policy mutex,
+then rechecks both CAS revisions and the worker source. Its digest binds the
+authenticated caller, selected patch, complete target baseline, policy content,
+native bindings/build, finite resolution, diff and impact. Apply repeats that
+review and refuses a changed result. A running load change discloses a
+whole-router restart, affected configured/observed models and the 60-second
+drain before Apply. Missing loaded-model readback remains an explicit unknown.
+Off stays Off; Apply never resumes a paused node. Policy-only edits use the
+policy CAS and publication owner and perform no native configure or restart.
 
 Snapshots distinguish desired settings, effective readback, coupled stage,
 policy revision and unresolved error. A receipt is never evidence of runtime
@@ -52,6 +54,96 @@ readiness. CAS/pending conflicts use `-32010`, Pause `-32011`, grant denial
 There is no build-maintenance exclusion at this source. Apply-build must add
 model-settings apply to its maintenance reservation before those mutation
 implementations are joined. There is no client-supplied bypass.
+
+The existing `engine-settings-operations.json` journal contains the accepted
+model operation as a subrecord, including previous/desired native settings,
+frozen review, selected policy patch, before/after policy-content fingerprints,
+load-only implications, caller, original resume intent and execution stage.
+The stages are `accepted`, `drained`, `native-applying`, `native-persisted`,
+`policy-persisted`, `activation-pending`, `releasing` and `completed`.
+`acceptance-uncertain` and `completion-uncertain` retain withdrawal after
+uncertain acceptance or terminal persistence.
+The journal uses the existing durable file replacement helper. A failed
+acceptance has no native or policy effects; a landed-but-uncertain acceptance
+remains fenced for local reconciliation. Receipts fingerprint the complete
+normalized request and caller. Reused IDs with different content refuse;
+identical retries still check the current peer pin, grant and Pause first.
+
+Acceptance uncertainty is saved back only after exact readback of the replacement
+that landed. A different or unreadable journal is never blindly replaced. If
+recording uncertainty also fails, a restart treats a bare `accepted` stage as
+ambiguous and requires fresh local reconciliation before any native effect.
+This also conservatively covers a crash after successful acceptance but before
+its first confirmed progress stage; that window cannot prove durable acceptance
+from the journal alone.
+
+A load-plus-policy acceptance reserves the complete policy document. Ordinary
+local and peer `policy:set` calls, including Advanced, role, copy and TUI
+writers, receive `-32010` naming the pending request. Availability transitions
+retain their independent owner. The private journal-driven policy commit
+compares content excluding only `revision`, `availability` and `pausedBy`,
+preserving their current values. Before content applies the accepted patch;
+after content adopts the landed revision; any third content refuses replacement.
+A landed policy replacement with uncertain durability is adopted and remains
+unresolved. No blind retry or rollback overwrites a newer policy.
+
+Load-only operations validate the policy revision used by Preview, reserve no
+whole policy document, and recheck the selected model's profile, serving and
+residency implications before publication. Unrelated policy edits remain usable.
+The existing inference lock protects generation options, mode and identity;
+it does not prevent load-only configuration. Selected edits retain opaque
+request-option numbers, target locks, unrelated model settings and existing
+qualification/admission bounds. They create no qualification evidence. Excluding
+one model from an unrestricted served list requires first selecting an explicit
+list; the model patch cannot silently turn unrestricted permission into empty.
+
+Before native effects, the current proxy must acknowledge backend withdrawal,
+admission drain and strict identity withdrawal. A running apply waits up to
+60 seconds for active work; acknowledged active work may be interrupted at that
+bound. Missing or failed acknowledgement prevents restart. The manager receives
+the frozen configuration once. Response loss is reconciled by exact current-source
+native readback, not interpreted as no effect. Frozen full-settings validation
+rechecks artifacts/build on replay without resolving portable Auto inputs again.
+Changed overrides, bindings/build or selected policy implications require a
+fresh review. A successful configure acknowledgement alone cannot complete Apply.
+Exact persisted native settings do not discharge saved resume intent after a
+manager restart. Resume converges through the existing ConfigureLaunch owner,
+which retains current Pause, engine-lock and saved-Off vetoes. A stopped result
+requires current veto evidence, rather than silently claiming running readiness.
+
+The operation keeps discovery, local backend eligibility, resident reconciliation
+and strict settings identity withdrawn through native persistence, policy
+publication/activation and exact final readback. A stopped save claims no loaded
+readiness. The final receipt is durable before drain release, and `releasing`
+retains the reservation until release acknowledgement and final journal save.
+Failed or uncertain stages retain their fences. An unresolved model operation
+keeps snapshot phase `applying`, including after an attempt's receipt becomes
+`failed`; `unresolvedError` explains the reconciliation requirement. This retains
+the existing switch and cold-binding exclusions until the operation is settled.
+Startup reconstructs them before
+proxy replay/facade enablement, advertising and enabled-intent restoration.
+Progressed applying records without failed receipts replay automatically.
+This includes `activation-pending` after restart. Fresh local supersession
+also reviews and carries any unresolved resume obligation through the existing
+manager activation vetoes, even when the replacement manager is stopped.
+`activation-pending` permits an explicit fresh local Preview/Apply after a repaired
+proxy acknowledgement; callers need not restart the broker or invoke recovery.
+Failed/conflicted attempts and ambiguous acceptance require a local
+fresh Preview/Apply with a new request ID, both current revisions and
+`supersedesRequestId`. Supersession retires the old reservation only in the same
+durable acceptance as its replacement, carries native readback forward and
+preserves unrelated newer policy content. A peer cannot clear that conflict.
+Pause of either origin always wins over completion and recovery. This recoverable
+sequence makes no ACID, qualification or native-hardware acceptance claim.
+
+An unreadable ordinary settings journal retains the existing enabled-intent
+restoration and proxy-policy replay behavior, with its error reported. A
+recognizable unresolved or invalid model subrecord, or unresolved model reservation
+already known in memory, still blocks that restoration/replay on a load error.
+Valid completed model history does not turn an ordinary journal error into a new
+reservation. Fully unrecognizable
+bytes cannot establish whether model work once existed; this fundamental ambiguity
+is reported as unknown, rather than asserted to be a model-free journal.
 
 The broker owns combined settings operations for Ollama, LM Studio, and
 llama.cpp. Each node owns its own configuration. `nodeId` selects a discovered,
@@ -90,8 +182,14 @@ the early remote ingress check alone is insufficient when operations overlap.
 ## Ownership, ordering and failures
 
 The node configuration mutex precedes engine operation locks. Worker dispatch
-is asynchronous; neither stdio reader waits for an operation. The broker holds
-the node lock across validation, journal acceptance and application. The worker
+is asynchronous; neither stdio reader waits for an operation. The broker serializes
+whole operations but releases the configuration mutex during typed worker reads,
+drain, native application and policy activation. It holds configuration then policy
+ordering for durable acceptance and policy commit. Settings notifications carry
+detached sequenced snapshots and perform I/O without the configuration mutex.
+Each publication registers its predecessor while assigning sequences, then waits
+and delivers outside that mutex. Delivery completes before reacquiring it, so
+concurrent publications cannot reverse Hub/TUI baselines or invert the locks. The worker
 holds its engine lock across override persistence, stopping with the old launch
 context, installing the new context, the narrow proxy rebind callback and one
 start/readiness wait. The callback validates an active operation token and
@@ -126,7 +224,9 @@ drain:true}` so admission sends that engine no new work, waits up to 60 s for
 the proxy's active count for the engine to reach zero, then applies and clears
 the drain. The node configuration lock is released during the wait and the
 operation lock is not, so readers stay responsive and no second Apply can start.
-Proxy-only edits and edits to a stopped engine do not drain.
+Ordinary proxy-only edits and ordinary edits to a stopped engine do not drain.
+Typed load edits establish an acknowledged fence even while stopped so their
+native/policy sequence and recovery cannot expose stale authority.
 
 Validation, stale revisions and journal-write failures cause no runtime
 mutation. Once accepted, desired settings remain saved if the engine or proxy
