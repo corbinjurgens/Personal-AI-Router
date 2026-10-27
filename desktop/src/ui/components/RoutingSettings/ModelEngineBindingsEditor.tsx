@@ -15,6 +15,7 @@ import { useShallow } from 'zustand/react/shallow'
 import type { JsonValue } from '@/shared/types/json'
 import type { NodeModelReference } from '@/shared/types/node-policy'
 import { engineLabel, engineManagerName } from '@/shared/utils/engines'
+import { replaceJsonFieldSource } from '@/shared/utils/json-source'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { engineTypesForNode } from '@/ui/utils/get-engines-for-node'
@@ -78,7 +79,7 @@ export default function ModelEngineBindingsEditor({
     const readOnly = disabled || draft === null
     const change = (bindings: NodeModelReference[]) => {
         if (readOnly || !draft) return
-        onTextChange(JSON.stringify({ ...draft.policy, engineBindings: bindings }, null, 2))
+        onTextChange(replaceJsonFieldSource(text, 'engineBindings', JSON.stringify(bindings)))
     }
     const edit = (index: number, field: 'engine' | 'model', value: string) => {
         if (!draft) return

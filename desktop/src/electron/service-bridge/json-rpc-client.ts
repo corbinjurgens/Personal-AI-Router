@@ -4,6 +4,7 @@
 import { EventEmitter } from 'events'
 import type { Duplex } from 'stream'
 import getErrorString from '@/shared/utils/get-error-string'
+import { compactJsonSource, jsonFieldSource } from '@/shared/utils/json-source'
 import { createStructuredLogger } from '@/shared/utils/log'
 import { redactSensitiveLogText } from '@/electron/redact-log'
 import {
@@ -68,6 +69,7 @@ export interface JsonRpcInboundRequest {
 }
 
 interface PendingCall {
+    method: string
     resolve: (value: JsonValue | undefined) => void
     reject: (error: Error) => void
     timeout?: ReturnType<typeof setTimeout>
@@ -150,6 +152,20 @@ function parseMessage(line: string): JsonRpcMessage | null {
     const error = parseError(value.error)
     if (error) message.error = error
     return message
+}
+
+/** Embed policy text as JSON, preserving its number tokens and duplicate keys. */
+function serializeMessage(message: JsonRpcMessage): string {
+    if (message.method !== 'policy:set') return JSON.stringify(message)
+    const { params, ...envelope } = message
+    if (!isJsonObject(params) || typeof params.policy !== 'string') {
+        throw new Error('The policy must be JSON object text')
+    }
+    const { policy, ...fields } = params
+    const parsed: JsonValue = JSON.parse(policy)
+    if (!isJsonObject(parsed)) throw new Error('The policy must be a JSON object')
+    const otherFields = JSON.stringify(fields).slice(1, -1)
+    return `${JSON.stringify(envelope).slice(0, -1)},"params":{${otherFields}${otherFields ? ',' : ''}"policy":${compactJsonSource(policy)}}}`
 }
 
 /**
@@ -250,7 +266,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
                           this.pending.delete(id)
                           reject(new Error(`${this.name} ${method} timed out`))
                       }, timeoutMs)
-            this.pending.set(id, { resolve, reject, timeout })
+            this.pending.set(id, { method, resolve, reject, timeout })
             this.write(message).catch(err => {
                 if (timeout) clearTimeout(timeout)
                 this.pending.delete(id)
@@ -598,6 +614,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         return this.writeFrame(socket, message)
     }
     private writeFrame(socket: Duplex, frame: string | JsonRpcMessage): Promise<void> {
+        const serialized = typeof frame === 'string' ? frame : `${serializeMessage(frame)}\n`
         this.writeTail = this.writeTail.then(
             () =>
                 new Promise<void>((resolve, reject) => {
@@ -605,16 +622,13 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
                         reject(new Error(`${this.name} connection closed before writing`))
                         return
                     }
-                    socket.write(
-                        typeof frame === 'string' ? frame : `${JSON.stringify(frame)}\n`,
-                        err => {
-                            if (err) {
-                                reject(err)
-                                return
-                            }
-                            resolve()
+                    socket.write(serialized, err => {
+                        if (err) {
+                            reject(err)
+                            return
                         }
-                    )
+                        resolve()
+                    })
                 })
         )
         return this.writeTail
@@ -636,6 +650,26 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
             })
         }
         if (!message) return
+
+        // Policy JSON is an opaque fragment on this side of the wire. Capture
+        // it from the validated frame before handing the result to the bridge.
+        // Other fields, including engine counters, retain ordinary JSON types.
+        const policyResponse =
+            typeof message.id === 'number' &&
+            ['policy:get', 'policy:set'].includes(this.pending.get(message.id)?.method ?? '')
+        const field = policyResponse
+            ? 'result'
+            : message.method === 'policy:changed'
+              ? 'params'
+              : null
+        if (field) {
+            const body = message[field]
+            if (isJsonObject(body)) {
+                body.policy = isJsonObject(body.policy)
+                    ? (jsonFieldSource(line, [field, 'policy']) ?? null)
+                    : null
+            }
+        }
 
         if (message.id !== undefined && message.method) {
             this.emit('request', {

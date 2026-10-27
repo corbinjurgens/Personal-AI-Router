@@ -87,10 +87,10 @@ unsaved changes, the other editor cannot silently take them over. Use
 **Discard draft and reload** only when you intend to discard those changes.
 Invalid JSON remains available for correction in Advanced policy JSON.
 
-Typed draft edits preserve unrelated source text. The existing desktop policy
-transport still parses JSON numbers as JavaScript numbers, so saving does not
-guarantee exact preservation of opaque numbers beyond that representation's
-precision. This limitation also applies to policy readback.
+Typed draft edits preserve unrelated source text. The desktop policy bridge
+keeps policy JSON as source text for saving, readback and change notifications,
+preserving every numeric spelling, including integers and decimals beyond
+JavaScript number precision. The broker still validates and persists the policy.
 
 A reconnect or newer target policy does not overwrite dirty text. A conflict
 requires an explicit reload and review. Refused or uncertain saves retain the
