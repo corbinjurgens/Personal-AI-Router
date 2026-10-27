@@ -10,11 +10,13 @@ export interface AvailabilityMenuItem {
     enabled: boolean
     /** The state a click requests, or null when the item cannot be clicked. */
     request: 'available' | 'paused' | null
+    retryPause?: boolean
+    refresh?: boolean
 }
 
 const PAUSE_LABEL = 'Pause inference on this PC'
 const RESUME_LABEL = 'Resume inference on this PC'
-const PAUSING_LABEL = 'Pausing…'
+const PAUSING_LABEL = 'Resume inference on this PC (pausing)'
 
 export function availabilityValue(value: JsonValue | undefined): NodeAvailability | null {
     return value === 'available' || value === 'draining' || value === 'paused' ? value : null
@@ -37,9 +39,9 @@ export function availabilityMenuItem(availability: NodeAvailability | null): Ava
         case 'paused':
             return { label: RESUME_LABEL, enabled: true, request: 'available' }
         case 'draining':
-            return { label: PAUSING_LABEL, enabled: false, request: null }
+            return { label: PAUSING_LABEL, enabled: true, request: 'available', retryPause: true }
         case null:
-            return { label: PAUSE_LABEL, enabled: false, request: null }
+            return { label: PAUSE_LABEL, enabled: false, request: null, refresh: true }
     }
 }
 
@@ -52,6 +54,7 @@ export function availabilityMenuItem(availability: NodeAvailability | null): Ava
 export class NodeAvailabilityState {
     private current: NodeAvailability | null = null
     private origin: NodeAvailabilityResult['pausedBy']
+    private version = 0
     private readonly listeners = new Set<() => void>()
 
     constructor(private readonly getSelfId: () => string | null) {}
@@ -62,6 +65,11 @@ export class NodeAvailabilityState {
 
     get pausedBy(): NodeAvailabilityResult['pausedBy'] {
         return this.origin
+    }
+
+    /** Invalidates reads when a newer push/result, even an equal value, arrives. */
+    get observation(): number {
+        return this.version
     }
 
     menuItem(): AvailabilityMenuItem {
@@ -78,7 +86,10 @@ export class NodeAvailabilityState {
     applyResult(result: JsonValue | undefined): void {
         const body = objectValue(result)
         const next = availabilityValue(body?.availability)
-        if (next) this.set(next, pauseOriginValue(body?.pausedBy))
+        if (next) {
+            this.version++
+            this.set(next, pauseOriginValue(body?.pausedBy))
+        }
     }
 
     /** Apply `node:availability-changed {nodeId, availability, active}`. */
@@ -88,11 +99,15 @@ export class NodeAvailabilityState {
         const selfId = this.getSelfId()
         if (selfId === null || body.nodeId !== selfId) return
         const next = availabilityValue(body.availability)
-        if (next) this.set(next, pauseOriginValue(body.pausedBy))
+        if (next) {
+            this.version++
+            this.set(next, pauseOriginValue(body.pausedBy))
+        }
     }
 
     /** Forget the state, as when the broker is gone and the real one is unknown. */
     reset(): void {
+        this.version++
         this.set(null)
     }
 

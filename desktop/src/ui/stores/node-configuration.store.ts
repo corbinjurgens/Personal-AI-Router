@@ -19,7 +19,12 @@
 import { create } from 'zustand'
 import type { EngineDescriptor, EngineModels, EngineType } from '@/shared/types/engines'
 import type { JsonValue } from '@/shared/types/json'
-import type { NodeAvailability, NodePolicySnapshot } from '@/shared/types/node-policy'
+import type {
+    NodeAvailability,
+    NodeAvailabilityRequest,
+    NodePolicyDocument,
+    NodePolicySnapshot
+} from '@/shared/types/node-policy'
 import type {
     NodePolicyAdvertisement,
     NodeRole,
@@ -38,6 +43,8 @@ import {
 import { getPairTransport } from '@/ui/api/bootstrap'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useNodesStore } from '@/ui/stores/nodes.store'
+import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { engineLabel, engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import getErrorString from '@/shared/utils/get-error-string'
@@ -372,6 +379,9 @@ interface BulkSelection {
 }
 
 interface NodeConfigurationState {
+    availability: Map<string, AvailabilityEntry>
+    readAvailability(targetId: string, manual?: boolean): Promise<void>
+    requestAvailability(targetId: string, state: 'available' | 'paused'): Promise<void>
     /** Whole-policy drafts are session-only and have one visible editor owner. */
     policyDrafts: Map<string, PolicyDraft>
     claimPolicyDraft(targetId: string, owner: PolicyDraft['owner'], discard?: boolean): boolean
@@ -431,6 +441,346 @@ interface NodeConfigurationState {
     ): Promise<void>
     bulk: BulkSelection
     setBulk(change: Partial<BulkSelection>): void
+}
+
+interface AvailabilityEntry {
+    value?: NodeAvailability
+    pausedBy?: PauseOrigin
+    revision?: string
+    current: boolean
+    reading: boolean
+    pending?: 'available' | 'paused'
+    stale: boolean
+    error?: string
+    readError?: string
+}
+
+interface AvailabilityTarget {
+    api: typeof window.pairApi.nodePolicy
+    nodeId: string | undefined
+    online: boolean
+    consumers: number
+    generation: number
+    observation: number
+    action: number
+    lastRead: number
+    until: number
+    request?: Promise<void>
+    timer?: ReturnType<typeof setTimeout>
+}
+
+const availabilityTargets = new Map<string, AvailabilityTarget>()
+let availabilityUnsubs: Array<() => void> = []
+const READ_INTERVAL = 2_000
+const READ_WINDOW = 60_000
+const policyReads = new Map<
+    string,
+    { api: typeof window.pairApi.nodePolicy; epoch: number; request: Promise<NodePolicyDocument> }
+>()
+const policyReadEpochs = new Map<string, number>()
+
+function invalidateNodePolicyRead(nodeId: string | undefined): void {
+    const key = nodeId ?? ''
+    policyReadEpochs.set(key, (policyReadEpochs.get(key) ?? 0) + 1)
+}
+
+/** Policy editors and availability observers share the same target read. */
+export function readNodePolicy(nodeId: string | undefined): Promise<NodePolicyDocument> {
+    const key = nodeId ?? ''
+    const api = window.pairApi.nodePolicy
+    const epoch = policyReadEpochs.get(key) ?? 0
+    const cached = policyReads.get(key)
+    const existing = cached?.api === api ? cached : undefined
+    if (existing?.epoch === epoch) return existing.request
+    const watched = Array.from(availabilityTargets).find(
+        ([id, target]) =>
+            target.nodeId === nodeId &&
+            target.api === api &&
+            target.consumers > 0 &&
+            (nodeId !== undefined || id === useConnectionStore.getState().selfId)
+    )
+    const target = watched?.[1]
+    const generation = target?.generation
+    const observation = target?.observation
+    const read = () => {
+        if (target) target.lastRead = Date.now()
+        return api.get(nodeId).then(document => {
+            if (
+                !watched ||
+                !target ||
+                availabilityTargets.get(watched[0]) !== target ||
+                target.generation !== generation ||
+                target.observation !== observation ||
+                !visibleTarget(target)
+            )
+                return document
+            const store = useNodeConfigurationStore.getState()
+            const entry = store.availability.get(watched[0])
+            if (entry?.stale || (entry?.revision && isOlder(document.revision, entry.revision)))
+                return document
+            putAvailability(watched[0], {
+                value: document.availability,
+                pausedBy: document.pausedBy,
+                revision: document.revision,
+                current: true,
+                stale: false,
+                readError: undefined
+            })
+            store.observePolicyAvailability(watched[0], document.availability)
+            store.adopt(watched[0], document)
+            store.observePolicyDraft(watched[0], document)
+            scheduleAvailability(watched[0], target)
+            return document
+        })
+    }
+    // A read started before a mutation/reconnect cannot become new evidence.
+    // Wait for it to settle before issuing the next physical target read.
+    const request = (existing ? existing.request.then(read, read) : read()).finally(() => {
+        if (policyReads.get(key)?.request === request) policyReads.delete(key)
+    })
+    policyReads.set(key, { api, epoch, request })
+    return request
+}
+
+function putAvailability(targetId: string, change: Partial<AvailabilityEntry>): void {
+    const store = useNodeConfigurationStore.getState()
+    const availability = new Map(store.availability)
+    availability.set(targetId, {
+        current: false,
+        reading: false,
+        stale: false,
+        ...availability.get(targetId),
+        ...change
+    })
+    useNodeConfigurationStore.setState({ availability })
+}
+
+function visibleTarget(target: AvailabilityTarget): boolean {
+    return (
+        target.consumers > 0 &&
+        target.api === window.pairApi.nodePolicy &&
+        target.online &&
+        useConnectionStore.getState().connected &&
+        document.visibilityState !== 'hidden'
+    )
+}
+
+function scheduleAvailability(id: string, target: AvailabilityTarget): void {
+    clearTimeout(target.timer)
+    if (!visibleTarget(target)) return
+    const entry = useNodeConfigurationStore.getState().availability.get(id)
+    if (entry?.stale) return
+    if (entry?.current && entry.value !== 'draining' && !entry.pending) return
+    if (Date.now() >= target.until) {
+        if (!entry?.current || entry.value === 'draining' || entry.pending) {
+            target.generation++
+            putAvailability(id, { current: false, stale: true, reading: false })
+        }
+        return
+    }
+    target.timer = setTimeout(
+        () => {
+            if (Date.now() >= target.until) scheduleAvailability(id, target)
+            else void useNodeConfigurationStore.getState().readAvailability(id)
+        },
+        target.request
+            ? target.until - Date.now()
+            : Math.min(
+                  Math.max(0, target.lastRead + READ_INTERVAL - Date.now()),
+                  target.until - Date.now()
+              )
+    )
+}
+
+function invalidateAvailability(
+    id: string,
+    target: AvailabilityTarget,
+    retireAction = false
+): void {
+    invalidateNodePolicyRead(target.nodeId)
+    target.generation++
+    if (retireAction) target.action++
+    target.until = Date.now() + READ_WINDOW
+    clearTimeout(target.timer)
+    putAvailability(id, {
+        current: false,
+        reading: false,
+        stale: false,
+        ...(retireAction ? { pending: undefined } : {})
+    })
+}
+
+/** Availability watches share one lifecycle and read owner across cards and Settings. */
+export function initializeNodeAvailability(): () => void {
+    if (availabilityUnsubs.length === 0) {
+        const refresh = (retireFormerSelf = false) => {
+            for (const [id, target] of availabilityTargets) {
+                invalidateAvailability(
+                    id,
+                    target,
+                    retireFormerSelf &&
+                        target.nodeId === undefined &&
+                        id !== useConnectionStore.getState().selfId
+                )
+                if (visibleTarget(target))
+                    void useNodeConfigurationStore.getState().readAvailability(id)
+            }
+        }
+        const onVisible = () => {
+            if (document.visibilityState !== 'hidden') refresh()
+            else for (const target of availabilityTargets.values()) clearTimeout(target.timer)
+        }
+        document.addEventListener('visibilitychange', onVisible)
+        availabilityUnsubs = [
+            () => document.removeEventListener('visibilitychange', onVisible),
+            useConnectionStore.subscribe((state, previous) => {
+                if (state.connected !== previous.connected || state.selfId !== previous.selfId)
+                    refresh(state.selfId !== previous.selfId)
+            }),
+            useNodesStore.subscribe((state, previous) => {
+                for (const [id, target] of availabilityTargets) {
+                    if (target.nodeId === undefined) continue
+                    const online = state.nodes.get(id)?.status !== 'offline' && state.nodes.has(id)
+                    if (
+                        online !== target.online ||
+                        state.nodes.get(id)?.status !== previous.nodes.get(id)?.status
+                    ) {
+                        target.online = online
+                        invalidateAvailability(id, target)
+                        if (visibleTarget(target))
+                            void useNodeConfigurationStore.getState().readAvailability(id)
+                    }
+                }
+            }),
+            useDiscoveredNodesStore.subscribe((state, previous) => {
+                for (const [id, target] of availabilityTargets) {
+                    const next = state.nodes.find(node => node.id === id)?.policy
+                    const before = previous.nodes.find(node => node.id === id)?.policy
+                    if (next?.revision === before?.revision && next?.pausedBy === before?.pausedBy)
+                        continue
+                    const entry = useNodeConfigurationStore.getState().availability.get(id)
+                    if (next?.revision && entry?.revision && isOlder(next.revision, entry.revision))
+                        continue
+                    // Advertisements trigger authoritative reads, never a completed-pause projection.
+                    target.observation++
+                    invalidateNodePolicyRead(target.nodeId)
+                    if (entry?.current && entry.value !== 'draining' && !entry.pending)
+                        target.until = Date.now() + READ_WINDOW
+                    putAvailability(id, {
+                        current: false,
+                        stale: false,
+                        revision: next?.revision ?? entry?.revision
+                    })
+                    scheduleAvailability(id, target)
+                }
+            }),
+            window.pairApi.nodePolicy.onAvailabilityChanged(change => {
+                const target = availabilityTargets.get(change.nodeId)
+                if (!target) return
+                target.observation++
+                invalidateNodePolicyRead(target.nodeId)
+                const entry = useNodeConfigurationStore.getState().availability.get(change.nodeId)
+                if (entry?.current && entry.value !== 'draining' && !entry.pending)
+                    target.until = Date.now() + READ_WINDOW
+                if (target.nodeId !== undefined) {
+                    // Relayed remote notifications can be delayed mutation replies.
+                    // Only a fresh target read can confirm their current outcome.
+                    putAvailability(change.nodeId, { current: false, stale: false })
+                    scheduleAvailability(change.nodeId, target)
+                    return
+                }
+                putAvailability(change.nodeId, {
+                    value: change.availability,
+                    pausedBy: change.pausedBy,
+                    current: true,
+                    stale: false
+                })
+                useNodeConfigurationStore
+                    .getState()
+                    .observePolicyAvailability(change.nodeId, change.availability)
+                scheduleAvailability(change.nodeId, target)
+            }),
+            window.pairApi.nodePolicy.onPolicyChanged(change => {
+                const target = availabilityTargets.get(change.nodeId)
+                if (!target) return
+                const entry = useNodeConfigurationStore.getState().availability.get(change.nodeId)
+                if (entry?.revision && isOlder(change.revision, entry.revision)) return
+                target.observation++
+                invalidateNodePolicyRead(target.nodeId)
+                putAvailability(change.nodeId, { revision: change.revision, current: false })
+                scheduleAvailability(change.nodeId, target)
+            })
+        ]
+    }
+    return () => {
+        availabilityUnsubs.forEach(stop => stop())
+        availabilityUnsubs = []
+        for (const [id, target] of availabilityTargets) invalidateAvailability(id, target, true)
+    }
+}
+
+export function watchNodeAvailability(
+    targetId: string,
+    nodeId: string | undefined,
+    online: boolean
+): () => void {
+    initializeNodeAvailability()
+    let target = availabilityTargets.get(targetId)
+    if (!target || target.nodeId !== nodeId || target.api !== window.pairApi.nodePolicy) {
+        if (target) invalidateAvailability(targetId, target, true)
+        target = {
+            api: window.pairApi.nodePolicy,
+            nodeId,
+            online,
+            consumers: 0,
+            generation: 0,
+            observation: 0,
+            action: 0,
+            lastRead: -Infinity,
+            until: Date.now() + READ_WINDOW
+        }
+        availabilityTargets.set(targetId, target)
+        putAvailability(targetId, {
+            value: undefined,
+            revision: undefined,
+            pausedBy: undefined,
+            current: false,
+            reading: false,
+            stale: false,
+            pending: undefined,
+            error: undefined,
+            readError: undefined
+        })
+    }
+    target.online = online
+    target.consumers++
+    if (target.consumers === 1) {
+        target.generation++
+        target.until = Date.now() + READ_WINDOW
+        invalidateNodePolicyRead(target.nodeId)
+        if (!useNodeConfigurationStore.getState().availability.has(targetId))
+            target.lastRead = -Infinity
+        putAvailability(targetId, { current: false, reading: false, stale: false })
+        if (visibleTarget(target))
+            void useNodeConfigurationStore.getState().readAvailability(targetId)
+    }
+    const watched = target
+    let stopped = false
+    return () => {
+        if (stopped) return
+        stopped = true
+        watched.consumers--
+        if (watched.consumers === 0 && availabilityTargets.get(targetId) === watched) {
+            watched.generation++
+            invalidateNodePolicyRead(watched.nodeId)
+            clearTimeout(watched.timer)
+            putAvailability(targetId, { current: false, reading: false })
+            if (!Array.from(availabilityTargets.values()).some(target => target.consumers > 0)) {
+                availabilityUnsubs.forEach(stop => stop())
+                availabilityUnsubs = []
+            }
+        }
+    }
 }
 
 type PolicyDraftSnapshot = NodePolicySnapshot & {
@@ -619,6 +969,109 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
     }
 
     return {
+        availability: new Map(),
+        readAvailability: async (targetId, manual = false) => {
+            const target = availabilityTargets.get(targetId)
+            if (!target || !visibleTarget(target)) return
+            if (manual) {
+                target.until = Date.now() + READ_WINDOW
+                putAvailability(targetId, { stale: false, current: false })
+            }
+            if (target.request) {
+                scheduleAvailability(targetId, target)
+                return target.request
+            }
+            if (get().availability.get(targetId)?.stale) return
+            if (Date.now() < target.lastRead + READ_INTERVAL) {
+                scheduleAvailability(targetId, target)
+                return
+            }
+            const generation = target.generation
+            const observation = target.observation
+            target.lastRead = Date.now()
+            putAvailability(targetId, { reading: true })
+            const valid = () =>
+                availabilityTargets.get(targetId) === target &&
+                target.generation === generation &&
+                visibleTarget(target)
+            const read = async () => {
+                try {
+                    await readNodePolicy(target.nodeId)
+                } catch (error) {
+                    if (valid() && target.observation === observation)
+                        putAvailability(targetId, {
+                            current: false,
+                            readError: `Could not refresh availability: ${getErrorString(error)}`
+                        })
+                } finally {
+                    target.request = undefined
+                    if (valid()) putAvailability(targetId, { reading: false })
+                    scheduleAvailability(targetId, target)
+                }
+            }
+            target.request = read()
+            scheduleAvailability(targetId, target)
+            return target.request
+        },
+        requestAvailability: async (targetId, state) => {
+            const target = availabilityTargets.get(targetId)
+            const entry = get().availability.get(targetId)
+            if (!target || !visibleTarget(target) || !entry?.current || entry.stale) return
+            const local = target.nodeId === undefined
+            if (local && targetId !== useConnectionStore.getState().selfId) return
+            if (
+                !local &&
+                (get().management.get(targetId)?.state !== 'allowed' ||
+                    entry.value !== 'available' ||
+                    state !== 'paused')
+            )
+                return
+            // Target-local Resume may supersede a configured drain already in flight.
+            if (
+                entry.pending &&
+                !(
+                    local &&
+                    state === 'available' &&
+                    entry.value === 'draining' &&
+                    entry.pending === 'paused'
+                )
+            )
+                return
+            if (local && state === 'available' && entry.value === 'available') return
+            const action = ++target.action
+            invalidateNodePolicyRead(target.nodeId)
+            target.until = Date.now() + READ_WINDOW
+            putAvailability(targetId, { pending: state, error: undefined })
+            const request: NodeAvailabilityRequest =
+                state === 'paused'
+                    ? { nodeId: target.nodeId, state, pauseMode: 'configured' }
+                    : { nodeId: target.nodeId, state }
+            try {
+                await window.pairApi.nodePolicy.setAvailability(request)
+            } catch (error) {
+                if (availabilityTargets.get(targetId) !== target || target.action !== action) return
+                putAvailability(targetId, {
+                    error:
+                        serviceErrorCode(error) === REMOTE_MANAGEMENT_DENIED_CODE
+                            ? `This device refused remote management permission. ${getErrorString(error)}`
+                            : serviceErrorCode(error) === LOCAL_VETO_CODE
+                              ? `${localVetoMessage('change availability')} ${getErrorString(error)}`
+                              : `Availability request failed; outcome must be read back. ${getErrorString(error)}`
+                })
+                if (serviceErrorCode(error) === REMOTE_MANAGEMENT_DENIED_CODE)
+                    void get().readManagement(targetId, target.nodeId, true)
+            } finally {
+                if (availabilityTargets.get(targetId) === target && target.action === action) {
+                    putAvailability(targetId, { pending: undefined, current: false })
+                    target.observation++
+                    invalidateNodePolicyRead(target.nodeId)
+                    // A read predating the mutation cannot confirm its outcome.
+                    if (target.request) await target.request
+                    if (availabilityTargets.get(targetId) === target && target.action === action)
+                        await get().readAvailability(targetId)
+                }
+            }
+        },
         policyDrafts: new Map(),
 
         claimPolicyDraft: (targetId, owner, discard = false) => {
@@ -672,6 +1125,15 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
         },
 
         observePolicyAvailability: (targetId, availability) => {
+            const roleEntry = get().editors.get(targetId)
+            if (roleEntry?.baseline) {
+                const editors = new Map(get().editors)
+                editors.set(targetId, {
+                    ...roleEntry,
+                    baseline: { ...roleEntry.baseline, availability }
+                })
+                set({ editors })
+            }
             const entry = get().policyDrafts.get(targetId)
             if (!entry) return
             putPolicy(targetId, {

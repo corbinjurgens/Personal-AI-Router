@@ -177,10 +177,26 @@ func (b *Broker) recoverEngineSettings() bool {
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
 	if err := b.loadEngineSettingsLocked(); err != nil {
-		slog.Error("engine settings recovery blocked", "err", err)
-		return false
+		if b.knownModelSettingsFenceLocked() {
+			slog.Error("engine settings recovery blocked by known model operation", "err", err)
+			return false
+		}
+		slog.Error("settings journal unreadable; model involvement is unknown; preserving ordinary enabled-intent restoration", "err", err)
+		return true
 	}
+	b.reconstructModelSettingsLocked()
 	for engine, record := range b.engineSettings {
+		if b.modelSettingsPendingLocked(engine) {
+			if modelSettingsNeedsReconciliation(record) && (record.Model.Stage != "activation-pending" || record.Receipts[record.Snapshot.RequestID].Phase == "failed") {
+				// Failed/uncertain work requires fresh local repair. A pending
+				// activation can retry the existing frozen operation on startup.
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), settings.OperationBudget)
+			_ = b.runModelSettingsOperationLocked(ctx, engine, record)
+			cancel()
+			continue
+		}
 		if record.Snapshot.Phase != "applying" {
 			continue
 		}
@@ -195,6 +211,11 @@ func (b *Broker) recoverEngineSettings() bool {
 	// Readiness may arrive before the journal is loaded. Seed the applied
 	// identity even when recovery and later live readbacks change no settings.
 	b.publishSettingsLocked()
+	for engine := range b.engineSettings {
+		if b.modelSettingsPendingLocked(engine) {
+			return false
+		}
+	}
 	return true
 }
 
