@@ -2,8 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { pathToFileURL } from 'url'
+import { rendererPath } from '@/electron/renderer-path'
 
-type Handler = (event: { sender: { getURL: () => string } }, ...args: unknown[]) => Promise<unknown>
+type Handler = (
+    event: {
+        sender: { getURL: () => string; mainFrame: { url: string } }
+        senderFrame: { url: string }
+    },
+    ...args: unknown[]
+) => Promise<unknown>
 
 const ipc = vi.hoisted(() => ({ handlers: new Map<string, Handler>() }))
 
@@ -15,6 +23,7 @@ vi.mock('electron', () => ({
     }
 }))
 vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
+vi.mock('@electron-toolkit/utils', () => ({ is: { dev: false } }))
 
 import { safeHandle } from '@/electron/ipc/safe-handle'
 import { handleServiceBridgeInvoke } from '@/electron/service-bridge/empty-handlers'
@@ -224,8 +233,9 @@ describe('engine lock refusal codes', () => {
         })
         const handler = ipc.handlers.get('service-bridge:invoke')
         if (!handler) throw new Error('no handler registered')
+        const frame = { url: pathToFileURL(rendererPath()).href }
         return handler(
-            { sender: { getURL: () => 'file:///index.html' } },
+            { sender: { getURL: () => frame.url, mainFrame: frame }, senderFrame: frame },
             { channel: 'engines:switch-status' }
         )
     }

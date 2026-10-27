@@ -4,6 +4,7 @@
 import { EventEmitter } from 'events'
 import fs from 'fs'
 import path from 'path'
+import { pathToFileURL } from 'url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ipcMain, ipcRenderer } from 'electron'
 import type {
@@ -80,6 +81,7 @@ import { createPairTransport } from '@/preload/api/pair-transport.api'
 import { serviceTransport } from '@/ui/api/service-transport'
 import { createRoutingHistory } from '@/ui/api/routing-history'
 import { createOverviewWindow, createTrayWindow } from '@/electron/window'
+import { rendererPath } from '@/electron/renderer-path'
 
 class TestWindow extends EventEmitter {
     readonly id = ++nextWindowId
@@ -122,13 +124,13 @@ let nextWindowId = 0
 
 class Renderer extends EventEmitter {
     readonly id = ++nextRendererId
-    readonly mainFrame = {}
+    readonly mainFrame = { url: pathToFileURL(rendererPath()).href }
     readonly ready: RoutingHistoryReady[] = []
     readonly ordinary: ServiceBridgePushMessage[] = []
     readonly ipc = new RendererIpc(this)
     private gone = false
     getURL(): string {
-        return 'file:///synthetic/index.html'
+        return this.mainFrame.url
     }
     isDestroyed(): boolean {
         return this.gone
@@ -1186,9 +1188,9 @@ describe('production history sender IPC and broadcaster', () => {
                 a,
                 'routing-history:consumed',
                 { generation: generationA, lease: first.lease },
-                {}
+                { url: a.mainFrame.url }
             )
-        ).toMatchObject({ success: false, error: 'history-invalid' })
+        ).toMatchObject({ success: false, error: 'Unauthorized sender' })
         expect(
             await invoke(a, 'routing-history:consumed', {
                 generation: generationA + 1,

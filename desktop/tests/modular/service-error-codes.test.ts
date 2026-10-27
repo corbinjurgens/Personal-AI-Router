@@ -3,7 +3,13 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-type Handler = (event: { sender: { getURL: () => string } }, ...args: unknown[]) => Promise<unknown>
+type Handler = (
+    event: {
+        sender: { getURL: () => string; mainFrame: { url: string } }
+        senderFrame: { url: string }
+    },
+    ...args: unknown[]
+) => Promise<unknown>
 
 const ipc = vi.hoisted(() => ({ handlers: new Map<string, Handler>() }))
 
@@ -15,6 +21,7 @@ vi.mock('electron', () => ({
     }
 }))
 vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
+vi.mock('@electron-toolkit/utils', () => ({ is: { dev: false } }))
 
 import { safeHandle } from '@/electron/ipc/safe-handle'
 import { JsonRpcResponseError } from '@/electron/service-bridge/json-rpc-client'
@@ -30,6 +37,8 @@ import type { IpcResult } from '@/shared/types/ipc-channels'
 import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
 import type { WsInvokeResponse } from '@/shared/types/ws-channels'
 import { ServiceCallError, serviceErrorCode, serviceTransport } from '@/ui/api/service-transport'
+import { rendererPath } from '@/electron/renderer-path'
+import { pathToFileURL } from 'url'
 
 const VETO_DETAIL = 'remote /v1/engines/start: HTTP 409: this node was paused on the node itself'
 
@@ -44,8 +53,9 @@ describe('service error codes across the IPC boundary', () => {
         })
         const handler = ipc.handlers.get('service-bridge:invoke')
         if (!handler) throw new Error('no handler registered')
+        const frame = { url: pathToFileURL(rendererPath()).href }
         return handler(
-            { sender: { getURL: () => 'file:///index.html' } },
+            { sender: { getURL: () => frame.url, mainFrame: frame }, senderFrame: frame },
             { channel: 'policy:set' }
         )
     }
