@@ -185,19 +185,21 @@ type Runtime struct {
 	servingObserved         *servingObserved
 	servingObservationSweep uint64
 	// Latched for this owned launch; inventory cannot restore withdrawn identity.
-	servingDrift   string
-	Serving        *engines.ServingConfig  `json:"serving,omitempty"`
-	ModelLoads     []modelconfig.ModelLoad `json:"modelLoads,omitempty"`
-	EditableLaunch *EditableLaunch         `json:"editable_launch,omitempty"`
-	LaunchArgs     *[]string               `json:"launch_args,omitempty"` // literal arguments after managed fields
-	LaunchEnv      *[]string               `json:"launch_env,omitempty"`  // complete literal explicit environment
-	Mode           string                  `json:"mode,omitempty"`
-	Bin            string                  `json:"bin,omitempty"`
-	Args           []string                `json:"args,omitempty"`
-	Env            map[string]string       `json:"env,omitempty"`
-	Port           int                     `json:"port"`            // 0 => auto-assign a free loopback port
-	Bind           string                  `json:"bind,omitempty"`  // listen addr, substituted as {host}; "" => 127.0.0.1
-	Start          [][]string              `json:"start,omitempty"` // command mode: ordered bring-up commands
+	servingDrift string
+	Serving      *engines.ServingConfig  `json:"serving,omitempty"`
+	ModelLoads   []modelconfig.ModelLoad `json:"modelLoads,omitempty"`
+	// Bound by the executor at read/launch owners, never persisted or portable.
+	modelLoadOwner *Executor
+	EditableLaunch *EditableLaunch   `json:"editable_launch,omitempty"`
+	LaunchArgs     *[]string         `json:"launch_args,omitempty"` // literal arguments after managed fields
+	LaunchEnv      *[]string         `json:"launch_env,omitempty"`  // complete literal explicit environment
+	Mode           string            `json:"mode,omitempty"`
+	Bin            string            `json:"bin,omitempty"`
+	Args           []string          `json:"args,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	Port           int               `json:"port"`            // 0 => auto-assign a free loopback port
+	Bind           string            `json:"bind,omitempty"`  // listen addr, substituted as {host}; "" => 127.0.0.1
+	Start          [][]string        `json:"start,omitempty"` // command mode: ordered bring-up commands
 	// CLI is the engine's control-CLI path for this platform, referenced
 	// elsewhere as {cli}. It lets the manifest's global actions resolve
 	// to the correct per-OS binary (e.g. lms.exe vs lms).

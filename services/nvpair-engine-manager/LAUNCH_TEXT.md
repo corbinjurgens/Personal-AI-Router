@@ -13,22 +13,33 @@ every native allocation entry plus generation/template/reasoning controls.
 Descriptors derive native spellings from the existing adapter table. A blank
 field inherits; showing a source-labelled default never saves an override.
 
-Until the native compiler/application bodies land, RPC launch preview/configure
-refuse typed loads and model changes before preparation, rebind or persistence.
-Ordinary RPC writes also refuse stored typed loads while preserving direct
-executor readback/persistence integration remains pending. These are temporary
-bodies, not persisted feature flags. Ordinary settings with no typed load state
-keep the existing path. Inspection is a read and reports unavailable artifact
-facts/estimates with descriptors; Auto selects no candidate or owner defaults.
+Typed-only llama process starts and crash relaunches now compile finite sorted
+model presets at the existing lifecycle owner, with no ServingConfig required.
+An 8192-token per-request selection with native slots 2 emits ctx-size 16384.
+The private generated file is leased to its owning child until exit. Native
+build, typed inputs, artifact samples and bytes are rechecked before spawn.
+Ordinary typed settings never create memory declarations or qualifications.
+
+Worker load-only modelChange previews return target-resolved settings, complete
+conversion diffs and their digest. Direct previews and readback preserve typed
+records. ConfigureLaunch and SetPort application remain
+explicitly refused pending O1, including unchanged echoes and removal of stored
+loads. Compiler/conversion/persistence helpers select no settings-apply
+restart policy. Ordinary settings without typed state keep the existing path.
+Inspection reads bounded artifact facts; estimates and Auto remain unavailable.
 Typed requests expose no raw-extras field. Advanced launch retains its existing
 supported validation.
 
 The parent-only launch decoder accepts the broker's internal PreserveCORS guard;
 public and pinned callers cannot supply it as authority. New fields are strictly
-decoded within the existing 64 KiB settings budget. Direct `PreviewLaunch` and
-`ConfigureLaunch` plus `launchStateLocked` and `persistRuntimeServing` still need
-the same guard and modelLoads preservation at their existing owners. No restart
-or drain choice is inferred while O1 remains unanswered.
+decoded within the existing 64 KiB settings budget. `persistRuntimeServing`
+can replace modelLoads in its existing atomic override write while preserving
+unrelated manifest/platform fields and numeric precision. Omitting that argument
+preserves loads; an explicit empty collection clears them. The complete-router
+conversion preview reports mapped field/source changes or a field-specific
+refusal. Mixed external preset/typed authority and overlapping native CLI/env
+sources conflict; unrelated logging/CORS/router options retain their owners.
+No restart or drain choice is inferred while O1 remains unanswered.
 
 The Settings editor uses this notation for local and paired-device engine
 configuration. Engine-manager assembles the manifest-owned command; the broker

@@ -16,6 +16,7 @@ import (
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 )
 
 func applyLiteralLaunch(rt Runtime, command launchCommand, vars map[string]string) (launchCommand, error) {
@@ -103,7 +104,7 @@ func launchForState(st *engineState, port int) (launchCommand, error) {
 	rt := st.plat.Runtime
 	bin := st.binPath
 	st.mu.Unlock()
-	if llamaServingRuntime(st, rt.Serving) {
+	if llamaServingRuntime(st, rt) {
 		rt = llamaServingBase(rt)
 	}
 	vars := st.pathVars()
@@ -129,6 +130,7 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 	st.mu.Lock()
 	result := settings.LaunchState{Engine: engine, ServerPort: st.plat.Runtime.Port, EffectivePort: st.port, Running: st.running, Adopted: st.adopted, Format: launchTextFormat}
 	result.Serving = st.plat.Runtime.Serving.Clone()
+	result.ModelLoads = modelconfig.CloneLoads(st.plat.Runtime.ModelLoads)
 	result.ServingReadback = servingDeclarationReadback(result.Serving)
 	drift := st.plat.Runtime.servingDrift
 	st.mu.Unlock()
@@ -137,8 +139,9 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 		st.mu.Lock()
 		rt := st.plat.Runtime
 		st.mu.Unlock()
-		if preparedServingRuntime(st, result.Serving) {
-			if llamaServingRuntime(st, result.Serving) {
+		rt.modelLoadOwner = e
+		if preparedServingRuntime(st, rt) {
+			if llamaServingRuntime(st, rt) {
 				rt = llamaServingBase(rt)
 			}
 			prepared, servingErr := compilePreparedServing(st, command, rt, false)
@@ -281,6 +284,9 @@ func (e *Executor) PreviewLaunch(p settings.Request, contexts ...context.Context
 	}
 	ctx, cancel := strataPreparationContext(contexts)
 	defer cancel()
+	if p.ModelChange != nil && p.ModelChange.Load != nil {
+		return e.previewModelLoadChange(ctx, st, p)
+	}
 	if err := e.prepareStrataRequest(ctx, st, p); err != nil {
 		return settings.Preview{Settings: p.Settings.Clone(), Errors: map[string]string{"serving": err.Error()}}, nil
 	}
@@ -318,7 +324,9 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 	rt := st.plat.Runtime
 	st.mu.Unlock()
 	rt.Serving = request.Settings.Serving.Clone()
-	if llamaServingRuntime(st, rt.Serving) {
+	rt.ModelLoads = modelconfig.CloneLoads(request.Settings.ModelLoads)
+	rt.modelLoadOwner = e
+	if llamaServingRuntime(st, rt) {
 		if rt.modeOrDefault() != "process" {
 			result.Errors["serving"] = "Finite llama serving requires an owned process launch."
 			return result
@@ -453,7 +461,7 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 	if err != nil {
 		return fail(err.Error())
 	}
-	if preparedServingRuntime(st, rt.Serving) {
+	if preparedServingRuntime(st, rt) {
 		compile := func(command launchCommand, rt Runtime) (*llamaServingLaunch, error) {
 			return compilePreparedServing(st, command, rt, false)
 		}
@@ -471,9 +479,14 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 			return result
 		}
 		result.Settings.Serving = prepared.Config.Clone()
+		result.Settings.ModelLoads = modelconfig.CloneLoads(prepared.ModelLoads)
 		result.Serving = preparedServingReadback(st, prepared)
 	}
 	if prepare != nil {
+		return result
+	}
+	if len(rt.ModelLoads) != 0 {
+		result.Impact = &modelconfig.Impact{RestartScope: "unknown", Unknowns: []string{"O1 settings-apply restart policy is unanswered; Apply is refused."}}
 		return result
 	}
 	current := e.launchStateLocked(request.Engine, st)
@@ -488,12 +501,24 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 // parent rebind callback. The parent already holds the node configuration lock;
 // that callback must not acquire it again. Explicit ON/OFF intent is untouched.
 func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, rebind func() error) (settings.LaunchState, error) {
+	// Public mutation boundary stays closed even for an unchanged typed echo,
+	// removal, Off, Resume or a port-only write until O1 integration is released.
+	st, err := e.state(p.Engine)
+	if err != nil {
+		return settings.LaunchState{}, err
+	}
+	st.mu.Lock()
+	hasLoads := len(st.plat.Runtime.ModelLoads) != 0
+	st.mu.Unlock()
+	if hasLoads || len(p.Settings.ModelLoads) != 0 {
+		return settings.LaunchState{}, modelLoadError("", "modelLoads", "Apply is unavailable pending O1 settings-apply restart integration.")
+	}
 	done, err := e.admitMutation(p.Engine)
 	if err != nil {
 		return settings.LaunchState{}, err
 	}
 	defer done()
-	st, err := e.state(p.Engine)
+	st, err = e.state(p.Engine)
 	if err != nil {
 		return settings.LaunchState{}, err
 	}
@@ -505,6 +530,12 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	if err := ctx.Err(); err != nil {
 		return settings.LaunchState{}, err
 	}
+	st.mu.Lock()
+	hasLoads = len(st.plat.Runtime.ModelLoads) != 0
+	st.mu.Unlock()
+	if hasLoads {
+		return settings.LaunchState{}, modelLoadError("", "modelLoads", "Apply is unavailable pending O1 settings-apply restart integration.")
+	}
 	preview := e.previewLaunchLocked(st, settings.Request{Engine: p.Engine, Settings: p.Settings})
 	if len(preview.Errors) > 0 || preview.Conflict != nil {
 		for field, reason := range preview.Errors {
@@ -514,7 +545,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 		}
 		return settings.LaunchState{}, fmt.Errorf("launch configuration failed authoritative validation")
 	}
-	if preparedServingRuntime(st, p.Settings.Serving) && !p.Settings.Serving.Equal(preview.Settings.Serving) {
+	if preparedServingRuntime(st, Runtime{Serving: p.Settings.Serving}) && !p.Settings.Serving.Equal(preview.Settings.Serving) {
 		return settings.LaunchState{}, servingError("Apply requires the exact reviewed native digest and artifact bindings.")
 	}
 	// This operation returns its one failure through the settings snapshot.
@@ -533,13 +564,13 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 		activationBlocked = true
 	}
 	var pending *llamaServingSnapshot
-	if preparedServingRuntime(st, preview.Settings.Serving) {
+	if preparedServingRuntime(st, Runtime{Serving: preview.Settings.Serving}) {
 		st.mu.Lock()
 		rt := st.plat.Runtime
 		st.mu.Unlock()
 		rt.Serving = preview.Settings.Serving.Clone()
 		rt.LaunchArgs, rt.LaunchEnv = &preview.Args, &preview.Env
-		if llamaServingRuntime(st, rt.Serving) {
+		if llamaServingRuntime(st, rt) {
 			rt = llamaServingBase(rt)
 		}
 		vars := st.pathVars()

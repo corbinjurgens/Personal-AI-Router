@@ -30,7 +30,7 @@ func snapshotLlamaObservation(st *engineState) (servingRunSnapshot, error) {
 	if err != nil {
 		return s, err
 	}
-	if !llamaServingRuntime(st, s.rt.Serving) {
+	if !llamaServingRuntime(st, s.rt) {
 		return servingRunSnapshot{}, &ServingIdentityRefusal{"Loaded observation is unavailable for this engine."}
 	}
 	s.rt.servingObserved = nil

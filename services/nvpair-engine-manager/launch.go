@@ -70,6 +70,49 @@ func literalEnvironment(assignments []string) (map[string]string, error) {
 	return env, nil
 }
 
+// Share native argument boundaries between default merging and typed conversion.
+// A flag's value is never interpreted again as an independent native option.
+func llamaLaunchArgument(token string) (string, int) {
+	name, _, attached := strings.Cut(token, "=")
+	name = llamaLongOption(name)
+	for _, option := range llamaServingOptions {
+		for _, flag := range option.flags {
+			if name == flag {
+				if option.bool {
+					return option.key, 0
+				}
+				values := 1
+				if option.key == "control-vector-layer-range" {
+					values = 2
+				}
+				if attached {
+					values--
+				}
+				return option.key, values
+			}
+		}
+	}
+	// Other pinned native server options take one value, except these
+	// switches (7fe450e1 common/arg.cpp). Consume values even when they
+	// look like flags; e.g. --log-file --models-preset is a filename.
+	switch name {
+	case "-h", "--help", "--usage", "--version", "-cl", "--cache-list", "--completion-bash",
+		"--perf", "--no-perf", "-e", "--escape", "--no-escape", "-sp", "--special", "--spm-infill",
+		"--ignore-eos", "--list-devices", "--check-tensors", "--reuse-port",
+		"--cors-credentials", "--no-cors-credentials", "--ui-mcp-proxy", "--webui-mcp-proxy", "--no-ui-mcp-proxy", "--no-webui-mcp-proxy",
+		"-ag", "--agent", "-no-ag", "--no-agent", "--ui", "--webui", "--no-ui", "--no-webui",
+		"--embedding", "--embeddings", "--rerank", "--reranking", "--metrics", "--props", "--slots", "--no-slots",
+		"--jinja", "--no-jinja", "--reasoning-preserve", "--no-reasoning-preserve", "--skip-chat-parsing", "--no-skip-chat-parsing",
+		"--prefill-assistant", "--no-prefill-assistant", "--lora-init-without-apply", "--log-disable", "--log-jsonl", "--no-log-jsonl",
+		"-v", "--verbose", "--log-verbose", "--offline", "--log-prefix", "--no-log-prefix", "--log-timestamps", "--no-log-timestamps":
+		return name, 0
+	}
+	if attached || !strings.HasPrefix(name, "-") {
+		return name, 0
+	}
+	return name, 1
+}
+
 // fixedLaunchArgs preserves startup defaults unless a custom native llama
 // router launch lets its preset (or an explicit user option) own the setting.
 func fixedLaunchArgs(rt Runtime) []string {
@@ -80,50 +123,10 @@ func fixedLaunchArgs(rt Runtime) []string {
 	if rt.LaunchArgs == nil {
 		return fixed
 	}
-	option := func(token string) (string, int) {
-		name, _, attached := strings.Cut(token, "=")
-		name = llamaLongOption(name)
-		for _, option := range llamaServingOptions {
-			for _, flag := range option.flags {
-				if name == flag {
-					if option.bool {
-						return option.key, 0
-					}
-					values := 1
-					if option.key == "control-vector-layer-range" {
-						values = 2
-					}
-					if attached {
-						values--
-					}
-					return option.key, values
-				}
-			}
-		}
-		// Other pinned native server options take one value, except these
-		// switches (7fe450e1 common/arg.cpp). Consume values even when they
-		// look like flags; e.g. --log-file --models-preset is a filename.
-		switch name {
-		case "-h", "--help", "--usage", "--version", "-cl", "--cache-list", "--completion-bash",
-			"--perf", "--no-perf", "-e", "--escape", "--no-escape", "-sp", "--special", "--spm-infill",
-			"--ignore-eos", "--list-devices", "--check-tensors", "--reuse-port",
-			"--cors-credentials", "--no-cors-credentials", "--ui-mcp-proxy", "--webui-mcp-proxy", "--no-ui-mcp-proxy", "--no-webui-mcp-proxy",
-			"-ag", "--agent", "-no-ag", "--no-agent", "--ui", "--webui", "--no-ui", "--no-webui",
-			"--embedding", "--embeddings", "--rerank", "--reranking", "--metrics", "--props", "--slots", "--no-slots",
-			"--jinja", "--no-jinja", "--reasoning-preserve", "--no-reasoning-preserve", "--skip-chat-parsing", "--no-skip-chat-parsing",
-			"--prefill-assistant", "--no-prefill-assistant", "--lora-init-without-apply", "--log-disable", "--log-jsonl", "--no-log-jsonl",
-			"-v", "--verbose", "--log-verbose", "--offline", "--log-prefix", "--no-log-prefix", "--log-timestamps", "--no-log-timestamps":
-			return name, 0
-		}
-		if attached || !strings.HasPrefix(name, "-") {
-			return name, 0
-		}
-		return name, 1
-	}
 	flags := func(args []string) map[string]bool {
 		found := map[string]bool{}
 		for i := 0; i < len(args); i++ {
-			key, values := option(args[i])
+			key, values := llamaLaunchArgument(args[i])
 			if strings.HasPrefix(args[i], "-") {
 				found[key] = true
 			}
@@ -137,7 +140,7 @@ func fixedLaunchArgs(rt Runtime) []string {
 	}
 	var result []string
 	for i := 0; i < len(fixed); i++ {
-		key, values := option(fixed[i])
+		key, values := llamaLaunchArgument(fixed[i])
 		end := min(i+1+values, len(fixed))
 		// All four bundled defaults are model options, not router options.
 		perModel := key == "ctx-size" || key == "parallel" || key == "sleep-idle-seconds" || key == "cache-ram"

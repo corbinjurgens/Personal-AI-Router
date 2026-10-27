@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -45,11 +46,12 @@ func servingError(reason string) error {
 }
 
 type llamaServingLaunch struct {
-	Config    *engines.ServingConfig
-	Envelopes []engines.ServingEnvelope
-	Snapshot  []byte
-	Source    string
-	Digest    string
+	ModelLoads []modelconfig.ModelLoad
+	Config     *engines.ServingConfig
+	Envelopes  []engines.ServingEnvelope
+	Snapshot   []byte
+	Source     string
+	Digest     string
 	// Credential is the native API key of a Strata launch. It reaches the
 	// server only through the child environment, never the snapshot, and is
 	// never serialized.
@@ -189,14 +191,14 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "load-on-startup", flags: []string{"--load-on-startup"}, env: "__PRESET_LOAD_ON_STARTUP", unsupported: true},
 }
 
-func llamaServingRuntime(st *engineState, config *engines.ServingConfig) bool {
-	return config != nil && st.manifest.FamilyOrDefault() == "llamacpp"
+func llamaServingRuntime(st *engineState, rt Runtime) bool {
+	return (rt.Serving != nil || len(rt.ModelLoads) != 0) && st.manifest.FamilyOrDefault() == "llamacpp"
 }
 
 // Remove only PAIR-owned defaults, before adding literal user arguments. The
 // manifest stays unchanged so the unconfigured path remains byte-for-byte.
 func llamaServingBase(rt Runtime) Runtime {
-	if rt.Serving == nil || rt.EditableLaunch == nil {
+	if (rt.Serving == nil && len(rt.ModelLoads) == 0) || rt.EditableLaunch == nil {
 		return rt
 	}
 	p := *rt.EditableLaunch
@@ -478,12 +480,16 @@ func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) 
 		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
 		key := llamaOptionKey(name)
 		if key == "" || key == "models-preset" || key == "models-max" {
-			return nil, servingError("Unknown preset option, include or inheritance is unsupported.")
+			field := "option"
+			if len(name) <= 64 && regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(name) {
+				field = name
+			}
+			return nil, &ServingFieldError{Field: "serving.models." + field, ModelID: section, Reason: "Unknown preset option, include or inheritance is unsupported."}
 		}
 		negative := false
 		for _, option := range llamaServingOptions {
 			if key == option.key && option.unsupported && key != "model" && key != "model-draft" && key != "load-on-startup" {
-				return nil, servingError("Unsupported envelope-affecting preset option.")
+				return nil, &ServingFieldError{Field: "serving.models." + key, ModelID: section, Reason: "Unsupported envelope-affecting preset option."}
 			}
 			if key == option.key {
 				negative = slices.Contains(option.negativeFlags, "--"+name)
@@ -543,6 +549,9 @@ func llamaArtifactPaths(path string) ([]string, error) {
 }
 
 func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool) (*llamaServingLaunch, error) {
+	if rt.Serving == nil {
+		return nil, servingError("A serving declaration is required by the external preset compiler.")
+	}
 	if len(servingDeclarationErrors(rt.Serving)) != 0 {
 		return nil, servingError("Invalid serving declaration.")
 	}
@@ -584,6 +593,15 @@ func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool
 	sections, err := parseLlamaServingPreset(data)
 	if err != nil {
 		return nil, err
+	}
+	return compileLlamaServingSections(rt, requireApproved, source, data, binding, sections, cli, env, capacity)
+}
+
+// The declaration validator consumes either external source bytes or typed
+// compiler bytes. The latter are input bytes, never a generated output path.
+func compileLlamaServingSections(rt Runtime, requireApproved bool, source string, data []byte, binding *engines.ServingBinding, sections map[string]map[string]string, cli, env map[string]string, capacity int64) (*llamaServingLaunch, error) {
+	if len(servingDeclarationErrors(rt.Serving)) != 0 || rt.Serving == nil {
+		return nil, servingError("A valid existing serving declaration is required.")
 	}
 	if len(sections)-boolInt(sections["*"] != nil) != len(rt.Serving.Models) {
 		return nil, servingError("Preset models must exactly match the serving declaration.")

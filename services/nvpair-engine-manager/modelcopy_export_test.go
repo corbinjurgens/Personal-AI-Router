@@ -28,6 +28,56 @@ import (
 
 const reportedCopyAlias = "tiel-coder-35b-a3b-msi-ctx32768"
 
+func TestModelCopyCustomTypedBindingUsesCanonicalResolver(t *testing.T) {
+	f := newModelLoadFixture(t)
+	rt := convertModelLoadFixture(t, f)
+	f.st.plat.Runtime = rt
+	store := engineModelStore{engine: "fake", adapter: "llamacpp", root: f.root}
+	list, err := f.ex.llamaExportFiles(context.Background(), f.st, store, "medium-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Files) != 1 || list.Files[0].configured != filepath.Join(f.root, "medium.gguf") || list.Files[0].SHA256 != "" || list.Files[0].asserted != "" {
+		t.Fatalf("typed resolver invented hashes or lost exact artifact: %+v", list)
+	}
+	writeInspectionGGUF(t, filepath.Join(f.root, "medium.gguf"), "llama", 0.75, 4096)
+	if _, err := f.ex.llamaExportFiles(context.Background(), f.st, store, "medium-model"); err == nil {
+		t.Fatal("changed typed artifact fell back to another source")
+	}
+}
+
+func TestModelCopyCustomTypedRouterPreservesUnrelatedReceiptExport(t *testing.T) {
+	f := newModelLoadFixture(t)
+	rt := convertModelLoadFixture(t, f)
+	rt.Serving = servingSettingsFixture() // unrelated and unapproved
+	f.st.plat.Runtime = rt
+	data, err := os.ReadFile(filepath.Join(f.root, "medium.gguf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := modelFileList{Engine: "fake", Model: "receipt-only", Layout: llamaArtifactsLayout, Files: []modelFile{{Role: "model", Path: "model/copied.gguf", Size: int64(len(data)), SHA256: sha256Hex(data)}}}
+	id, err := artifactExportID(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list.ExportID = id
+	base := copyAliasDir(f.root, list.Model)
+	artifact := filepath.Join(base, id, "model", "copied.gguf")
+	writeTestFile(t, artifact, data)
+	receipt, err := json.Marshal(copyReceipt{Version: 1, List: list})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(base, "copy.json"), receipt)
+	exported, err := f.ex.llamaExportFiles(context.Background(), f.st, engineModelStore{engine: "fake", adapter: "llamacpp", root: f.root}, list.Model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.Files) != 1 || exported.Files[0].configured != artifact || exported.Files[0].asserted != list.Files[0].SHA256 {
+		t.Fatalf("receipt-only re-export lost its source or asserted digest: %+v", exported)
+	}
+}
+
 type customCopyFixture struct {
 	source                  *Executor
 	preset, artifact, store string
