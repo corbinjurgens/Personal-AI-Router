@@ -173,35 +173,6 @@ func TestDiagnoseConnection(t *testing.T) {
 	}
 }
 
-func TestStartFailsFastWhenAuthRequired(t *testing.T) {
-	var probes atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		probes.Add(1)
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	ex, st, started, stopped := newDiagnosisExecutor(t, srv.URL, diagnosisServerPort(t, srv))
-	st.plat.Runtime.Ready.TimeoutS = 60
-	closeDiagnosisServerOnStop(t, srv, stopped)
-	begin := time.Now()
-	if err := ex.Start(context.Background(), "fake"); err == nil {
-		t.Fatal("start succeeded against an authentication refusal")
-	}
-	if elapsed := time.Since(begin); elapsed >= 10*time.Second {
-		t.Fatalf("auth failure took %s, want less than 10s", elapsed)
-	}
-	if probes.Load() != 4 {
-		t.Fatalf("probe count = %d, want identity probe plus three readiness probes", probes.Load())
-	}
-	if !fileExists(started) || !fileExists(stopped) {
-		t.Fatal("start and cleanup stop commands must both run")
-	}
-	assertDiagnosisReport(t, ex, startFailedID("fake"), diagnosisMessage("Fake Engine", diagnosisAuthRequired), "error", "retry")
-	status, err := ex.Status("fake")
-	if err != nil || status.Running {
-		t.Fatalf("status = %+v, error = %v, want stopped", status, err)
-	}
-}
-
 func TestStartReportsAppRunningWhenRefused(t *testing.T) {
 	port := diagnosisRefusedPort(t)
 	ex, _, _, stopped := newDiagnosisExecutor(t, fmt.Sprintf("http://127.0.0.1:%d/", port), port)

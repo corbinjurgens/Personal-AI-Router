@@ -12,10 +12,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/nodeid"
 )
 
 func main() {
@@ -23,7 +25,7 @@ func main() {
 	peerSync := flag.Bool("peer-sync", false, "serve the cross-node errors endpoint and push errors to peer nodes learned from the broker's discovery relay")
 	port := flag.Int("port", 14319, "HTTP port for the cross-node errors endpoint (only used with --peer-sync)")
 	clusterDir := flag.String("cluster-dir", "", "cluster config dir (node.crt/node.key + trusted/); cross-node error sync is pin-based cluster mTLS, so without a usable identity and live membership here this node serves and pushes nothing")
-	nodeID := flag.String("node-id", "", "this node's stable origin id (the broker passes its resolved per-host UUID); defaults to the hostname when unset so the bare binary keeps its standalone behavior")
+	nodeID := flag.String("node-id", "", "this node's stable origin id (the broker passes its resolved per-host UUID); when unset, peer-sync resolves the shared stable UUID and local-only mode defaults to the hostname")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
@@ -49,6 +51,9 @@ func main() {
 	}
 	defer transport.Close()
 
+	codec := NewCodec(transport)
+	mgr := newStartupManager(codec, *peerSync, *nodeID, *clusterDir)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -62,15 +67,6 @@ func main() {
 		case <-ctx.Done():
 		}
 	}()
-
-	codec := NewCodec(transport)
-	mgr := NewManager(codec)
-	// The broker passes the stable per-host UUID so this node's errors are
-	// attributed to the same identity the broker stamps and the cluster keys on
-	// (surviving a PC rename); absent it, NewManager's hostname default stands.
-	if *nodeID != "" {
-		mgr.SetLocalNodeID(*nodeID)
-	}
 
 	// Networking is opt-in. Without --peer-sync, nvpair-errors is a
 	// stdio-only local datastore with no network surface (and the
@@ -90,6 +86,25 @@ func main() {
 		log.Fatalf("manager error: %v", err)
 	}
 	log.Print("shutdown complete")
+}
+
+func newStartupManager(codec *Codec, peerSync bool, nodeID, clusterDir string) *Manager {
+	mgr := NewManager(codec)
+	if peerSync && nodeID == "" {
+		// Match the broker's config root: clusterDir is <base>/cluster;
+		// empty selects nodeid's shared default. Resolve before NewPeerSync
+		// captures the origin, even if cluster creation will happen later.
+		base := ""
+		if clusterDir != "" {
+			base = filepath.Dir(clusterDir)
+		}
+		nodeID = nodeid.Resolve(base)
+		if nodeID == "" {
+			log.Fatal("could not resolve a stable node UUID (system CSPRNG unavailable); refusing to start without a node identity")
+		}
+	}
+	mgr.SetLocalNodeID(nodeID)
+	return mgr
 }
 
 // startPeerSync wires the cross-node networking layer onto mgr and

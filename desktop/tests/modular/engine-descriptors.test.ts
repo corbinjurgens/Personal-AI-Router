@@ -126,6 +126,36 @@ afterEach(() => {
 })
 
 describe('engine descriptor parsing', () => {
+    it('preserves every Go descriptor protocol and rejects an unknown protocol', () => {
+        const protocols = [
+            'ollama-api',
+            'openai-v1',
+            'openai-chat',
+            'anthropic-messages',
+            'llamacpp-router'
+        ]
+        const descriptor = wireDescriptorObject(STRATA_WIRE)
+
+        expect(parseEngineDescriptors({ engines: [{ ...descriptor, protocols }] })).toEqual([
+            {
+                engineType: 'strata',
+                family: 'strata',
+                label: 'Strata',
+                available: true,
+                protocols,
+                modelNaming: 'exact',
+                modelStore: '',
+                catalog: '',
+                operations: { load: { responseTimeoutS: 0 }, unload: { responseTimeoutS: 0 } }
+            }
+        ])
+        expect(
+            parseEngineDescriptors({
+                engines: [{ ...descriptor, protocols: [...protocols, 'grpc'] }]
+            })
+        ).toEqual([])
+    })
+
     it('keeps valid descriptors and drops ones this build cannot honor', () => {
         const parsed = parseEngineDescriptors({
             engines: [

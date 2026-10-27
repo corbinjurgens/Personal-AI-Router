@@ -1016,7 +1016,11 @@ the messages are:
 
 Auth evidence takes precedence over process inspection. Without diagnosis fields,
 or if process listing fails without auth evidence, the original failure wording
-is retained. Only three consecutive readiness responses with a declared auth
+is retained. Before a command-mode start, a declared auth response from the
+effective ready endpoint refuses the start without running either the start or
+cleanup stop command, leaving the listener unadopted. Explicit Stop and shutdown
+retain their existing behavior. After a start command is attempted, three
+consecutive readiness responses with a declared auth
 status fail readiness early (about 0.6 seconds for immediate responses); any
 other result resets that count. Other failures retain the existing readiness
 timeout (60 seconds for LM Studio), and failed-start stop-command cleanup is
