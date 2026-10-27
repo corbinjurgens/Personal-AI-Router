@@ -188,7 +188,7 @@ export const npmLicenseFileHashes: Readonly<Record<string, string>> = {
     'dunder-proto@1.0.1': '2b770a704c15de238c3f622b01b0044ddd60b49ee30608ea6991ebf19db7a7a1',
     'electron-log@5.4.4': '8a7030a9df0eac3ba1948991278d847d3e4c8dc4908a777b5868692c975ccfa8',
     'electron-updater@6.8.9': 'bed8d0ab3e6031817f775a641ff37313b0f5591bc8ba0ed79b978dafbd4231ce',
-    'electron@42.10.0': '5154e165bd6c2cc0cfbcd8916498c7abab0497923bafcd5cb07673fe8480087d',
+    'electron@42.11.18': '5154e165bd6c2cc0cfbcd8916498c7abab0497923bafcd5cb07673fe8480087d',
     'entities@8.0.0': 'cb992345949ccd6e8394b2cd6c465f7b897c864f845937dbf64e8997f389e164',
     'env-paths@3.0.0': '5c932d88256b4ab958f64a856fa48e8bd1f55bc1d96b8149c65689e0c61789d3',
     'es-define-property@1.0.1': '5e325595b4ea8cfec3802f545b1def5d7b73e4a5b8e9ba63e32a320f67732292',
@@ -218,7 +218,7 @@ export const npmLicenseFileHashes: Readonly<Record<string, string>> = {
     'isomorphic-dompurify@3.13.0':
         '6354ab976818c186f78b8f80b54668dfb4dadcfbb7a016c0b0acbf5fa5678fc9',
     'js-tokens@4.0.0': '2213d91c606205c71eb051a199478cdc2adde945893404d7f1421436dd6d5cc1',
-    'js-yaml@4.2.0': 'a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550',
+    'js-yaml@4.3.2': 'a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550',
     'jsdom@29.1.1': '242d37e7cab25cbafc36cc973ee88f9345fddf066afe4f72b7ac3d9ad4e24cce',
     'jsonfile@6.2.1': 'a9801fb52ba22ef808682a094da8a7a480584b7ed0dfd0d888ab543616335031',
     'lodash.escaperegexp@4.1.2': 'ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272',

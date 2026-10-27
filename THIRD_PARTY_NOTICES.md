@@ -149,7 +149,7 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `devlop` | 1.1.0 | MIT |
 | `dompurify` | 3.4.13 | (MPL-2.0 OR Apache-2.0) |
 | `dunder-proto` | 1.0.1 | MIT |
-| `electron` | 42.10.0 | MIT |
+| `electron` | 42.11.18 | MIT |
 | `electron-log` | 5.4.4 | MIT |
 | `electron-updater` | 6.8.9 | MIT |
 | `entities` | 8.0.0 | BSD-2-Clause |
@@ -219,7 +219,7 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `is-potential-custom-element-name` | 1.0.1 | MIT |
 | `isomorphic-dompurify` | 3.13.0 | MIT |
 | `js-tokens` | 4.0.0 | MIT |
-| `js-yaml` | 4.2.0 | MIT |
+| `js-yaml` | 4.3.2 | MIT |
 | `jsdom` | 29.1.1 | MIT |
 | `jsonfile` | 6.2.1 | MIT |
 | `lazy-val` | 1.0.5 | MIT |
@@ -5013,7 +5013,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### electron 42.10.0
+### electron 42.11.18
 
 License: MIT
 
@@ -8291,13 +8291,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### js-yaml 4.2.0
+### js-yaml 4.3.2
 
 License: MIT
 
 Repository: https://github.com/nodeca/js-yaml
 
-License source: js-yaml@4.2.0/LICENSE
+License source: js-yaml@4.3.2/LICENSE
 
 ```text
 (The MIT License)
