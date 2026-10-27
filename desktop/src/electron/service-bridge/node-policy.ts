@@ -29,6 +29,7 @@ import type {
 } from '@/shared/types/node-policy'
 import { engineManagerName, isValidRoutingEngineId } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
+import { prettyJsonSource } from '@/shared/utils/json-source'
 import { availabilityValue } from './node-availability'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 
@@ -558,14 +559,15 @@ function modelConfiguration(value: JsonValue | undefined): ModelConfiguration | 
 }
 
 function policySnapshot(body: JsonObject | null): NodePolicySnapshot {
-    const policy = objectValue(body?.policy)
-    if (!body || !policy) throw new Error('The service returned no node policy')
-    validateModelPreferences(policy)
+    if (!body || typeof body.policy !== 'string') {
+        throw new Error('The service returned no node policy')
+    }
+    const policy = parsePolicyText(body.policy)
     const revision = revisionValue(policy.revision)
     if (revision === null) throw new Error('The service returned a node policy without a revision')
     const configuration = modelConfiguration(body.modelConfiguration)
     return {
-        policy: JSON.stringify(policy, null, 2),
+        policy: prettyJsonSource(body.policy),
         revision,
         activation: activationStatus(body),
         ...(configuration !== undefined ? { modelConfiguration: configuration } : {})
@@ -726,9 +728,10 @@ export function policySetParams(request: NodePolicyWrite): JsonObject {
     if (revisionValue(request.expectedPersistedRevision) === null) {
         throw new Error('The policy revision it was edited from must be a decimal string')
     }
+    parsePolicyText(request.policy)
     return {
         ...nodeTargetParams(request),
-        policy: parsePolicyText(request.policy),
+        policy: request.policy,
         expectedPersistedRevision: request.expectedPersistedRevision
     }
 }

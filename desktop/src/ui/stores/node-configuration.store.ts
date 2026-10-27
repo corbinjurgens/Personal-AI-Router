@@ -41,6 +41,7 @@ import { useConnectionStore } from '@/ui/stores/connection.store'
 import { engineLabel, engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import getErrorString from '@/shared/utils/get-error-string'
+import { replaceJsonFieldSource } from '@/shared/utils/json-source'
 import {
     pauseOriginValue,
     parseNodeRoles,
@@ -85,13 +86,12 @@ export const NODE_PAUSED_MESSAGE =
  * field kept as read. Unset tiers are omitted, which leaves them undeclared.
  */
 export function withRoles(policy: string, roles: NodeRoles): string {
-    const body = policyObject(policy)
     const declared: JsonMap = {}
     for (const tier of ROLE_TIERS) {
         const role = roles[tier]
         if (role) declared[tier] = { engine: role.engine, model: role.model }
     }
-    return JSON.stringify({ ...body, roles: declared }, null, 2)
+    return replaceJsonFieldSource(policy, 'roles', JSON.stringify(declared))
 }
 
 /** One installed model a role can name, in engine-manager spelling. */

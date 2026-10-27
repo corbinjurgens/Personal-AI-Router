@@ -47,6 +47,11 @@ function strictFixtureObject(value: JsonValue | undefined): JsonObject {
     return value
 }
 
+/** Decoded fixture with the opaque policy text supplied by the socket client. */
+function policyEnvelope(body: JsonObject): JsonObject {
+    return { ...body, policy: JSON.stringify(body.policy) }
+}
+
 function loadStrictFixtures(): JsonObject {
     const value: JsonValue = JSON.parse(
         readFileSync(
@@ -63,14 +68,14 @@ describe('served/resident policy contract', () => {
             revision: '31',
             routing: { buffers: { capacityMiB: 384, waitSeconds: 0 } }
         }
-        const document = parsePolicyDocument({ policy, availability: 'available' })
+        const document = parsePolicyDocument(policyEnvelope({ policy, availability: 'available' }))
         const draft = parsePolicyText(document.policy)
         expect(draft).toEqual(policy)
         const params = policySetParams({
             policy: document.policy,
             expectedPersistedRevision: document.revision
         })
-        expect(params).toEqual({ policy, expectedPersistedRevision: '31' })
+        expect(params).toEqual({ policy: document.policy, expectedPersistedRevision: '31' })
         const result = parsePolicySetResult({ policy: params.policy })
         expect(parsePolicyText(result.policy)).toEqual(policy)
         const changed = parsePolicyChange({ nodeId: 'self', policy: params.policy })
@@ -98,14 +103,14 @@ describe('served/resident policy contract', () => {
             if (fixture.valid !== true) {
                 expect(() => parsePolicyText(text)).toThrow()
                 expect(() =>
-                    parsePolicySetResult({ policy: { ...input, revision: '31' } })
+                    parsePolicySetResult(policyEnvelope({ policy: { ...input, revision: '31' } }))
                 ).toThrow()
                 return
             }
             const draft = parsePolicyText(text)
             expect(Object.hasOwn(draft, 'servedModels')).toBe(fixture.servedPresent)
             expect(draft.servedModels).toEqual(fixture.served)
-            const saved = parsePolicySetResult({ policy: draft })
+            const saved = parsePolicySetResult(policyEnvelope({ policy: draft }))
             const params = policySetParams({
                 policy: saved.policy,
                 expectedPersistedRevision: saved.revision,
@@ -113,7 +118,7 @@ describe('served/resident policy contract', () => {
             })
             expect(params).toEqual({
                 nodeId: 'peer',
-                policy: draft,
+                policy: saved.policy,
                 expectedPersistedRevision: '31'
             })
             const readback = parsePolicyDocument({ policy: params.policy, availability: 'paused' })
@@ -128,17 +133,23 @@ describe('served/resident policy contract', () => {
             residentModels: [],
             routing: { accounts: [] }
         }
-        const changed = parsePolicyChange({ nodeId: 'self', policy })
+        const changed = parsePolicyChange(policyEnvelope({ nodeId: 'self', policy }))
         expect(changed).not.toBeNull()
         if (!changed) throw new Error('Missing policy change')
         expect(
             policySetParams({ policy: changed.policy, expectedPersistedRevision: '9' }).policy
-        ).toEqual({
-            revision: '9',
-            servedModels: [],
-            residentModels: [],
-            routing: { accounts: [] }
-        })
+        ).toBe(
+            JSON.stringify(
+                {
+                    revision: '9',
+                    servedModels: [],
+                    residentModels: [],
+                    routing: { accounts: [] }
+                },
+                null,
+                2
+            )
+        )
     })
 
     /** Resident policy with one qualified profile at the given token bounds. */
@@ -165,12 +176,12 @@ describe('served/resident policy contract', () => {
     it('keeps a non-empty residentModels list through the bridge round trip', () => {
         const draft = parsePolicyText(residentPolicy(4096, 512))
         expect(draft).toHaveProperty('residentModels', RESIDENT)
-        const saved = parsePolicySetResult({ policy: draft })
+        const saved = parsePolicySetResult(policyEnvelope({ policy: draft }))
         const params = policySetParams({
             policy: saved.policy,
             expectedPersistedRevision: saved.revision
         })
-        expect(params.policy).toEqual(draft)
+        expect(params.policy).toBe(saved.policy)
     })
 
     it('accepts a resident output ceiling below a nonzero context bound', () => {
@@ -223,16 +234,22 @@ describe('engine binding policy transport', () => {
             routing: { accounts: [] },
             ...(value === undefined ? {} : { engineBindings: value })
         }
-        const document = parsePolicyDocument({ policy, availability: 'available' })
+        const document = parsePolicyDocument(policyEnvelope({ policy, availability: 'available' }))
         const params = policySetParams({
             nodeId: 'peer',
             policy: document.policy,
             expectedPersistedRevision: document.revision
         })
-        expect(params).toEqual({ nodeId: 'peer', policy, expectedPersistedRevision: '31' })
+        expect(params).toEqual({
+            nodeId: 'peer',
+            policy: document.policy,
+            expectedPersistedRevision: '31'
+        })
         const saved = parsePolicySetResult({ policy: params.policy })
         expect(parsePolicyText(saved.policy)).toEqual(policy)
-        expect(parsePolicyChange({ nodeId: 'peer', policy })?.policy).toBe(document.policy)
+        expect(parsePolicyChange(policyEnvelope({ nodeId: 'peer', policy }))?.policy).toBe(
+            document.policy
+        )
         expect(parsePolicyText(withRoles(document.policy, { weak: bindings[0] }))).toEqual({
             ...policy,
             roles: { weak: bindings[0] }
@@ -265,9 +282,11 @@ describe('engine binding policy transport', () => {
     it.each(invalid)('rejects %s across get, set, push and drafts', (_name, engineBindings) => {
         const policy = { revision: '31', engineBindings }
         expect(() => parsePolicyText(JSON.stringify(policy))).toThrow()
-        expect(() => parsePolicyDocument({ policy, availability: 'available' })).toThrow()
-        expect(() => parsePolicySetResult({ policy })).toThrow()
-        expect(parsePolicyChange({ nodeId: 'peer', policy })).toBeNull()
+        expect(() =>
+            parsePolicyDocument(policyEnvelope({ policy, availability: 'available' }))
+        ).toThrow()
+        expect(() => parsePolicySetResult(policyEnvelope({ policy }))).toThrow()
+        expect(parsePolicyChange(policyEnvelope({ nodeId: 'peer', policy }))).toBeNull()
     })
 
     it('refuses case variant binding keys', () => {
@@ -293,19 +312,19 @@ describe('engine binding policy transport', () => {
         const get = vi.fn<INodePolicyApi['get']>()
         const set = vi.fn<INodePolicyApi['set']>()
         get.mockImplementation(async target =>
-            parsePolicyDocument({
-                policy: {
-                    revision: '31',
-                    roles: {},
-                    engineBindings: [{ engine: 'ollama', model: `${target}-model` }],
-                    routing: { accounts: [] }
-                },
-                availability: 'available'
-            })
+            parsePolicyDocument(
+                policyEnvelope({
+                    policy: {
+                        revision: '31',
+                        roles: {},
+                        engineBindings: [{ engine: 'ollama', model: `${target}-model` }],
+                        routing: { accounts: [] }
+                    },
+                    availability: 'available'
+                })
+            )
         )
-        set.mockImplementation(async request =>
-            parsePolicySetResult({ policy: parsePolicyText(request.policy) })
-        )
+        set.mockImplementation(async request => parsePolicySetResult({ policy: request.policy }))
         Object.defineProperty(window, 'pairApi', {
             configurable: true,
             value: {
@@ -820,8 +839,13 @@ describe('node policy bridge helpers', () => {
     })
 
     it('turns a policy:get result into editable text', () => {
+        const policy = JSON.stringify(
+            { revision: '5', tier: 'weak', limits: { maxJobs: 2 } },
+            null,
+            2
+        )
         const document = parsePolicyDocument({
-            policy: { revision: '5', tier: 'weak', limits: { maxJobs: 2 } },
+            policy,
             availability: 'draining'
         })
         expect(document.availability).toBe('draining')
@@ -830,7 +854,7 @@ describe('node policy bridge helpers', () => {
             tier: 'weak',
             limits: { maxJobs: 2 }
         })
-        expect(document.policy).toContain('\n')
+        expect(document.policy).toBe(policy)
     })
 
     it('rejects malformed policy:get and set results', () => {
@@ -842,7 +866,9 @@ describe('node policy bridge helpers', () => {
 
     it('reads set and availability results', () => {
         expect(
-            JSON.parse(parsePolicySetResult({ policy: { revision: '2', a: 1 } }).policy)
+            JSON.parse(
+                parsePolicySetResult(policyEnvelope({ policy: { revision: '2', a: 1 } })).policy
+            )
         ).toEqual({ revision: '2', a: 1 })
         expect(parseAvailabilityResult({ availability: 'paused' })).toEqual({
             availability: 'paused'
@@ -874,7 +900,7 @@ describe('node push parsers', () => {
 
     it('renders a policy change as the same pretty JSON text policy:get shows', () => {
         const policy = { revision: '3', cpu: { maxPercent: 50 } }
-        expect(parsePolicyChange({ nodeId: 'n1', policy })).toEqual({
+        expect(parsePolicyChange(policyEnvelope({ nodeId: 'n1', policy }))).toEqual({
             nodeId: 'n1',
             policy: JSON.stringify(policy, null, 2),
             revision: '3',
@@ -906,7 +932,7 @@ describe('policy revision and activation fields', () => {
             engineBindings: [{ engine: 'llamacpp', model: 'm' }],
             routing: { accounts: [] }
         }
-        const document = parsePolicyDocument({ policy, availability: 'available' })
+        const document = parsePolicyDocument(policyEnvelope({ policy, availability: 'available' }))
         const params = policySetParams({
             nodeId: 'peer',
             policy: document.policy,
@@ -914,17 +940,17 @@ describe('policy revision and activation fields', () => {
         })
         expect(params).toEqual({
             nodeId: 'peer',
-            policy,
+            policy: document.policy,
             expectedPersistedRevision: '9007199254740993'
         })
         expect(JSON.parse(parsePolicySetResult({ policy: params.policy }).policy)).toEqual(policy)
-        const change = parsePolicyChange({ nodeId: 'peer', policy })
+        const change = parsePolicyChange(policyEnvelope({ nodeId: 'peer', policy }))
         if (!change) throw new Error('Missing inference-settings change')
         expect(JSON.parse(change.policy)).toEqual(policy)
     })
     it('reads the persisted revision and the activation report from policy:get', () => {
         const document = parsePolicyDocument({
-            policy: { revision: '12' },
+            policy: '{"revision":"12"}',
             availability: 'available',
             recoveryRequired: false,
             activeRevision: '11',
@@ -942,7 +968,7 @@ describe('policy revision and activation fields', () => {
 
     it('reads an active policy with no error text', () => {
         const result = parsePolicySetResult({
-            policy: { revision: '4' },
+            policy: '{"revision":"4"}',
             activeRevision: '4',
             activation: 'active'
         })
@@ -953,7 +979,7 @@ describe('policy revision and activation fields', () => {
     it('reads a pending policy that no proxy has acknowledged', () => {
         const change = parsePolicyChange({
             nodeId: 'n1',
-            policy: { revision: '9' },
+            policy: '{"revision":"9"}',
             activeRevision: '',
             activation: 'pending'
         })
@@ -962,7 +988,7 @@ describe('policy revision and activation fields', () => {
 
     it('reports recovery from policy:get', () => {
         const document = parsePolicyDocument({
-            policy: { revision: '1' },
+            policy: '{"revision":"1"}',
             availability: 'paused',
             recoveryRequired: true,
             activeRevision: '',
@@ -973,7 +999,7 @@ describe('policy revision and activation fields', () => {
 
     it('reads a paired node answer that carries no activation or recovery fields', () => {
         const document = parsePolicyDocument({
-            policy: { revision: '30' },
+            policy: '{"revision":"30"}',
             availability: 'available'
         })
         expect(document.activation).toBeNull()
@@ -1005,7 +1031,7 @@ describe('policy revision and activation fields', () => {
             }
         ]
     ])('rejects a policy:set result with %s', (_name, result) => {
-        expect(() => parsePolicySetResult(result)).toThrow()
+        expect(() => parsePolicySetResult(policyEnvelope(result))).toThrow()
     })
 
     it.each([
@@ -1013,20 +1039,22 @@ describe('policy revision and activation fields', () => {
         ['a non-decimal revision', { policy: { revision: 'abc' } }]
     ])('drops a policy:changed push with %s', (_name, extra) => {
         expect(
-            parsePolicyChange({
-                nodeId: 'n1',
-                policy: { revision: '1' },
-                activeRevision: '',
-                activation: 'pending',
-                ...extra
-            })
+            parsePolicyChange(
+                policyEnvelope({
+                    nodeId: 'n1',
+                    policy: { revision: '1' },
+                    activeRevision: '',
+                    activation: 'pending',
+                    ...extra
+                })
+            )
         ).toBeNull()
     })
 
     it('rejects a policy:get result with a non-boolean recovery flag', () => {
         expect(() =>
             parsePolicyDocument({
-                policy: { revision: '1' },
+                policy: '{"revision":"1"}',
                 availability: 'available',
                 recoveryRequired: 'yes'
             })
@@ -1081,9 +1109,11 @@ describe('model configuration policy evidence', () => {
                 modelConfiguration: configuration,
                 ...(node === 'local' ? { activation: 'active', activeRevision: '9' } : {})
             }
-            const document = parsePolicyDocument({ ...snapshot, availability: 'available' })
-            const saved = parsePolicySetResult(snapshot)
-            const change = parsePolicyChange({ ...snapshot, nodeId: node })
+            const document = parsePolicyDocument(
+                policyEnvelope({ ...snapshot, availability: 'available' })
+            )
+            const saved = parsePolicySetResult(policyEnvelope(snapshot))
+            const change = parsePolicyChange(policyEnvelope({ ...snapshot, nodeId: node }))
             expect(document.modelConfiguration).toEqual(configuration)
             expect(saved.modelConfiguration).toEqual(configuration)
             expect(change?.modelConfiguration).toEqual(configuration)
@@ -1119,9 +1149,11 @@ describe('model configuration policy evidence', () => {
                 ]
             }
             const snapshot = { policy: { revision: '9' }, modelConfiguration: evidence }
-            const document = parsePolicyDocument({ ...snapshot, availability: 'available' })
-            const saved = parsePolicySetResult(snapshot)
-            const change = parsePolicyChange({ ...snapshot, nodeId: node })
+            const document = parsePolicyDocument(
+                policyEnvelope({ ...snapshot, availability: 'available' })
+            )
+            const saved = parsePolicySetResult(policyEnvelope(snapshot))
+            const change = parsePolicyChange(policyEnvelope({ ...snapshot, nodeId: node }))
             expect(document.modelConfiguration).toEqual(evidence)
             expect(saved.modelConfiguration).toEqual(evidence)
             expect(change?.modelConfiguration).toEqual(evidence)
@@ -1150,17 +1182,21 @@ describe('model configuration policy evidence', () => {
             }
             const snapshot = { policy: { revision: '9' }, modelConfiguration: evidence }
             expect(
-                parsePolicyDocument({ ...snapshot, availability: 'paused' }).modelConfiguration
+                parsePolicyDocument(policyEnvelope({ ...snapshot, availability: 'paused' }))
+                    .modelConfiguration
             ).toEqual(evidence)
-            expect(parsePolicySetResult(snapshot).modelConfiguration).toEqual(evidence)
-            expect(parsePolicyChange({ ...snapshot, nodeId: 'peer' })?.modelConfiguration).toEqual(
+            expect(parsePolicySetResult(policyEnvelope(snapshot)).modelConfiguration).toEqual(
                 evidence
             )
+            expect(
+                parsePolicyChange(policyEnvelope({ ...snapshot, nodeId: 'peer' }))
+                    ?.modelConfiguration
+            ).toEqual(evidence)
         }
     )
 
     it('keeps absent status absent on get, set and push', () => {
-        const snapshot = { policy: { revision: '9' } }
+        const snapshot = { policy: '{"revision":"9"}' }
         expect(parsePolicyDocument({ ...snapshot, availability: 'available' })).not.toHaveProperty(
             'modelConfiguration'
         )
@@ -1177,7 +1213,7 @@ describe('model configuration policy evidence', () => {
             routing: { buffers: { capacityMiB: 384, waitSeconds: 0 } }
         }
         const document = parsePolicyDocument({
-            policy,
+            policy: JSON.stringify(policy),
             availability: 'paused',
             modelConfiguration: configuration
         })
@@ -1188,14 +1224,16 @@ describe('model configuration policy evidence', () => {
         })
         expect(params).toEqual({
             nodeId: 'peer',
-            policy,
+            policy: document.policy,
             expectedPersistedRevision: '9'
         })
         const savedPolicy = { ...policy, revision: '10' }
         const evidence = { ...configuration, policyRevision: '10' }
-        const saved = parsePolicySetResult({ policy: savedPolicy, modelConfiguration: evidence })
+        const saved = parsePolicySetResult(
+            policyEnvelope({ policy: savedPolicy, modelConfiguration: evidence })
+        )
         const readback = parsePolicyDocument({
-            policy: savedPolicy,
+            policy: JSON.stringify(savedPolicy),
             availability: 'paused',
             modelConfiguration: evidence
         })
@@ -1209,7 +1247,7 @@ describe('model configuration policy evidence', () => {
     it('normalizes model text like the Go decoder before checking duplicate evidence', () => {
         const entry = { ...loaded, model: '\ud800' }
         const snapshot = {
-            policy: { revision: '9' },
+            policy: '{"revision":"9"}',
             modelConfiguration: { ...configuration, models: [entry] }
         }
         expect(parsePolicySetResult(snapshot).modelConfiguration?.models[0].model).toBe('\ufffd')
@@ -1227,7 +1265,7 @@ describe('model configuration policy evidence', () => {
     it('preserves explicit empty evidence and served permission without inferring success', () => {
         const evidence = { policyRevision: '9', observationGeneration: 0, models: [] }
         const policy = { revision: '9', servedModels: [] }
-        const snapshot = { policy, modelConfiguration: evidence }
+        const snapshot = { policy: JSON.stringify(policy), modelConfiguration: evidence }
         expect(
             parsePolicyDocument({ ...snapshot, availability: 'available' }).modelConfiguration
         ).toEqual(evidence)
@@ -1241,7 +1279,7 @@ describe('model configuration policy evidence', () => {
     it('accepts the largest exact generation', () => {
         const evidence = { ...configuration, observationGeneration: Number.MAX_SAFE_INTEGER }
         expect(
-            parsePolicySetResult({ policy: { revision: '9' }, modelConfiguration: evidence })
+            parsePolicySetResult({ policy: '{"revision":"9"}', modelConfiguration: evidence })
                 .modelConfiguration?.observationGeneration
         ).toBe(Number.MAX_SAFE_INTEGER)
     })
@@ -1249,7 +1287,7 @@ describe('model configuration policy evidence', () => {
     it('accepts a leading byte-order mark in model names like Go TrimSpace', () => {
         const evidence = { ...configuration, models: [{ ...loaded, model: '\ufeffmodel' }] }
         expect(
-            parsePolicySetResult({ policy: { revision: '9' }, modelConfiguration: evidence })
+            parsePolicySetResult({ policy: '{"revision":"9"}', modelConfiguration: evidence })
                 .modelConfiguration
         ).toEqual(evidence)
     })
@@ -1332,9 +1370,11 @@ describe('model configuration policy evidence', () => {
     ]
     it.each(malformed)('rejects %s on get/set and drops its push', (_name, evidence) => {
         const snapshot = { policy: { revision: '9' }, modelConfiguration: evidence }
-        expect(() => parsePolicyDocument({ ...snapshot, availability: 'available' })).toThrow()
-        expect(() => parsePolicySetResult(snapshot)).toThrow()
-        expect(parsePolicyChange({ ...snapshot, nodeId: 'peer' })).toBeNull()
+        expect(() =>
+            parsePolicyDocument(policyEnvelope({ ...snapshot, availability: 'available' }))
+        ).toThrow()
+        expect(() => parsePolicySetResult(policyEnvelope(snapshot))).toThrow()
+        expect(parsePolicyChange(policyEnvelope({ ...snapshot, nodeId: 'peer' }))).toBeNull()
     })
 })
 
@@ -1342,7 +1382,7 @@ describe('policy set params', () => {
     it('sends the base revision beside the edited policy', () => {
         expect(
             policySetParams({ policy: '{"tier":"weak"}', expectedPersistedRevision: '41' })
-        ).toEqual({ policy: { tier: 'weak' }, expectedPersistedRevision: '41' })
+        ).toEqual({ policy: '{"tier":"weak"}', expectedPersistedRevision: '41' })
     })
 
     it('names the target node when one is given', () => {
@@ -1352,7 +1392,7 @@ describe('policy set params', () => {
                 policy: '{}',
                 expectedPersistedRevision: '0'
             })
-        ).toEqual({ nodeId: 'node-b', policy: {}, expectedPersistedRevision: '0' })
+        ).toEqual({ nodeId: 'node-b', policy: '{}', expectedPersistedRevision: '0' })
     })
 
     it.each(['', '1.5', '-1', '1e3', '007', ' 1'])('refuses the base revision %j', revision => {
@@ -1373,11 +1413,11 @@ describe('policy set params', () => {
         expect(
             policySetParams({ policy: text, expectedPersistedRevision: '9223372036854775807' })
         ).toEqual({
-            policy: { revision: '9223372036854775807', budget: { monthly: '9007199254740993' } },
+            policy: text,
             expectedPersistedRevision: '9223372036854775807'
         })
         const document = parsePolicyDocument({
-            policy: { revision: '9223372036854775807', budget: { monthly: '9007199254740993' } },
+            policy: text,
             availability: 'available',
             activeRevision: '9223372036854775806',
             activation: 'pending'

@@ -161,8 +161,9 @@ export interface ModelConfiguration {
 
 /**
  * A node's saved policy. The policy travels as JSON text because the editor
- * shows and edits it as text and the service validates it. Revisions are
- * decimal strings: they exceed what a JavaScript number holds exactly.
+ * shows and edits it as text and the service validates it. The socket bridge
+ * preserves raw policy JSON so numeric lexemes survive get, set and pushes.
+ * Revisions are decimal strings: they exceed what a JavaScript number holds exactly.
  */
 export interface NodePolicySnapshot {
     policy: string
