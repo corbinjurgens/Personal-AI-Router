@@ -25,6 +25,19 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// Tests must never initialize a native credential store, even when a bundled
+	// manifest opts in. Each executor lazily receives a fresh private fake.
+	newCredentialBackend = func() credentialBackend { return &credentialFake{} }
+	if len(os.Args) > 1 && os.Args[1] == "credential-cli-helper" {
+		found := false
+		for _, value := range append(os.Environ(), os.Args...) {
+			found = found || strings.Contains(value, credentialTestKey)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(map[string]bool{"credentialPresent": found}); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if runModelLoadChild() {
 		return
 	}
@@ -72,10 +85,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// managerFixtureOverlay changes exactly the registry construction site. It
-// compiles the actual main, owned transport, signals, listeners, Manager.Run,
-// watcher and StopAll, with fresh inert bundled raw JSON and normal override
-// merging. No production source or runtime configuration is added.
+// managerFixtureOverlay replaces registry construction and the credential
+// factory only in disposable fixture sources. It compiles the actual main,
+// owned transport, signals, listeners, Manager.Run, watcher and StopAll, with
+// inert bundled JSON, normal override merging and a private in-memory store.
+// No production source or runtime configuration is added.
 func managerFixtureOverlay(dir string) (string, error) {
 	bundle := filepath.Join(dir, "bundled")
 	if err := os.Mkdir(bundle, 0o700); err != nil {
@@ -123,7 +137,36 @@ func managerFixtureOverlay(dir string) (string, error) {
 	if err := os.WriteFile(modified, []byte(strings.Replace(string(data), site, replacement, 1)), 0o600); err != nil {
 		return "", err
 	}
-	overlay, err := json.Marshal(map[string]map[string]string{"Replace": {source: modified}})
+	// The production child is not a test binary, so TestMain's in-memory
+	// factory replacement must also be compiled into its fixture overlay.
+	credentialSource, err := filepath.Abs("credentialstore.go")
+	if err != nil {
+		return "", err
+	}
+	credentialData, err := os.ReadFile(credentialSource)
+	if err != nil {
+		return "", err
+	}
+	const factory = "var newCredentialBackend = func() credentialBackend { return secretstore.New() }"
+	if strings.Count(string(credentialData), factory) != 1 {
+		return "", fmt.Errorf("credential fixture factory site changed")
+	}
+	credentialData = []byte(strings.Replace(string(credentialData), factory, `var newCredentialBackend = func() credentialBackend { return &fixtureCredentialBackend{values: make(map[string][]byte)} }
+type fixtureCredentialBackend struct { values map[string][]byte }
+func (f *fixtureCredentialBackend) Set(_ context.Context, purpose, id string, value []byte) error {
+ f.values[purpose+"/"+id] = append([]byte(nil), value...); return nil
+}
+func (f *fixtureCredentialBackend) Get(_ context.Context, purpose, id string) ([]byte, error) {
+ value, ok := f.values[purpose+"/"+id]; if !ok { return nil, secretstore.ErrNotFound }; return append([]byte(nil), value...), nil
+}
+func (f *fixtureCredentialBackend) Delete(_ context.Context, purpose, id string) error {
+ delete(f.values, purpose+"/"+id); return nil
+}`, 1))
+	credentialModified := filepath.Join(dir, "credentialstore.go")
+	if err := os.WriteFile(credentialModified, credentialData, 0o600); err != nil {
+		return "", err
+	}
+	overlay, err := json.Marshal(map[string]map[string]string{"Replace": {source: modified, credentialSource: credentialModified}})
 	if err != nil {
 		return "", err
 	}

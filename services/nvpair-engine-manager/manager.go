@@ -321,6 +321,42 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 			m.respondOrErr(msg, st, err)
 		}()
 
+	case engines.SetCredentialMethod, engines.CredentialStateMethod:
+		// These cases exist only on the broker's private stdio ingress. Reject
+		// remote-looking targets even when their value is empty or null.
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(msg.Params, &fields) != nil || fields == nil {
+			m.codec.RespondError(msg.ID, -32602, errInvalidCredential.Error())
+			return
+		}
+		for field := range fields {
+			if field != "engine" && !(msg.Method == engines.SetCredentialMethod && field == "credential") {
+				m.codec.RespondError(msg.ID, -32602, errInvalidCredential.Error())
+				return
+			}
+		}
+		var engine, credential *string
+		if json.Unmarshal(fields["engine"], &engine) != nil || engine == nil || (msg.Method == engines.SetCredentialMethod && (json.Unmarshal(fields["credential"], &credential) != nil || credential == nil)) {
+			m.codec.RespondError(msg.ID, -32602, errInvalidCredential.Error())
+			return
+		}
+		go func() {
+			var state engines.CredentialState
+			var err error
+			if msg.Method == engines.SetCredentialMethod {
+				state, err = m.exec.setCredential(ctx, *engine, *credential)
+			} else {
+				state, err = m.exec.credentialState(ctx, *engine)
+			}
+			if errors.Is(err, errInvalidCredential) {
+				m.codec.RespondError(msg.ID, -32602, errInvalidCredential.Error())
+			} else if err != nil {
+				m.codec.RespondError(msg.ID, -32000, errCredentialUnavailable.Error())
+			} else {
+				m.codec.Respond(msg.ID, state)
+			}
+		}()
+
 	// Only the broker calls this; it refuses the method from its clients.
 	case engines.LocalCredentialMethod:
 		var p engineParam

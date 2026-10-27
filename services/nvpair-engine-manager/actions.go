@@ -23,26 +23,20 @@ import (
 	"nvpair-shared/engines"
 )
 
-// ownedCredentialLocked is the native API key of the engine's owned, running
-// prepared launch, paired with the port that launch serves on. An adopted or
-// stopped engine has none. The caller holds st.mu.
-func (st *engineState) ownedCredentialLocked() engines.LocalCredential {
-	launch := st.plat.Runtime.servingLaunch
-	if st.proc == nil || !st.running || launch == nil || launch.Credential == "" {
-		return engines.LocalCredential{}
-	}
-	return engines.LocalCredential{Credential: launch.Credential, Port: st.port}
-}
-
 // LocalCredential answers engines.LocalCredentialMethod for the broker.
 func (e *Executor) LocalCredential(engine string) (engines.LocalCredential, error) {
 	st, err := e.state(engine)
 	if err != nil {
 		return engines.LocalCredential{}, err
 	}
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.ownedCredentialLocked(), nil
+	c, running, err := e.credentialForRunning(context.Background(), st)
+	if err != nil {
+		return engines.LocalCredential{}, err
+	}
+	if !running || c.key == "" {
+		return engines.LocalCredential{}, nil
+	}
+	return engines.LocalCredential{Credential: c.key, Port: c.port}, nil
 }
 
 // ActionHTTPError preserves the status of a failed HTTP action. Body is the
@@ -255,9 +249,7 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	ctx, cancel := context.WithTimeout(ctx, e.actionTimeout)
 	defer cancel()
 	st.mu.Lock()
-	running := st.running
 	port := st.port
-	credential := st.ownedCredentialLocked().Credential
 	st.mu.Unlock()
 
 	// CLI actions (act.Cmd) drive the engine's control binary, which
@@ -271,9 +263,14 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	if len(act.Cmd) > 0 {
 		return e.runCmdAction(ctx, st, act, port, params)
 	}
+	credential, running, err := e.credentialForRunning(ctx, st)
+	if err != nil {
+		return nil, err
+	}
 	if !running {
 		return nil, fmt.Errorf("engine %q is not running", engine)
 	}
+	port = credential.port
 
 	path, err := resolvePlaceholders(act.HTTP.Path, map[string]string{"port": strconv.Itoa(port)})
 	if err != nil {
@@ -304,6 +301,9 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	}
 	req, err := http.NewRequestWithContext(ctx, strings.ToUpper(act.HTTP.Method), requestURL, body)
 	if err != nil {
+		if credential.key != "" {
+			return nil, errCredentialRequest
+		}
 		return nil, err
 	}
 	if body != nil {
@@ -322,13 +322,9 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 		observationClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		client = &observationClient
 	}
-	if credential != "" {
-		// The key authorizes only this loopback request: a redirect is
-		// answered as is, never followed with the header.
-		req.Header.Set("Authorization", "Bearer "+credential)
-		keyedClient := *client
-		keyedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		client = &keyedClient
+	client, err = credentialHTTPClient(client, req, credential)
+	if err != nil {
+		return nil, err
 	}
 	finishDispatch, err := beginActivationEffect(ctx)
 	if err != nil {
@@ -356,11 +352,17 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if credential.key != "" {
+			return nil, errCredentialHTTP
+		}
 		return nil, fmt.Errorf("action %q: %w", action, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
 	if err != nil {
+		if credential.key != "" {
+			return nil, errCredentialHTTP
+		}
 		return nil, fmt.Errorf("action %q: read response body: %w", action, err)
 	}
 	// Inventory reads are observation evidence only on exactly 200. Apply
@@ -368,8 +370,8 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	// Mutation actions retain their general 2xx success contract (e.g. 204).
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (observation && resp.StatusCode != http.StatusOK) {
 		body := strings.TrimSpace(string(data))
-		if credential != "" {
-			body = strings.ReplaceAll(body, credential, "[redacted]")
+		if credential.key != "" {
+			body = "Authenticated engine request was refused."
 		}
 		return nil, &ActionHTTPError{Action: action, StatusCode: resp.StatusCode, Body: body}
 	}
@@ -377,7 +379,23 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 		return json.RawMessage("null"), nil
 	}
 	if json.Valid(data) {
+		if credential.key != "" {
+			var value any
+			decoder := json.NewDecoder(bytes.NewReader(data))
+			decoder.UseNumber()
+			if err := decoder.Decode(&value); err != nil {
+				return nil, errCredentialHTTP
+			}
+			clean, err := json.Marshal(redactCredentialJSON(value, credential.key))
+			if err != nil {
+				return nil, errCredentialHTTP
+			}
+			return clean, nil
+		}
 		return json.RawMessage(data), nil
+	}
+	if credential.key != "" {
+		data = []byte(strings.ReplaceAll(string(data), credential.key, "[redacted]"))
 	}
 	wrapped, _ := json.Marshal(string(data))
 	return wrapped, nil
