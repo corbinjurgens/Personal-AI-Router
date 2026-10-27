@@ -10,6 +10,7 @@ import { createStructuredLogger } from '@/shared/utils/log'
 import { openExternalSafe } from '@/electron/open-external'
 import { trackWindowVisibility } from '@/electron/window-visibility'
 import { getRoutingDelivery } from '@/electron/service-bridge/routing-delivery'
+import { rendererPath } from './renderer-path'
 
 const MIN_DIMENSION = 420
 
@@ -315,9 +316,7 @@ export function createOverviewWindow(): void {
     const load = (): void => {
         const rendererUrl = process.env['ELECTRON_RENDERER_URL']
         const navigation =
-            is.dev && rendererUrl
-                ? window.loadURL(rendererUrl)
-                : window.loadFile(join(__dirname, '../ui/index.html'))
+            is.dev && rendererUrl ? window.loadURL(rendererUrl) : window.loadFile(rendererPath())
         navigation.catch(() => {})
     }
 
@@ -380,7 +379,7 @@ export function createTrayWindow(): BrowserWindow {
     const navigation =
         is.dev && rendererUrl
             ? window.loadURL(rendererUrl + query)
-            : window.loadFile(join(__dirname, '../ui/index.html'), { search: query })
+            : window.loadFile(rendererPath(), { search: query })
     // Destroying the popup mid-load rejects this with ERR_ABORTED; real load
     // failures are reported by did-fail-load.
     navigation.catch(() => {})
