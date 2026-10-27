@@ -4,7 +4,7 @@
 import type {
     NodeModelReference,
     EngineBindingOffers,
-    NodeAvailability,
+    NodeAvailabilityResult,
     NodeAvailabilityChange,
     NodePolicyChange,
     NodePolicyDocument,
@@ -30,7 +30,7 @@ import type {
 import { engineManagerName, isValidRoutingEngineId } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 import { prettyJsonSource } from '@/shared/utils/json-source'
-import { availabilityValue } from './node-availability'
+import { availabilityValue, pauseOriginValue } from './node-availability'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 
 function objectValue(value: JsonValue | undefined): JsonObject | null {
@@ -585,7 +585,7 @@ export function parsePolicyDocument(result: JsonValue | undefined): NodePolicyDo
     }
     return {
         ...policySnapshot(body),
-        availability,
+        ...parseAvailabilityResult(result),
         recoveryRequired: body?.recoveryRequired === true
     }
 }
@@ -596,12 +596,19 @@ export function parsePolicySetResult(result: JsonValue | undefined): NodePolicyS
 }
 
 /** Parse a `node:set-availability` result. */
-export function parseAvailabilityResult(result: JsonValue | undefined): {
-    availability: NodeAvailability
-} {
-    const availability = availabilityValue(objectValue(result)?.availability)
+export function parseAvailabilityResult(result: JsonValue | undefined): NodeAvailabilityResult {
+    const body = objectValue(result)
+    const availability = availabilityValue(body?.availability)
     if (!availability) throw new Error('The service returned no node availability')
-    return { availability }
+    const pausedBy = body?.pausedBy
+    if (pausedBy !== undefined && pausedBy !== '' && pausedBy !== 'local' && pausedBy !== 'peer') {
+        throw new Error('The service returned invalid pause provenance')
+    }
+    const origin = availability !== 'available' ? pauseOriginValue(pausedBy) : undefined
+    return {
+        availability,
+        ...(origin !== undefined ? { pausedBy: origin } : {})
+    }
 }
 
 /** Parse a `node:availability-changed {nodeId, availability, active}` push; null if malformed. */
@@ -611,7 +618,11 @@ export function parseAvailabilityChange(
     const body = objectValue(params)
     const availability = availabilityValue(body?.availability)
     if (!body || typeof body.nodeId !== 'string' || body.nodeId === '' || !availability) return null
-    return { nodeId: body.nodeId, availability }
+    try {
+        return { nodeId: body.nodeId, ...parseAvailabilityResult(params) }
+    } catch {
+        return null
+    }
 }
 
 /** Parse a `policy:changed {nodeId, policy, activation...}` push; null if malformed. */

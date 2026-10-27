@@ -1574,7 +1574,10 @@ describe('permission controls', () => {
             await act(async () => button('Pause').click())
             expect(document.body.textContent).toContain(message)
             expect(button('Pause')).toBeDefined()
-            expect(availability).toHaveBeenCalledExactlyOnceWith('paused', 'peer-1')
+            expect(availability).toHaveBeenCalledExactlyOnceWith({
+                state: 'paused',
+                nodeId: 'peer-1'
+            })
         }
     )
 })

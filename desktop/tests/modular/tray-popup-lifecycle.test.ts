@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 
 interface FakeMenuItem {
     label?: string
@@ -97,7 +98,9 @@ const mocks = vi.hoisted(() => {
             supervisor.listeners.add(listener)
             return () => supervisor.listeners.delete(listener)
         },
-        setAvailability: vi.fn(() => Promise.resolve())
+        setAvailability: vi.fn<ReturnType<typeof getModularSupervisor>['setAvailability']>(() =>
+            Promise.resolve(undefined)
+        )
     }
     const destroyConnector = vi.fn(() => Promise.resolve())
 
@@ -343,7 +346,7 @@ describe('tray popup lifecycle', () => {
             expect(pause?.enabled).toBe(true)
 
             pause?.click?.({ checked: false })
-            expect(mocks.supervisor.setAvailability).toHaveBeenCalledWith('paused')
+            expect(mocks.supervisor.setAvailability).toHaveBeenCalledWith({ state: 'paused' })
         })
 
         it('relabels the toggle when the availability changes', () => {
@@ -355,7 +358,7 @@ describe('tray popup lifecycle', () => {
             for (const listener of mocks.supervisor.listeners) listener()
 
             menuItem('Resume inference on this PC')?.click?.({ checked: false })
-            expect(mocks.supervisor.setAvailability).toHaveBeenCalledWith('available')
+            expect(mocks.supervisor.setAvailability).toHaveBeenCalledWith({ state: 'available' })
             expect(menuItem('Pause inference on this PC')).toBeUndefined()
         })
 

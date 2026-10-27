@@ -30,6 +30,9 @@ import (
 // replaced by a newer one before it finished.
 var errAvailabilitySuperseded = errors.New("superseded by a later node:set-availability request")
 
+// Task 5 enables immediate dispatch after physical-stop and interruption proof.
+var errImmediatePauseUnavailable = errors.New("Immediate pause is unavailable until safe execution stopping is enabled.")
+
 // pauseCancelSettle bounds how long a pause waits for cancelled work to
 // unwind after the drain timeout, before it unloads and stops anyway.
 var pauseCancelSettle = 10 * time.Second
@@ -49,6 +52,10 @@ func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availabil
 // is checked before registration can supersede an in-flight transition.
 // transitionMu serializes execution of work already accepted here.
 func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, caller string) (nodepolicy.Availability, error) {
+	return b.setAvailabilityRequestAs(ctx, state, origin, caller, nil)
+}
+
+func (b *Broker) setAvailabilityRequestAs(ctx context.Context, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, caller string, rawMode json.RawMessage) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	if err := b.authorizeRemoteManagementLocked(r, caller, "availability", ""); err != nil {
@@ -58,6 +65,22 @@ func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availab
 	if origin == nodepolicy.PausedByPeer && r.managementBlockedLocked() {
 		r.mu.Unlock()
 		return "", &localVetoError{}
+	}
+	if state != nodepolicy.Available && state != nodepolicy.Paused {
+		r.mu.Unlock()
+		return "", &invalidParamsError{fmt.Errorf("state must be %q or %q", nodepolicy.Available, nodepolicy.Paused)}
+	}
+	mode, err := nodepolicy.ParsePauseMode(state, rawMode)
+	if err != nil {
+		r.mu.Unlock()
+		return "", &invalidParamsError{err}
+	}
+	if mode == nodepolicy.PauseImmediate {
+		r.mu.Unlock()
+		if caller != "" || origin != nodepolicy.PausedLocally {
+			return "", &invalidParamsError{errors.New("Immediate pause must be requested on this node.")}
+		}
+		return "", errImmediatePauseUnavailable
 	}
 	if state == nodepolicy.Paused {
 		r.pendingPauseRequested = true
@@ -103,7 +126,7 @@ func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availab
 	done := make(chan outcome, 1)
 	go func() {
 		defer cancel()
-		availability, err := b.runAvailabilityTransition(tctx, gen, state, origin)
+		availability, err := b.runAvailabilityTransition(tctx, gen, state, origin, mode)
 		// The transition saved its provenance or failed before saving any;
 		// either way the stored policy now says whether a local pause holds.
 		r.mu.Lock()
@@ -127,7 +150,10 @@ func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availab
 	}
 }
 
-func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, state nodepolicy.Availability, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
+func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, mode nodepolicy.PauseMode) (nodepolicy.Availability, error) {
+	if mode != nodepolicy.PauseConfigured {
+		return "", errImmediatePauseUnavailable
+	}
 	r := b.nodePolicyRuntime()
 	r.transitionMu.Lock()
 	defer r.transitionMu.Unlock()
