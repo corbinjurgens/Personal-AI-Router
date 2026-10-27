@@ -353,8 +353,8 @@ func (m ModelLoad) Validate() error {
 		return fmt.Errorf("resolved.gpu: differs from requested placement")
 	}
 	if m.Requested.Context != nil && m.Requested.Context.Mode == "auto" || m.Requested.GPU != nil && m.Requested.GPU.Mode == "auto" {
-		if r.ResolverRevision == "" || r.ReviewedInputID == "" {
-			return fmt.Errorf("resolved: Auto requires resolver revision and reviewed input identity")
+		if !strings.HasPrefix(r.ResolverRevision, "auto/") || r.ReviewedInputID == "" {
+			return fmt.Errorf("resolved: Auto requires an Auto resolver and reviewed input identity")
 		}
 	}
 	// Effective explicit options must preserve requested quality/retention fields.

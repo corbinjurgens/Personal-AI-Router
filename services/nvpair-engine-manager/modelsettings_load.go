@@ -24,6 +24,8 @@ import (
 	"nvpair-shared/modelconfig"
 )
 
+const externalConversionResolver = "external-conversion/llama"
+
 func modelLoadError(model, field, reason string) error {
 	return &ServingFieldError{Field: "modelLoads." + field, ModelID: model, Reason: reason}
 }
@@ -217,6 +219,10 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 			}
 		}
 		resolved.NativeBuildID = buildID
+		if previous := rtLoadResolution(rt.ModelLoads, load.ModelID); previous != nil {
+			resolved.ResolverRevision = previous.ResolverRevision
+			resolved.ReviewedInputID = previous.ReviewedInputID
+		}
 		sections[load.ModelID], lists[i] = options, list
 		load.Resolved = resolved
 	}
@@ -491,12 +497,12 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 	return options, &modelconfig.ResolvedLoad{PerSlotContext: per, TotalContext: total, Slots: slots, KVUnified: &unified, GPU: gpu, Options: resolvedOptions}, nil
 }
 
-// Read-only worker preview. Acceptance, policy implications and all runtime
-// application remain with the O1-gated settings operation owner.
+// Read-only worker preview. Acceptance and policy implications remain with
+// the settings operation owner.
 func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, p settings.Request) (settings.Preview, error) {
 	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
 	defer cancel()
-	result := settings.Preview{Settings: p.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: map[string]string{}, Impact: &modelconfig.Impact{RestartScope: "unknown", Unknowns: []string{"O1 settings-apply restart policy is unanswered; Apply is refused."}}}
+	result := settings.Preview{Settings: p.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: map[string]string{}}
 	fail := func(err error) (settings.Preview, error) {
 		if ctx.Err() != nil {
 			return settings.Preview{}, ctx.Err()
@@ -594,6 +600,22 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	if err != nil {
 		return fail(err)
 	}
+	st.mu.Lock()
+	running, adopted := st.running, st.adopted
+	st.mu.Unlock()
+	if running && adopted {
+		return fail(modelLoadError("", "ownership", "Stop this engine in its own application before changing settings."))
+	}
+	changed := baseline.LaunchText != result.Settings.LaunchText || !baseline.Serving.Equal(result.Settings.Serving) || !modelconfig.EqualLoads(baseline.ModelLoads, result.Settings.ModelLoads)
+	result.Restart = running && changed
+	models := map[string]bool{}
+	for model := range before {
+		models[model] = true
+	}
+	for _, load := range prepared.ModelLoads {
+		models[load.ModelID] = true
+	}
+	result.Impact = e.modelLoadImpact(p.Engine, baseline, result.Settings, running, changed, models)
 	if rt.LaunchArgs != nil {
 		result.Args = slices.Clone(*rt.LaunchArgs)
 	}
@@ -648,6 +670,36 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	return result, nil
 }
 
+func (e *Executor) modelLoadImpact(engine string, before, after settings.Config, running, changed bool, models map[string]bool) *modelconfig.Impact {
+	if models == nil {
+		models = map[string]bool{}
+	}
+	for _, config := range []settings.Config{before, after} {
+		for _, load := range config.ModelLoads {
+			models[load.ModelID] = true
+		}
+		if config.Serving != nil {
+			for _, model := range config.Serving.Models {
+				models[model.ModelID] = true
+			}
+		}
+	}
+	timeout := int32(60)
+	interrupt, staysOff := running && changed, !running
+	if err := e.activationVeto(engine); err != nil {
+		staysOff = true
+	}
+	scope := "none"
+	if changed {
+		scope = "router"
+	}
+	impact := &modelconfig.Impact{RestartScope: scope, AffectedModels: sortedKeys(models), DrainTimeoutSeconds: &timeout, MayInterruptActive: &interrupt, StaysOff: &staysOff, ActiveWorkPolicy: "proceed-after-timeout"}
+	if running {
+		impact.Unknowns = []string{"Loaded-model readback is not part of this native settings preview; the broker includes current runtime observations before acceptance."}
+	}
+	return impact
+}
+
 // Preparation seam for Task 7. It changes selected requested leaves
 // only; previous target artifact assertions survive for exact re-resolution.
 func patchModelLoad(loads []modelconfig.ModelLoad, model string, patch modelconfig.LoadPatch) ([]modelconfig.ModelLoad, error) {
@@ -695,13 +747,74 @@ func patchModelLoad(loads []modelconfig.ModelLoad, model string, patch modelconf
 	return out, nil
 }
 
-// No caller can apply this value yet. The complete source digest is approval
-// material for a future accepted conversion, not a path to a mutable output.
+// The complete source digest binds the current external baseline during
+// conversion. The broker owns acceptance of the selected patch and preview.
 type typedLlamaConversion struct {
 	Runtime      Runtime
 	SourceDigest string
 	Diff         []modelconfig.FieldDiff
 	Before       map[string]map[string]string
+}
+
+// Configure receives frozen settings, not the selected patch. Reconstruct the
+// complete current external router at this boundary, preserve its artifact set
+// and unrelated launch inputs, then let the normal compiler validate the exact
+// reviewed requested/resolved identity. Never use generated output as input.
+func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineState, rt Runtime, desired settings.Config) (func() error, error) {
+	if len(rt.ModelLoads) != 0 || len(desired.ModelLoads) == 0 || st.manifest.FamilyOrDefault() != "llamacpp" {
+		return nil, nil
+	}
+	command, err := launchForState(st, rt.Port)
+	if err != nil {
+		return nil, err
+	}
+	cli, env, err := llamaLaunchOptions(command, rt.EditableLaunch)
+	if err != nil {
+		return nil, err
+	}
+	if cli["models-preset"] == "" && env["models-preset"] == "" {
+		return nil, nil
+	}
+	// Use an immutable baseline: after persistence st contains the typed map.
+	baseline := strataPreparationState(st)
+	conversion, err := e.previewTypedLlamaConversion(ctx, baseline, command, rt)
+	if err != nil {
+		return nil, err
+	}
+	for _, load := range conversion.Runtime.ModelLoads {
+		resolved := rtLoadResolution(desired.ModelLoads, load.ModelID)
+		if resolved == nil || resolved.ResolverRevision != externalConversionResolver || resolved.ReviewedInputID != conversion.SourceDigest {
+			return nil, modelLoadError(load.ModelID, "conversion", "External router source changed since preview; preview again before applying.")
+		}
+		if resolved == nil || !reflect.DeepEqual(resolved.Artifacts, load.Resolved.Artifacts) || resolved.NativeBuildID != load.Resolved.NativeBuildID {
+			return nil, modelLoadError(load.ModelID, "conversion", "Accepted conversion must preserve the complete current router artifact set and native build.")
+		}
+	}
+	vars := baseline.pathVars()
+	vars["host"], vars["port"] = effectiveBind(rt.Bind, ""), strconv.Itoa(desired.ServerPort)
+	converted := conversion.Runtime
+	converted.Port = desired.ServerPort
+	convertedCommand, err := resolveProcessLaunch(llamaServingBase(converted), command.Bin, vars)
+	if err != nil {
+		return nil, err
+	}
+	text, err := convertedCommand.argumentText(llamaServingBase(converted))
+	if err != nil {
+		return nil, err
+	}
+	if text != desired.LaunchText {
+		return nil, modelLoadError("", "conversion", "Accepted conversion must preserve unrelated router launch settings.")
+	}
+	return func() error {
+		current, err := e.previewTypedLlamaConversion(ctx, baseline, command, rt)
+		if err != nil {
+			return err
+		}
+		if current.SourceDigest != conversion.SourceDigest {
+			return modelLoadError("", "conversion", "External router source changed during application; obtain a fresh preview.")
+		}
+		return nil
+	}, nil
 }
 
 // Caller holds opMu, or supplies an immutable state snapshot and revalidates
@@ -863,7 +976,17 @@ func (e *Executor) previewTypedLlamaConversion(ctx context.Context, st *engineSt
 	if err != nil {
 		return typedLlamaConversion{}, err
 	}
-	result := typedLlamaConversion{Runtime: converted, SourceDigest: modelLoadDigest(review), Before: before}
+	sourceDigest := modelLoadDigest(review)
+	for i := range converted.ModelLoads {
+		converted.ModelLoads[i].Resolved.ResolverRevision = externalConversionResolver
+		converted.ModelLoads[i].Resolved.ReviewedInputID = sourceDigest
+	}
+	prepared, err = compileTypedLlamaInputs(ctx, st, proposedCommand, converted, false)
+	if err != nil {
+		return typedLlamaConversion{}, err
+	}
+	converted.ModelLoads, converted.Serving = prepared.ModelLoads, prepared.Config
+	result := typedLlamaConversion{Runtime: converted, SourceDigest: sourceDigest, Before: before}
 	generated, err := parseLlamaServingPreset(prepared.Snapshot)
 	if err != nil {
 		return typedLlamaConversion{}, err

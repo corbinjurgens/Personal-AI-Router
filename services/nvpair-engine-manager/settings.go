@@ -452,6 +452,7 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 	}
 	rt.LaunchArgs = &result.Args
 	rt.LaunchEnv = &result.Env
+	rt.Port = result.Settings.ServerPort
 	vars["port"] = strconv.Itoa(result.Settings.ServerPort)
 	command, err := applyLiteralLaunch(rt, base, vars)
 	if err != nil {
@@ -485,12 +486,12 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 	if prepare != nil {
 		return result
 	}
-	if len(rt.ModelLoads) != 0 {
-		result.Impact = &modelconfig.Impact{RestartScope: "unknown", Unknowns: []string{"O1 settings-apply restart policy is unanswered; Apply is refused."}}
-		return result
-	}
 	current := e.launchStateLocked(request.Engine, st)
-	result.Restart = current.Running && (current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving))
+	changed := current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving) || !modelconfig.EqualLoads(current.ModelLoads, result.Settings.ModelLoads)
+	result.Restart = current.Running && changed
+	if len(current.ModelLoads) != 0 || len(result.Settings.ModelLoads) != 0 {
+		result.Impact = e.modelLoadImpact(request.Engine, settings.ConfigFromLaunch(current, request.Settings.ProxyPort), result.Settings, current.Running, changed, nil)
+	}
 	if !current.Editable {
 		return fail(current.Reason)
 	}
@@ -501,17 +502,12 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 // parent rebind callback. The parent already holds the node configuration lock;
 // that callback must not acquire it again. Explicit ON/OFF intent is untouched.
 func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, rebind func() error) (settings.LaunchState, error) {
-	// Public mutation boundary stays closed even for an unchanged typed echo,
-	// removal, Off, Resume or a port-only write until O1 integration is released.
+	if err := e.validateModelSettingsLaunch(ctx, settings.Request{Engine: p.Engine, Settings: p.Settings}, true); err != nil {
+		return settings.LaunchState{}, err
+	}
 	st, err := e.state(p.Engine)
 	if err != nil {
 		return settings.LaunchState{}, err
-	}
-	st.mu.Lock()
-	hasLoads := len(st.plat.Runtime.ModelLoads) != 0
-	st.mu.Unlock()
-	if hasLoads || len(p.Settings.ModelLoads) != 0 {
-		return settings.LaunchState{}, modelLoadError("", "modelLoads", "Apply is unavailable pending O1 settings-apply restart integration.")
 	}
 	done, err := e.admitMutation(p.Engine)
 	if err != nil {
@@ -527,25 +523,41 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
+	return e.configureLaunchLocked(ctx, st, p, rebind)
+}
+
+// Caller owns mutation admission and opMu. SetPort uses this same owner for
+// typed settings so changing the endpoint cannot bypass native revalidation.
+func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p settings.Configure, rebind func() error) (settings.LaunchState, error) {
 	if err := ctx.Err(); err != nil {
 		return settings.LaunchState{}, err
 	}
 	st.mu.Lock()
-	hasLoads = len(st.plat.Runtime.ModelLoads) != 0
+	currentRT := st.plat.Runtime
 	st.mu.Unlock()
-	if hasLoads {
-		return settings.LaunchState{}, modelLoadError("", "modelLoads", "Apply is unavailable pending O1 settings-apply restart integration.")
+	var recheckContent func() error
+	if len(currentRT.ModelLoads) != 0 || len(p.Settings.ModelLoads) != 0 {
+		release, recheck, err := e.modelLoadContentRead(p.Engine)
+		if err != nil {
+			return settings.LaunchState{}, err
+		}
+		defer release()
+		recheckContent = recheck
+	}
+	recheckConversion, err := e.validateTypedLlamaConversion(ctx, st, currentRT, p.Settings)
+	if err != nil {
+		return settings.LaunchState{}, err
 	}
 	preview := e.previewLaunchLocked(st, settings.Request{Engine: p.Engine, Settings: p.Settings})
 	if len(preview.Errors) > 0 || preview.Conflict != nil {
 		for field, reason := range preview.Errors {
-			if field == "serving" || strings.HasPrefix(field, "serving.") {
+			if field == "serving" || strings.HasPrefix(field, "serving.") || strings.HasPrefix(field, "modelLoads.") {
 				return settings.LaunchState{}, &ServingFieldError{Field: field, Reason: reason}
 			}
 		}
 		return settings.LaunchState{}, fmt.Errorf("launch configuration failed authoritative validation")
 	}
-	if preparedServingRuntime(st, Runtime{Serving: p.Settings.Serving}) && !p.Settings.Serving.Equal(preview.Settings.Serving) {
+	if preparedServingRuntime(st, Runtime{Serving: p.Settings.Serving, ModelLoads: p.Settings.ModelLoads}) && (!p.Settings.Serving.Equal(preview.Settings.Serving) || !modelconfig.EqualLoads(p.Settings.ModelLoads, preview.Settings.ModelLoads)) {
 		return settings.LaunchState{}, servingError("Apply requires the exact reviewed native digest and artifact bindings.")
 	}
 	// This operation returns its one failure through the settings snapshot.
@@ -554,7 +566,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	e.reporter.clear(startFailedID(p.Engine))
 	e.reporter.clear(exitedID(p.Engine))
 	old := e.launchStateLocked(p.Engine, st)
-	changed := old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText || !old.Serving.Equal(preview.Settings.Serving)
+	changed := old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText || !old.Serving.Equal(preview.Settings.Serving) || !modelconfig.EqualLoads(old.ModelLoads, preview.Settings.ModelLoads)
 	activationBlocked := false
 	if err := e.activationVeto(p.Engine); err != nil {
 		var veto *localVetoError
@@ -564,11 +576,14 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 		activationBlocked = true
 	}
 	var pending *llamaServingSnapshot
-	if preparedServingRuntime(st, Runtime{Serving: preview.Settings.Serving}) {
+	if preparedServingRuntime(st, Runtime{Serving: preview.Settings.Serving, ModelLoads: preview.Settings.ModelLoads}) {
 		st.mu.Lock()
 		rt := st.plat.Runtime
 		st.mu.Unlock()
 		rt.Serving = preview.Settings.Serving.Clone()
+		rt.ModelLoads = modelconfig.CloneLoads(preview.Settings.ModelLoads)
+		rt.Port = preview.Settings.ServerPort
+		rt.modelLoadOwner = e
 		rt.LaunchArgs, rt.LaunchEnv = &preview.Args, &preview.Env
 		if llamaServingRuntime(st, rt) {
 			rt = llamaServingBase(rt)
@@ -597,6 +612,16 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 			return settings.LaunchState{}, err
 		}
 	}
+	if recheckConversion != nil {
+		if err := recheckConversion(); err != nil {
+			return settings.LaunchState{}, err
+		}
+	}
+	if recheckContent != nil {
+		if err := recheckContent(); err != nil {
+			return settings.LaunchState{}, err
+		}
+	}
 	// Stop before writing the override file. A stop failure returns with the
 	// engine still on its old launch, so persisting first would leave disk on
 	// the new one and the next start would silently adopt a configuration the
@@ -607,7 +632,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 		}
 	}
 	if changed || !reflect.DeepEqual(st.plat.Runtime.LaunchArgs, &preview.Args) || !reflect.DeepEqual(st.plat.Runtime.LaunchEnv, &preview.Env) {
-		if err := e.persistRuntimeServing(p.Engine, preview.Settings.ServerPort, &preview.Args, &preview.Env, &preview.Settings.Serving); err != nil {
+		if err := e.persistRuntimeServing(p.Engine, preview.Settings.ServerPort, &preview.Args, &preview.Env, &preview.Settings.Serving, &preview.Settings.ModelLoads); err != nil {
 			return e.launchStateLocked(p.Engine, st), err
 		}
 	}
@@ -617,6 +642,8 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	st.plat.Runtime.LaunchArgs = &preview.Args
 	st.plat.Runtime.LaunchEnv = &preview.Env
 	st.plat.Runtime.Serving = preview.Settings.Serving.Clone()
+	st.plat.Runtime.ModelLoads = modelconfig.CloneLoads(preview.Settings.ModelLoads)
+	st.plat.Runtime.modelLoadOwner = e
 	st.plat.Runtime.servingSnapshot = pending
 	pending = nil // runtime owns this cold generation until start or replacement
 	st.port = preview.Settings.ServerPort
@@ -633,6 +660,18 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 		resume = false
 	}
 	if !activationBlocked && ((changed && old.Running) || resume) {
+		if recheckContent != nil {
+			if err := recheckContent(); err != nil {
+				e.emitState(p.Engine)
+				return e.launchStateLocked(p.Engine, st), err
+			}
+		}
+		if recheckConversion != nil {
+			if err := recheckConversion(); err != nil {
+				e.emitState(p.Engine)
+				return e.launchStateLocked(p.Engine, st), err
+			}
+		}
 		if err := e.doStart(ctx, st, p.Engine, startOpts{RequireOwned: true}); err != nil {
 			e.emitState(p.Engine)
 			return e.launchStateLocked(p.Engine, st), err
