@@ -143,9 +143,6 @@ type candidateCredential struct {
 
 func (e *Executor) credentialForCandidate(ctx context.Context, st *engineState, effectivePort int) (candidateCredential, error) {
 	c := candidateCredential{port: effectivePort}
-	if effectivePort < 1 || effectivePort > 65535 {
-		return c, errCredentialRequest
-	}
 	st.mu.Lock()
 	rt := st.plat.Runtime
 	owned := st.proc != nil && st.port == effectivePort
@@ -154,18 +151,17 @@ func (e *Executor) credentialForCandidate(ctx context.Context, st *engineState, 
 		c.key = rt.servingLaunch.Credential
 	}
 	st.mu.Unlock()
-	if c.key != "" {
-		if !engines.ValidCredential(c.key) {
-			return candidateCredential{}, errCredentialRequest
-		}
-		return c, nil
-	}
-	if rt.UserCredential {
+	if c.key == "" && rt.UserCredential {
 		key, err := e.credentials.get(ctx, id)
 		if err != nil {
 			return candidateCredential{}, err
 		}
 		c.key = key
+	}
+	// Unauthenticated requests retain their existing port and transport
+	// semantics. Endpoint eligibility matters only when attaching a key.
+	if c.key != "" && (effectivePort < 1 || effectivePort > 65535 || !engines.ValidCredential(c.key)) {
+		return candidateCredential{}, errCredentialRequest
 	}
 	return c, nil
 }

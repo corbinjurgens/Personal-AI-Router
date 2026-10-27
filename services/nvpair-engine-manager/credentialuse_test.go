@@ -443,8 +443,39 @@ func TestCredentialUseInitialURLAndTransportRefusal(t *testing.T) {
 	if requests.Load() != 0 {
 		t.Fatal("refused URL made network requests")
 	}
-	if _, err := ex.credentialForCandidate(t.Context(), &engineState{}, 0); err != errCredentialRequest {
+	keyed, st, _, _ := credentialExecutor(t, srv.URL, port, &credentialFake{value: credentialTestKey})
+	if _, err := keyed.credentialForCandidate(t.Context(), st, 0); err != errCredentialRequest {
 		t.Fatal("invalid candidate port accepted")
+	}
+}
+
+func TestCredentialUseUnkeyedActionPreservesPortAndTransport(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		t.Run(fmt.Sprintf("credential_supported_%t", supported), func(t *testing.T) {
+			m := testEngineManifest(fakeEngineBin)
+			m.Actions["read"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/read"}}
+			ex := newTestExecutor(t, m)
+			st, err := ex.state(m.Engine)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.mu.Lock()
+			st.port, st.running = 0, true
+			st.plat.Runtime.UserCredential = supported
+			st.mu.Unlock()
+			calls := 0
+			ex.client.Transport = healthProbeTransport(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.URL.Port() != "0" || req.Header.Get("Authorization") != "" {
+					t.Error("unkeyed request changed its endpoint or attached a credential")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+			})
+			result, err := ex.Action(t.Context(), m.Engine, "read", nil)
+			if err != nil || string(result) != `{"ok":true}` || calls != 1 {
+				t.Fatalf("unkeyed action did not retain its transport: calls=%d err=%v", calls, err)
+			}
+		})
 	}
 }
 

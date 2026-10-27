@@ -46,6 +46,8 @@ keyed action JSON field names/string values and non-JSON text redact the active
 key. HTTP status and JSON identity still establish readiness; process presence
 is only diagnosis. A declared auth response after attaching the saved key says
 the saved key was rejected, while a known-absent key keeps the no-key diagnosis.
+With no key attached, existing port handling, HTTP transport and errors remain
+unchanged; credential endpoint eligibility is not applied.
 
 Trust follows `nvpair-service`'s private same-user socket/pipe, broker stdio,
 then manager stdio. Set/state have no ec route, remote method, settings/policy

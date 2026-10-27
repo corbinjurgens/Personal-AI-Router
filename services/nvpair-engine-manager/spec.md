@@ -33,8 +33,8 @@ In-flight snapshots can finish with their previous key. Teardown drops cache
 and adapter references without a native write; no secure-erasure claim applies.
 There is no secondary plaintext/settings/override store or retry goroutine.
 
-`candidateCredential` binds selection to a valid operation port independently
-of `running` and `proc`, so cold command readiness and first adoption use saved
+A key-bearing `candidateCredential` binds selection to a valid operation port
+independently of `running` and `proc`, so cold command readiness and first adoption use saved
 keys. An owned prepared Strata launch credential takes priority. A saved key is
 eligible only when the host runtime declares support. Broker retrieval and HTTP
 actions additionally require running on the exact current port; stopped engines
@@ -54,7 +54,8 @@ redirects (including same-origin); unsupported injected transports fail closed.
 Credential-bearing failures expose fixed operation/status text, never response
 bodies or raw transport errors. Successful action JSON is decoded and the
 active key replaced in field names/string values before re-encoding; non-JSON
-text is redacted before wrapping. Unauthenticated engine behavior is preserved.
+text is redacted before wrapping. Without a key, the existing port handling,
+HTTP transport and errors are preserved; credential eligibility is not applied.
 
 Local authorization is the existing `ipc.ListenPrivate` same-user 0600 Unix
 socket or user-SID Windows pipe, then service multiplexing, broker stdio and
@@ -503,7 +504,8 @@ without spaces or commas (one trailing line end allowed). The file is bound into
 the approval digest by identity only (path, size, modification time, file ID),
 never by content; it is never in the snapshot, the server receives the key only as
 `STRATA_API_KEY` in its child environment, engine-manager's own requests to the
-engine carry it (without following redirects, and redacted from error bodies),
+engine carry it (without following redirects, with fixed failure diagnostics
+instead of response bodies),
 and `internal:local-engine-credential` gives it, with the launch's port, only
 to the broker for its health probe and its own proxy. Context is an explicit positive
 `--max-context` per slot; `parallel` must be in 1..8. Explicit `--batch` or
