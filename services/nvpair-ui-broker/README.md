@@ -952,7 +952,8 @@ proxy enforces it.
   activity) feeds the drains below; `admission/unload` unloads the named models
   through `engine:unload-model`; `admission/wake` calls `engine:wake` unless the
   node is not `available` or the engine is saved Off. None of them reach clients.
-- **Pausing** (`node:set-availability {state:"paused"}`): persist `paused`, push
+- **Configured pausing** (`node:set-availability {state:"paused", pauseMode:"configured"}`,
+  or omitted `pauseMode`): persist `paused`, push
   `draining` (with `cancelActive` when `pause.onActive` is `cancel`), wait for the
   proxy's active count to reach zero for up to `pause.drainTimeoutSeconds`, then
   push again with `cancelActive` and allow 10 s for that work to unwind. Then
@@ -979,6 +980,17 @@ proxy enforces it.
   policy and readback shows `true`. Reading a file does not rewrite it; the next
   ordinary save writes the canonical values. `pause.onActive` and
   `pause.drainTimeoutSeconds` stay configurable with their existing validation.
+- **Immediate request contract.** `pauseMode:"immediate"` is request-scoped,
+  target-local only, and currently refused before any save, transition
+  supersession, proxy call or engine effect. A valid local request returns
+  `-32000`, `Immediate pause is unavailable until safe execution stopping is enabled.`
+  This preparatory contract does not dispatch immediate requests to configured
+  draining. An authorized peer receives `-32602`,
+  `Immediate pause must be requested on this node.` The verified peer identity
+  determines locality, regardless of a supplied `nodeId`. Fresh target permission
+  denial (`-32012`) precedes the pause fence (`-32011`), which precedes mode
+  validation. Null or unknown modes, and any explicit mode with Resume, are
+  invalid parameters. Timing is never persisted and changes no saved drain options.
 - **Resuming** persists and pushes `available`, then `engine:wake`s the engines
   the pause stopped. Their saved intent was never changed, so only engines saved
   On and unlocked come back through engine-manager's activation guards.
@@ -1303,11 +1315,15 @@ an availability push made during policy recovery. It is also
 scheduled when a proxy start has been replayed the policy. Replay and renewal
 announcements coalesce through the same publisher, with at most one sender and
 one waiter; each reads the current state after taking the publication lock.
-`node:availability-changed {nodeId, availability,
+`node:availability-changed {nodeId, availability, pausedBy?,
 active}` follows each availability transition (`draining`, then `paused`; or
 `available`), and while draining it repeats whenever the active count changes.
 Both are also sent with another node's `nodeId` after this node changed that
 node's policy or availability; the remote form carries no `active`.
+The target's authoritative snapshot supplies `pausedBy`: `local` or `peer`,
+empty/omitted when unknown. Available clears it. No initiating peer identity
+is exposed. `policy:get` carries the same top-level provenance for initial/live
+readback, including in the peer projection without origin-private routing.
 
 ```json
 {"jsonrpc":"2.0","method":"node:availability-changed","params":{"nodeId":"<hostUuid>","availability":"draining","active":2}}
@@ -1319,9 +1335,9 @@ node's policy or availability; the remote form carries no `active`.
 
 | Method | Params | Result |
 |---|---|---|
-| `policy:get` | `{ nodeId? }` | `{ policy, availability, recoveryRequired, activeRevision, activation, activationError? }` — `policy` is the persisted `nodepolicy.Policy` (`policy.revision` is the broker-assigned revision of the stored document); `availability` is live and may be `draining`; `recoveryRequired` is true while the node runs on the paused recovery policy because its file was unusable, until an explicit `policy:set` succeeds; `activeRevision` is the revision the running proxy acknowledged (empty when none, and after the newest availability push was refused, failed or not answered in time; a push still in flight leaves it as it was) and `activation` is `active`, `pending` or `error` (Activation above). Relayed from a paired node, `policy` is the peer projection (`nodepolicy.PeerPolicy`: no `routing`, no API tier entries) and the activation fields are absent |
+| `policy:get` | `{ nodeId? }` | `{ policy, availability, pausedBy?, recoveryRequired, activeRevision, activation, activationError? }`: `policy` is the persisted `nodepolicy.Policy` (`policy.revision` is the broker-assigned revision of the stored document); `availability` is live and may be `draining`; `pausedBy` reports actual local/peer provenance as described above; `recoveryRequired` is true while the node runs on the paused recovery policy because its file was unusable, until an explicit `policy:set` succeeds; `activeRevision` is the revision the running proxy acknowledged (empty when none, and after the newest availability push was refused, failed or not answered in time; a push still in flight leaves it as it was) and `activation` is `active`, `pending` or `error` (Activation above). Relayed from a paired node, `policy` is the peer projection (`nodepolicy.PeerPolicy`: no `routing`, no API tier entries) and the activation fields are absent |
 | `policy:set` | `{ nodeId?, policy, expectedPersistedRevision }` | `{ policy, activeRevision, activation, activationError? }` after the precondition, validation, persisting and the bounded wait for the proxy to acknowledge that exact revision; `activation` describes `policy.revision` and is `pending` or `error` when it was saved but not activated; `policy.revision` against `activeRevision` shows both revisions. The wait is bounded, so a busy push slot yields `pending`. Fields the caller omits take their defaults. `policy.availability`, `policy.pausedBy` and `policy.revision` are ignored (the persisted availability and its provenance are kept: only `node:set-availability` changes them; the broker assigns the next revision). `expectedPersistedRevision` is required: the canonical decimal `policy.revision` of the `policy:get` the draft is based on. A missing, null, empty or non-canonical value is error `-32602` before anything else, and there is no unconditional write. It is compared with the persisted `policy.revision` under the same lock as the save, so two writers holding the same revision cannot both succeed; a mismatch is error `-32010` whose message starts with `policy conflict:` and names the current persisted revision, with nothing validated, persisted, pushed or announced. The caller reloads and reviews the policy rather than resubmitting the old draft. A failure before replacement is error `-32000` (`the policy could not be saved: ...`), with the file and running state unchanged. A landed replacement whose durability failed is also error `-32000`, saying the document with revision N was saved and is being applied but may not survive a power loss. That complete document is adopted, recovery is cleared, proxy supervision is reconciled, and the proxy push and `policy:changed` proceed as after success (Durability above). An invalid policy is error `-32602` and nothing changes, as is an enabled `routing.listener.port` that a configured facade uses (Supervision & recovery). Enabling or disabling the listener on a node with no facade starts or stops the proxy in the background, so that revision is `pending` until the new process acknowledges the replay. Relayed from a paired node, `expectedPersistedRevision` is required in the same way (the `revision` of the projection it read) and a mismatch is returned with `errorCode: -32010` and `policy conflict:` text in `policy:reply`, while invalid parameters carry `errorCode: -32602`; only device fields may change: `tiers` and `tierPolicy` must equal the projection and `routing` must be absent, or the set is rejected; the result is the peer projection |
-| `node:set-availability` | `{ nodeId?, state: "available" \| "paused" }` | `{ availability, revision, activeRevision, activation, activationError? }` once the state is reached; pausing waits for the drain and verified engine shutdown. Incomplete shutdown returns `-32000` and retains live `draining` and the pause fence. `revision` is the persisted revision the activation fields describe (the one this change took, unless it was made during policy recovery); `activation` is `error`, with `activeRevision` empty, when the proxy refused or did not answer the availability push, even though the state was reached on this node (Activation). A request replaced by a newer one fails with `superseded by a later node:set-availability request`. Relayed from a paired node the result is `{ availability }` alone: like the relayed `policy:get`, it shows that peer no activation fields. Every peer availability write while either-origin pause is pending or active returns `-32011` and changes nothing (Pause fence); only local Resume lifts the fence |
+| `node:set-availability` | `{ nodeId?, state: "available" \| "paused", pauseMode?: "configured" \| "immediate" }` | `{ availability, pausedBy?, revision, activeRevision, activation, activationError? }` from the target's authoritative snapshot. Omitted/configured timing waits for the saved drain and verified engine shutdown. Immediate is currently refused as described above, with no effects. Incomplete configured shutdown returns `-32000` and retains live `draining` and the pause fence. `revision` is the persisted revision the activation fields describe; activation remains local-only. A superseded request fails with `superseded by a later node:set-availability request`. The peer result carries only `{ availability, pausedBy? }`, without activation or origin-private policy. Peer writes first recheck permission, then the either-origin pause fence (`-32011`); only target-local Resume lifts it. |
 
 An omitted `nodeId`, or this node's own, acts locally; any other is relayed to
 that node (see [Node policy](#node-policy)).

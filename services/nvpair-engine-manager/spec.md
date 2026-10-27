@@ -876,11 +876,24 @@ Requests (caller → service):
 | `engine:load-model` | `{ engine, model }` | the engine's raw response, via the manifest's `load` operation binding |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response, via the manifest's `unload` operation binding |
 | `engine:delete-model` | `{ engine, model }` | the engine's raw response, via the manifest's `delete` operation binding |
-| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
+| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability, pausedBy? }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
 | `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
-| `engine:remote-availability-set` | `{ nodeId, state }` | the target broker's `node:set-availability` result |
+| `engine:remote-availability-set` | `{ nodeId, state, pauseMode? }` | the target broker's `{ availability, pausedBy? }` result; configured waits for drain, immediate is refused |
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |
+
+The availability relay carries request-scoped `pauseMode` unchanged, including
+explicit null for target validation. Omission selects `configured`; explicit
+values are `configured` or `immediate`, valid only with `state:"paused"`.
+After fresh target permission (`-32012`) and pause-fence (`-32011`) checks,
+an authorized peer's immediate request is refused with `-32602`,
+`Immediate pause must be requested on this node.` The authenticated caller,
+not payload `nodeId`, determines locality. Valid local immediate requests are
+currently unavailable with no persistence, supersession or execution effects;
+the existing configured transition is never used for them. Timing is never
+persisted. The target's policy readback and availability result preserve actual
+`pausedBy` (`local`/`peer`, empty/omitted when unknown, cleared while available).
+Peer responses omit activation and origin-private routing fields.
 
 The `engineintent.Snapshot` shared wire type defines both intent payloads.
 `enabledByEngine` is a required object mapping every registered engine to a

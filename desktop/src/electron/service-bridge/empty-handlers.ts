@@ -1070,9 +1070,7 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     },
     'node:set-availability': async payload => {
         if (!payload) throw new Error('Missing availability request')
-        return parseAvailabilityResult(
-            await getModularSupervisor().setAvailability(payload.state, payload.nodeId)
-        )
+        return parseAvailabilityResult(await getModularSupervisor().setAvailability(payload))
     }
 }
 

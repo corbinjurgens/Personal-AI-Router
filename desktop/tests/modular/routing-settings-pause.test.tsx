@@ -111,7 +111,10 @@ describe('routing settings pause recovery', () => {
 
         await act(async () => button('Pause').click())
 
-        expect(setAvailability).toHaveBeenCalledExactlyOnceWith('paused', undefined)
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            state: 'paused',
+            nodeId: undefined
+        })
         expect(getPolicy).toHaveBeenCalledTimes(2)
         expect(container.textContent).toContain('Owned engine did not stop.')
         expect(button('Retry pause').disabled).toBe(false)
@@ -127,7 +130,10 @@ describe('routing settings pause recovery', () => {
 
         await act(async () => button('Retry pause').click())
 
-        expect(setAvailability).toHaveBeenCalledExactlyOnceWith('paused', undefined)
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            state: 'paused',
+            nodeId: undefined
+        })
         expect(button('Resume').disabled).toBe(false)
         expect(container.textContent).not.toContain('Retry pause')
         expect(container.textContent).toContain('paused')
@@ -158,7 +164,10 @@ describe('routing settings pause recovery', () => {
 
         await act(async () => button('Resume').click())
 
-        expect(setAvailability).toHaveBeenCalledExactlyOnceWith('available', undefined)
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            state: 'available',
+            nodeId: undefined
+        })
         expect(container.textContent).toContain('draining')
         expect(button('Resume').disabled).toBe(true)
         if (!finishRead) throw new Error('Missing resume policy readback')

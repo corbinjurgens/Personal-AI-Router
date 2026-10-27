@@ -1944,12 +1944,13 @@ func TestRelayedSetAvailabilityShowsNoActivationFields(t *testing.T) {
 	if errText != "" {
 		t.Fatalf("relayed set-availability: %s", errText)
 	}
-	var relayed map[string]json.RawMessage
+	var relayed map[string]string
 	if err := json.Unmarshal(result, &relayed); err != nil {
 		t.Fatalf("decode relayed set-availability %s: %v", result, err)
 	}
-	if len(relayed) != 1 || string(relayed["availability"]) != `"paused"` {
-		t.Fatalf("relayed set-availability = %s, want only {\"availability\":\"paused\"}", result)
+	want := map[string]string{"availability": "paused", "pausedBy": "peer"}
+	if !reflect.DeepEqual(relayed, want) {
+		t.Fatalf("relayed set-availability = %v, want only %v", relayed, want)
 	}
 
 	rb.b.handleMessage(clientRequest(7, methodSetAvailability, map[string]any{"state": "available"}))

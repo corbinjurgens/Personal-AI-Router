@@ -80,6 +80,7 @@ import { connectOrStart, serviceConnectionDeps } from './service-connection'
 import { defaultServiceEndpointEnvironment, resolveServiceEndpoint } from './service-endpoint'
 import { parseAvailabilityChange, parsePolicyChange } from './node-policy'
 import { NodeAvailabilityState, type AvailabilityMenuItem } from './node-availability'
+import type { NodeAvailabilityRequest } from '@/shared/types/node-policy'
 import { PerformanceSubscription } from './performance'
 import { RoutingHistorySubscription } from './routing'
 import {
@@ -464,17 +465,14 @@ class ModularSupervisor {
      * `nodeId` the broker relays the change to that node and the tray, which
      * shows only this node, is left alone.
      */
-    async setAvailability(
-        state: 'available' | 'paused',
-        nodeId?: string
-    ): Promise<JsonValue | undefined> {
+    async setAvailability(request: NodeAvailabilityRequest): Promise<JsonValue | undefined> {
         const result = await this.callProcess(
             'broker',
             'node:set-availability',
-            nodeId ? { state, nodeId } : { state },
+            { ...request },
             AVAILABILITY_CALL_TIMEOUT_MS
         )
-        if (!nodeId) this.availability.applyResult(result)
+        if (!request.nodeId) this.availability.applyResult(result)
         return result
     }
 

@@ -288,9 +288,9 @@ Requests (caller → service):
 | `engine:load-model` | `{ engine, model }` | the engine's raw response — loads one model through the manifest's `load` binding, the same one the remote load uses (Ollama: `run_model` with `stream:false` and a 10-minute response budget) |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the manifest's `unload` binding, the same one the remote unload uses (Ollama: `keep_alive:0`) |
 | `engine:delete-model` | `{ engine, model }` | the engine's raw response — deletes one model through the manifest's `delete` binding, the same one the remote delete uses. LM Studio's restarts a running server before replying |
-| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
+| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability, pausedBy? }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
 | `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
-| `engine:remote-availability-set` | `{ nodeId, state }` | the target broker's `node:set-availability` result (waits for the target's drain, on the readiness-sized response budget) |
+| `engine:remote-availability-set` | `{ nodeId, state, pauseMode? }` | the target broker's `{ availability, pausedBy? }` result (configured pause waits for the target's drain, on the readiness-sized response budget); immediate is refused by the target |
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |
 
@@ -678,7 +678,7 @@ Endpoints (all under `/v1`):
 | `GET /v1/models/file?engine=&model=&path=` | file bytes | one listed file, with HTTP Range support |
 | `POST /v1/node-policy/get` | JSON | the target broker's peer projection of its policy, as for `engine:remote-policy-get` |
 | `POST /v1/node-policy/set` | JSON `{ policy, expectedPersistedRevision }` | the peer projection after the target broker merges the change; the revision is forwarded unchanged |
-| `POST /v1/node-availability/set` | JSON `{ state }` | the target broker's `node:set-availability`, answered once the state is reached |
+| `POST /v1/node-availability/set` | JSON `{ state, pauseMode? }` | the target broker's `node:set-availability`, answered once the configured state is reached; immediate is refused |
 
 The node-policy routes carry the broker's policy, which engine-manager does not
 interpret. Each is gated on the caller's pin like the settings routes, accepts at
@@ -686,6 +686,15 @@ most 256 KiB, refuses unknown fields, clears any `nodeId` so the target acts on
 itself and never forwards a further hop, and relays to the broker as
 `policy:request` stamped with the authenticated caller. The broker re-checks the
 pin, acts, and answers with `policy:reply {id, result, error?, errorCode?}`.
+`pauseMode` is carried unchanged, including explicit null, for target-side
+validation after fresh permission and pause-fence checks. Omission means
+`configured`; `immediate` is target-local only, so an authorized unfenced peer
+receives `-32602`, `Immediate pause must be requested on this node.` No payload
+`nodeId` can impersonate locality. Any mode on Resume is invalid. Valid local
+immediate calls are currently unavailable without effects; the relay exposes
+no immediate dispatch. Timing is never saved. Results preserve actual target
+`pausedBy` (`local`/`peer`, unknown empty/omitted, cleared while available),
+without exposing local activation or origin-private routing fields.
 Every error carries a JSON-RPC `errorCode`: `-32602` for invalid parameters,
 including missing `expectedPersistedRevision`, invalid policy or availability;
 `-32010` for a revision conflict; `-32011` for a resume the local veto refuses;

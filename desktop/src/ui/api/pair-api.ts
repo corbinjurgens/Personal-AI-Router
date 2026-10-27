@@ -22,13 +22,13 @@ import type { NodeItem } from '@/shared/types/nodes'
 import type { ServiceError } from '@/shared/types/errors'
 import type { NodeItemMetrics } from '@/shared/types/metrics'
 import type {
-    NodeAvailability,
+    NodeAvailabilityRequest,
+    NodeAvailabilityResult,
     NodeAvailabilityChange,
     NodePolicyChange,
     NodePolicyDocument,
     NodePolicySnapshot,
     NodePolicyWrite,
-    RequestedAvailability,
     WorkloadCancelRequest
 } from '@/shared/types/node-policy'
 import type { Workload } from '@/shared/types/workloads'
@@ -147,10 +147,7 @@ export interface INodePolicyApi {
     /** Replace a node's policy. Rejects with the service's message, including a stale revision. */
     set(request: NodePolicyWrite): Promise<NodePolicySnapshot>
     /** Pause or resume a node; pausing resolves once the node has drained. */
-    setAvailability(
-        state: RequestedAvailability,
-        nodeId?: string
-    ): Promise<{ availability: NodeAvailability }>
+    setAvailability(request: NodeAvailabilityRequest): Promise<NodeAvailabilityResult>
     /** Any node's availability changed (this PC included); compare `nodeId` with the self id. */
     onAvailabilityChanged(callback: (change: NodeAvailabilityChange) => void): () => void
     /** Any node's saved policy changed. */
@@ -298,9 +295,9 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
                     refreshNodeManagement(request.nodeId)
                     return result
                 }),
-            setAvailability: (state, nodeId) =>
-                transport.invoke('node:set-availability', { nodeId, state }).then(result => {
-                    refreshNodeManagement(nodeId)
+            setAvailability: request =>
+                transport.invoke('node:set-availability', request).then(result => {
+                    refreshNodeManagement(request.nodeId)
                     return result
                 }),
             onAvailabilityChanged: cb => transport.subscribePush('node:availability-changed', cb),

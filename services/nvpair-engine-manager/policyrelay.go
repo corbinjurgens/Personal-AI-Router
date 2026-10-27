@@ -82,6 +82,7 @@ type policyBody struct {
 	NodeID                    string          `json:"nodeId,omitempty"`
 	Policy                    json.RawMessage `json:"policy,omitempty"`
 	State                     string          `json:"state,omitempty"`
+	PauseMode                 json.RawMessage `json:"pauseMode,omitempty"`
 	ExpectedPersistedRevision string          `json:"expectedPersistedRevision,omitempty"`
 }
 
@@ -241,8 +242,7 @@ func (c *remoteClient) postPolicy(ctx context.Context, path string, body policyB
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if resp.StatusCode == http.StatusBadRequest {
-			message := fmt.Sprintf("remote node policy: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
-			return nil, &codedError{code: -32602, message: message}
+			return nil, &codedError{code: -32602, message: strings.TrimSpace(string(out))}
 		}
 		return nil, remoteStatusError("remote node policy", resp.StatusCode, out)
 	}

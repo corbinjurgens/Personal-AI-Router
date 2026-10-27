@@ -149,7 +149,7 @@ class TrayManager {
     private requestAvailability(request: 'available' | 'paused' | null): void {
         if (request === null) return
         getModularSupervisor()
-            .setAvailability(request)
+            .setAvailability({ state: request })
             .catch((error: unknown) => {
                 log.warn({
                     sublevel: 'lifecycle',
