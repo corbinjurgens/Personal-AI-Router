@@ -19,6 +19,8 @@ export const REMOTE_MANAGEMENT_DENIED_CODE = -32012
 export const ENGINE_LOCKED_CODE = -32013
 /** A peer tried to change inference settings reserved for the target device. */
 export const REMOTE_SETTING_LOCKED_CODE = -32014
+/** A build apply and a model-settings operation cannot hold maintenance together. */
+export const BUILD_APPLY_MAINTENANCE_BUSY_CODE = -32015
 
 /**
  * The explanation for a paired node's action refused with LOCAL_VETO_CODE.

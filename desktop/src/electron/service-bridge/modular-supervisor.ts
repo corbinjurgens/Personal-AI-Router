@@ -27,6 +27,7 @@ import {
 } from '@/shared/constants/service-errors'
 import { currentPlatform } from '@/shared/utils/platform'
 import { parseServiceBuildId } from '@/shared/utils/service-build'
+import { dispatchBuildApplyChanged } from './build-apply'
 import {
     getModularBridgeState,
     isUpstreamUnreachableError,
@@ -715,6 +716,53 @@ class ModularSupervisor {
 
     hasProcess(name: ModularProcessName): boolean {
         return this.processes.has(name)
+    }
+
+    /** Local service calls use the existing attachment, never launch on failure. */
+    async callBuildApply(
+        method:
+            | 'service/build-apply-preview'
+            | 'service/build-apply-start'
+            | 'service/build-apply-status'
+            | 'service/build-apply-gui-ready',
+        params: JsonObject
+    ): Promise<JsonValue | undefined> {
+        const child = this.processes.get('broker')
+        if (!child || !this.ready || this.shuttingDown) {
+            return {
+                available: false,
+                value: null,
+                refusal: {
+                    code: 'unavailable',
+                    detail: 'Build apply requires an attached service.'
+                }
+            }
+        }
+        let current = true
+        const invalidate = (): void => {
+            current = false
+        }
+        child.on('disconnected', invalidate)
+        child.on('broker-restarted', invalidate)
+        child.on('exit', invalidate)
+        try {
+            const result = await child.call(method, params)
+            if (
+                !current ||
+                this.processes.get('broker') !== child ||
+                !this.ready ||
+                this.shuttingDown
+            ) {
+                throw new Error(
+                    'Build apply connection changed; read the operation before retrying.'
+                )
+            }
+            return result
+        } finally {
+            child.off('disconnected', invalidate)
+            child.off('broker-restarted', invalidate)
+            child.off('exit', invalidate)
+        }
     }
 
     /** Read only the attached service; invalidate even if this client reconnects mid-request. */
@@ -1502,6 +1550,14 @@ class ModularSupervisor {
     }
 
     private handleNotification(notification: JsonRpcNotification): void {
+        if (notification.method === 'service/build-apply-changed') {
+            try {
+                dispatchBuildApplyChanged(notification.params)
+            } catch {
+                log.warn({ sublevel: 'build-apply', message: 'Invalid build apply notification.' })
+            }
+            return
+        }
         log.verbose({
             sublevel: notification.source,
             message: notification.method,
