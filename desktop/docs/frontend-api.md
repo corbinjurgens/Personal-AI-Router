@@ -593,3 +593,11 @@ subscription setup so a renderer reload reconstructs state from the service.
 An inference feature may use engine HTTP endpoints as a local third-party
 client. Those requests are separate from the renderer control API and do not
 replace `window.pairApi`. Nothing in the renderer does this today.
+
+### Local engine credentials
+
+`engines.credentialState({ nodeId, engineType })` and `engines.setCredential({ nodeId, engineType, credential })` return `{ supported, configured }`. The node must be the known local node; remote or unknown targets are refused before RPC. The bridge sends only the engine name and, for a mutation, the credential to Go. An empty credential clears the saved key only through the explicit Clear action. Unsupported engines and remote rows have no credential form.
+
+The local row uses KUI's accessible, masked, uncontrolled password field. Ordinary status rerenders preserve an unsent draft. Submission, success, failure, Cancel, target change and unmount clear the input. The key is held only by the transient input and actual in-flight packet, never by component state, domain stores, history, push events or logs. Completion callbacks carry nonsecret ownership metadata and cannot repopulate another row. This limits references; it does not guarantee memory erasure.
+
+An initial pending or failed state read shows Credential store unavailable. A failed Save or Clear preserves the last confirmed label and shows Could not update credential inline. Cancel clears the input but cannot cancel an accepted physical write. It withdraws the saved-state label and keeps mutations disabled until physical settlement and a fresh correlated state read. The API refuses overlapping mutations for the same target with Credential update pending and delays reads behind an outstanding write, including after row remount. If reconciliation fails, the state remains unavailable and Retry performs only a new state read, never a mutation or a key retry.

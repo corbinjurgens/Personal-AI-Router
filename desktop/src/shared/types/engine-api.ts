@@ -64,6 +64,11 @@ export interface EngineHubSearchResponse {
     models: EngineHubModel[]
 }
 
+export interface EngineCredentialState {
+    supported: boolean
+    configured: boolean
+}
+
 /** Engine command discriminator. */
 export type EngineCommandType =
     | 'toggle'
