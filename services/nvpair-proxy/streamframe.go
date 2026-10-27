@@ -300,6 +300,7 @@ const (
 	streamInterruptReasonMalformed     = "malformed upstream stream"
 	streamInterruptReasonUpstreamError = "upstream reported an error"
 	streamInterruptReasonPeerLink      = "peer response interrupted"
+	streamInterruptReasonNodePaused    = "node paused"
 )
 
 var streamInterruptionReasons = []string{
@@ -311,6 +312,7 @@ var streamInterruptionReasons = []string{
 	streamInterruptReasonMalformed,
 	streamInterruptReasonUpstreamError,
 	streamInterruptReasonPeerLink,
+	streamInterruptReasonNodePaused,
 }
 
 // streamInterruptionFrames holds the protocol-correct error terminator for each
@@ -561,6 +563,9 @@ func (r *streamFrameReader) Read(p []byte) (int, error) {
 			r.finished = false
 			r.finishLocked(streamOutcomeCancelled, "", nil)
 		}
+		if !r.finished && r.sink.executionWithdrawn() {
+			r.finishInterruptedLocked(streamInterruptReasonNodePaused)
+		}
 		if r.closed {
 			r.mu.Unlock()
 			return 0, io.EOF
@@ -690,6 +695,10 @@ func (r *streamFrameReader) readOnce() {
 	}
 	if r.parent.Err() != nil {
 		r.finishLocked(streamOutcomeCancelled, "", nil)
+		return
+	}
+	if r.sink.executionWithdrawn() {
+		r.finishInterruptedLocked(streamInterruptReasonNodePaused)
 		return
 	}
 	if r.idleFired {

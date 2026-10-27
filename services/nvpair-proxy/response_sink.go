@@ -28,6 +28,7 @@ type responseSink struct {
 	continuationUnavailable                                         bool
 	body                                                            responseInterruptionBody
 	bootstrap                                                       *bufferLease
+	execution                                                       context.Context
 	factVersion                                                     uint64
 	factOutcome                                                     streamOutcome
 }
@@ -45,6 +46,22 @@ type responseSinkContextKey struct{}
 
 func newResponseSink(w http.ResponseWriter, cancel context.CancelFunc) *responseSink {
 	return &responseSink{w: w, cancel: cancel}
+}
+
+func (s *responseSink) bindExecution(ctx context.Context) {
+	s.mu.Lock()
+	s.execution = ctx
+	s.mu.Unlock()
+}
+
+func (s *responseSink) executionWithdrawn() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	ctx := s.execution
+	s.mu.Unlock()
+	return executionWasWithdrawn(ctx)
 }
 
 func withResponseSink(ctx context.Context, sink *responseSink) context.Context {
@@ -216,6 +233,9 @@ func (s *responseSink) planInterruptionForAttempt(reason string, attempt *public
 // planInterruptionLocked requires s.mu; a supplied attempt admits the ending
 // under the existing request mutex before any new sink plan is recorded.
 func (s *responseSink) planInterruptionLocked(reason string, attempt *publicAttemptLifecycle) bool {
+	if executionWasWithdrawn(s.execution) {
+		reason = streamInterruptReasonNodePaused
+	}
 	if _, ok := streamInterruptionFramesByReason[reason]; !ok {
 		reason = streamInterruptReasonReadFailed
 	}
@@ -233,6 +253,9 @@ func (s *responseSink) planInterruptionLocked(reason string, attempt *publicAtte
 }
 
 func interruptionBytes(protocol streamProtocol, reason string) []byte {
+	if protocol == streamProtocolUnknown {
+		return nil
+	}
 	frames, ok := streamInterruptionFramesByReason[reason]
 	if !ok {
 		frames = streamInterruptionFramesByReason[streamInterruptReasonReadFailed]
@@ -247,6 +270,7 @@ func interruptionBytes(protocol streamProtocol, reason string) []byte {
 // immutable templates even if the parser's bootstrap allowance was refused.
 func (s *responseSink) interruptedBody(protocol streamProtocol, reason string) io.ReadCloser {
 	s.planInterruption(reason)
+	reason = s.result().Reason
 	s.body = responseInterruptionBody{sink: s, data: interruptionBytes(protocol, reason)}
 	return &s.body
 }
@@ -255,6 +279,7 @@ func (s *responseSink) interruptedBodyForAttempt(protocol streamProtocol, reason
 	if !s.planInterruptionForAttempt(reason, attempt) {
 		return nil
 	}
+	reason = s.result().Reason
 	s.body = responseInterruptionBody{sink: s, data: interruptionBytes(protocol, reason)}
 	return &s.body
 }
@@ -268,6 +293,11 @@ type responseInterruptionBody struct {
 func (b *responseInterruptionBody) Read(p []byte) (int, error) {
 	if b.off == len(b.data) {
 		b.sink.streamResult(streamFrameResult{Outcome: streamOutcomeInterrupted, Reason: b.sink.result().Reason})
+		if len(b.data) == 0 {
+			// Raw/nonstreaming responses have no synthetic terminal. Fail the
+			// copy so the client observes truncation rather than a clean EOF.
+			return 0, io.ErrUnexpectedEOF
+		}
 		return 0, io.EOF
 	}
 	n := copy(p, b.data[b.off:])
@@ -286,6 +316,10 @@ type sinkObservedBody struct {
 
 func (b *sinkObservedBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
+	if b.sink.executionWithdrawn() {
+		b.sink.streamResult(streamFrameResult{Outcome: streamOutcomeInterrupted, Reason: streamInterruptReasonNodePaused})
+		return 0, executionInterruption{}
+	}
 	if n > 0 {
 		b.sink.output(n, true)
 	}
