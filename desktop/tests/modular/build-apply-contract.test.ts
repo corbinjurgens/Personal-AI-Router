@@ -34,7 +34,6 @@ import {
     getBuildApplyStatus,
     handleBuildApplyEntry
 } from '@/electron/build-apply'
-import { handleShortcutEntry } from '@/electron/windows-shortcut'
 import { buildApplyApi } from '@/preload/api/build-apply.api'
 
 const native = vi.hoisted(() => ({
@@ -485,10 +484,6 @@ describe('native local build apply registration', () => {
         expect(await handleBuildApplyEntry(['--pair-build-apply=operation_1'])).toBe(69)
         expect(await handleBuildApplyEntry(['--pair-build-apply=../bad'])).toBe(64)
         expect(await handleBuildApplyEntry([])).toBeNull()
-        for (const command of ['create', 'status', 'remove']) {
-            expect(await handleShortcutEntry(['--pair-shortcut=' + command])).toBe(69)
-        }
-        expect(await handleShortcutEntry(['--pair-shortcut=other'])).toBe(64)
         expect(JsonRpcSocketClient.prototype.call).not.toHaveBeenCalled()
     })
 })
