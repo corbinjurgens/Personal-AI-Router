@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -551,6 +552,115 @@ func TestModelSettingsRecoverySavedResumeHonorsCurrentVeto(t *testing.T) {
 	test("saved local Off", false, true, false, 1)
 }
 
+func TestModelSettingsRecoveryEveryProgressedStageReplays(t *testing.T) {
+	for _, stage := range []string{"drained", "native-applying", "native-persisted", "policy-persisted", "activation-pending", "releasing"} {
+		t.Run(stage, func(t *testing.T) {
+			h := newModelSettingsHarness(t)
+			record := h.seedAccepted(t, true)
+			if stage != "drained" && stage != "native-applying" {
+				h.setNative(record.Snapshot.Settings)
+			}
+			h.b.engineConfigMu.Lock()
+			live := h.b.engineSettings["llamacpp"]
+			if stage == "policy-persisted" || stage == "activation-pending" || stage == "releasing" {
+				if err := h.b.commitModelPolicyLocked(live); err != nil {
+					h.b.engineConfigMu.Unlock()
+					t.Fatal(err)
+				}
+			}
+			if err := h.b.saveModelStageLocked(live, stage); err != nil {
+				h.b.engineConfigMu.Unlock()
+				t.Fatal(err)
+			}
+			h.b.engineConfigMu.Unlock()
+			h.restartJournal(t)
+			if !h.b.recoverEngineSettings() {
+				t.Fatalf("stage %s did not recover automatically", stage)
+			}
+			got := h.record(t)
+			if got.Model.Stage != "completed" || got.Receipts[got.Snapshot.RequestID].Phase != "succeeded" || len(h.b.localPolicy().Policy.Profiles) != 1 {
+				t.Fatalf("stage %s outcome = %+v", stage, got.Snapshot)
+			}
+		})
+	}
+}
+
+func TestModelSettingsRecoverySupersessionReviewsSavedResume(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	record := h.seedAccepted(t, true)
+	h.setNative(record.Snapshot.Settings)
+	h.b.engineConfigMu.Lock()
+	live := h.b.engineSettings["llamacpp"]
+	live.Resume = true
+	if err := h.b.saveModelStageLocked(live, "activation-pending"); err != nil {
+		h.b.engineConfigMu.Unlock()
+		t.Fatal(err)
+	}
+	h.b.engineConfigMu.Unlock()
+	fresh := h.request(t, true)
+	fresh.ModelChange.SupersedesRequestID = record.Snapshot.RequestID
+	preview, err := h.b.previewEngineSettings(t.Context(), fresh, "")
+	if err != nil || !preview.Restart || preview.Impact == nil || preview.Impact.StaysOff == nil || *preview.Impact.StaysOff {
+		t.Fatalf("saved resume was not reviewed: %+v, %v", preview, err)
+	}
+	fresh.ModelChange.PreviewDigest = preview.PreviewDigest
+	receipt, err := h.b.applyEngineSettings(t.Context(), fresh, "")
+	if err != nil || receipt.Phase != "succeeded" || !h.record(t).Snapshot.Running || h.calls() != 1 {
+		t.Fatalf("supersession lost resume: %+v, %v", receipt, err)
+	}
+}
+
+func TestModelSettingsRecoveryAcceptedCrashRequiresPreviewWithoutEffects(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	p := h.review(t, h.request(t, true), "")
+	policyBefore := modelSettingsHash(h.b.localPolicy().Policy)
+	h.mu.Lock()
+	nativeBefore := settings.ConfigFromLaunch(h.launch, p.Settings.ProxyPort)
+	h.mu.Unlock()
+	crash := errors.New("simulated process exit after acceptance sync")
+	h.b.engineSettingsReplacer = durablefile.Replacer{SyncDir: func(string) error {
+		// The replacement is already on disk. Terminate control flow here,
+		// before the acceptance owner can issue any component command.
+		panic(crash)
+	}}
+	func() {
+		defer func() {
+			if got := recover(); got != crash {
+				t.Fatalf("acceptance crash = %v", got)
+			}
+		}()
+		_, _ = h.b.applyEngineSettings(context.Background(), p, "")
+	}()
+	// A process exit discards mutexes. The harness reuses its pipe fixtures;
+	// release only the policy lock held at this exact injected exit boundary.
+	h.b.nodePolicy.mu.Unlock()
+	h.b.engineSettingsReplacer = durablefile.Replacer{}
+	if h.calls() != 0 || modelSettingsHash(h.b.localPolicy().Policy) != policyBefore {
+		t.Fatal("native or policy effect preceded accepted journal stage")
+	}
+	h.mu.Lock()
+	nativeUnchanged := nativeBefore.Equal(settings.ConfigFromLaunch(h.launch, p.Settings.ProxyPort)) && !h.launch.Running
+	h.mu.Unlock()
+	if !nativeUnchanged {
+		t.Fatal("acceptance stopped, wrote or launched the native engine")
+	}
+	h.restartJournal(t)
+	if h.b.recoverEngineSettings() || h.calls() != 0 || modelSettingsHash(h.b.localPolicy().Policy) != policyBefore {
+		t.Fatal("bare accepted restart performed component effects")
+	}
+	got := h.record(t)
+	if got.Receipts[p.RequestID].Phase != "failed" || got.Snapshot.AppliedRevision == got.Snapshot.Revision || !strings.Contains(got.Snapshot.Reason, "Interrupted before changes; preview again") {
+		t.Fatalf("interrupted readback = %+v", got.Snapshot)
+	}
+	fresh := h.request(t, true)
+	fresh.ModelChange.SupersedesRequestID = p.RequestID
+	fresh = h.review(t, fresh, "")
+	receipt, err := h.b.applyEngineSettings(context.Background(), fresh, "")
+	if err != nil || receipt.Phase != "succeeded" || h.calls() != 1 || h.record(t).Model.Stage != "completed" {
+		t.Fatalf("interrupted acceptance blocked fresh review/apply: %+v, %v", receipt, err)
+	}
+}
+
 func TestModelSettingsRecoveryAcceptanceUncertaintySurvivesRestartAndDoubleFailure(t *testing.T) {
 	for _, second := range []string{"durable uncertainty", "failure before uncertainty replacement", "uncertain uncertainty replacement"} {
 		t.Run(second, func(t *testing.T) {
@@ -583,7 +693,7 @@ func TestModelSettingsRecoveryAcceptanceUncertaintySurvivesRestartAndDoubleFailu
 				t.Fatal("restart converted uncertain acceptance into native effects")
 			}
 			got := h.record(t)
-			if got.Model.Stage != "acceptance-uncertain" || !modelSettingsNeedsReconciliation(got) || got.Snapshot.UnresolvedError == "" || len(h.b.localPolicy().Policy.Profiles) != 0 {
+			if got.Model.Stage != "acceptance-uncertain" || !modelSettingsNeedsReconciliation(got) || !strings.Contains(got.Snapshot.UnresolvedError, "Interrupted before changes; preview again") || got.Snapshot.AppliedRevision == got.Snapshot.Revision || got.Receipts[p.RequestID].Phase != "failed" || len(h.b.localPolicy().Policy.Profiles) != 0 {
 				t.Fatal("uncertain acceptance lost its durable/reconstructed reconciliation state")
 			}
 			if _, err := h.b.setLocalPolicy(settingsJSON(h.b.localPolicy().Policy), settingsJSON(h.b.localPolicy().Policy.Revision)); policyErrorCode(err) != codePolicyConflict {

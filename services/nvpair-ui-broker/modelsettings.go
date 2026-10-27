@@ -162,7 +162,8 @@ func (b *Broker) knownModelSettingsFenceLocked() bool {
 func markModelAcceptanceUncertain(record *engineSettingsRecord) {
 	record.Model.Stage, record.Snapshot.CoupledStage = "acceptance-uncertain", "acceptance-uncertain"
 	record.Snapshot.Phase, record.Snapshot.Editable = "applying", false
-	record.Snapshot.Error, record.Snapshot.UnresolvedError = "Acceptance durability is uncertain; local fresh preview is required.", "Acceptance durability is uncertain; local fresh preview is required."
+	record.Snapshot.Error, record.Snapshot.UnresolvedError = "Interrupted before changes; preview again on this device.", "Interrupted before changes; preview again on this device."
+	record.Snapshot.Reason = record.Snapshot.UnresolvedError
 	receipt := record.Receipts[record.Snapshot.RequestID]
 	receipt.Phase = "failed"
 	record.Receipts[record.Snapshot.RequestID] = receipt
@@ -434,6 +435,11 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 	preview.Revision, preview.PolicyRevision = base.Snapshot.Revision, policy.Revision
 	preview.Rebind = preview.Settings.ProxyPort != base.Snapshot.Settings.ProxyPort
 	preview.Restart = launch.Running && !preview.Settings.Equal(settings.ConfigFromLaunch(launch, p.Settings.ProxyPort))
+	// Supersession reviews the unresolved running intent as well as current
+	// observation: a replacement manager may have persisted settings but stopped.
+	if p.ModelChange.SupersedesRequestID != "" && p.ModelChange.Load != nil && base.Resume {
+		preview.Restart = true
+	}
 	preview.Impact = b.modelSettingsImpact(p.Engine, launch, preview.Settings, preview.Restart)
 	if p.ModelChange.Policy != nil {
 		preview.Diff = append(preview.Diff, modelconfig.FieldDiff{Field: "policy", Before: settingsJSON(policy.PeerProjection()), After: settingsJSON(nextPolicy.PeerProjection())})
@@ -582,7 +588,7 @@ func (b *Broker) modelSettingsImpact(engine string, launch settings.LaunchState,
 	if restart {
 		scope = "whole-router"
 	}
-	interrupt, off := restart, !launch.Running || paused
+	interrupt, off := restart, !launch.Running && !restart || paused
 	impact := &modelconfig.Impact{RestartScope: scope, MayInterruptActive: &interrupt, StaysOff: &off, ActiveWorkPolicy: "none"}
 	if restart {
 		seconds := int32(60)

@@ -123,6 +123,9 @@ the existing switch and cold-binding exclusions until the operation is settled.
 Startup reconstructs them before
 proxy replay/facade enablement, advertising and enabled-intent restoration.
 Progressed applying records without failed receipts replay automatically.
+This includes `activation-pending` after restart. Fresh local supersession
+also reviews and carries any unresolved resume obligation through the existing
+manager activation vetoes, even when the replacement manager is stopped.
 `activation-pending` permits an explicit fresh local Preview/Apply after a repaired
 proxy acknowledgement; callers need not restart the broker or invoke recovery.
 Failed/conflicted attempts and ambiguous acceptance require a local

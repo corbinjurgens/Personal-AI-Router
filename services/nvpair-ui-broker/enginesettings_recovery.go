@@ -187,9 +187,9 @@ func (b *Broker) recoverEngineSettings() bool {
 	b.reconstructModelSettingsLocked()
 	for engine, record := range b.engineSettings {
 		if b.modelSettingsPendingLocked(engine) {
-			if modelSettingsNeedsReconciliation(record) {
-				// Failed/uncertain acceptance and activation-pending work have
-				// an explicit fresh local repair path. Keep their fences here.
+			if modelSettingsNeedsReconciliation(record) && (record.Model.Stage != "activation-pending" || record.Receipts[record.Snapshot.RequestID].Phase == "failed") {
+				// Failed/uncertain work requires fresh local repair. A pending
+				// activation can retry the existing frozen operation on startup.
 				continue
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), settings.OperationBudget)
