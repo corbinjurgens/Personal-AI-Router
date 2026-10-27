@@ -15,7 +15,7 @@ Most IPC handlers in `src/electron/ipc/` are thin wrappers for things that
 require Electron main process access. The modular service bridge is the one
 intentional data IPC envelope: preload exposes `window.pairApi`, then forwards
 logical service invokes/subscriptions over `service-bridge:*` IPC to Electron
-main, where handlers map to stdio JSON-RPC subprocesses or explicit empty
+main, where handlers map to service JSON-RPC calls or explicit empty
 responses.
 
 - **Window management**: `window:close`, `window:open-*`, `window:quit`, `window:maximize`, `window:minimize`, `window:is-maximized`, `window:copy-to-clipboard`, `window:copy-image-to-clipboard`, `window:save-debug-logs`
@@ -47,7 +47,7 @@ safeHandle('service:get-status', async (_event) => { ... })
 
 ## Service methods drive state
 
-Service state now comes from the modular bridge. Modular subprocess
+Service state now comes from the modular bridge. Service
 notifications update `ModularBridgeState`, then Electron main emits
 `service-bridge:push` IPC messages that preload fans out to `window.pairApi`
 subscribers.
