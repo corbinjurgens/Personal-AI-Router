@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,18 +19,29 @@ import (
 func TestSwitchDrainActiveSourceMustReachFreshZero(t *testing.T) {
 	h := newSwitchHarness(t)
 	h.active.Store(2)
+	freshSnapshot := make(chan struct{})
+	var snapshotOnce sync.Once
+	base := h.proxy.answer
+	h.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, errText := base(method, raw)
+		if method == nodepolicy.MethodAdmissionSnapshot {
+			// Signal after reading the active count, so the first fresh reply
+			// contains the active source even if the test then clears it.
+			snapshotOnce.Do(func() { close(freshSnapshot) })
+		}
+		return result, errText
+	})
 	p := h.request(t, "active-drain")
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err != nil {
 		t.Fatal(err)
 	}
-	h.proxy.waitFor("fresh admission request", func(calls []policyCall) bool {
-		for _, call := range calls {
-			if call.method == nodepolicy.MethodAdmissionSnapshot {
-				return true
-			}
-		}
-		return false
-	})
+	snapshotCtx, cancelSnapshot := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelSnapshot()
+	select {
+	case <-freshSnapshot:
+	case <-snapshotCtx.Done():
+		t.Fatal("wait for fresh admission snapshot")
+	}
 	if steps := switchSteps(t, h.engine); len(steps) != 0 {
 		t.Fatalf("stopped active source: %v", steps)
 	}
@@ -46,7 +58,9 @@ func TestSwitchDrainActiveSourceMustReachFreshZero(t *testing.T) {
 	for _, call := range h.proxy.snapshot() {
 		order = append(order, call.method)
 	}
-	wantPrefix := []string{nodepolicy.MethodSetModelIdentity, nodepolicy.MethodSetModelIdentity, "llamacpp:node/set-local-backend", nodepolicy.MethodSetEngineDrain, nodepolicy.MethodInvalidateEngine, nodepolicy.MethodInvalidateEngine, nodepolicy.MethodAdmissionSnapshot}
+	// The acknowledged manager startup identity precedes the switch's two
+	// identity withdrawals and the original drain sequence.
+	wantPrefix := []string{nodepolicy.MethodSetModelIdentity, nodepolicy.MethodSetModelIdentity, nodepolicy.MethodSetModelIdentity, "llamacpp:node/set-local-backend", nodepolicy.MethodSetEngineDrain, nodepolicy.MethodInvalidateEngine, nodepolicy.MethodInvalidateEngine, nodepolicy.MethodAdmissionSnapshot}
 	if len(order) < len(wantPrefix) || !reflect.DeepEqual(order[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("drain order = %v", order)
 	}
