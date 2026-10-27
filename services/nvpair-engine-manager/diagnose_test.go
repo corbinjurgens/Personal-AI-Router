@@ -163,7 +163,11 @@ func TestDiagnoseConnection(t *testing.T) {
 			if tc.noProcesses {
 				st.plat.Runtime.AppProcesses = nil
 			}
-			if got := ex.diagnoseConnection(context.Background(), st, port); got != tc.want {
+			got, err := ex.diagnoseConnection(context.Background(), st, port)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
 				t.Fatalf("diagnosis = %v, want %v", got, tc.want)
 			}
 			if (tc.want == diagnosisAuthRequired || tc.noFields) && calls != 0 {
@@ -333,7 +337,7 @@ func TestWaitReadyAuthConfirmations(t *testing.T) {
 		defer srv.Close()
 		ex, st, _, _ := newDiagnosisExecutor(t, srv.URL, diagnosisServerPort(t, srv))
 		st.plat.Runtime.Ready.TimeoutS = 10
-		if err := ex.waitReady(context.Background(), st.plat.Runtime.Ready, st.port, st.plat.Runtime.AuthStatuses); !errors.Is(err, errAuthRequired) {
+		if err := ex.waitReady(context.Background(), st.plat.Runtime.Ready, st.port, st.plat.Runtime.AuthStatuses, candidateCredential{port: st.port}); !errors.Is(err, errAuthRequired) {
 			t.Fatalf("waitReady error = %v, want auth required", err)
 		}
 		if calls.Load() != int32(len(responses)) {
@@ -344,7 +348,7 @@ func TestWaitReadyAuthConfirmations(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
 		defer srv.Close()
 		ex, st, _, _ := newDiagnosisExecutor(t, srv.URL, diagnosisServerPort(t, srv))
-		err := ex.waitReady(context.Background(), st.plat.Runtime.Ready, st.port, nil)
+		err := ex.waitReady(context.Background(), st.plat.Runtime.Ready, st.port, nil, candidateCredential{port: st.port})
 		if err == nil || err.Error() != "not ready after 1s" {
 			t.Fatalf("waitReady error = %v, want original timeout wording", err)
 		}
@@ -358,7 +362,7 @@ func TestWaitReadyAuthConfirmations(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		err := ex.waitReady(ctx, st.plat.Runtime.Ready, port, st.plat.Runtime.AuthStatuses)
+		err := ex.waitReady(ctx, st.plat.Runtime.Ready, port, st.plat.Runtime.AuthStatuses, candidateCredential{port: port})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("waitReady error = %v, want cancellation", err)
 		}
@@ -395,11 +399,18 @@ func TestProbeStatusPreservesIdentity(t *testing.T) {
 			ex, st, _, _ := newDiagnosisExecutor(t, srv.URL, diagnosisServerPort(t, srv))
 			p := st.plat.Runtime.Ready
 			p.JSONMatch = &ProbeJSONMatch{Field: "role", Value: "router"}
-			ok, status := ex.probeStatus(context.Background(), p, st.port)
+			ok, status, err := ex.probeStatus(context.Background(), p, st.port, candidateCredential{port: st.port})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if ok != tc.want || status != tc.status || !identityHeader.Load() {
 				t.Fatalf("probe = (%v, %d), identity header = %v; want (%v, %d), header true", ok, status, identityHeader.Load(), tc.want, tc.status)
 			}
-			if got := ex.probe(context.Background(), p, st.port); got != tc.want {
+			got, err := ex.probe(context.Background(), p, st.port, candidateCredential{port: st.port})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
 				t.Fatalf("boolean probe = %v, want %v", got, tc.want)
 			}
 		})
@@ -424,7 +435,10 @@ func TestProbeStatusWithoutHTTPResponse(t *testing.T) {
 		{"unresolved placeholder", &Probe{HTTP: "http://127.0.0.1:{missing}/"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, status := ex.probeStatus(context.Background(), tc.probe, port)
+			ok, status, err := ex.probeStatus(context.Background(), tc.probe, port, candidateCredential{port: port})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if ok != tc.want || status != 0 {
 				t.Fatalf("probe = (%v, %d), want (%v, 0)", ok, status, tc.want)
 			}

@@ -1,6 +1,8 @@
 {
     "$comment": "Intentionally unintegrated JSON-RPC methods for desktop ↔ services contract checks. Each ignoredMethods entry needs a current technical reason. Edit by hand; run npm run service-contracts:write to refresh docs/services-api.md after services/ changes.",
     "ignoredMethods": {
+        "engine:set-credential": "Local credential API implemented; desktop consumer follows in LM Task 8. No peer route.",
+        "engine:credential-state": "Local credential API implemented; desktop consumer follows in LM Task 8. No peer route.",
         "build:apply-impact": "Broker-local read-only impact seam for nvpair-service's build-apply preview owner, never a renderer/peer request. Registered unavailable until Task 2 supplies authoritative observations.",
         "build:apply-prepare": "Broker-local prepare seam for nvpair-service's one-operation build-apply owner, never a renderer/peer request. Registered unavailable; Task 3 owns authoritative settings exclusion and pause reservation lifetime.",
         "build:apply-finish": "Broker-local finish seam for nvpair-service's build-apply verification owner, never a renderer/peer request. Registered unavailable until Task 3 supplies guarded finish while paused.",

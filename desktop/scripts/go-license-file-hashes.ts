@@ -31,12 +31,16 @@ export const goLicenseFileHashes: Readonly<Record<string, string>> = {
         'b2ae011bca455cb2852107cbda5715272390ee7d4ad4afd1cff35b79fb89c0f6',
     'github.com/clipperhouse/uax29/v2@v2.5.0':
         '9f8e640fa57607fad6cbace258acb6200ccff986ffc3b02ea7855b2a2245a331',
+    'github.com/danieljoos/wincred@v1.2.3':
+        '1702a813fa31858c0d6c7788216fa3dd202472265716998024654c252fc7bb41',
     'github.com/ebitengine/purego@v0.10.2':
         '6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a',
     'github.com/erikgeiser/coninput@v0.0.0-20211004153227-1c3628e74d0f':
         '7d2822ece53bc5c83ee27d755c20bb5f7aabdaa7a2041327970867a14604d28a',
     'github.com/go-ole/go-ole@v1.2.6':
         '81c2cdb956838661c69c9196670e6b8d410eb90dccec1ab3107a32eb77d8bc57',
+    'github.com/godbus/dbus/v5@v5.1.0':
+        'e12c81531f3c1821fc36e5f79dbae484c398355de2b4f063cb33e11362ac6913',
     'github.com/grandcat/zeroconf@v1.0.0':
         '7c98ae52958423910e953549de4d1b31190357e514b50490c33225d192d28772',
     'github.com/hashicorp/yamux@v0.1.2':

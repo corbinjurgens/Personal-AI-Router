@@ -180,7 +180,11 @@ func TestStrataReadinessIdentity(t *testing.T) {
 			if !ok {
 				t.Fatal("missing host platform")
 			}
-			if got := ex.probe(context.Background(), p.Runtime.Ready, port); got != tc.want {
+			got, err := ex.probe(context.Background(), p.Runtime.Ready, port, candidateCredential{port: port})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
 				t.Fatalf("readiness = %v, want %v", got, tc.want)
 			}
 		})

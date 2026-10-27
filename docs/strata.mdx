@@ -110,7 +110,7 @@ The key stays on the serving host:
 - engine-manager gives it to the Strata server only as `STRATA_API_KEY` in the
   server's environment; it is not in the launch snapshot, readback or logs;
 - engine-manager's own requests (model list, load, unload) carry it, never
-  follow a redirect with it, and redact it from error bodies;
+  follow a redirect with it, and replace failure bodies with fixed diagnostics;
 - the broker reads it from engine-manager over a private method that clients
   cannot call, uses it for the advertisement health probe, and hands it to its
   own proxy over the private stdio channel;
