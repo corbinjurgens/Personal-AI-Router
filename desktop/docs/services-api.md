@@ -416,6 +416,9 @@
 | `admission/strict-readiness` | request (we call) | ➖ ignored |
 | `admission/unload` | request (we call) | ⚠️ not called |
 | `admission/wake` | request (we call) | ⚠️ not called |
+| `build:apply-finish` | request (we call) | ➖ ignored |
+| `build:apply-impact` | request (we call) | ➖ ignored |
+| `build:apply-prepare` | request (we call) | ➖ ignored |
 | `connection/cluster-auto-sync` | request (we call) | ➖ ignored |
 | `connection/cluster-identity` | request (we call) | ✅ yes |
 | `discovery:get-node-info` | request (we call) | ✅ yes |

@@ -195,6 +195,14 @@ func (b *Broker) handleMessage(msg *Message) {
 		return
 	}
 
+	if isBuildApplyMethod(method) {
+		if componentAddressed {
+			_ = b.codec.RespondError(msg.ID, -32601, "build apply methods are local-only")
+			return
+		}
+		b.handleBuildApply(msg)
+		return
+	}
 	if componentAddressed {
 		if b.handleEngineProxyBrokerRequest(profile, method, msg) {
 			return

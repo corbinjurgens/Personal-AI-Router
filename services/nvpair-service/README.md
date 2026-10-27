@@ -5,6 +5,45 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-service
 
+## Local staged-build contract
+
+`service/build-apply-preview`, `service/build-apply-start`,
+`service/build-apply-status` and `service/build-apply-gui-ready` are local
+service methods. They currently validate bounded, strict requests and return
+`{available:false,value:null,refusal:{code:"unavailable",detail:...}}`.
+Preview/start perform no filesystem, lifecycle, broker or process-launch work.
+The registered `service/build-apply-changed` operation notification uses the
+existing service connection and native desktop notification dispatcher.
+
+Native main owns the candidate picker, GUI PID/executable and embedded GUI
+build stamp. Start accepts only the preview ID, interruption consent and native
+GUI facts. No method accepts a remote node/caller, command, renderer-selected
+endpoint or destination. GUI-ready acknowledges a new GUI; it is unavailable
+until the transaction owner independently checks the expected process and path.
+Early `--pair-build-apply=OPERATION_ID` currently exits unavailable before
+connector auto-start. Shortcut command registration similarly exits unavailable
+before ordinary single-instance, connector or updater work.
+
+The shared contract separates current GUI, bundled service, requested GUI and
+service, attached running service, measured SHA-256, source revision and dirty
+state. Unknown observations use `{known:false,value:null}`. Saved, enforced and
+physically stopped results are independent. The accepted restore policy finishes
+while paused, preserves intent/locks and newer pauses, requires explicit local
+Resume, and performs no automatic rollback. This registration does not implement
+the preview validator or transaction.
+
+Build identity inspection uses standard `debug/buildinfo.Read` on an already
+opened bounded regular-file `io.SectionReader`, the root-approved equivalent
+of the planned `ReadFile`. This avoids reopening a substituted path. Descriptor
+and path identity/size/modification checks bracket parsing; a read budget and
+object-header allocation bounds limit malformed metadata. Supported inspection
+formats are current 64-bit little-endian PE, ELF and thin Mach-O. A missing VCS
+revision or modification field stays independently unknown; it never means
+clean. The existing `git:<revision>[+dirty]` ID requires both fields. Artifact
+hashes and the Vite-embedded GUI stamp do not fill missing Go VCS metadata or
+authenticate a publisher. Native linked-worktree/standalone packaging evidence
+is a separate validation gate.
+
 The per-user, long-running owner of `nvpair-ui-broker`. It spawns the broker
 over stdio exactly as a front end used to, restarts it if it dies, and lets any
 number of clients attach to it and detach from it over a local socket or named

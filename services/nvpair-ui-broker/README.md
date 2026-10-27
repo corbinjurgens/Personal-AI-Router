@@ -5,6 +5,22 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+## Local build maintenance contract
+
+`build:apply-impact`, `build:apply-prepare` and `build:apply-finish` are
+broker-local methods admitted before generic namespace forwarding. Their
+non-renderer consumer is the local `nvpair-service` build-apply owner. They
+currently validate strict bounded requests and return an unavailable result,
+with no settings, availability, engine or process effects. They have no peer
+route, remote caller, node selector, arbitrary command or destination field.
+
+`shared/buildapply` defines the maintenance observations and reciprocal
+`maintenance_busy` refusal (`-32015` when returned as a JSON-RPC error).
+This task supplies only that shape/result. Authoritative settings-owner hooks,
+reservation lifetime and both-direction tests belong to Task 3 after the model
+settings owner merges. The local method dispatch is not a maintenance lock and
+does not establish exclusion for internal settings callers.
+
 Model inspection uses `engine:inspect-model` through the existing settings read
 relay. The shared model configuration contract preserves typed `modelLoads`
 beside ordinary settings, separates requested/resolved/readback state, and

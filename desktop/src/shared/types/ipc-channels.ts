@@ -7,6 +7,13 @@ import type { ServiceBridgeInvokeRequest } from './service-bridge'
 import type { UpdateStatus } from '@/shared/types/update'
 import type { DemoState } from '@/shared/types/inference-demo'
 import type {
+    BuildApplyPreview,
+    BuildApplyOperation,
+    BuildApplyResult,
+    BuildApplyStartRequest,
+    BuildApplyStatusRequest
+} from './build-apply'
+import type {
     RoutingHistoryConsumed,
     RoutingHistoryConsumption,
     RoutingHistoryPull,
@@ -72,6 +79,15 @@ export interface ServiceVersions {
 export type BootstrapPayload = { port: number; token: string } | null
 
 export interface IpcChannelMap {
+    'build-apply:preview': { request: void; response: BuildApplyResult<BuildApplyPreview> }
+    'build-apply:start': {
+        request: Omit<BuildApplyStartRequest, 'gui'>
+        response: BuildApplyResult<BuildApplyOperation>
+    }
+    'build-apply:status': {
+        request: BuildApplyStatusRequest
+        response: BuildApplyResult<BuildApplyOperation>
+    }
     'routing-history:pull': { request: RoutingHistoryPull; response: RoutingHistoryTransfer }
     'routing-history:consumed': {
         request: RoutingHistoryConsumed
@@ -156,6 +172,7 @@ export interface IpcChannelMap {
  * relying on a cast in preload.
  */
 export interface IpcPushChannelMap {
+    'build-apply:changed': BuildApplyOperation
     /** Node-local Inference Demo progress. Broadcast to every window. */
     'demo:state': DemoState
 }

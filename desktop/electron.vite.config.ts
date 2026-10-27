@@ -4,6 +4,7 @@
 import { resolve } from 'path'
 import { defineConfig } from 'electron-vite'
 import { srcAlias } from './scripts/vite-alias'
+import { buildIdentity } from './scripts/build-identity'
 import react from '@vitejs/plugin-react'
 // @ts-ignore - Tailwind CSS plugin
 import tailwindcss from '@tailwindcss/vite'
@@ -46,6 +47,7 @@ function copyIconsPlugin() {
 
 export default defineConfig({
     main: {
+        define: { __PAIR_GUI_BUILD_ID__: JSON.stringify(buildIdentity(resolve(__dirname, '..'))) },
         plugins: [copyIconsPlugin()],
         build: {
             externalizeDeps: false,

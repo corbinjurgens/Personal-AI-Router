@@ -27,6 +27,7 @@ import { ensureNvpairOnPath } from '@/electron/nvpair-command'
 import { isAppDataWipeScheduled } from '@/electron/app-data-wipe-orchestrator'
 import { destroyInferenceDemoSync, stopInferenceDemo } from '@/electron/inference-demo'
 import { startEventLoopMonitor } from '@/electron/event-loop-monitor'
+import { ensureWindowsShortcut } from '@/electron/windows-shortcut'
 
 /** How long quitting waits for queued log lines to reach the disk. */
 const LOG_FLUSH_TIMEOUT_MS = 2_000
@@ -122,6 +123,7 @@ if (!gotTheLock || exitRequested) {
         })
 
         registerAllIpc()
+        ensureWindowsShortcut()
         initializeUpdater()
 
         // Bound startup on authoritative broker + proxy readiness before opening
