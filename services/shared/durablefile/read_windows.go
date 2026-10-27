@@ -3,7 +3,7 @@
 
 //go:build windows
 
-package clustertrust
+package durablefile
 
 import (
 	"io"
@@ -12,13 +12,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// openAuthorityFile reads the cluster-manager's atomically replaced files.
-// os.Open shares read/write access only, which conflicts with a replacement's
-// DELETE-access handle in either open order. Sharing delete access lets each
-// reader observe its opened file; the authority brackets still validate fresh
-// opens of the path. This grants no write/delete access to the reader and does
-// not bypass access checks or retry a failed open.
-func openAuthorityFile(path string) (*os.File, error) {
+// Open opens path for reading while sharing read, write and delete access.
+// Sharing delete permits atomic replacement while the reader retains its
+// opened file's bytes. It grants no write/delete access and bypasses no access
+// checks. Callers that require current authority must validate fresh path reads.
+func Open(path string) (*os.File, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
@@ -32,8 +30,10 @@ func openAuthorityFile(path string) (*os.File, error) {
 	return os.NewFile(uintptr(handle), path), nil
 }
 
-func readAuthorityFile(path string) ([]byte, error) {
-	f, err := openAuthorityFile(path)
+// ReadFile reads path through a replacement-compatible handle and closes it
+// before returning. A held handle never follows a replacement to new bytes.
+func ReadFile(path string) ([]byte, error) {
+	f, err := Open(path)
 	if err != nil {
 		return nil, err
 	}

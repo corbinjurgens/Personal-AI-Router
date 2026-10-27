@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"nvpair-shared/durablefile"
 )
 
 // admissionFile stores this node's monotonic cluster-admission counter and its
@@ -29,7 +31,7 @@ func (m *Manager) admissionPath() string {
 }
 
 func (m *Manager) loadAdmission() error {
-	data, err := os.ReadFile(m.admissionPath())
+	data, err := durablefile.ReadFile(m.admissionPath())
 	if os.IsNotExist(err) {
 		return nil
 	}

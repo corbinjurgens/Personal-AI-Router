@@ -41,7 +41,7 @@ func remoteManagementWrite(path string, data []byte) error {
 }
 
 func remoteManagementRead(path string) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := durablefile.Open(path)
 	if err != nil {
 		return nil, err
 	}

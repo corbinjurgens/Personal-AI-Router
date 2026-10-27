@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"nvpair-shared/durablefile"
 )
 
 const pairingReceiptsFile = "pairing-receipts.json"
@@ -54,7 +56,7 @@ func (m *Manager) newPairingReceipt(sess *pairingSession, inv *Invite, success [
 }
 
 func (m *Manager) loadPairingReceipts() error {
-	data, err := os.ReadFile(filepath.Join(m.clusterDir, pairingReceiptsFile))
+	data, err := durablefile.ReadFile(filepath.Join(m.clusterDir, pairingReceiptsFile))
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -370,7 +372,7 @@ func (m *Manager) rollbackPairingPeerLocked(receipt pairingReceipt) error {
 			}
 		}
 	}
-	data, readErr := os.ReadFile(m.trust.pinPath(pi.NodeUUID))
+	data, readErr := durablefile.ReadFile(m.trust.pinPath(pi.NodeUUID))
 	if readErr != nil && !os.IsNotExist(readErr) {
 		rollbackErr = errors.Join(rollbackErr, readErr)
 		if pin, ok := m.trust.Get(pi.NodeUUID); ok && pin.ClusterID == receipt.ClusterID &&

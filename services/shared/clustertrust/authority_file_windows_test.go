@@ -8,6 +8,7 @@ package clustertrust
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,13 +112,61 @@ func TestAuthorityReadClosesBeforeReplacement(t *testing.T) {
 	if err != nil || !bytes.Equal(retained, oldData) {
 		t.Fatalf("read before replacement: original bytes=%v, error=%v", bytes.Equal(retained, oldData), err)
 	}
-	// The read must close its handle before returning. MoveFileEx still needs
-	// readers to finish; do not hide a leaked handle with writer retries.
+	// A compatible leaked handle no longer blocks replacement. An exclusive
+	// open proves ReadFile actually released its handle before returning.
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatalf("encode pin path: %v", err)
+	}
+	exclusive, err := windows.CreateFile(name, windows.GENERIC_READ, 0,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatalf("exclusive open after completed read: %v", err)
+	}
+	if err := windows.CloseHandle(exclusive); err != nil {
+		t.Fatalf("close exclusive reader: %v", err)
+	}
+	// A fresh open after the read observes the new complete file.
 	newData := append(bytes.Clone(oldData), '\n')
 	replaceAuthorityFile(t, path, newData)
 	current, err := readAuthorityFile(path)
 	if err != nil || !bytes.Equal(current, newData) {
 		t.Fatalf("fresh path after replacement: new bytes=%v, error=%v", bytes.Equal(current, newData), err)
+	}
+	f.mesh.Refresh()
+	if got := requireIncarnation(t, f.mesh); got != doc.Grants[0].Incarnation {
+		t.Fatal("metadata replacement changed authority")
+	}
+	if got := f.mesh.RemoteManagement("peer"); !got.Allowed {
+		t.Fatalf("metadata replacement lost grant: state=%q, predicate=%q", got.State, got.Diagnostic.Predicate)
+	}
+}
+
+func TestAuthorityReaderCoexistsWithReplacement(t *testing.T) {
+	f, doc, _ := managementFixture(t)
+	path := filepath.Join(f.dir, "trusted", "peer.json")
+	oldData, err := readAuthorityFile(path)
+	if err != nil {
+		t.Fatalf("read original pin: %v", err)
+	}
+	reader, err := openAuthorityFile(path)
+	if err != nil {
+		t.Fatalf("hold authority reader: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("close held authority reader: %v", err)
+		}
+	})
+	newData := append(bytes.Clone(oldData), '\n')
+	replaceAuthorityFile(t, path, newData)
+	retained, err := io.ReadAll(reader)
+	if err != nil || !bytes.Equal(retained, oldData) {
+		t.Fatalf("held reader: original bytes=%v, error=%v", bytes.Equal(retained, oldData), err)
+	}
+	current, err := readAuthorityFile(path)
+	if err != nil || !bytes.Equal(current, newData) {
+		t.Fatalf("fresh reader: replacement bytes=%v, error=%v", bytes.Equal(current, newData), err)
 	}
 	f.mesh.Refresh()
 	if got := requireIncarnation(t, f.mesh); got != doc.Grants[0].Incarnation {
@@ -136,6 +185,15 @@ func TestAuthorityReplacementDuringReadRefuses(t *testing.T) {
 	got, ok := f.mesh.peerServiceIncarnationDiagnostic("peer", func(path string) ([]byte, error) {
 		data, err := readAuthorityFile(path)
 		if err == nil && path == pinPath && !replaced {
+			held, err := openAuthorityFile(path)
+			if err != nil {
+				t.Fatalf("hold pin reader during authority replacement: %v", err)
+			}
+			defer func() {
+				if err := held.Close(); err != nil {
+					t.Errorf("close held pin reader: %v", err)
+				}
+			}()
 			replaced = true
 			f.pin.AdmissionEpoch++
 			replaceAuthorityFile(t, path, managementEncode(t, f.pin))
@@ -147,6 +205,34 @@ func TestAuthorityReplacementDuringReadRefuses(t *testing.T) {
 	}
 	f.mesh.Refresh()
 	requireNoIncarnation(t, f.mesh, "peer")
+}
+
+func TestAuthorityHeldReaderDoesNotPreserveRevokedGrant(t *testing.T) {
+	f, doc, _ := managementFixture(t)
+	path := filepath.Join(f.dir, RemoteManagementFile)
+	oldData, err := readAuthorityFile(path)
+	if err != nil {
+		t.Fatalf("read original permission: %v", err)
+	}
+	held, err := openAuthorityFile(path)
+	if err != nil {
+		t.Fatalf("hold permission reader: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := held.Close(); err != nil {
+			t.Errorf("close held permission reader: %v", err)
+		}
+	})
+	doc.Revision, doc.Grants[0].DecisionRevision = "2", "2"
+	doc.Grants[0].Allowed = false
+	replaceAuthorityFile(t, path, managementEncode(t, doc))
+	retained, err := io.ReadAll(held)
+	if err != nil || !bytes.Equal(retained, oldData) {
+		t.Fatalf("held permission reader: original bytes=%v, error=%v", bytes.Equal(retained, oldData), err)
+	}
+	if got := f.mesh.RemoteManagement("peer"); got.Allowed || got.State != "denied" || got.Revision != "2" {
+		t.Fatalf("revoked grant: allowed=%v, state=%q, revision=%q", got.Allowed, got.State, got.Revision)
+	}
 }
 
 func denyAuthorityRead(t *testing.T, path string) {
