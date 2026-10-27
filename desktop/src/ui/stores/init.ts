@@ -83,6 +83,7 @@ async function initializeAllStores(): Promise<void> {
     useMetricsStore.getState().initialize()
 
     const engineInitial = fetchEngineInitial()
+    const statusReady = useEngineStatusStore.getState().initialize(engineInitial)
     // Subscribe while the shared snapshot is in flight, including first startup.
     const modelsReady = overviewStores
         ? useEngineModelsStore.getState().initialize(engineInitial)
@@ -91,7 +92,7 @@ async function initializeAllStores(): Promise<void> {
         ? useEngineProgressStore.getState().initialize(engineInitial)
         : Promise.resolve()
     const snapshot = await engineInitial
-    await useEngineStatusStore.getState().initialize(snapshot)
+    await statusReady
     if (overviewStores) {
         await modelsReady
         await progressReady
@@ -157,6 +158,7 @@ async function resyncAllStores(): Promise<void> {
     useMetricsStore.getState().clearAll()
 
     const engineInitial = fetchEngineInitial()
+    const statusReady = useEngineStatusStore.getState().initialize(engineInitial)
     const modelsReady = overviewStores
         ? useEngineModelsStore.getState().initialize(engineInitial)
         : Promise.resolve()
@@ -164,7 +166,7 @@ async function resyncAllStores(): Promise<void> {
         ? useEngineProgressStore.getState().initialize(engineInitial)
         : Promise.resolve()
     const snapshot = await engineInitial
-    useEngineStatusStore.getState().initialize(snapshot)
+    void statusReady
     if (overviewStores) {
         await modelsReady
         await progressReady
