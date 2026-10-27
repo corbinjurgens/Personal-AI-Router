@@ -20,6 +20,14 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+// These policy tests need a provably absent engine, rather than the harness's
+// occupied, unidentified HTTP endpoint. The latter correctly refuses Pause.
+func withStoppedPolicyEngines(t *testing.T, f *serviceFixture) {
+	t.Helper()
+	f.withInertEngineManager()
+	jointIsolateEngines(t, f.configDir, temporaryClusterPort(t))
+}
+
 func TestModelControlsServiceStoredPolicy(t *testing.T) {
 	f := newServiceFixture(t)
 	f.withInertEngineManager()
@@ -344,7 +352,7 @@ func TestServicePolicy(t *testing.T) {
 
 	t.Run("a real proxy activates the persisted revision after set, pause and resume", func(t *testing.T) {
 		f := newProxyServiceFixture(t)
-		f.withInertEngineManager()
+		withStoppedPolicyEngines(t, f)
 		f.start()
 		c := f.readyClient()
 		assertActive := func(step string) servicePolicySnapshot {
@@ -402,7 +410,7 @@ func TestServicePolicy(t *testing.T) {
 
 	t.Run("pause notifies observer and persists before restart and resume", func(t *testing.T) {
 		f := newServiceFixture(t)
-		f.withInertEngineManager()
+		withStoppedPolicyEngines(t, f)
 		f.start()
 		command := f.readyClient()
 		observer := f.readyClient()
@@ -481,7 +489,7 @@ func TestServicePolicy(t *testing.T) {
 func TestServicePolicyModelConfiguration(t *testing.T) {
 	f := newServiceFixture(t)
 	// No manager is intentional: configuration must retain unknown loaded
-	// inventory. Start paused without requesting physical shutdown proof.
+	// inventory. Persisted Pause remains draining without manager stop proof.
 	initial := nodepolicy.Default()
 	initial.Availability = nodepolicy.Paused
 	initial.PausedBy = nodepolicy.PausedLocally
@@ -491,7 +499,7 @@ func TestServicePolicyModelConfiguration(t *testing.T) {
 	jointWriteJSON(t, f.policyPath(), initial)
 	f.start()
 	command := f.readyClient()
-	assertPolicySnapshot(t, fetchServicePolicy(t, command), initial, nodepolicy.Paused)
+	assertPolicySnapshot(t, fetchServicePolicy(t, command), initial, nodepolicy.Draining)
 	observer := f.readyClient()
 	want := servicePolicy(t, command)
 	want.Profiles = append(want.Profiles, fixtureResidentProfile())
