@@ -166,8 +166,13 @@ func TestPolicyRelayJoint(t *testing.T) {
 			f.assertUnchanged(t, before)
 			response := f.originCall(t, "engine:remote-policy-set", params)
 			wantMessage := fmt.Sprintf("remote node policy: HTTP %d: %s", tc.status, tc.text)
+			if tc.status == http.StatusBadRequest {
+				// The policy relay preserves invalid parameters directly, without
+				// the generic remote HTTP error prefix.
+				wantMessage = tc.text
+			}
 			if response.Error == nil || response.Error.Code != tc.code || response.Error.Message != wantMessage || len(response.Result) != 0 {
-				t.Fatalf("origin RPC classification mismatch: want_code=%d error_present=%t result_bytes=%d", tc.code, response.Error != nil, len(response.Result))
+				t.Fatalf("origin RPC classification mismatch: want_code=%d error=%+v result_bytes=%d", tc.code, response.Error, len(response.Result))
 			}
 			f.assertUnchanged(t, before)
 		}) {
@@ -205,6 +210,10 @@ func TestPolicyRelayJoint(t *testing.T) {
 	// Pause locally after the ordinary policy writes: a paired node cannot
 	// resume it, and the node's own resume still can.
 	t.Run("local pause vetoes a relayed resume until the node resumes itself", func(t *testing.T) {
+		// The fixture owns this unidentified listener. Close it before asking
+		// the manager to prove the absent engines stopped; an occupied unknown
+		// endpoint correctly makes physical Pause incomplete.
+		f.inert.Close()
 		local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "paused"}, 15*time.Second)
 		if local.Error != nil {
 			t.Fatalf("local pause before relayed resume: %+v", local.Error)
