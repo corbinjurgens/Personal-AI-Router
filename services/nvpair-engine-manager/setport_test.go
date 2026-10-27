@@ -349,6 +349,19 @@ func adoptedCommandEngineFixture(t *testing.T, engine string, port int) (*Execut
 		func(port int) bool { return fileExists(filepath.Join(dir, "started-"+strconv.Itoa(port))) }
 }
 
+func ownedCommandEngineFixture(t *testing.T, engine string, port int) (*Executor, func() bool, func(int) bool) {
+	t.Helper()
+	ex, stopped, started := adoptedCommandEngineFixture(t, engine, port)
+	state, err := ex.state(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	state.adopted = false
+	state.mu.Unlock()
+	return ex, stopped, started
+}
+
 func adoptedProcessEngineFixture(t *testing.T, engine string, port int) *Executor {
 	t.Helper()
 	return adoptedEngineFixture(t, engine, port, Runtime{
@@ -461,10 +474,28 @@ func TestSetPortRejectsOutOfRange(t *testing.T) {
 	}
 }
 
-func TestSetPortMovesAdoptedCommandEngine(t *testing.T) {
+func TestSetPortRefusesAdoptedCommandEngine(t *testing.T) {
 	ports := privateTestPorts(t, 2)
 	oldPort, newPort := ports[0], ports[1]
 	ex, stopped, started := adoptedCommandEngineFixture(t, "lmstudio", oldPort)
+	if _, err := ex.SetPort(context.Background(), "lmstudio", newPort); err == nil || !strings.Contains(err.Error(), "external management") {
+		t.Fatalf("external command move = %v, want ownership refusal", err)
+	}
+	if stopped() || started(oldPort) || started(newPort) {
+		t.Fatal("refused external move invoked a stop or start command")
+	}
+	if status, err := ex.Status("lmstudio"); err != nil || status.Port != oldPort || !status.Running || !status.Healthy {
+		t.Fatalf("refused external move changed state: %+v, %v", status, err)
+	}
+	if _, err := os.Stat(filepath.Join(ex.overrideDir, "lmstudio.json")); !os.IsNotExist(err) {
+		t.Fatalf("refused external move persisted an override: %v", err)
+	}
+}
+
+func TestSetPortMovesOwnedCommandEngine(t *testing.T) {
+	ports := privateTestPorts(t, 2)
+	oldPort, newPort := ports[0], ports[1]
+	ex, stopped, started := ownedCommandEngineFixture(t, "lmstudio", oldPort)
 	status, err := ex.SetPort(context.Background(), "lmstudio", newPort)
 	if err != nil {
 		t.Fatal(err)
@@ -508,7 +539,7 @@ func TestSetPortRejectsCommandEngineWithoutStopCommand(t *testing.T) {
 func TestSetPortRestartsOldPortWhenPersistenceFails(t *testing.T) {
 	ports := privateTestPorts(t, 2)
 	oldPort, newPort := ports[0], ports[1]
-	ex, stopped, started := adoptedCommandEngineFixture(t, "lmstudio", oldPort)
+	ex, stopped, started := ownedCommandEngineFixture(t, "lmstudio", oldPort)
 	blocked := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blocked, []byte("blocked"), 0o644); err != nil {
 		t.Fatal(err)

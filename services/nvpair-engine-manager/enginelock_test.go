@@ -822,9 +822,28 @@ func TestLockStopFailureAfterReplacementRetainsFenceAndRetries(t *testing.T) {
 		requireOffOrigin(t, ex.desired, "fake", "local")
 	}
 	server.Close()
-	if err := ex.setEngineLocked("fake", true); err != nil {
-		t.Fatalf("retry after listener closes: %v", err)
+	if err := ex.setEngineLocked("fake", true); err == nil || rpcCode(err) != -32000 {
+		t.Fatalf("closed listener without process-exit proof = %v, want refusal", err)
 	}
+	status, err := ex.Status("fake")
+	if err != nil || !status.Running || status.Healthy || status.Locked == nil || !*status.Locked {
+		t.Fatalf("closed-listener fence = %+v, %v", status, err)
+	}
+	requireOffOrigin(t, ex.desired, "fake", "local")
+	st.mu.Lock()
+	st.reclaimPID = os.Getpid()
+	st.mu.Unlock()
+	ex.reconcilePresenceStateWithProcessProof(t.Context(), "fake", st, true, st.port, true,
+		func(int) (int, string, bool) { return os.Getpid(), "fixture-owner", true },
+		func(pid int) bool { return pid == os.Getpid() })
+	if err := ex.setEngineLocked("fake", true); err != nil {
+		t.Fatalf("retry after positive external process exit: %v", err)
+	}
+	status, err = ex.Status("fake")
+	if err != nil || status.Running || status.Healthy || status.Locked == nil || !*status.Locked {
+		t.Fatalf("completed lock after exit = %+v, %v", status, err)
+	}
+	requireOffOrigin(t, ex.desired, "fake", "local")
 }
 
 func TestLockPreservesCheckpointAndUnknownEngines(t *testing.T) {
