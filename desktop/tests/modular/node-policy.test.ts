@@ -1428,6 +1428,20 @@ describe('routing settings editor', () => {
 
     beforeEach(async () => {
         vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+        // Each case starts a fresh app session; drafts intentionally survive component unmounts.
+        useNodeConfigurationStore.setState({ policyDrafts: new Map() })
+        Object.defineProperty(HTMLDialogElement.prototype, 'show', {
+            configurable: true,
+            value: function (this: HTMLDialogElement) {
+                this.open = true
+            }
+        })
+        Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+            configurable: true,
+            value: function (this: HTMLDialogElement) {
+                this.open = false
+            }
+        })
         // jsdom has no CSS.supports, which the auto-sizing text area asks.
         vi.stubGlobal('CSS', { supports: () => true })
         Object.defineProperty(window, 'pairApi', {
@@ -1494,6 +1508,10 @@ describe('routing settings editor', () => {
     const lastBase = (): string | undefined => set.mock.lastCall?.[0].expectedPersistedRevision
 
     describe('typed inference settings draft', () => {
+        async function openModelSettings() {
+            await open()
+            await click('Configure model')
+        }
         const profiles = [
             { name: 'm', engine: 'llamacpp', model: 'm', requestOptions: { temperature: 1 } }
         ]
@@ -1521,7 +1539,7 @@ describe('routing settings editor', () => {
         it('edits the shared draft and saves exactly this device against its loaded revision', async () => {
             get.mockResolvedValue(savedDocument('5', { policy: initial }))
             set.mockResolvedValue(snapshot('6', 'pending'))
-            await open()
+            await openModelSettings()
             await temperature('0.4')
             const draft = editor().value
             expect(JSON.parse(draft)).toEqual({
@@ -1540,7 +1558,7 @@ describe('routing settings editor', () => {
 
         it('blocks Save for invalid typed input without mutating the shared JSON draft', async () => {
             get.mockResolvedValue(savedDocument('5', { policy: initial }))
-            await open()
+            await openModelSettings()
             await temperature('-1')
             expect(editor().value).toBe(initial)
             expect(button('Save').disabled).toBe(true)
@@ -1556,7 +1574,7 @@ describe('routing settings editor', () => {
             })
             get.mockResolvedValue(savedDocument('5', { policy: empty }))
             set.mockResolvedValue(snapshot('6', 'pending'))
-            await open()
+            await openModelSettings()
             const chooseMode = async (value: string) => {
                 const label = Array.from(container.querySelectorAll('label')).find(
                     item => item.textContent === 'Request overrides'
@@ -1588,7 +1606,7 @@ describe('routing settings editor', () => {
 
         it('keeps a typed dirty draft through pushes and disconnection without lifecycle writes', async () => {
             get.mockResolvedValue(savedDocument('5', { policy: initial }))
-            await open()
+            await openModelSettings()
             await temperature('0.4')
             const draft = editor().value
             await push({ nodeId: SELF, ...snapshot('6', 'pending') })
@@ -1612,7 +1630,7 @@ describe('routing settings editor', () => {
                 savedDocument('6', { policy: initial })
             )
             set.mockRejectedValue(new Error('policy conflict'))
-            await open()
+            await openModelSettings()
             await temperature('0.4')
             const draft = editor().value
             await click('Save')

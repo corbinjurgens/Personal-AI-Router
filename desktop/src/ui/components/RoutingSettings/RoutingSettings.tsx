@@ -20,7 +20,6 @@ import type {
     RequestedAvailability
 } from '@/shared/types/node-policy'
 import getErrorString from '@/shared/utils/get-error-string'
-import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
@@ -36,6 +35,7 @@ import { useNodesStore } from '@/ui/stores/nodes.store'
 import {
     LOCAL_VETO_CODE,
     REMOTE_MANAGEMENT_DENIED_CODE,
+    REMOTE_SETTING_LOCKED_CODE,
     localVetoMessage
 } from '@/shared/constants/service-errors'
 import { serviceErrorCode } from '@/ui/api/service-transport'
@@ -118,7 +118,6 @@ export default function RoutingSettings() {
         targetId === null ? undefined : state.policyDrafts.get(targetId)
     )
     const otherDraft = policyDraft !== undefined && policyDraft.owner !== 'Routing'
-    const policyTextValid = useMemo(() => parseModelSettings(text).ok, [text])
     const setText = useCallback(
         (value: string) => {
             if (targetId === null) return
@@ -196,13 +195,17 @@ export default function RoutingSettings() {
                     }
                     return
                 }
-                store.observePolicyDraft(targetId, {
-                    ...document,
-                    availability:
-                        availabilityRead !== availabilityGeneration.current
-                            ? (latestAvailability.current ?? document.availability)
-                            : document.availability
-                })
+                store.observePolicyDraft(
+                    targetId,
+                    {
+                        ...document,
+                        availability:
+                            availabilityRead !== availabilityGeneration.current
+                                ? (latestAvailability.current ?? document.availability)
+                                : document.availability
+                    },
+                    'read'
+                )
                 adoptRoles(document, availabilityRead)
                 setSettingsSnapshot(current =>
                     current && isOlder(document.revision, current.revision) ? current : document
@@ -281,12 +284,7 @@ export default function RoutingSettings() {
                 latestAvailability.current = change.availability
                 setAvailability(change.availability)
                 const store = useNodeConfigurationStore.getState()
-                const saved = store.policyDrafts.get(targetId)?.saved
-                if (saved)
-                    store.observePolicyDraft(targetId, {
-                        ...saved,
-                        availability: change.availability
-                    })
+                store.observePolicyAvailability(targetId, change.availability)
                 const baseline = store.editors.get(targetId)?.baseline
                 if (baseline)
                     store.adopt(targetId, {
@@ -425,7 +423,12 @@ export default function RoutingSettings() {
         } else if (result?.phase === 'conflict' && result.saved) {
             setConflict({ latest: result.saved, message: result.message ?? 'Policy conflict' })
         } else {
-            setSaveError(result?.message ?? 'Could not save this policy.')
+            if (result?.failure?.code === REMOTE_SETTING_LOCKED_CODE) {
+                const detail = result.failure.detail.slice(0, 1024).replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+                setSaveError(
+                    `Inference settings are locked on ${nodeName}. Your policy draft is kept. Change this profile's inference settings on that device. Service message: ${detail}`
+                )
+            } else setSaveError(result?.message ?? 'Could not save this policy.')
         }
         setSaving(false)
     }, [
@@ -439,7 +442,8 @@ export default function RoutingSettings() {
         switching,
         conflict,
         settingsValid,
-        otherDraft
+        otherDraft,
+        nodeName
     ])
 
     const nodeItems: DropdownEntry[] = useMemo(
@@ -458,7 +462,7 @@ export default function RoutingSettings() {
     const canSave =
         !permissionReadOnly &&
         !otherDraft &&
-        policyTextValid &&
+        policyDraft?.current === true &&
         policyDraft?.phase !== 'conflict' &&
         policyDraft?.phase !== 'unknown' &&
         policyDraft?.phase !== 'saving' &&

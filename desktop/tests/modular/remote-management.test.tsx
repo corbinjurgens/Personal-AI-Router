@@ -776,6 +776,10 @@ describe('permission controls', () => {
         if (!item) throw new Error('Missing Peer node menu item')
         await act(async () => item.click())
     }
+    async function configurePeer() {
+        await choosePeer()
+        await act(async () => button('Configure model').click())
+    }
     async function renderSettings() {
         await act(async () =>
             root.render(
@@ -800,6 +804,12 @@ describe('permission controls', () => {
     beforeEach(() => {
         vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
         vi.stubGlobal('CSS', { supports: () => true })
+        Object.defineProperty(HTMLDialogElement.prototype, 'show', {
+            configurable: true,
+            value: function (this: HTMLDialogElement) {
+                this.open = true
+            }
+        })
         Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
             configurable: true,
             value: function (this: HTMLDialogElement) {
@@ -850,7 +860,12 @@ describe('permission controls', () => {
         useClusterInvitationsStore.getState().cleanup()
         useDiscoveredNodesStore.setState({ nodes: [peer] })
         useNodesStore.setState({ nodes: new Map([['peer-1', peerNode]]) })
-        useNodeConfigurationStore.setState({ editors: new Map(), management: new Map() })
+        // Each case starts a fresh app session; drafts intentionally survive component unmounts.
+        useNodeConfigurationStore.setState({
+            editors: new Map(),
+            management: new Map(),
+            policyDrafts: new Map()
+        })
         useEngineSettingsStore.setState({ entries: {} })
         useEngineStatusStore.setState({ statusByNode: new Map() })
         container = document.createElement('div')
@@ -1344,7 +1359,7 @@ describe('permission controls', () => {
     it('saves typed remote inference settings to exactly the selected peer with its loaded CAS revision', async () => {
         getPolicy.mockResolvedValue(inferencePolicy())
         await act(async () => root.render(<RoutingSettings />))
-        await choosePeer()
+        await configurePeer()
         expect(document.body.textContent).toContain('Editing settings on Peer')
         await changeText(temperatureInput(), '0.4')
         const draft = document.querySelector<HTMLTextAreaElement>(
@@ -1366,7 +1381,7 @@ describe('permission controls', () => {
     it('uses the loaded remote lock even when Advanced policy JSON clears the flag', async () => {
         getPolicy.mockResolvedValue(inferencePolicy(true))
         await act(async () => root.render(<RoutingSettings />))
-        await choosePeer()
+        await configurePeer()
         const tampered = inferencePolicy(false, 2).policy
         await changeText(
             document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Node policy JSON"]'),
@@ -1397,7 +1412,7 @@ describe('permission controls', () => {
         }
         getPolicy.mockResolvedValue(inferencePolicy())
         await act(async () => root.render(<RoutingSettings />))
-        await choosePeer()
+        await configurePeer()
         await changeText(temperatureInput(), '0.4')
         const draft = document.querySelector<HTMLTextAreaElement>(
             'textarea[aria-label="Node policy JSON"]'
@@ -1418,7 +1433,7 @@ describe('permission controls', () => {
     it('disables inference edits after management permission is revoked without losing the typed draft', async () => {
         getPolicy.mockResolvedValue(inferencePolicy())
         await act(async () => root.render(<RoutingSettings />))
-        await choosePeer()
+        await configurePeer()
         await changeText(temperatureInput(), '0.4')
         const draft = document.querySelector<HTMLTextAreaElement>(
             'textarea[aria-label="Node policy JSON"]'
@@ -1446,7 +1461,7 @@ describe('permission controls', () => {
             )
         )
         await act(async () => root.render(<RoutingSettings />))
-        await choosePeer()
+        await configurePeer()
         await changeText(temperatureInput(), '0.4')
         const draft = document.querySelector<HTMLTextAreaElement>(
             'textarea[aria-label="Node policy JSON"]'
@@ -1474,14 +1489,14 @@ describe('permission controls', () => {
             policy: draft,
             expectedPersistedRevision: '5'
         })
-        expect(button('Reload').disabled).toBe(false)
+        expect(button('Discard draft and reload').disabled).toBe(false)
     })
 
     it('does not infer a lock refusal from text without a numeric service code', async () => {
         getPolicy.mockResolvedValue(inferencePolicy())
         setPolicy.mockRejectedValueOnce(new Error('-32014: locked profile'))
         await act(async () => root.render(<RoutingSettings />))
-        await choosePeer()
+        await configurePeer()
         await changeText(temperatureInput(), '0.4')
         const reads = getPolicy.mock.calls.length
         getPolicy.mockRejectedValue(new Error('disconnected'))

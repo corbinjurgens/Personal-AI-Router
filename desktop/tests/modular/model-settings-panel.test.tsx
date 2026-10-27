@@ -432,6 +432,29 @@ describe('composed model settings', () => {
         expect(setPolicy).not.toHaveBeenCalled()
     })
 
+    it('retains a Routing draft and its CAS base when its view is reopened in the same session', async () => {
+        await render(<RoutingSettings />)
+        const pending = '{"profiles":[],"unsent":"keep across navigation"}'
+        await editJson(pending)
+        await render(null)
+        await render(<RoutingSettings />)
+
+        expect(draft()).toMatchObject({
+            owner: 'Routing',
+            text: pending,
+            baseline: { revision: '1' },
+            current: true
+        })
+        expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe(pending)
+        expect(setPolicy).not.toHaveBeenCalled()
+        await act(async () => button('Save', container).click())
+        expect(setPolicy).toHaveBeenCalledExactlyOnceWith({
+            nodeId: undefined,
+            policy: pending,
+            expectedPersistedRevision: '1'
+        })
+    })
+
     it('subscribes before Routing reads and does not rewind a newer policy push', async () => {
         let finish: ((snapshot: NodePolicyDocument) => void) | undefined
         getPolicy.mockImplementationOnce(() => {

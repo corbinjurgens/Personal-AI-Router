@@ -230,7 +230,12 @@ beforeEach(() => {
     Object.defineProperty(window, 'pairApi', { configurable: true, value: api })
     useConnectionStore.setState({ connected: true, selfId: 'self' })
     useNodesStore.setState({ nodes: new Map([['peer', peer]]) })
-    useNodeConfigurationStore.setState({ editors: new Map(), management: new Map() })
+    // Each case starts a fresh app session; drafts intentionally survive component unmounts.
+    useNodeConfigurationStore.setState({
+        editors: new Map(),
+        management: new Map(),
+        policyDrafts: new Map()
+    })
     useEngineModelsStore.setState({ models: new Map() })
     useEngineStatusStore.setState({
         descriptors: new Map([
