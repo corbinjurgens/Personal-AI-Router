@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
     Button,
     FormField,
@@ -12,12 +12,16 @@ import {
     TextInput
 } from '@nvidia/foundations-react-core'
 import type { NodeModelReference } from '@/shared/types/node-policy'
+import { EngineManagerNames } from '@/shared/constants/engines'
+import ModelLoadSettings from './ModelLoadSettings'
+import { modelSettingsKey, useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
 import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
 import ModelSettingsEditor from '@/ui/components/RoutingSettings/ModelSettingsEditor'
 import ModelProfileControls from './ModelProfileControls'
 import ModelSettingsCopy from './ModelSettingsCopy'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import {
     nodePaused,
     NODE_PAUSED_MESSAGE,
@@ -72,6 +76,7 @@ export default function ModelSettingsPanel({
     }
     const [pickedIdentity, setPickedIdentity] = useState<NodeModelReference | null>(null)
     const [valid, setValid] = useState(true)
+    const [showLoad, setShowLoad] = useState(false)
     const [copyTarget, setCopyTarget] = useState<{
         targetId: string
         nodeId?: string
@@ -79,6 +84,7 @@ export default function ModelSettingsPanel({
         identity: NodeModelReference
     } | null>(null)
     const connected = useConnectionStore(state => state.connected)
+    const permissionContext = useClusterInvitationsStore(state => state.remoteManagementContext)
     const entry = useNodeConfigurationStore(state => state.policyDrafts.get(targetId))
     const management = useNodeConfigurationStore(state => state.management.get(targetId))
     useEffect(() => {
@@ -103,6 +109,28 @@ export default function ModelSettingsPanel({
     const concurrent = !routing && entry !== undefined && entry.owner !== 'Model Manager'
     const paused = nodeId !== undefined && nodePaused(savedText ?? '', entry?.saved?.availability)
     const permission = nodeId !== undefined && management?.state !== 'allowed'
+    const settingsEngine = Object.values(EngineManagerNames).find(
+        engine => engine === identity.engine
+    )
+    const loadDraft = useEngineSettingsStore(state =>
+        settingsEngine
+            ? state.modelDrafts[
+                  modelSettingsKey({ nodeId: targetId, engine: settingsEngine }, identity.model)
+              ]
+            : undefined
+    )
+    const loadDirty = !!loadDraft?.change?.load || !!loadDraft?.change?.policy
+    const loadAuthority = JSON.stringify([
+        targetId,
+        identity,
+        connected,
+        entry?.current,
+        entry?.saved?.revision,
+        management?.state,
+        management?.revision,
+        permissionContext,
+        paused
+    ])
     const disabled =
         routing?.disabled ??
         (!connected ||
@@ -119,6 +147,13 @@ export default function ModelSettingsPanel({
         else useNodeConfigurationStore.getState().editPolicyDraft(targetId, 'Model Manager', value)
     }
     const reload = () => {
+        if (settingsEngine) {
+            const store = useEngineSettingsStore.getState()
+            store.discardModel(
+                modelSettingsKey({ nodeId: targetId, engine: settingsEngine }, identity.model)
+            )
+            if (showLoad) void store.reload({ nodeId: targetId, engine: settingsEngine })
+        }
         if (routing) routing.onReload()
         else {
             const store = useNodeConfigurationStore.getState()
@@ -126,7 +161,14 @@ export default function ModelSettingsPanel({
                 void store.readPolicyDraft(targetId, 'Model Manager', nodeId)
         }
     }
-    const onValidityChange = routing?.onValidityChange ?? setValid
+    const routingValidityChange = routing?.onValidityChange
+    const onValidityChange = useCallback(
+        (value: boolean) => {
+            setValid(value)
+            routingValidityChange?.(value)
+        },
+        [routingValidityChange]
+    )
     const message = routing?.message ?? entry?.message
     const selected =
         profiles.ok &&
@@ -167,7 +209,11 @@ export default function ModelSettingsPanel({
                         Discard draft and reload
                     </Button>
                     <Button
-                        disabled={!profiles.ok || (routing ? !routing.canSave : disabled || !valid)}
+                        disabled={
+                            loadDirty ||
+                            !profiles.ok ||
+                            (routing ? !routing.canSave : disabled || !valid)
+                        }
                         onClick={() =>
                             routing
                                 ? routing.onSave()
@@ -296,7 +342,35 @@ export default function ModelSettingsPanel({
                     onTextChange={changeText}
                     onValidityChange={onValidityChange}
                 />
-                {selected &&
+                {settingsEngine && identity.model && (
+                    <>
+                        <Button kind="secondary" onClick={() => setShowLoad(value => !value)}>
+                            {showLoad
+                                ? 'Hide load and routing settings'
+                                : 'Configure load and routing settings'}
+                        </Button>
+                        {showLoad && (
+                            <ModelLoadSettings
+                                key={JSON.stringify([targetId, identity])}
+                                target={{ nodeId: targetId, engine: settingsEngine }}
+                                modelId={identity.model}
+                                policy={text}
+                                savedPolicy={savedText ?? ''}
+                                policyRevision={entry?.saved?.revision ?? ''}
+                                authority={loadAuthority}
+                                disabled={disabled || !valid}
+                                evidence={entry?.saved?.modelConfiguration}
+                            />
+                        )}
+                        {loadDirty && (
+                            <Text kind="body/regular/sm">
+                                Load/routing draft kept. Use Preview model changes and Apply
+                                reviewed model changes for one combined operation.
+                            </Text>
+                        )}
+                    </>
+                )}
+                {(selected || (settingsEngine && identity.model)) &&
                     (renderCopy ? (
                         renderCopy({ identity, policy: text, targetId, nodeId })
                     ) : (

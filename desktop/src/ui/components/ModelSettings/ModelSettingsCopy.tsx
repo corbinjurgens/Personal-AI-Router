@@ -4,7 +4,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Checkbox, FormField, Stack, Text, TextInput } from '@nvidia/foundations-react-core'
 import type { NodeModelReference, NodePolicyDocument } from '@/shared/types/node-policy'
-import { copyModelSettings, defaultModelCopyFields } from '@/shared/utils/node-policy-model-copy'
+import {
+    copyModelSettings,
+    defaultModelCopyFields,
+    defaultPortableLoadFields,
+    modelPolicyPatch,
+    modelRoutingState,
+    portableLoadFields,
+    portableLoadPatch
+} from '@/shared/utils/node-policy-model-copy'
+import type { ModelChange, RequestedLoad } from '@/shared/types/model-config'
+import { EngineManagerNames } from '@/shared/constants/engines'
+import {
+    engineSettingsKey,
+    modelSettingsKey,
+    useEngineSettingsStore,
+    watchEngineSettings
+} from '@/ui/stores/engine-settings.store'
+import ModelSettingsPreview from './ModelSettingsPreview'
 import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import { MODEL_OPTION_FIELDS, parseModelSettings } from '@/shared/utils/node-policy-model-settings'
 import {
@@ -20,6 +37,8 @@ import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { ModelCopyModal } from '@/ui/components/ModelManager/ModelCopyModal'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
+import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { nodePaused, useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 
 interface Target {
@@ -32,6 +51,8 @@ interface Comparison {
     target: Target
     baseline: NodePolicyDocument
     policy: string
+    modelKey?: string
+    authority?: string
 }
 interface Outcome {
     message: string
@@ -68,18 +89,78 @@ export default function ModelSettingsCopy({
 }) {
     const selfId = useConnectionStore(state => state.selfId)
     const connected = useConnectionStore(state => state.connected)
+    const permissionContext = useClusterInvitationsStore(state => state.remoteManagementContext)
     const nodes = useNodesStore(state => state.nodes)
     const defaults = useMemo(
         () => defaultModelCopyFields(policy, identity, identity),
         [policy, identity]
     )
     const [fields, setFields] = useState<string[]>(() => (defaults.ok ? defaults.value : []))
+    const fieldDefaultsApplied = useRef(defaults.ok)
+    useEffect(() => {
+        if (!fieldDefaultsApplied.current && defaults.ok) {
+            fieldDefaultsApplied.current = true
+            setFields(defaults.value)
+        }
+    }, [defaults])
     const [mode, setMode] = useState(false)
     const [selected, setSelected] = useState<string[]>([])
     const [models, setModels] = useState<Record<string, string>>({})
     const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({})
     const [busy, setBusy] = useState(false)
     const [copyFiles, setCopyFiles] = useState(false)
+    const contentHandoff = useRef(false)
+    const inspectedCopies = useRef(new Set<string>())
+    const copyProgress = useEngineProgressStore(state => state.progress)
+    const [extended, setExtended] = useState(false)
+    const [loads, setLoads] = useState<Array<keyof RequestedLoad>>([])
+    const loadDefaultsApplied = useRef(false)
+    const [routingFields, setRoutingFields] = useState<
+        Array<'weak' | 'medium' | 'strong' | 'served' | 'resident' | 'binding'>
+    >([])
+    const settingsEngine = Object.values(EngineManagerNames).find(
+        engine => engine === identity.engine
+    )
+    const settings = useEngineSettingsStore(state => state.entries)
+    const drafts = useEngineSettingsStore(state => state.modelDrafts)
+    const management = useNodeConfigurationStore(state => state.management)
+    const sourceTarget = useMemo(
+        () => (settingsEngine ? { nodeId: targetId, engine: settingsEngine } : undefined),
+        [targetId, settingsEngine]
+    )
+    const sourceInspection = sourceTarget
+        ? drafts[modelSettingsKey(sourceTarget, identity.model)]?.inspection
+        : undefined
+    const sourceRequested = sourceTarget
+        ? (settings[engineSettingsKey(sourceTarget)]?.snapshot?.settings.modelLoads?.find(
+              item => item.modelId === identity.model
+          )?.requested ?? {})
+        : {}
+    const typed = extended && (loads.length > 0 || routingFields.length > 0)
+    const sourceLoadIdentity = JSON.stringify([sourceRequested, sourceInspection])
+    useEffect(() => {
+        if (!extended || !sourceTarget) return
+        const stop = watchEngineSettings()
+        const store = useEngineSettingsStore.getState()
+        void store
+            .reload(sourceTarget)
+            .then(() => store.inspectModel(sourceTarget, identity.model))
+            .then(() => {
+                const current = useEngineSettingsStore.getState()
+                const inspection =
+                    current.modelDrafts[modelSettingsKey(sourceTarget, identity.model)]?.inspection
+                const requested = current.entries[
+                    engineSettingsKey(sourceTarget)
+                ]?.snapshot?.settings.modelLoads?.find(
+                    item => item.modelId === identity.model
+                )?.requested
+                if (inspection && requested && !loadDefaultsApplied.current) {
+                    loadDefaultsApplied.current = true
+                    setLoads(defaultPortableLoadFields(inspection, requested))
+                }
+            })
+        return stop
+    }, [extended, sourceTarget, identity.model])
     const engineType = engineTypeFromManagerName(identity.engine)
     const generation = useRef(0)
     const activeAttempt = useRef<{ targetId: string } | null>(null)
@@ -124,7 +205,64 @@ export default function ModelSettingsCopy({
         )
         if (!activeAttempt.current) setBusy(false)
         return invalidateGeneration
-    }, [policy, identity.engine, identity.model, targetId, connected, invalidateGeneration])
+    }, [
+        policy,
+        identity.engine,
+        identity.model,
+        targetId,
+        connected,
+        permissionContext,
+        sourceLoadIdentity,
+        invalidateGeneration
+    ])
+    useEffect(() => {
+        if (!contentHandoff.current || !settingsEngine) return
+        for (const progress of copyProgress.values()) {
+            if (
+                !progress.opId ||
+                inspectedCopies.current.has(progress.opId) ||
+                progress.operation !== 'copy' ||
+                progress.copyResult?.durability !== 'confirmed' ||
+                progress.engineType !== engineType ||
+                progress.copyResult.engine !== settingsEngine ||
+                progress.model !== identity.model ||
+                progress.sourceNodeId !== targetId ||
+                !progress.destinationNodeId ||
+                !['done', 'complete'].includes(progress.status)
+            )
+                continue
+            inspectedCopies.current.add(progress.opId)
+            const destination = progress.destinationNodeId
+            const store = useEngineSettingsStore.getState()
+            store.invalidateModel(
+                modelSettingsKey(
+                    { nodeId: destination, engine: settingsEngine },
+                    models[destination] ?? identity.model
+                )
+            )
+            void store.inspectModel(
+                { nodeId: destination, engine: settingsEngine },
+                models[destination] ?? identity.model
+            )
+            setOutcomes(current => ({
+                ...current,
+                [destination]: {
+                    message:
+                        'Model files copied durably. Fresh inspection requested. Preview settings again before confirming; no settings were applied.'
+                }
+            }))
+        }
+    }, [copyProgress, settingsEngine, engineType, targetId, identity.model, models])
+
+    const targetAuthority = (target: Target, revision: string) =>
+        JSON.stringify([
+            target.id,
+            target.identity,
+            revision,
+            connected,
+            useNodeConfigurationStore.getState().management.get(target.id),
+            useClusterInvitationsStore.getState().remoteManagementContext
+        ])
 
     const invalidate = () => {
         generation.current++
@@ -175,7 +313,7 @@ export default function ModelSettingsCopy({
                     continue
                 }
                 const profile = findProfile(baseline.policy, target.identity)
-                if (!profile) {
+                if (!profile && (!typed || fields.length > 0 || mode)) {
                     put(
                         target.id,
                         { message: 'Missing profile: Configure/Create on this target first.' },
@@ -183,14 +321,109 @@ export default function ModelSettingsCopy({
                     )
                     continue
                 }
-                const result = copyModelSettings(
-                    policy,
-                    identity,
-                    baseline.policy,
-                    target.identity,
-                    { fields, mode },
-                    target.nodeId !== undefined && profile.localOnly
-                )
+                const result =
+                    fields.length || mode
+                        ? copyModelSettings(
+                              policy,
+                              identity,
+                              baseline.policy,
+                              target.identity,
+                              { fields, mode },
+                              target.nodeId !== undefined && profile?.localOnly === true
+                          )
+                        : ({ ok: true, value: baseline.policy } satisfies ReturnType<
+                              typeof copyModelSettings
+                          >)
+                if (typed && settingsEngine && result.ok) {
+                    const targetSettings = { nodeId: target.id, engine: settingsEngine }
+                    const store = useEngineSettingsStore.getState()
+                    await store.reload(targetSettings)
+                    if (generation.current !== ticket) break
+                    const sourceState = modelRoutingState(policy, identity)
+                    const targetState = modelRoutingState(
+                        baseline.policy,
+                        target.identity,
+                        baseline.modelConfiguration
+                    )
+                    if (
+                        routingFields.includes('resident') &&
+                        sourceState.resident &&
+                        !targetState.qualified
+                    ) {
+                        put(
+                            target.id,
+                            {
+                                message:
+                                    'Keep loaded unavailable: target finite qualified profile/current readiness required.'
+                            },
+                            ticket
+                        )
+                        continue
+                    }
+                    const selectedPolicy = modelPolicyPatch(
+                        baseline.policy,
+                        result.value,
+                        target.identity
+                    )
+                    if (!selectedPolicy.ok) {
+                        put(target.id, { message: selectedPolicy.error.message }, ticket)
+                        continue
+                    }
+                    const patch: NonNullable<ModelChange['policy']> = { ...selectedPolicy.value }
+                    for (const field of routingFields) {
+                        if (field === 'weak' || field === 'medium' || field === 'strong') {
+                            const role = sourceState.roles[field]
+                            const matches =
+                                role !== null &&
+                                typeof role === 'object' &&
+                                !Array.isArray(role) &&
+                                role.engine === identity.engine &&
+                                role.model === identity.model
+                            patch.roles = { ...patch.roles, [field]: matches }
+                        } else
+                            patch[field] =
+                                field === 'served'
+                                    ? sourceState.served !== 'excluded'
+                                    : sourceState[field]
+                    }
+                    const authority = targetAuthority(target, baseline.revision)
+                    await store.previewModel(
+                        targetSettings,
+                        {
+                            modelId: target.identity.model,
+                            expectedPolicyRevision: baseline.revision,
+                            ...(loads.length
+                                ? { load: portableLoadPatch(sourceRequested, loads) }
+                                : {}),
+                            policy: patch
+                        },
+                        authority
+                    )
+                    if (generation.current !== ticket) break
+                    const modelKey = modelSettingsKey(targetSettings, target.identity.model)
+                    const reviewed = useEngineSettingsStore.getState().modelDrafts[modelKey]
+                    put(
+                        target.id,
+                        {
+                            message: reviewed?.review
+                                ? 'Review target-selected changes and impact, then confirm.'
+                                : (reviewed?.message ?? 'Preview unavailable.'),
+                            ...(reviewed?.review
+                                ? {
+                                      comparison: {
+                                          target,
+                                          baseline,
+                                          policy: result.value,
+                                          modelKey,
+                                          authority
+                                      }
+                                  }
+                                : {})
+                        },
+                        ticket
+                    )
+                    continue
+                }
                 put(
                     target.id,
                     result.ok
@@ -211,6 +444,31 @@ export default function ModelSettingsCopy({
     }
     const confirm = async (comparison: Comparison) => {
         if (activeAttempt.current) return
+        if (comparison.modelKey && comparison.authority) {
+            if (
+                comparison.authority !==
+                targetAuthority(comparison.target, comparison.baseline.revision)
+            ) {
+                invalidate()
+                return
+            }
+            setBusy(true)
+            activeAttempt.current = { targetId: comparison.target.id }
+            try {
+                await useEngineSettingsStore
+                    .getState()
+                    .applyModel(comparison.modelKey, comparison.authority)
+            } finally {
+                const result = useEngineSettingsStore.getState().modelDrafts[comparison.modelKey]
+                setOutcomes(current => ({
+                    ...current,
+                    [comparison.target.id]: { message: result?.message ?? 'Read operation status.' }
+                }))
+                activeAttempt.current = null
+                setBusy(false)
+            }
+            return
+        }
         const ticket = generation.current
         const target = comparison.target
         setBusy(true)
@@ -333,10 +591,11 @@ export default function ModelSettingsCopy({
     }
     return (
         <Stack gap="3">
-            <Text kind="body/semibold/sm">Copy generation preferences</Text>
+            <Text kind="body/semibold/sm">Copy model preferences</Text>
             <Text kind="body/regular/sm">
                 Source: {identity.engine} / {identity.model}. Content identity unknown, even for the
-                same name. No model files or routing settings are copied.
+                same name. Model files use a separate action. Routing/residency changes require
+                explicit selection.
             </Text>
             {!defaults.ok && <InlineErrorBanner message={defaults.error.message} />}
             {MODEL_OPTION_FIELDS.filter(
@@ -366,6 +625,76 @@ export default function ModelSettingsCopy({
                     setMode(value === true)
                 }}
             />
+            {settingsEngine && (
+                <Button
+                    kind="tertiary"
+                    disabled={busy || disabled}
+                    onClick={() => {
+                        invalidate()
+                        setExtended(value => !value)
+                    }}
+                >
+                    Select portable load and routing preferences
+                </Button>
+            )}
+            {extended && (
+                <>
+                    <Text kind="body/regular/sm">
+                        Tuning only by default. Load selections copy requested values, never source
+                        paths, native device IDs, resolved allocation, ports, locks, qualifications,
+                        memory bounds or approval digests.
+                    </Text>
+                    {sourceInspection &&
+                        portableLoadFields(sourceInspection).map(field => (
+                            <Checkbox
+                                key={field}
+                                slotLabel={`Copy load ${field}: ${JSON.stringify(sourceRequested[field]) ?? 'Clear on target'}`}
+                                checked={loads.includes(field)}
+                                disabled={busy || disabled}
+                                onCheckedChange={value => {
+                                    loadDefaultsApplied.current = true
+                                    invalidate()
+                                    setLoads(current =>
+                                        value === true
+                                            ? [...current, field]
+                                            : current.filter(item => item !== field)
+                                    )
+                                }}
+                            />
+                        ))}
+                    {!sourceInspection && (
+                        <Text kind="body/regular/sm">
+                            Portable load descriptors unavailable. Generation preferences remain
+                            readable.
+                        </Text>
+                    )}
+                    {(
+                        [
+                            'weak',
+                            'medium',
+                            'strong',
+                            'served',
+                            'resident',
+                            'binding'
+                        ] satisfies typeof routingFields
+                    ).map(field => (
+                        <Checkbox
+                            key={field}
+                            slotLabel={`Explicitly copy ${field}${field === 'served' ? ' membership (unrestricted source means include only this model; target nil/empty semantics reviewed)' : field === 'resident' ? ' (requires target qualification/readiness)' : field === 'binding' ? ' membership' : ' role (can displace target tier)'}`}
+                            checked={routingFields.includes(field)}
+                            disabled={busy || disabled}
+                            onCheckedChange={value => {
+                                invalidate()
+                                setRoutingFields(current =>
+                                    value === true
+                                        ? [...current, field]
+                                        : current.filter(item => item !== field)
+                                )
+                            }}
+                        />
+                    ))}
+                </>
+            )}
             {targets.map(target => (
                 <Stack gap="2" key={target.id}>
                     <Checkbox
@@ -411,10 +740,75 @@ export default function ModelSettingsCopy({
                                     {summary(outcomes[target.id]?.comparison)}
                                 </Text>
                             )}
+                            {settingsEngine && extended && (
+                                <ModelSettingsPreview
+                                    inspection={
+                                        drafts[
+                                            modelSettingsKey(
+                                                { nodeId: target.id, engine: settingsEngine },
+                                                target.identity.model
+                                            )
+                                        ]?.inspection
+                                    }
+                                    preview={
+                                        drafts[
+                                            modelSettingsKey(
+                                                { nodeId: target.id, engine: settingsEngine },
+                                                target.identity.model
+                                            )
+                                        ]?.review?.preview
+                                    }
+                                    snapshot={
+                                        settings[
+                                            engineSettingsKey({
+                                                nodeId: target.id,
+                                                engine: settingsEngine
+                                            })
+                                        ]?.snapshot
+                                    }
+                                />
+                            )}
+                            {settingsEngine &&
+                                extended &&
+                                drafts[
+                                    modelSettingsKey(
+                                        { nodeId: target.id, engine: settingsEngine },
+                                        target.identity.model
+                                    )
+                                ]?.attempt && (
+                                    <Text kind="body/regular/sm" role="status">
+                                        {
+                                            drafts[
+                                                modelSettingsKey(
+                                                    { nodeId: target.id, engine: settingsEngine },
+                                                    target.identity.model
+                                                )
+                                            ]?.message
+                                        }
+                                    </Text>
+                                )}
                             {outcomes[target.id]?.comparison && (
                                 <Button
                                     size="small"
-                                    disabled={busy || disabled || !connected}
+                                    disabled={
+                                        busy ||
+                                        disabled ||
+                                        !connected ||
+                                        (outcomes[target.id]?.comparison?.modelKey !== undefined &&
+                                            (!drafts[
+                                                outcomes[target.id]?.comparison?.modelKey ?? ''
+                                            ]?.review ||
+                                                outcomes[target.id]?.comparison?.authority !==
+                                                    JSON.stringify([
+                                                        target.id,
+                                                        target.identity,
+                                                        outcomes[target.id]?.comparison?.baseline
+                                                            .revision,
+                                                        connected,
+                                                        management.get(target.id),
+                                                        permissionContext
+                                                    ])))
+                                    }
                                     onClick={() => {
                                         const comparison = outcomes[target.id]?.comparison
                                         if (comparison) void confirm(comparison)
@@ -438,6 +832,30 @@ export default function ModelSettingsCopy({
                             >
                                 Configure/Create on {target.name}
                             </Button>
+                            {settingsEngine &&
+                                drafts[
+                                    modelSettingsKey(
+                                        { nodeId: target.id, engine: settingsEngine },
+                                        target.identity.model
+                                    )
+                                ]?.attempt && (
+                                    <Button
+                                        kind="tertiary"
+                                        onClick={() =>
+                                            void useEngineSettingsStore.getState().readModelOutcome(
+                                                modelSettingsKey(
+                                                    {
+                                                        nodeId: target.id,
+                                                        engine: settingsEngine
+                                                    },
+                                                    target.identity.model
+                                                )
+                                            )
+                                        }
+                                    >
+                                        Read copy operation status on {target.name}
+                                    </Button>
+                                )}
                         </>
                     )}
                 </Stack>
@@ -449,7 +867,7 @@ export default function ModelSettingsCopy({
                     disabled ||
                     !connected ||
                     selected.length === 0 ||
-                    (fields.length === 0 && !mode)
+                    (fields.length === 0 && !mode && !typed)
                 }
                 onClick={() => void preview()}
             >
@@ -462,13 +880,36 @@ export default function ModelSettingsCopy({
             </Text>
             {engineType && (
                 <>
-                    <Button kind="tertiary" size="small" onClick={() => setCopyFiles(true)}>
+                    <Button
+                        kind="tertiary"
+                        size="small"
+                        onClick={() => {
+                            contentHandoff.current = true
+                            setCopyFiles(true)
+                        }}
+                    >
                         Copy model files
                     </Button>
                     {copyFiles && (
                         <ModelCopyModal
                             open
-                            onOpenChange={setCopyFiles}
+                            onOpenChange={open => {
+                                setCopyFiles(open)
+                                if (!open) {
+                                    invalidate()
+                                    setOutcomes(current =>
+                                        Object.fromEntries(
+                                            Object.entries(current).map(([id]) => [
+                                                id,
+                                                {
+                                                    message:
+                                                        'Content-copy result is separate. Preview again for a fresh target inspection; settings were not applied.'
+                                                }
+                                            ])
+                                        )
+                                    )
+                                }
+                            }}
                             engineType={engineType}
                             initialSource={targetId}
                             initialModel={identity.model}

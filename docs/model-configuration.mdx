@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Configure model generation settings
+# Configure model settings
 
 Open **Configure** on a model row in Model Manager, or **Configure model** in
 Routing settings. The side panel shows the node, engine and exact native model
@@ -20,6 +20,60 @@ subsequent requests. Other options remain in Advanced policy JSON.
 Saving generation preferences does not start an engine, load or download a
 model, or change native context allocation or GPU placement. It affects
 subsequent requests on the serving node. An Off engine stays Off.
+
+## Native load settings and inspection
+
+The same panel separates native load preferences from Generation settings and
+Routing/residency. Choose **Configure load and routing settings** to inspect
+those controls. For llama.cpp, Basic load covers tokens per request, slots,
+GPU placement and separate K/V cache precision. Advanced controls expose only
+the support, ranges and inherited sources reported by the target service.
+Clearing an override means inheritance, not an invented default. Total context
+allocation is separate from tokens per request and policy admission limits.
+
+Inspection is a read. Artifact status, source and binding assurance describe
+what the target actually resolved. Unavailable facts or estimates remain
+Unknown; they do not become zero or evidence of a complete model. Unsupported
+controls retain their reported reason. No inspection loads, downloads or starts
+a model, and this editor does not create qualification.
+Main, draft and companion files are labelled separately. A companion such as a
+projector is not presented as another main-model shard.
+
+The currently integrated service reports bounded inspection unavailable and
+refuses reviewed native load application as not ready. You can inspect the
+reported descriptors and prepare a session draft. A refused preview does not
+enable Apply or produce a success receipt. Generation-only policy editing
+continues through its existing Save path.
+
+## Review before applying load changes
+
+A successful target preview must supply the selected-field diff, both target
+revisions and a reviewed digest before Apply is available. Combined load,
+generation and routing changes use one target operation; they are never two
+independent saves. Editing the draft or changing target, revisions, connection,
+authority, artifact identity or build identity invalidates the preview and keeps
+the draft for a fresh review.
+Use **Preview model changes**, then review the result before choosing
+**Apply reviewed model changes**.
+
+Runtime impact comes from the service. When it reports a whole-router restart,
+the preview says **Restarts the whole llama.cpp engine**, lists affected models
+and shows the reported drain bound and interruption warning. An omitted impact
+value is Unknown, not zero, an empty model list or a promise that active work
+will finish. A reported Off-preserving operation stays Off; Saved never means
+Loaded.
+
+Desired preferences, applied settings and observed runtime remain separate.
+An applying or failed coupled stage retains its request identity and error.
+After a lost response, status/readback checks that identity before any explicit
+retry. Failed or unresolved operations require local reconciliation and a fresh
+preview for explicit supersession; the editor never rolls them back, resumes a
+node or silently retries them.
+
+The saved inference lock protects generation preferences only. Readable load
+settings retain their separate permission and Pause rules. Routing and
+keep-loaded changes require explicit selection and target review; residency
+still needs a current finite qualified profile and target evidence.
 
 ## Drafts and saving
 
@@ -96,6 +150,30 @@ Copy carries only the selected generation leaves and optional precedence. It
 does not carry locks, qualification, memory bounds, roles, keep-loaded intent,
 served permissions, bindings, paths, ports or devices. These routing and native
 settings are outside generation copy.
+
+### Reviewed load and routing copy
+
+Choose **Select portable load and routing preferences** to extend generation
+copy's selection.
+Load fields are a separate explicit selection, restricted to portable requested
+preferences. The destination resolves placement and artifacts itself. Source
+resolutions, native device identifiers, paths, ports and approvals are never
+copied. Selected absent overrides mean Clear on target, with the destination's
+inherited source shown for review.
+
+Roles, served membership, keep-loaded intent and engine bindings are unselected
+by default. Selecting them requires target review of displaced tiers and served
+permission, including unrestricted versus explicit deny-all. Keep loaded stays
+unavailable without the target's current finite qualified profile and evidence.
+Copy never transfers locks, qualification or memory assertions.
+
+Each target uses its own inspection and reviewed operation with fresh policy
+and settings revisions. A failed or not-ready target does not authorize another
+target's Apply. Missing content is handed to the existing content-copy flow only
+when chosen; after that flow, inspect and preview the destination again. A
+content-copy receipt is not a settings approval and never triggers automatic
+Apply. This build's not-ready native application refusal applies to load copy
+as well.
 
 Saved, activation pending and activation error are distinct outcomes. Remote
 policy replies provide no activation status. A lost Save reply triggers a
