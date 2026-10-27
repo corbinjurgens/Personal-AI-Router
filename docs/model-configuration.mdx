@@ -69,3 +69,38 @@ target-side evidence. A saved profile alone does not establish readiness.
 After a positively reported model download completes, **Configure** is offered
 without automatically opening the panel or moving keyboard focus. Content copy
 and generation configuration remain separate operations.
+
+## Copy selected generation preferences
+
+In the model settings panel, choose the generation fields and target devices,
+then **Preview selected targets**. Initially only configured common numeric
+generation fields are selected. Request precedence is a separate opt-in. A
+selected field absent from the source is shown as **Clear on target** before
+confirmation. Unselected target options, nested fields and mode are retained.
+
+Copy starts with the same engine and exact native model name. You can explicitly
+map to another target model name; the comparison shows both names and labels
+content equivalence unverified. Matching names never prove matching bytes.
+Each target must already have a profile. **Configure/Create** opens its settings
+without creating a profile or saving anything automatically.
+
+Each preview reads the target's current policy, revision and management
+permission. Confirm each target separately using that revision. Conflicts,
+denials, locks, missing profiles and disconnected targets remain separate from
+other targets' results. A selected no-op still goes through the target's grant,
+Pause and CAS checks. An enforced mode cannot be left with no options.
+Readable source preferences can be copied even when that source is paused or
+does not permit remote management; only the destination is changed.
+
+Copy carries only the selected generation leaves and optional precedence. It
+does not carry locks, qualification, memory bounds, roles, keep-loaded intent,
+served permissions, bindings, paths, ports or devices. These routing and native
+settings are outside generation copy.
+
+Saved, activation pending and activation error are distinct outcomes. Remote
+policy replies provide no activation status. A lost Save reply triggers a
+readback, never an automatic resend. If the selected fields match, the panel
+reports **Target already matches selected fields** without claiming an operation
+receipt. Retry requires a fresh preview and confirmation. Content copy has
+separate results: use Model Manager's existing **Copy model files** action when
+needed; copying preferences starts no transfer, load or download.

@@ -15,6 +15,7 @@ import type { NodeModelReference } from '@/shared/types/node-policy'
 import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
 import ModelSettingsEditor from '@/ui/components/RoutingSettings/ModelSettingsEditor'
 import ModelProfileControls from './ModelProfileControls'
+import ModelSettingsCopy from './ModelSettingsCopy'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
@@ -71,6 +72,12 @@ export default function ModelSettingsPanel({
     }
     const [pickedIdentity, setPickedIdentity] = useState<NodeModelReference | null>(null)
     const [valid, setValid] = useState(true)
+    const [copyTarget, setCopyTarget] = useState<{
+        targetId: string
+        nodeId?: string
+        nodeName: string
+        identity: NodeModelReference
+    } | null>(null)
     const connected = useConnectionStore(state => state.connected)
     const entry = useNodeConfigurationStore(state => state.policyDrafts.get(targetId))
     const management = useNodeConfigurationStore(state => state.management.get(targetId))
@@ -125,6 +132,17 @@ export default function ModelSettingsPanel({
         profiles.ok &&
         profiles.value.some(
             item => item.engine === identity.engine && item.model === identity.model
+        )
+    if (copyTarget)
+        return (
+            <ModelSettingsPanel
+                key={copyTarget.targetId}
+                {...copyTarget}
+                open
+                onOpenChange={value => {
+                    if (!value) setCopyTarget(null)
+                }}
+            />
         )
     return (
         <SidePanel
@@ -278,7 +296,29 @@ export default function ModelSettingsPanel({
                     onTextChange={changeText}
                     onValidityChange={onValidityChange}
                 />
-                {selected && renderCopy?.({ identity, policy: text, targetId, nodeId })}
+                {selected &&
+                    (renderCopy ? (
+                        renderCopy({ identity, policy: text, targetId, nodeId })
+                    ) : (
+                        <ModelSettingsCopy
+                            key={JSON.stringify([targetId, identity.engine, identity.model])}
+                            identity={identity}
+                            policy={text}
+                            targetId={targetId}
+                            disabled={
+                                !connected ||
+                                !entry?.current ||
+                                concurrent ||
+                                entry.phase === 'reading' ||
+                                entry.phase === 'saving' ||
+                                entry.phase === 'unknown' ||
+                                entry.phase === 'conflict' ||
+                                !valid ||
+                                !profiles.ok
+                            }
+                            onConfigureTarget={setCopyTarget}
+                        />
+                    ))}
             </Stack>
         </SidePanel>
     )
