@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"nvpair-shared/durablefile"
 )
 
 // tombstonesFile is the durable record of cluster-wide removals. Persisting it
@@ -126,7 +128,7 @@ func (m *Manager) persistTombstonesLocked() error {
 // loadTombstones restores the legacy tombstone set on startup. A missing file is
 // the normal first-run state.
 func (m *Manager) loadTombstones() {
-	data, err := os.ReadFile(m.tombstonesPath())
+	data, err := durablefile.ReadFile(m.tombstonesPath())
 	if os.IsNotExist(err) {
 		return
 	}

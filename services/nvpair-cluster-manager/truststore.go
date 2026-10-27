@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"nvpair-shared/durablefile"
 )
 
 // pubFromDER parses a certificate DER and extracts its Ed25519 public key.
@@ -124,7 +126,7 @@ func (ts *TrustStore) load() {
 			continue
 		}
 		fileUUID := strings.TrimSuffix(name, ".json")
-		data, err := os.ReadFile(filepath.Join(ts.dir, name))
+		data, err := durablefile.ReadFile(filepath.Join(ts.dir, name))
 		if err != nil {
 			log.Printf("trusted store: read %s: %v", name, err)
 			continue

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"nvpair-shared/durablefile"
 )
 
 // membersFile is the durable, lean roster persisted under the cluster dir. Only
@@ -68,7 +70,7 @@ func (m *Manager) persistMembersStoreLocked() error {
 // loadMembers restores the confirmed member roster from disk on startup. A
 // missing file is the normal first-run / unclustered state.
 func (m *Manager) loadMembers() error {
-	data, err := os.ReadFile(m.membersPath())
+	data, err := durablefile.ReadFile(m.membersPath())
 	if os.IsNotExist(err) {
 		return nil
 	}

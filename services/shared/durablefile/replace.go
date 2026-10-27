@@ -6,18 +6,19 @@
 //
 // WriteFile writes a uniquely named temporary sibling, syncs it, replaces the
 // target with it, and then makes the replacement durable: on POSIX it syncs the
-// parent directory, and on Windows the replace itself is issued with
-// MOVEFILE_WRITE_THROUGH. Success means the replacement is durable as far as the
-// platform documents. It is not a power-loss proof: the guarantees are those of
-// fsync, rename and MoveFileEx, a filesystem or storage layer may weaken them,
-// and tests that kill a process exercise crash ordering rather than power loss.
+// parent directory, and on Windows it renames through a write-through handle
+// with FileRenameInfoEx and flushes that handle after publication. Success means
+// the replacement is durable as far as the platform documents. It is not a
+// power-loss proof: the guarantees are those of fsync, rename and
+// FlushFileBuffers, a filesystem or storage layer may weaken them, and tests
+// that kill a process exercise crash ordering rather than power loss.
 //
 // Any failure before the replacement removes the temporary file and leaves the
-// target byte-identical. A directory-sync failure happens after the
-// replacement: the error wraps ErrReplaced and the target already holds the
-// complete new bytes. Callers should adopt those bytes while reporting the
-// durability failure; they may not survive a power loss. The parent directory
-// must already exist.
+// target byte-identical. A directory-sync or post-rename flush failure happens
+// after the replacement: the error wraps ErrReplaced and the target already
+// holds the complete new bytes. Callers should adopt those bytes while
+// reporting the durability failure; they may not survive a power loss. The
+// parent directory must already exist.
 //
 // Replacer exposes each filesystem step as a replaceable function so callers in
 // other modules can inject a failure at any boundary from their own tests.
@@ -63,7 +64,7 @@ type Replacer struct {
 	// error must wrap ErrReplaced; that failure is never retried.
 	Replace func(tmp, target string) error
 	// SyncDir makes a completed replacement in dir durable. It is a no-op on
-	// Windows, where Replace writes through.
+	// Windows, where Replace flushes its write-through handle.
 	SyncDir func(dir string) error
 	// IsTransient reports whether a Replace error may clear on retry.
 	IsTransient func(err error) bool

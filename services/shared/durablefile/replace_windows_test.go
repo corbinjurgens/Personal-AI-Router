@@ -7,13 +7,135 @@ package durablefile
 
 import (
 	"errors"
+	"io"
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+// No goroutine, timer or retry releases this reader before replacement. This
+// is the native proof gate for FileRenameInfoEx with POSIX_SEMANTICS and
+// REPLACE_IF_EXISTS, independently of WriteFile's retry policy.
+func TestFileRenameInfoExReplacesHeldTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := writeTarget(t, dir, "old bytes")
+	reader, err := Open(target)
+	if err != nil {
+		t.Fatalf("open replacement-compatible reader: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("close reader: %v", err)
+		}
+	})
+	tmp := filepath.Join(dir, "replacement.tmp")
+	replacement, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatalf("create replacement: %v", err)
+	}
+	_, writeErr := replacement.Write([]byte("new bytes"))
+	syncErr := replacement.Sync()
+	closeErr := replacement.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		t.Fatalf("write, flush and close replacement before rename: %v", err)
+	}
+	if err := replaceFile(tmp, target); err != nil {
+		t.Fatalf("FileRenameInfoEx with held sharing-compatible reader: %v", err)
+	}
+	old, err := io.ReadAll(reader)
+	if err != nil || string(old) != "old bytes" {
+		t.Fatalf("held reader = %q, error = %v; want old bytes", old, err)
+	}
+	if got := readString(t, target); got != "new bytes" {
+		t.Fatalf("fresh reader = %q, want new bytes", got)
+	}
+	assertOnlyTarget(t, dir, target)
+}
+
+func TestWriteFileReplacesHeldSharingCompatibleReader(t *testing.T) {
+	dir := t.TempDir()
+	target := writeTarget(t, dir, "old bytes")
+	reader, err := Open(target)
+	if err != nil {
+		t.Fatalf("open replacement-compatible reader: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("close reader: %v", err)
+		}
+	})
+	r := Replacer{
+		IsTransient: func(error) bool { return false },
+		Sleep:       func(time.Duration) { t.Fatal("replacement retried with compatible reader held") },
+	}
+	if err := r.WriteFile(target, []byte("new bytes"), 0o600); err != nil {
+		t.Fatalf("WriteFile with reader held: %v", err)
+	}
+	old, err := io.ReadAll(reader)
+	if err != nil || string(old) != "old bytes" {
+		t.Fatalf("held reader = %q, error = %v; want old bytes", old, err)
+	}
+	if got := readString(t, target); got != "new bytes" {
+		t.Fatalf("fresh reader = %q, want new bytes", got)
+	}
+	assertOnlyTarget(t, dir, target)
+}
+
+func TestWriteFileRejectsHeldIncompatibleReader(t *testing.T) {
+	dir := t.TempDir()
+	target := writeTarget(t, dir, "old bytes")
+	reader, err := os.Open(target)
+	if err != nil {
+		t.Fatalf("open reader without delete sharing: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("close reader: %v", err)
+		}
+	})
+	r := Replacer{IsTransient: func(error) bool { return false }}
+	err = r.WriteFile(target, []byte("new bytes"), 0o600)
+	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("replacement error = %v, want sharing violation or access denied", err)
+	}
+	if errors.Is(err, ErrReplaced) {
+		t.Fatalf("failed replacement reported landed bytes: %v", err)
+	}
+	if got := readString(t, target); got != "old bytes" {
+		t.Fatalf("failed replacement changed target to %q", got)
+	}
+	assertOnlyTarget(t, dir, target)
+}
+
+func TestWriteFilePreservesReadOnlyTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := writeTarget(t, dir, "old bytes")
+	name, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		t.Fatalf("encode target: %v", err)
+	}
+	if err := windows.SetFileAttributes(name, windows.FILE_ATTRIBUTE_READONLY); err != nil {
+		t.Fatalf("make target read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := windows.SetFileAttributes(name, windows.FILE_ATTRIBUTE_NORMAL); err != nil {
+			t.Errorf("restore target attributes: %v", err)
+		}
+	})
+	r := Replacer{IsTransient: func(error) bool { return false }}
+	err = r.WriteFile(target, []byte("new bytes"), 0o600)
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || errors.Is(err, ErrReplaced) {
+		t.Fatalf("read-only replacement error = %v, want access denied before replacement", err)
+	}
+	if got := readString(t, target); got != "old bytes" {
+		t.Fatalf("read-only target changed to %q", got)
+	}
+	assertOnlyTarget(t, dir, target)
+}
 
 func TestIsTransientReplaceErrorMatchesSharingErrnos(t *testing.T) {
 	test := func(name string, err error, want bool) {

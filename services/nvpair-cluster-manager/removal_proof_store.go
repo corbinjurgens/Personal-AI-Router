@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"nvpair-shared/durablefile"
 )
 
 const removalProofsFile = "removal-proofs.json"
@@ -230,7 +232,7 @@ func (m *Manager) persistRemovalProofsLocked() error {
 }
 
 func (m *Manager) loadRemovalProofs() error {
-	data, err := os.ReadFile(m.removalProofsPath())
+	data, err := durablefile.ReadFile(m.removalProofsPath())
 	if os.IsNotExist(err) {
 		return nil
 	}

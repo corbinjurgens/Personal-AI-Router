@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"nvpair-shared/durablefile"
 	"nvpair-shared/nodeid"
 )
 
@@ -60,7 +61,7 @@ func loadOrMintIdentity(clusterDir string) (*NodeIdentity, error) {
 		hostname = "unknown-host"
 	}
 
-	idData, idErr := os.ReadFile(idPath)
+	idData, idErr := durablefile.ReadFile(idPath)
 	if idErr == nil {
 		var idf identityFile
 		if err := json.Unmarshal(idData, &idf); err != nil || idf.NodeUUID == "" {
@@ -108,11 +109,11 @@ func loadOrMintIdentity(clusterDir string) (*NodeIdentity, error) {
 }
 
 func readKeypair(crtPath, keyPath string) (certPEM, keyPEM []byte, err error) {
-	certPEM, err = os.ReadFile(crtPath)
+	certPEM, err = durablefile.ReadFile(crtPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read node.crt: %w", err)
 	}
-	keyPEM, err = os.ReadFile(keyPath)
+	keyPEM, err = durablefile.ReadFile(keyPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read node.key: %w", err)
 	}

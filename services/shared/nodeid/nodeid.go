@@ -61,7 +61,7 @@ func Resolve(baseDir string) string {
 }
 
 func readUUID(path string) string {
-	data, err := os.ReadFile(path)
+	data, err := durablefile.ReadFile(path)
 	if err != nil {
 		return ""
 	}

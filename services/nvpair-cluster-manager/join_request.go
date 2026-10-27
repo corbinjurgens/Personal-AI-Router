@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"nvpair-shared/durablefile"
 )
 
 const (
@@ -153,7 +155,7 @@ func (m *Manager) joinEligibilityLocked(ignoreInvite string) (solo bool, reason 
 		return false, "already-clustered"
 	}
 	m.membersStoreMu.Lock()
-	data, err := os.ReadFile(m.membersPath())
+	data, err := durablefile.ReadFile(m.membersPath())
 	m.membersStoreMu.Unlock()
 	var members []ClusterNode
 	if err == nil {
@@ -201,7 +203,7 @@ func (m *Manager) joinEligibilityLocked(ignoreInvite string) (solo bool, reason 
 	}
 	// Re-read receipts: unconfirmed commits and compensation block a new try
 	// even after a restart or if a store became unreadable after startup.
-	data, err = os.ReadFile(filepath.Join(m.clusterDir, pairingReceiptsFile))
+	data, err = durablefile.ReadFile(filepath.Join(m.clusterDir, pairingReceiptsFile))
 	if err == nil {
 		var receipts map[string]pairingReceipt
 		if json.Unmarshal(data, &receipts) != nil || receipts == nil {
@@ -234,7 +236,7 @@ func (m *Manager) joinAdmissionAvailableLocked() bool {
 	if cid != admissionCID {
 		return false
 	}
-	data, err := os.ReadFile(m.admissionPath())
+	data, err := durablefile.ReadFile(m.admissionPath())
 	if os.IsNotExist(err) {
 		return admissionCID == "" && epoch == 0
 	}

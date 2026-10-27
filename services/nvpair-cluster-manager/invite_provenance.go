@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"nvpair-shared/durablefile"
 )
 
 const inviteCreatedClusterFile = "invite-created-cluster.json"
@@ -25,7 +27,7 @@ func (m *Manager) inviteCreatedClusterPath() string {
 // marker id lets that path distinguish a matching invite-created cluster from
 // an unrelated, intentionally restored identity.
 func (m *Manager) loadInviteCreatedCluster() error {
-	data, err := os.ReadFile(m.inviteCreatedClusterPath())
+	data, err := durablefile.ReadFile(m.inviteCreatedClusterPath())
 	if os.IsNotExist(err) {
 		return nil
 	}

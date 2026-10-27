@@ -584,6 +584,20 @@ replay or cleanup cannot be persisted. Unauthenticated pre-invite sessions must
 begin with a valid Type-1 EAP message, are capped at 64, and expire on the invite
 TTL when they never reach a user-visible invite.
 
+Authority and trust file readers use the shared `durablefile.Open` or
+`durablefile.ReadFile` owner. On Windows they share read, write and delete
+access without gaining write/delete rights. Replacement uses
+`SetFileInformationByHandle` with `FileRenameInfoEx` and
+`REPLACE_IF_EXISTS|POSIX_SEMANTICS`: a held compatible reader retains the old
+file, while fresh opens see the complete replacement. Unsupported Windows or
+filesystem implementations return a rename error, with no alternate rename
+path. Incompatible handles and read-only targets still reject replacement.
+The temporary file is flushed before rename; the renamed write-through handle
+is flushed afterward. A failed post-rename flush reports `durablefile.ErrReplaced`,
+so existing landed-write policies still apply. This is not a power-loss proof.
+Unix replacement and parent-directory sync are unchanged. Readers still
+validate authority on fresh opens and fail closed on invalid or changing state.
+
 Reconciles fire on pair success and removal, with a ~30 s heartbeat backstop.
 The human PIN stays the only root of trust — nothing is pinned without an
 endorsement chain leading back to a real pairing. Full model in spec §7.7.

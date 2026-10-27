@@ -7,27 +7,68 @@ package durablefile
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// replaceFile moves tmp over target and returns once the move is written
-// through to disk (MOVEFILE_WRITE_THROUGH), which is Windows' substitute for a
-// directory sync.
+// fileRenameInfo matches FILE_RENAME_INFO, including HANDLE alignment on both
+// 32-bit and 64-bit Windows. Flags is the DWORD union used by FileRenameInfoEx.
+type fileRenameInfo struct {
+	Flags          uint32
+	RootDirectory  windows.Handle
+	FileNameLength uint32
+	FileName       [1]uint16
+}
+
+// replaceFile uses POSIX replacement semantics so sharing-compatible readers
+// retain the old file while fresh opens see tmp. No read-only override is used.
+// The caller has already flushed and closed tmp. Open a write-through handle
+// and flush it after the rename; failures after publication wrap ErrReplaced.
+// Unsupported Windows/filesystem implementations fail without a fallback.
 func replaceFile(tmp, target string) error {
 	from, err := windows.UTF16PtrFromString(tmp)
 	if err != nil {
 		return err
 	}
-	to, err := windows.UTF16PtrFromString(target)
+	absoluteTarget, err := filepath.Abs(target)
 	if err != nil {
 		return err
 	}
-	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+	to, err := windows.UTF16FromString(absoluteTarget)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(from, windows.DELETE|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_WRITE_THROUGH, 0)
+	if err != nil {
+		return fmt.Errorf("open replacement for DELETE and write-through access: %w", err)
+	}
+	defer windows.CloseHandle(handle)
+	var layout fileRenameInfo
+	buffer := make([]byte, int(unsafe.Offsetof(layout.FileName))+len(to)*2)
+	info := (*fileRenameInfo)(unsafe.Pointer(&buffer[0]))
+	info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
+	info.FileNameLength = uint32((len(to) - 1) * 2)
+	copy(unsafe.Slice(&info.FileName[0], len(to)), to)
+	if err := windows.SetFileInformationByHandle(handle, windows.FileRenameInfoEx, &buffer[0], uint32(len(buffer))); err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
+			errors.Is(err, windows.ERROR_INVALID_FUNCTION) || errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED) {
+			return fmt.Errorf("Windows/filesystem does not support FileRenameInfoEx (REPLACE_IF_EXISTS|POSIX_SEMANTICS): %w", err)
+		}
+		return fmt.Errorf("FileRenameInfoEx (REPLACE_IF_EXISTS|POSIX_SEMANTICS): %w", err)
+	}
+	if err := windows.FlushFileBuffers(handle); err != nil {
+		return fmt.Errorf("flush renamed file: %w: %w", ErrReplaced, err)
+	}
+	return nil
 }
 
-// syncDir is a no-op: replaceFile already wrote the move through.
+// syncDir is a no-op: replaceFile flushes its write-through handle.
 func syncDir(string) error {
 	return nil
 }
