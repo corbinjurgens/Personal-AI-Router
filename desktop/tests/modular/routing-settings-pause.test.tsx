@@ -13,7 +13,10 @@ import { createPairApi, type INodePolicyApi } from '@/ui/api/pair-api'
 import { ServiceCallError } from '@/ui/api/service-transport'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { useConnectionStore } from '@/ui/stores/connection.store'
-import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
+import {
+    initializeNodeAvailability,
+    useNodeConfigurationStore
+} from '@/ui/stores/node-configuration.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 
 vi.mock('@/ui/components/RoutingSettings/RoleEditor', () => ({ default: () => null }))
@@ -38,6 +41,13 @@ const setAvailability = vi.fn<INodePolicyApi['setAvailability']>()
 let availabilityChanged: ((change: NodeAvailabilityChange) => void) | undefined
 let root: Root
 let container: HTMLDivElement
+let cleanupAvailability: () => void
+
+async function readback(): Promise<void> {
+    await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+    })
+}
 
 function button(label: string): HTMLButtonElement {
     const found = Array.from(container.querySelectorAll('button')).find(
@@ -53,6 +63,7 @@ async function mount(availability: NodePolicyDocument['availability'] = 'drainin
 }
 
 beforeEach(() => {
+    vi.useFakeTimers()
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     vi.stubGlobal('CSS', { supports: () => true })
     getPolicy.mockReset()
@@ -83,10 +94,12 @@ beforeEach(() => {
     useConnectionStore.setState({ connected: true, selfId: 'self' })
     useNodesStore.setState({ nodes: new Map() })
     useNodeConfigurationStore.setState({
+        availability: new Map(),
         editors: new Map(),
         management: new Map(),
         policyDrafts: new Map()
     })
+    cleanupAvailability = initializeNodeAvailability()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -94,13 +107,16 @@ beforeEach(() => {
 
 afterEach(async () => {
     await act(async () => root.unmount())
+    cleanupAvailability()
     container.remove()
     useNodeConfigurationStore.setState({
+        availability: new Map(),
         editors: new Map(),
         management: new Map(),
         policyDrafts: new Map()
     })
     vi.unstubAllGlobals()
+    vi.useRealTimers()
 })
 
 describe('routing settings pause recovery', () => {
@@ -109,18 +125,20 @@ describe('routing settings pause recovery', () => {
         setAvailability.mockRejectedValueOnce(new Error('Owned engine did not stop.'))
         getPolicy.mockResolvedValue(documentFor('draining', '2'))
 
-        await act(async () => button('Pause').click())
+        await act(async () => button('Pause node').click())
+        await readback()
 
         expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
             state: 'paused',
-            nodeId: undefined
+            nodeId: undefined,
+            pauseMode: 'configured'
         })
         expect(getPolicy).toHaveBeenCalledTimes(2)
         expect(container.textContent).toContain('Owned engine did not stop.')
         expect(button('Retry pause').disabled).toBe(false)
         expect(button('Resume').disabled).toBe(false)
         expect(container.textContent).toContain(
-            'Pausing always unloads models and stops engines. The stopEngines and unloadModels fields are ignored.'
+            'Pause unloads models and stops controlled engines.'
         )
     })
 
@@ -129,14 +147,16 @@ describe('routing settings pause recovery', () => {
         getPolicy.mockResolvedValue(documentFor('paused', '2'))
 
         await act(async () => button('Retry pause').click())
+        await readback()
 
         expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
             state: 'paused',
-            nodeId: undefined
+            nodeId: undefined,
+            pauseMode: 'configured'
         })
         expect(button('Resume').disabled).toBe(false)
         expect(container.textContent).not.toContain('Retry pause')
-        expect(container.textContent).toContain('paused')
+        expect(container.textContent).toContain('Paused')
     })
 
     it('retains both recovery choices and the operational error after retry failure', async () => {
@@ -144,6 +164,7 @@ describe('routing settings pause recovery', () => {
         setAvailability.mockRejectedValueOnce(new Error('Shutdown remains incomplete.'))
 
         await act(async () => button('Retry pause').click())
+        await readback()
 
         expect(getPolicy).toHaveBeenCalledTimes(2)
         expect(container.textContent).toContain('Shutdown remains incomplete.')
@@ -163,16 +184,17 @@ describe('routing settings pause recovery', () => {
         )
 
         await act(async () => button('Resume').click())
+        await readback()
 
         expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
             state: 'available',
             nodeId: undefined
         })
-        expect(container.textContent).toContain('draining')
+        expect(container.textContent).toContain('Availability unconfirmed')
         expect(button('Resume').disabled).toBe(true)
         if (!finishRead) throw new Error('Missing resume policy readback')
         await act(async () => finishRead?.(documentFor('available', '2')))
-        expect(button('Pause').disabled).toBe(false)
+        expect(button('Pause node').disabled).toBe(false)
         expect(container.textContent).not.toContain('Retry pause')
     })
 
@@ -181,6 +203,7 @@ describe('routing settings pause recovery', () => {
         setAvailability.mockRejectedValueOnce(new Error('Resume was superseded by another pause.'))
 
         await act(async () => button('Resume').click())
+        await readback()
 
         expect(getPolicy).toHaveBeenCalledTimes(2)
         expect(container.textContent).toContain('Resume was superseded by another pause.')
@@ -194,11 +217,13 @@ describe('routing settings pause recovery', () => {
         getPolicy.mockRejectedValueOnce(new Error('Policy readback disconnected.'))
 
         await act(async () => button('Retry pause').click())
+        await readback()
 
         expect(container.textContent).toContain('Pause could not stop the engine.')
         expect(container.textContent).toContain('Policy readback disconnected.')
-        expect(button('Retry pause').disabled).toBe(false)
-        expect(button('Resume').disabled).toBe(false)
+        expect(button('Retry pause').disabled).toBe(true)
+        expect(button('Resume').disabled).toBe(true)
+        expect(button('Refresh').disabled).toBe(false)
     })
 
     it('restores local draining recovery choices from reconnect readback without writing', async () => {
@@ -226,6 +251,7 @@ describe('routing settings pause recovery', () => {
                 })
         )
         await act(async () => button('Resume').click())
+        await readback()
         if (!availabilityChanged || !finishRead)
             throw new Error('Missing availability observer/read')
 
@@ -236,13 +262,13 @@ describe('routing settings pause recovery', () => {
 
         expect(button('Retry pause').disabled).toBe(false)
         expect(button('Resume').disabled).toBe(false)
-        expect(container.textContent).toContain('draining')
+        expect(container.textContent).toContain('Pausing')
         expect(
             useNodeConfigurationStore.getState().editors.get('self')?.baseline?.availability
         ).toBe('draining')
     })
 
-    it('fences the role baseline on a peer draining push and retains its draft through an older read', async () => {
+    it('fences peer writes until fresh draining readback and retains its role draft through an older read', async () => {
         const peer: NodeItem = {
             id: 'peer',
             name: 'Peer',
@@ -284,20 +310,31 @@ describe('routing settings pause recovery', () => {
         await act(async () => availabilityChanged?.({ nodeId: 'peer', availability: 'draining' }))
 
         expect(useNodeConfigurationStore.getState().editors.get('peer')).toMatchObject({
-            baseline: { availability: 'draining', policy: baselinePolicy },
+            baseline: { availability: 'available', policy: baselinePolicy },
             draft
         })
-        await act(async () => finishRead?.(documentFor('available', '2')))
+        expect(useNodeConfigurationStore.getState().availability.get('peer')?.current).toBe(false)
+        expect(button('Save').disabled).toBe(true)
+        await act(async () => finishRead?.(documentFor('available', '0')))
+        expect(useNodeConfigurationStore.getState().availability.get('peer')?.current).toBe(false)
+        expect(button('Save').disabled).toBe(true)
+        getPolicy.mockResolvedValue(documentFor('draining', '2'))
+        await readback()
+        expect(useNodeConfigurationStore.getState().availability.get('peer')).toMatchObject({
+            value: 'draining',
+            current: true,
+            revision: '2'
+        })
         expect(useNodeConfigurationStore.getState().editors.get('peer')).toMatchObject({
             baseline: { availability: 'draining' },
             draft
         })
-        expect(button('Resume').disabled).toBe(true)
+        expect(container.querySelector('[aria-label="Resume node: Peer"]')).toBeNull()
         expect(button('Save').disabled).toBe(true)
         expect(setAvailability).not.toHaveBeenCalled()
     })
 
-    it('ignores an obsolete resume completion after reconnect restores draining', async () => {
+    it('retains pending Resume through reconnect and reads current draining state after completion', async () => {
         await mount()
         let finishResume: ((value: { availability: 'available' }) => void) | undefined
         setAvailability.mockImplementationOnce(
@@ -309,14 +346,31 @@ describe('routing settings pause recovery', () => {
         await act(async () => button('Resume').click())
         await act(async () => useConnectionStore.setState({ connected: false }))
         await act(async () => useConnectionStore.setState({ connected: true }))
-        getPolicy.mockResolvedValue(documentFor('available', '2'))
-        if (!finishResume) throw new Error('Missing obsolete resume request')
+        await readback()
+        expect(useNodeConfigurationStore.getState().availability.get('self')).toMatchObject({
+            value: 'draining',
+            current: true,
+            pending: 'available'
+        })
+        expect(button('Retry pause').disabled).toBe(true)
+        expect(button('Resume').disabled).toBe(true)
+        if (!finishResume) throw new Error('Missing pending Resume request')
 
         await act(async () => finishResume?.({ availability: 'available' }))
+        await readback()
 
         expect(button('Retry pause').disabled).toBe(false)
         expect(button('Resume').disabled).toBe(false)
-        expect(container.textContent).toContain('draining')
+        expect(container.textContent).toContain('Pausing')
+        expect(useNodeConfigurationStore.getState().availability.get('self')).toMatchObject({
+            value: 'draining',
+            current: true,
+            pending: undefined
+        })
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            nodeId: undefined,
+            state: 'available'
+        })
     })
 
     it('shows the target refusal detail when a policy save is vetoed', async () => {
@@ -363,13 +417,13 @@ describe('routing settings pause recovery', () => {
             if (!option) throw new Error('Missing peer menu item')
             await act(async () => option.click())
 
-            expect(button('Resume').disabled).toBe(true)
+            expect(container.querySelector('[aria-label="Resume node: Peer"]')).toBeNull()
             expect(button('Save').disabled).toBe(true)
             expect(button('Reload').disabled).toBe(false)
             expect(container.textContent).toContain(
                 'This node is paused. Resume it on that node before making changes.'
             )
-            await act(async () => button('Resume').click())
+            await act(async () => button('Pause node').click())
             await act(async () => button('Reload').click())
             expect(setAvailability).not.toHaveBeenCalled()
             expect(getPolicy).toHaveBeenLastCalledWith('peer')

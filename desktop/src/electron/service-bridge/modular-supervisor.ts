@@ -78,7 +78,7 @@ import {
 } from '@/shared/constants/modular-runtime'
 import { connectOrStart, serviceConnectionDeps } from './service-connection'
 import { defaultServiceEndpointEnvironment, resolveServiceEndpoint } from './service-endpoint'
-import { parseAvailabilityChange, parsePolicyChange } from './node-policy'
+import { parseAvailabilityChange, parseAvailabilityResult, parsePolicyChange } from './node-policy'
 import { NodeAvailabilityState, type AvailabilityMenuItem } from './node-availability'
 import type { NodeAvailabilityRequest } from '@/shared/types/node-policy'
 import { PerformanceSubscription } from './performance'
@@ -454,6 +454,13 @@ class ModularSupervisor {
         return this.availability.menuItem()
     }
 
+    /** Explicit self-only readback, including when no renderer window is open. */
+    async refreshAvailability(): Promise<void> {
+        await this.hydrateAvailability(true)
+    }
+
+    private availabilityRequestGeneration = 0
+
     /** Register for changes to the pause toggle; returns the unsubscribe function. */
     onAvailabilityChanged(listener: () => void): () => void {
         return this.availability.onChange(listener)
@@ -466,14 +473,31 @@ class ModularSupervisor {
      * shows only this node, is left alone.
      */
     async setAvailability(request: NodeAvailabilityRequest): Promise<JsonValue | undefined> {
-        const result = await this.callProcess(
-            'broker',
-            'node:set-availability',
-            { ...request },
-            AVAILABILITY_CALL_TIMEOUT_MS
-        )
-        if (!request.nodeId) this.availability.applyResult(result)
-        return result
+        const local = !request.nodeId
+        const generation = this.brokerSessionGeneration
+        const selfId = getModularBridgeState().getSelfId()
+        const action = local ? ++this.availabilityRequestGeneration : 0
+        let succeeded = false
+        try {
+            const result = await this.callProcess(
+                'broker',
+                'node:set-availability',
+                { ...request },
+                AVAILABILITY_CALL_TIMEOUT_MS
+            )
+            succeeded = true
+            return result
+        } finally {
+            // A failed/lost reply may already have installed the fence. Never
+            // resend. Remote replies and superseded sessions or requests cannot update self state.
+            if (
+                local &&
+                selfId === getModularBridgeState().getSelfId() &&
+                generation === this.brokerSessionGeneration &&
+                action === this.availabilityRequestGeneration
+            )
+                await this.hydrateAvailability(succeeded)
+        }
     }
 
     /** Register a handler invoked whenever the broker reports app:ready. */
@@ -1032,17 +1056,36 @@ class ModularSupervisor {
     }
 
     /** Read this node's pause state from the broker. */
-    private async hydrateAvailability(): Promise<void> {
+    private async hydrateAvailability(required = false): Promise<void> {
         const generation = this.brokerSessionGeneration
+        const selfId = getModularBridgeState().getSelfId()
+        const action = this.availabilityRequestGeneration
+        const observation = this.availability.observation
         try {
             const result = await this.callProcess('broker', 'policy:get', {})
-            if (generation !== this.brokerSessionGeneration) return
-            this.availability.applyResult(result)
+            if (
+                generation !== this.brokerSessionGeneration ||
+                selfId !== getModularBridgeState().getSelfId() ||
+                action !== this.availabilityRequestGeneration ||
+                observation !== this.availability.observation
+            )
+                return
+            this.availability.applyResult({ ...parseAvailabilityResult(result) })
         } catch (err) {
+            if (
+                generation !== this.brokerSessionGeneration ||
+                selfId !== getModularBridgeState().getSelfId() ||
+                action !== this.availabilityRequestGeneration ||
+                observation !== this.availability.observation
+            )
+                return
+            this.availability.reset()
             log.warn({
                 sublevel: 'broker',
                 message: `Unable to read node availability: ${getErrorString(err)}`
             })
+            if (required)
+                throw new Error(`Availability outcome is unconfirmed: ${getErrorString(err)}`)
         }
     }
 

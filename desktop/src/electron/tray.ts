@@ -47,6 +47,11 @@ class TrayManager {
     private displayChangeListener: (() => void) | undefined
     private visibilityInterval: ReturnType<typeof setInterval> | undefined
     private unsubscribeAvailability: (() => void) | undefined
+    private availabilityRequest: 'available' | 'paused' | null = null
+    private availabilityError: string | null = null
+    private availabilityReadError: string | null = null
+    private availabilityReading = false
+    private availabilityAction = 0
     private popupIdleTimer: ReturnType<typeof setTimeout> | undefined
     /** A popup created by a click, waiting for its first paint before it is shown. */
     private pendingReveal: { win: BrowserWindow; timer: ReturnType<typeof setTimeout> } | undefined
@@ -130,9 +135,34 @@ class TrayManager {
             { type: 'separator' },
             {
                 label: pause.label,
-                enabled: pause.enabled,
+                enabled:
+                    pause.enabled &&
+                    (this.availabilityRequest === null ||
+                        (pause.retryPause === true && this.availabilityRequest === 'paused')),
                 click: () => this.requestAvailability(pause.request)
             },
+            ...(pause.retryPause
+                ? [
+                      {
+                          label: 'Retry pause on this PC',
+                          enabled: this.availabilityRequest === null,
+                          click: () => this.requestAvailability('paused')
+                      }
+                  ]
+                : []),
+            ...(pause.refresh
+                ? [
+                      {
+                          label: 'Refresh availability on this PC',
+                          enabled: !this.availabilityReading && this.availabilityRequest === null,
+                          click: () => this.refreshAvailability()
+                      }
+                  ]
+                : []),
+            ...(this.availabilityError ? [{ label: this.availabilityError, enabled: false }] : []),
+            ...(this.availabilityReadError
+                ? [{ label: this.availabilityReadError, enabled: false }]
+                : []),
             { type: 'separator' },
             {
                 label: 'Stop background service and quit',
@@ -145,16 +175,52 @@ class TrayManager {
         ])
     }
 
+    private refreshAvailability(): void {
+        if (this.availabilityReading || this.availabilityRequest !== null) return
+        this.availabilityReading = true
+        this.availabilityReadError = null
+        this.refreshContextMenu()
+        getModularSupervisor()
+            .refreshAvailability()
+            .catch((error: unknown) => {
+                this.availabilityReadError = `Availability refresh failed: ${error}`
+            })
+            .finally(() => {
+                this.availabilityReading = false
+                this.refreshContextMenu()
+            })
+    }
+
     /** Pause or resume inference on this PC. The label follows the broker's own notifications. */
     private requestAvailability(request: 'available' | 'paused' | null): void {
         if (request === null) return
+        if (
+            this.availabilityRequest !== null &&
+            !(this.availabilityRequest === 'paused' && request === 'available')
+        )
+            return
+        this.availabilityRequest = request
+        const action = ++this.availabilityAction
+        this.availabilityError = null
+        this.availabilityReadError = null
+        this.refreshContextMenu()
         getModularSupervisor()
-            .setAvailability({ state: request })
+            .setAvailability(
+                request === 'paused'
+                    ? { state: request, pauseMode: 'configured' }
+                    : { state: request }
+            )
             .catch((error: unknown) => {
+                if (action === this.availabilityAction)
+                    this.availabilityError = `Availability request failed: ${error}`
                 log.warn({
                     sublevel: 'lifecycle',
                     message: `Could not set availability to ${request}: ${error}`
                 })
+            })
+            .finally(() => {
+                if (action === this.availabilityAction) this.availabilityRequest = null
+                this.refreshContextMenu()
             })
     }
 
