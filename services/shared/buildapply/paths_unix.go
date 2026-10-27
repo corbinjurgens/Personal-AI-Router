@@ -18,8 +18,6 @@ import (
 	"strings"
 	"syscall"
 	"unsafe"
-
-	"github.com/ebitengine/purego"
 )
 
 func nativeLocalPath(path string) error {
@@ -296,26 +294,18 @@ func darwinProcessIdentity(pid int) (ProcessIdentity, error) {
 	if err != nil {
 		return ProcessIdentity{}, err
 	}
-	// libproc's proc_pidpath returns the path length; the raw proc_info
-	// syscall returns 0 on success, so it cannot report the copied length.
-	handle, err := purego.Dlopen("/usr/lib/libSystem.B.dylib", purego.RTLD_NOW|purego.RTLD_LOCAL)
-	if err != nil {
-		return ProcessIdentity{}, errors.New("native process image unavailable")
-	}
-	defer purego.Dlclose(handle)
-	symbol, err := purego.Dlsym(handle, "proc_pidpath")
-	if err != nil {
-		return ProcessIdentity{}, errors.New("native process image unavailable")
-	}
-	var lookup func(int32, *byte, uint32) int32
-	purego.RegisterFunc(&lookup, symbol)
+	// SYS_proc_info, PROC_INFO_CALL_PIDINFO, PROC_PIDPATHINFO.
 	var buffer [4096]byte
-	n := lookup(int32(pid), &buffer[0], uint32(len(buffer)))
+	n, _, errno := syscall.Syscall6(336, 2, uintptr(pid), 11, 0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
 	runtime.KeepAlive(buffer)
-	if n <= 0 || n >= int32(len(buffer)) || buffer[n] != 0 || bytes.IndexByte(buffer[:n], 0) >= 0 {
+	if errno != 0 {
+		return ProcessIdentity{}, errno
+	}
+	end := bytes.IndexByte(buffer[:], 0)
+	if n == 0 || n >= uintptr(len(buffer)) || end <= 0 {
 		return ProcessIdentity{}, errors.New("native process image unavailable")
 	}
-	image := string(buffer[:n])
+	image := string(buffer[:end])
 	if !filepath.IsAbs(image) {
 		return ProcessIdentity{}, errors.New("invalid native image path")
 	}
