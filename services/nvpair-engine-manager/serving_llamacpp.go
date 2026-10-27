@@ -826,7 +826,7 @@ func (e *Executor) guardServingLoad(ctx context.Context, st *engineState, action
 		release()
 		return ctx, noop, err
 	}
-	return ctx, release, nil
+	return e.activationDispatchContext(ctx, st.manifest.Engine), release, nil
 }
 
 func registerServingLoad(ctx context.Context, st *engineState) (context.Context, func()) {
@@ -867,7 +867,7 @@ func (e *Executor) guardServingLoadLocked(ctx context.Context, st *engineState, 
 		release()
 		return ctx, func() {}, err
 	}
-	return ctx, release, nil
+	return e.activationDispatchContext(ctx, st.manifest.Engine), release, nil
 }
 
 // Reject undeclared loads before mutation admission. guardServingLoad repeats

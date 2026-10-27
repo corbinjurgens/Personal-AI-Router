@@ -523,6 +523,15 @@ func TestStopClearsUnhealthy(t *testing.T) {
 	if err := ex.Start(context.Background(), "d"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
+	state, err := ex.state("d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The positive stop owns this daemon. The external refusal and stop
+	// sentinel are pinned by TestCommandStopRefusesAdoptedExternalOwner.
+	state.mu.Lock()
+	state.adopted = false
+	state.mu.Unlock()
 	healthy.Store(false)
 	waitFor(t, 6*time.Second, func() bool { return hasErr(ex.Errors(), unhealthyID("d")) })
 	closed := make(chan struct{})

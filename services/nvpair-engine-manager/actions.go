@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"nvpair-shared/engines"
@@ -52,6 +53,22 @@ type ActionHTTPError struct {
 	Body       string
 }
 
+// The request enters client.Do while the projection gate is held. Hand it off
+// at transport entry so neither network I/O nor the response holds that gate.
+// Once handed off, the existing registered context owns its cancellation.
+type activationDispatchTransport struct {
+	next    http.RoundTripper
+	entered func()
+}
+
+func (t activationDispatchTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.entered()
+	if err := vetoCause(req.Context(), req.Context().Err()); err != nil {
+		return nil, err
+	}
+	return t.next.RoundTrip(req)
+}
+
 func (e *ActionHTTPError) Error() string {
 	return fmt.Sprintf("action %q: engine returned HTTP %d: %s", e.Action, e.StatusCode, e.Body)
 }
@@ -76,6 +93,26 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 	if err := st.manifest.validateActionModelParams(action, params, true); err != nil {
 		return nil, err
 	}
+	// Ollama's raw generate endpoint loads by default, even when reached through
+	// an action named unload_model. Resolve that action through the unload
+	// binding, dropping caller-supplied generation fields and fixed-param edits.
+	if st.manifest.FamilyOrDefault() == "ollama" && act.HTTP != nil && act.HTTP.Path == "/api/generate" {
+		if binding, ok := st.manifest.operationBinding(engines.OperationUnload); ok && binding.Action == action {
+			var zero *float64
+			if json.Unmarshal(binding.Params["keep_alive"], &zero) != nil || zero == nil || *zero != 0 || len(binding.Params) != 1 {
+				return nil, fmt.Errorf("engine %q: unload binding does not prove a generation-free unload", engine)
+			}
+			var fields map[string]json.RawMessage
+			var model string
+			if json.Unmarshal(params, &fields) != nil || json.Unmarshal(fields[binding.modelParam()], &model) != nil || model == "" {
+				return nil, fmt.Errorf("engine %q: unload requires its bound model identifier", engine)
+			}
+			params, err = binding.params(model)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	if action == pullModelAction {
 		return e.PullModelStream(ctx, engine, "", params)
 	}
@@ -90,7 +127,7 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 		defer done()
 	}
 	run := func() (json.RawMessage, error) {
-		loadCtx, releaseServingLoad, err := e.guardServingLoad(ctx, st, action, params)
+		loadCtx, releaseServingLoad, err := e.guardActionExecution(ctx, st, action, params)
 		if err != nil {
 			return nil, err
 		}
@@ -136,6 +173,34 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 		return nil, err
 	}
 	return res, nil
+}
+
+// LM Studio chat can JIT-load a model without invoking its load binding. Share
+// the activation veto, cancellation registry and lifecycle lock with loads so
+// Pause also cancels an accepted native chat on a protected external listener.
+func (e *Executor) guardActionExecution(ctx context.Context, st *engineState, action string, params json.RawMessage) (context.Context, func(), error) {
+	if st.manifest.FamilyOrDefault() != "lmstudio" || action != "chat" {
+		return e.guardServingLoad(ctx, st, action, params)
+	}
+	noop := func() {}
+	if err := e.activationVeto(st.manifest.Engine); err != nil {
+		return ctx, noop, err
+	}
+	ctx, cleanup := registerServingLoad(ctx, st)
+	if !residentLock(ctx, &st.opMu) {
+		cleanup()
+		return ctx, noop, vetoCause(ctx, ctx.Err())
+	}
+	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup() })
+	if err := e.activationVeto(st.manifest.Engine); err != nil {
+		release()
+		return ctx, noop, err
+	}
+	if err := vetoCause(ctx, ctx.Err()); err != nil {
+		release()
+		return ctx, noop, err
+	}
+	return e.activationDispatchContext(ctx, st.manifest.Engine), release, nil
 }
 
 // restartAfterAction restarts a running engine after one of its actions
@@ -264,6 +329,30 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 		keyedClient := *client
 		keyedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		client = &keyedClient
+	}
+	finishDispatch, err := beginActivationEffect(ctx)
+	if err != nil {
+		if err == context.Canceled || err == context.DeadlineExceeded {
+			// The final gate prevents dispatch, while retaining the action's
+			// ordinary HTTP cancellation envelope. Typed vetoes remain intact.
+			return nil, fmt.Errorf("action %q: %w", action, &url.Error{
+				Op: req.Method[:1] + strings.ToLower(req.Method[1:]), URL: req.URL.String(), Err: err,
+			})
+		}
+		return nil, err
+	}
+	if _, guarded := ctx.Value(activationDispatchKey{}).(activationDispatch); guarded {
+		finishDispatch = sync.OnceFunc(finishDispatch)
+		defer finishDispatch() // client validation can fail before transport entry
+		dispatchClient := *client
+		transport := client.Transport
+		if transport == nil {
+			transport = http.DefaultTransport
+		}
+		dispatchClient.Transport = activationDispatchTransport{next: transport, entered: finishDispatch}
+		client = &dispatchClient
+	} else {
+		finishDispatch()
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -460,14 +549,34 @@ func (e *Executor) runCommandOutput(ctx context.Context, argv []string) (string,
 	// CommandContext's default Cancel kills only the command. Bound pipe
 	// draining too: descendants may survive and retain the output pipes.
 	cmd.WaitDelay = stopGrace(Runtime{})
-	out, err := cmd.Output()
+	if _, guarded := ctx.Value(activationDispatchKey{}).(activationDispatch); !guarded {
+		out, err := cmd.Output()
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(ee.Stderr)))
+			}
+			return "", err
+		}
+		return string(out), nil
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	finishDispatch, err := beginActivationEffect(ctx)
+	if err != nil {
+		return "", err
+	}
+	err = cmd.Start()
+	finishDispatch()
+	if err == nil {
+		err = cmd.Wait()
+	}
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(ee.Stderr)))
+			return "", fmt.Errorf("%v: %s", ee, strings.TrimSpace(stderr.String()))
 		}
 		return "", err
 	}
-	return string(out), nil
+	return stdout.String(), nil
 }
 
 // lmsGetResumeAttempts bounds how many times a transient `lms get` download

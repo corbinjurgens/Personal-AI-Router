@@ -170,6 +170,7 @@ func TestNodeProjectionPublishedOnPersistAvailabilityAndReady(t *testing.T) {
 	ab := newActivatedBroker(t)
 	engine := attachFakeEngine(t, ab.b)
 	source := ab.b.activateEngineManagerSource()
+	ab.b.bindEngineMgr(ab.b.getEngineMgr(), source)
 
 	_, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
 		Policy: mustJSON(map[string]any{

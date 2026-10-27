@@ -209,6 +209,8 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 	wireFinish := &nodepolicy.FinishResidentResult{ReservationID: "fixture-reservation", Outcome: outcome}
 	finishEncoded := make(chan struct{})
 	finishReply := &modelConfigMatrixReply{value: wireFinish, encoded: finishEncoded}
+	finishSelected := make(chan struct{})
+	selectFinish := sync.OnceFunc(func() { close(finishSelected) })
 	phaseEncoded := make(chan struct{})
 	// Shared answer flags are read by fake-worker goroutines.
 	var answerMu sync.Mutex
@@ -226,6 +228,7 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 			}
 			result, failure := proxyAnswer(method, raw)
 			if state == "finish in flight" {
+				selectFinish()
 				return finishReply, holdSuccessReply
 			}
 			return result, failure
@@ -261,7 +264,9 @@ func runModelConfigEventTrace(t *testing.T, state string, events []string, f *mo
 			f.engine.releaseHeld()
 			loadLive = false
 			if state == "finish in flight" && !finishError {
-				awaitModelConfigMatrixCall(t, f.proxy, nodepolicy.MethodFinishResident)
+				// Recording the call precedes answer selection. Join the selected
+				// held reply before an event can change finishError.
+				awaitModelConfigDone(t, finishSelected)
 				finishLive = true
 			} else {
 				awaitModelConfigDone(t, done)

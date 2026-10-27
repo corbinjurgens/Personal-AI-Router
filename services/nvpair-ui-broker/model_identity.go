@@ -49,7 +49,17 @@ func (b *Broker) activateEngineManagerSource() *engineManagerSource {
 	r.mu.Lock()
 	r.engineManagerSource = source
 	r.engineIdentity = nil
+	invalidated := r.current.Availability == nodepolicy.Paused && r.live == nodepolicy.Paused
+	if invalidated {
+		r.live = nodepolicy.Draining
+	}
 	r.mu.Unlock()
+	if invalidated {
+		go func() {
+			b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
+			b.notifyAvailability()
+		}()
+	}
 	b.identityChanged()
 	return source
 }
@@ -104,7 +114,17 @@ func (b *Broker) retireEngineManagerSource(source *engineManagerSource) {
 	}
 	r.engineManagerSource = nil
 	r.engineIdentity = nil
+	invalidated := r.current.Availability == nodepolicy.Paused && r.live == nodepolicy.Paused
+	if invalidated {
+		r.live = nodepolicy.Draining
+	}
 	r.mu.Unlock()
+	if invalidated {
+		go func() {
+			b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
+			b.notifyAvailability()
+		}()
+	}
 	b.identityChanged()
 }
 

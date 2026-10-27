@@ -550,6 +550,17 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 			return fmt.Errorf("NE pre-spawn source recheck: %w", err)
 		}
 	}
+	// Source preparation and persistence above may block. Order the actual
+	// spawn against Pause, rather than relying on their earlier context check.
+	e.nodeProjection.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		e.nodeProjection.mu.Unlock()
+		return err
+	}
+	if e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked {
+		e.nodeProjection.mu.Unlock()
+		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+	}
 	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
 		if serving {
 			if prepared.Credential != "" {
@@ -567,6 +578,7 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 			st.logs.append(stream, line)
 		}
 	})
+	e.nodeProjection.mu.Unlock()
 	if err != nil {
 		if allocated {
 			err = errors.Join(err, e.clearAllocatedPort(st, engine))
@@ -706,17 +718,23 @@ func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineSta
 			}
 		}
 		argv := append([]string{launch.Bin}, launch.Args...)
-		run := e.runCommand
-		if rt.LaunchArgs != nil || rt.LaunchEnv != nil || len(launch.Env) > 0 {
-			run = func(ctx context.Context, argv []string) error {
-				return runPrivateLaunchCommand(ctx, argv, launch.Env, launchDiagnosticArgs(rt))
-			}
-		}
 		// A control CLI may detach its daemon before returning, then fail or
 		// be cancelled. Attempt official cleanup once any start command runs,
 		// even when that command never reports success.
-		startAttempted = true
-		if err := run(ctx, argv); err != nil {
+		if err := ctx.Err(); err != nil {
+			return cleanup(err)
+		}
+		if err := e.activationVeto(engine); err != nil {
+			return cleanup(err)
+		}
+		start := func(cmd *exec.Cmd) error {
+			err := e.startActivationCommand(cmd)
+			if err == nil {
+				startAttempted = true
+			}
+			return err
+		}
+		if err := runPrivateLaunchCommandWithStart(ctx, argv, launch.Env, launchDiagnosticArgs(rt), start); err != nil {
 			werr := fmt.Errorf("start command failed: %w", err)
 			werr = e.diagnoseStartFailure(ctx, st, port, err, werr)
 			e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
@@ -735,6 +753,21 @@ func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineSta
 
 // Capture vendor startup diagnostics without interpreting engine options.
 func runPrivateLaunchCommand(ctx context.Context, argv []string, environment map[string]string, privateArgs []string) error {
+	return runPrivateLaunchCommandWithStart(ctx, argv, environment, privateArgs, func(cmd *exec.Cmd) error { return cmd.Start() })
+}
+
+// The projection gate covers only creation of the control process. Waiting for
+// a CLI (which may detach a daemon) must not prevent Pause from being stored.
+func (e *Executor) startActivationCommand(cmd *exec.Cmd) error {
+	e.nodeProjection.mu.Lock()
+	defer e.nodeProjection.mu.Unlock()
+	if e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked {
+		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+	}
+	return cmd.Start()
+}
+
+func runPrivateLaunchCommandWithStart(ctx context.Context, argv []string, environment map[string]string, privateArgs []string, start func(*exec.Cmd) error) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("launch executable is missing")
 	}
@@ -744,7 +777,10 @@ func runPrivateLaunchCommand(ctx context.Context, argv []string, environment map
 	cmd.Stdout, cmd.Stderr = diagnostics, diagnostics
 	cmd.Env = childEnv(environment)
 	configureSysProcAttr(cmd)
-	if err := cmd.Run(); err != nil {
+	if err := start(cmd); err != nil {
+		return diagnostics.failure(fmt.Errorf("launch command failed: %w", err))
+	}
+	if err := cmd.Wait(); err != nil {
 		return diagnostics.failure(fmt.Errorf("launch command failed: %w", err))
 	}
 	return nil
@@ -940,61 +976,46 @@ func (e *Executor) doStopOwnedContext(ctx context.Context, st *engineState, engi
 		st.mu.Unlock()
 		return &stopOwnershipChangedError{engine}
 	}
-	if !st.running {
+	if !st.running && st.proc == nil {
 		st.mu.Unlock()
 		return nil
 	}
 	proc := st.proc
 	port = st.port
 	adopted := st.adopted
-	binPath := st.binPath
+	if mode == "command" && adopted {
+		st.mu.Unlock()
+		if rt.Ready != nil && e.waitUnavailableContext(ctx, rt.Ready, port, time.Second) {
+			e.markStopped(st, engine)
+			return nil
+		}
+		e.emitState(engine)
+		return fmt.Errorf("cannot stop engine %q: it is running under external management; stop it in its own application, then retry", engine)
+	}
 	if mode != "command" && proc == nil {
 		st.mu.Unlock()
 		if adopted {
-			if rt.Ready != nil && e.waitUnavailableContext(ctx, rt.Ready, port, time.Second) {
+			// Reuse the exact managed-install/image owner, including its PID
+			// exit proof. Endpoint refusal alone cannot clear a surviving child.
+			if reclaimed, err := e.reclaimOrphan(ctx, st, engine, port); reclaimed || err != nil {
+				return err
+			}
+			evidence, known, err := e.desired.processStop(engine)
+			if err != nil {
+				return err
+			}
+			if known && (evidence.PID == 0 || !orphanPIDExited(evidence.PID)) {
+				return fmt.Errorf("cannot stop engine %q: saved process identity is unverified", engine)
+			}
+			st.mu.Lock()
+			externalPID := st.reclaimPID
+			st.mu.Unlock()
+			if externalPID > 0 && orphanPIDExited(externalPID) && rt.Ready != nil && e.waitUnavailableContext(ctx, rt.Ready, port, time.Second) {
 				e.markStopped(st, engine)
 				return nil
 			}
-			// The listener is still up. If it's a PAIR-managed orphan on our
-			// own port — our engine binary left running by a prior run that
-			// lost its handle — reclaim it by terminating the PID bound to the
-			// port, so a user OFF actually takes effect instead of being
-			// refused forever. This is precise to the port, so a genuine
-			// desktop app on a different port (e.g. Ollama's own :11434 while
-			// we manage :11435) is never touched; we decline only a process
-			// whose image we can't confirm is ours.
-			pid, image, ok := pidOnPort(port)
-			if ok && isManagedInstallPath(binPath, st.installDir) && isOurEngineImage(image, binPath) {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				st.mu.Lock()
-				st.stopping = true
-				st.reclaimPID = pid
-				if st.healthStop != nil {
-					st.healthStop()
-					st.healthStop = nil
-				}
-				st.mu.Unlock()
-				grace := stopGrace(rt)
-				if err := terminatePIDContext(ctx, pid, grace); err != nil && ctx.Err() != nil {
-					e.failOrphanReclaim(st, engine, err)
-					return err
-				}
-				if !pidAlive(pid) {
-					e.markStopped(st, engine)
-					return nil
-				}
-				if rt.Ready == nil || e.waitUnavailableContext(ctx, rt.Ready, port, grace+2*time.Second) {
-					e.markStopped(st, engine)
-					return nil
-				}
-				if err := ctx.Err(); err != nil {
-					e.failOrphanReclaim(st, engine, err)
-					return err
-				}
-			}
 			e.emitState(engine)
+			pid, image, ok := pidOnPort(port)
 			if ok {
 				return fmt.Errorf("cannot stop engine %q: it is running under external management (pid %d, %s); stop it in its own application, then retry", engine, pid, image)
 			}

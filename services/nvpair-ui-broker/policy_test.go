@@ -438,11 +438,15 @@ func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 			}
 			statuses := make([]map[string]any, 0, len(engines))
 			for engine, running := range engines {
-				statuses = append(statuses, map[string]any{"engine": engine, "running": running})
+				statuses = append(statuses, map[string]any{"engine": engine, "running": running, "terminationVerified": slept[engine]})
 			}
 			return map[string]any{"engines": statuses}, ""
 		case "engine:models":
-			return map[string]any{"loadedByEngine": b.loadedSnapshot()}, ""
+			loaded := b.loadedSnapshot()
+			for engine := range slept {
+				loaded[engine] = []string{}
+			}
+			return map[string]any{"loadedByEngine": loaded}, ""
 		case engineSleepMethod:
 			var p struct {
 				Engine string `json:"engine"`
@@ -451,6 +455,7 @@ func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 				return nil, err.Error()
 			}
 			slept[p.Engine] = true
+			return map[string]any{"engine": p.Engine, "running": false, "terminationVerified": true}, ""
 		case engineWakeMethod:
 			var p struct {
 				Engine string `json:"engine"`
@@ -462,7 +467,19 @@ func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 		}
 		return map[string]bool{"ok": true}, ""
 	})
-	b.setEngineMgr(&rpcWorker{peer: peer})
+	// Use a caller's preactivated source, or give a replacement its own source.
+	// A worker alone cannot prove physical shutdown for the current manager.
+	_, previousSource := b.pauseManager()
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	source := r.engineManagerSource
+	r.mu.Unlock()
+	if source == nil || (previousSource != nil && source == previousSource) {
+		source = b.activateEngineManagerSource()
+	}
+	worker := &rpcWorker{peer: peer}
+	b.setEngineMgr(worker)
+	b.bindEngineMgr(worker, source)
 	return f
 }
 
@@ -574,7 +591,7 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 	}
 	b, _ = newPolicyBroker(t)
 	b.loadNodePolicy(path)
-	if got := b.localPolicy(); got.Availability != nodepolicy.Paused || !got.RecoveryRequired {
+	if got := b.localPolicy(); got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused || !got.RecoveryRequired {
 		t.Fatalf("invalid file was not replaced by the paused recovery policy: availability=%q recoveryRequired=%t", got.Availability, got.RecoveryRequired)
 	}
 	if bad, err := os.ReadFile(path + ".bad"); err != nil || !strings.Contains(string(bad), "sideways") {
@@ -587,7 +604,7 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 	writePolicyFile(t, path, paused)
 	b, _ = newPolicyBroker(t)
 	b.loadNodePolicy(path)
-	if got := b.localPolicy(); got.Availability != nodepolicy.Paused || got.Policy.Admission.MaxResidentModels != 3 {
+	if got := b.localPolicy(); got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused || got.Policy.Admission.MaxResidentModels != 3 {
 		t.Fatalf("valid file not loaded: %+v", got)
 	}
 
@@ -602,8 +619,8 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 	if got.Policy.Idle.UnloadAfterMinutes != 7 {
 		t.Fatalf("policy:set was not persisted: %+v", got.Policy.Idle)
 	}
-	if got.Availability != nodepolicy.Paused {
-		t.Fatalf("policy:set changed availability to %q; only node:set-availability may", got.Availability)
+	if got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused {
+		t.Fatalf("policy:set changed paused intent or established unproved shutdown: live=%q stored=%q", got.Availability, got.Policy.Availability)
 	}
 	if entries, _ := filepath.Glob(filepath.Join(dir, nodepolicy.FileName+".*.tmp")); len(entries) != 0 {
 		t.Fatalf("atomic write left temp files: %v", entries)
@@ -645,7 +662,7 @@ func TestModelControlPolicyLoadMalformedShapeRequiresRecovery(t *testing.T) {
 	}
 	b, _ := newPolicyBroker(t)
 	b.loadNodePolicy(path)
-	if got := b.localPolicy(); !got.RecoveryRequired || got.Availability != nodepolicy.Paused {
+	if got := b.localPolicy(); !got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused {
 		t.Fatal("malformed shape did not invoke conservative recovery")
 	}
 	bad, err := os.ReadFile(path + ".bad")
@@ -711,7 +728,7 @@ func TestModelControlPolicyLoadLegacyKeepsDisk(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	b.loadNodePolicy(path)
 	got := b.localPolicy()
-	if got.RecoveryRequired || got.Availability != nodepolicy.Paused || got.Policy.Version != 2 || got.Policy.Revision != "0" || len(got.Policy.Roles) != 1 || len(got.Policy.Tiers[nodepolicy.TierWeak]) != 1 {
+	if got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused || got.Policy.Version != 2 || got.Policy.Revision != "0" || len(got.Policy.Roles) != 1 || len(got.Policy.Tiers[nodepolicy.TierWeak]) != 1 {
 		t.Fatal("legacy repair lost state or invoked recovery")
 	}
 	onDisk, err := os.ReadFile(path)
@@ -970,8 +987,11 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	if calls[0].method != nodepolicy.MethodSetAvailability {
 		t.Fatalf("first push after a restart = %s; availability must reach the proxy first", calls[0].method)
 	}
-	if p := availabilityPushes(calls); p[0].State != nodepolicy.Paused {
-		t.Fatalf("replayed availability = %+v, want paused", p[0])
+	if p := availabilityPushes(calls); p[0].State != nodepolicy.Draining || p[0].CancelActive {
+		t.Fatalf("replayed availability = %+v, want draining until current-manager physical proof", p[0])
+	}
+	if got := b.localPolicy(); got.Policy.Availability != nodepolicy.Paused {
+		t.Fatalf("manager replacement changed stored pause intent: %+v", got)
 	}
 	for _, c := range calls {
 		switch c.method {
@@ -1230,12 +1250,19 @@ func TestPauseFinishWaitsForDrainThenUnloadsAndStops(t *testing.T) {
 		t.Fatal("pause did not finish after the drain")
 	}
 	calls := pauseLifecycleCalls(engine.snapshot())
-	if len(calls) != 2 || calls[0].method != engineUnloadModelMethod || calls[1].method != engineSleepMethod {
-		t.Fatalf("engine calls = %v, want unload then sleep", engine.methods(""))
+	if len(calls) != 1 || calls[0].method != engineSleepMethod {
+		t.Fatalf("engine calls = %v, want intent-neutral manager-owned cleanup", engine.methods(""))
 	}
-	if !strings.Contains(string(calls[0].params), `"model":"m1"`) {
-		t.Fatalf("unload params = %s", calls[0].params)
+	var slept struct {
+		Engine string `json:"engine"`
 	}
+	if err := json.Unmarshal(calls[0].params, &slept); err != nil {
+		t.Fatalf("decode Sleep params: %v", err)
+	}
+	if slept.Engine != "ollama" {
+		t.Fatalf("Sleep targeted %q, want ollama", slept.Engine)
+	}
+	requirePauseManagerCleanup(t, b, "ollama")
 	pushes := availabilityPushes(proxy.snapshot())
 	if last := pushes[len(pushes)-1]; last.State != nodepolicy.Paused {
 		t.Fatalf("final availability push = %+v", last)
@@ -1258,9 +1285,10 @@ func TestPauseCancelPushesCancelActiveImmediately(t *testing.T) {
 		t.Fatalf("availability pushes = %+v, want draining with cancelActive first", p)
 	}
 	calls := pauseLifecycleCalls(engine.snapshot())
-	if len(calls) != 2 || calls[0].method != engineUnloadModelMethod || calls[1].method != engineSleepMethod {
-		t.Fatalf("legacy false pause options skipped unload or stop: %v", engine.methods(""))
+	if len(calls) != 1 || calls[0].method != engineSleepMethod {
+		t.Fatalf("legacy false pause options skipped manager-owned cleanup: %v", engine.methods(""))
 	}
+	requirePauseManagerCleanup(t, b, "ollama")
 }
 
 func TestPauseDrainTimeoutCancelsActiveWork(t *testing.T) {
@@ -2549,6 +2577,14 @@ func freshBroker(t *testing.T, path string) *Broker {
 	return b
 }
 
+// Loading durable Pause installs its fence, but no manager has proved shutdown.
+func unprovedStartupAvailability(stored nodepolicy.Availability) nodepolicy.Availability {
+	if stored == nodepolicy.Paused {
+		return nodepolicy.Draining
+	}
+	return stored
+}
+
 func revisionNumber(t *testing.T, p nodepolicy.Policy) int64 {
 	t.Helper()
 	n, err := strconv.ParseInt(p.Revision, 10, 64)
@@ -2831,7 +2867,7 @@ func TestAvailabilityPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 					t.Fatal("restart after a failed save needs recovery")
 				}
 				want := before.Policy
-				if !reflect.DeepEqual(fresh.Policy, want) || fresh.Availability != want.Availability {
+				if !reflect.DeepEqual(fresh.Policy, want) || fresh.Availability != unprovedStartupAvailability(want.Availability) {
 					t.Errorf("restart loaded revision %q availability %q (live %q), want the wholly old document at revision %q availability %q",
 						fresh.Policy.Revision, fresh.Policy.Availability, fresh.Availability, want.Revision, want.Availability)
 				}
@@ -2941,8 +2977,8 @@ func requireLandedAvailability(t *testing.T, rb *routedBroker, want nodepolicy.P
 	if announced.ActiveRevision != want.Revision || announced.Activation != activationActive || announced.ActivationError != "" {
 		t.Errorf("announced activation = %+v, want active revision %s", announced, want.Revision)
 	}
-	if got := freshBroker(t, rb.path).localPolicy().Availability; got != want.Availability {
-		t.Errorf("restart live availability = %q, want %q", got, want.Availability)
+	if got := freshBroker(t, rb.path).localPolicy().Availability; got != unprovedStartupAvailability(want.Availability) {
+		t.Errorf("restart live availability = %q, want %q until current-manager shutdown proof", got, unprovedStartupAvailability(want.Availability))
 	}
 }
 
@@ -2991,7 +3027,7 @@ func TestAvailabilityVersion1FirstSavePublicationFaultBoundaries(t *testing.T) {
 				if len(rb.proxy.snapshot()) != callStart || len(rb.out.frames()) != frameStart+1 {
 					t.Error("failure before replacement pushed or announced a change")
 				}
-				if got := freshBroker(t, rb.path).localPolicy(); got.RecoveryRequired || !reflect.DeepEqual(got.Policy, before.Policy) || got.Availability != before.Availability {
+				if got := freshBroker(t, rb.path).localPolicy(); got.RecoveryRequired || !reflect.DeepEqual(got.Policy, before.Policy) || got.Availability != unprovedStartupAvailability(before.Policy.Availability) {
 					t.Error("restart did not load the unchanged migrated v1 document and availability")
 				}
 			})
@@ -3088,7 +3124,7 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 				t.Fatalf("landed transition = %q, %v, want completed %q and durability warning", got, err, to)
 			}
 			requireLandedAvailability(t, rb, want, callStart, frameStart)
-			wantMethods := []string{"engine:get-installed", "engine:models", engineUnloadModelMethod, engineSleepMethod, "engine:get-installed"}
+			wantMethods := []string{"engine:get-installed", engineSleepMethod, "engine:get-installed"}
 			if to == nodepolicy.Available {
 				wantMethods = []string{restoreEnabledEnginesMethod, engineWakeMethod}
 				rb.engine.waitFor("restore and wake after landed resume", func(calls []policyCall) bool { return len(calls) >= engineStart+2 })
@@ -3097,7 +3133,7 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 			var gotMethods []string
 			for _, call := range calls {
 				gotMethods = append(gotMethods, call.method)
-				if call.method == restoreEnabledEnginesMethod || call.method == "engine:get-installed" || call.method == "engine:models" {
+				if call.method == restoreEnabledEnginesMethod || call.method == "engine:get-installed" {
 					continue
 				}
 				var params struct {
@@ -3107,16 +3143,25 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 				if err := json.Unmarshal(call.params, &params); err != nil {
 					t.Fatalf("decode %s params: %v", call.method, err)
 				}
-				if params.Engine != "ollama" || (call.method == engineUnloadModelMethod && params.Model != "m1") {
-					t.Errorf("engine action %s params = %+v, want ollama and loaded model m1 for unload", call.method, params)
+				if params.Engine != "ollama" || params.Model != "" {
+					t.Errorf("engine action %s params = %+v, want intent-neutral lifecycle operation for ollama", call.method, params)
 				}
 			}
-			if !reflect.DeepEqual(gotMethods, wantMethods) {
+			// Known engines begin stopping independently of the first inventory.
+			// Both orders still require the final readback after the Sleep reply.
+			matched := reflect.DeepEqual(gotMethods, wantMethods)
+			if to == nodepolicy.Paused && reflect.DeepEqual(gotMethods, []string{engineSleepMethod, "engine:get-installed", "engine:get-installed"}) {
+				matched = true
+			}
+			if !matched {
 				t.Errorf("landed transition engine actions = %v, want %v", gotMethods, wantMethods)
+			}
+			if to == nodepolicy.Paused {
+				requirePauseManagerCleanup(t, rb.b, "ollama")
 			}
 		})
 	}
-	test("pause unloads and sleeps", nodepolicy.Paused, "13")
+	test("pause completes manager-owned cleanup", nodepolicy.Paused, "13")
 	test("resume restores and wakes", nodepolicy.Available, "14")
 }
 
@@ -3155,7 +3200,7 @@ func TestAvailabilityDuringRecoveryPreservesFileUntilPolicyReplacementLands(t *t
 			if policyPushes(rb.proxy) != 0 || len(policyChangedRevisions(t, rb.out)) != 0 {
 				t.Error("unsaved recovery availability pushed or announced a policy revision")
 			}
-			if fresh := freshBroker(t, rb.path).localPolicy(); !fresh.RecoveryRequired || fresh.Availability != nodepolicy.Paused {
+			if fresh := freshBroker(t, rb.path).localPolicy(); !fresh.RecoveryRequired || fresh.Availability != nodepolicy.Draining || fresh.Policy.Availability != nodepolicy.Paused {
 				t.Error("restart did not preserve paused recovery on the corrupt file")
 			}
 			want.Revision, want.Idle.UnloadAfterMinutes = "5", 7
@@ -3365,8 +3410,8 @@ func TestPolicyRecovery(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				rb := newBrokerOnFile(t, contents)
 				got := rb.b.localPolicy()
-				if !got.RecoveryRequired || got.Availability != nodepolicy.Paused || got.Policy.Availability != nodepolicy.Paused {
-					t.Fatalf("recovery=%t live=%q persisted=%q, want recovery required and paused",
+				if !got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused {
+					t.Fatalf("recovery=%t live=%q persisted=%q, want recovery required, draining and paused intent",
 						got.RecoveryRequired, got.Availability, got.Policy.Availability)
 				}
 				if len(got.Policy.Tiers) != 0 || len(got.Policy.Profiles) != 0 {
@@ -3409,8 +3454,8 @@ func TestPolicyRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := freshBroker(t, path).localPolicy()
-		if !got.RecoveryRequired || got.Availability != nodepolicy.Paused {
-			t.Fatalf("recovery=%t live=%q, want recovery required and paused", got.RecoveryRequired, got.Availability)
+		if !got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused {
+			t.Fatalf("recovery=%t live=%q, want recovery required and draining with paused intent", got.RecoveryRequired, got.Availability)
 		}
 	})
 
@@ -3472,8 +3517,8 @@ func TestPolicyRecovery(t *testing.T) {
 			t.Error("the recovering set kept revision 0")
 		}
 		got := rb.b.localPolicy()
-		if got.RecoveryRequired || got.Availability != nodepolicy.Paused {
-			t.Errorf("after the set: recovery=%t live=%q, want recovery cleared and the node still paused", got.RecoveryRequired, got.Availability)
+		if got.RecoveryRequired || got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused {
+			t.Errorf("after the set: recovery=%t live=%q, want recovery cleared and execution still fenced awaiting shutdown proof", got.RecoveryRequired, got.Availability)
 		}
 		fresh := freshBroker(t, rb.path).localPolicy()
 		if fresh.RecoveryRequired || fresh.Policy.Idle.UnloadAfterMinutes != 7 || fresh.Policy.Revision != policy.Revision {
