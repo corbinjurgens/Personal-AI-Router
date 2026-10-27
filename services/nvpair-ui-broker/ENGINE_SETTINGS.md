@@ -76,6 +76,11 @@ ambiguous and requires fresh local reconciliation before any native effect.
 This also conservatively covers a crash after successful acceptance but before
 its first confirmed progress stage; that window cannot prove durable acceptance
 from the journal alone.
+The attempt receipt becomes `failed`, with snapshot phase `applying`, coupled
+stage `acceptance-uncertain` and an interrupted-before-changes explanation.
+Recovery performs no native configure or policy publication from that bare stage.
+A fresh local superseding preview is required; an identical request-ID retry
+reads the historical failed attempt rather than replaying it.
 
 A load-plus-policy acceptance reserves the complete policy document. Ordinary
 local and peer `policy:set` calls, including Advanced, role, copy and TUI
@@ -153,8 +158,8 @@ propagation is not part of this API.
 | Method | Request | Result |
 | --- | --- | --- |
 | `engine:get-settings` | `{engine, nodeId?}` | Full snapshot |
-| `engine:preview-settings` | `{engine, nodeId?, expectedRevision, settings, resolution?}` | Normalized settings, errors, conflict, restart/rebind summary |
-| `engine:apply-settings` | Preview request plus `requestId` | `{revision, phase}` acknowledgement |
+| `engine:preview-settings` | `{engine, nodeId?, expectedRevision, settings, modelChange?, resolution?}` | Normalized settings, errors, conflict, selected diff, review digest and runtime impact |
+| `engine:apply-settings` | Preview request plus `requestId`, and reviewed `modelChange.previewDigest` for selected edits | `{revision, phase}` attempt receipt after target-owned execution; lost replies require readback |
 
 `engine` is `ollama`, `lmstudio`, or `llamacpp`. `settings` contains all three
 fields: `serverPort`, `proxyPort`, `launchText`. The last field contains

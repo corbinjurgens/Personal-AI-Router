@@ -8,10 +8,15 @@ SPDX-License-Identifier: Apache-2.0
 Model configuration contract: inspection is connected through the typed bridge,
 existing broker settings relay and pinned engine-control read route. Portable
 load edits, target resolutions, selected policy patches and preview impact are
-represented; ordinary settings clients preserve model loads. Bounded inspection,
-native apply/coupled recovery and advisory Auto implementation are pending.
-Typed changes currently refuse before journal/runtime effects. No runtime,
-qualification or hardware-fit acceptance is claimed by this contract unit.
+represented; ordinary settings clients preserve model loads. Bounded inspection
+and reviewed finite llama.cpp load application use the manager and broker's
+coupled recovery path. Advisory estimates and reviewed Auto remain unavailable.
+Qualification and hardware-fit acceptance are not implied by a settings receipt.
+Load-plus-policy changes reserve raw policy writers through native persistence
+and target policy activation. Pause remains independently available, generation
+locks retain their generation-only scope, and destination copy preserves
+unselected fields. Interrupted bare acceptance requires fresh local review;
+later durable stages recover the frozen resolution.
 
 This document records the current integration status between Personal AI Router
 and the `services/` backend. It is a present-state reference, not a release
