@@ -329,6 +329,31 @@ the broker from the same installation directory. The broker is the parent
 process and canonical backend entry point: it supervises the worker subprocesses
 on the UI's behalf, speaking JSON-RPC over stdio.
 
+`nvpair-service` accepts same-user clients through `ipc.ListenPrivate` (a 0600
+Unix socket or a named pipe restricted to the process user's SID), multiplexes
+their requests to broker stdio, and the broker's local dispatcher relays
+`engine:set-credential` and `engine:credential-state` through the generic engine
+relay to engine-manager's stdio dispatcher. Set accepts an empty credential to
+Clear; both methods return only `supported` and `configured`, or a sanitized
+store error. Relay diagnostics contain operational metadata, never request or
+response bodies. Engine-manager owns the credential cache and native store.
+
+Peer HTTP requests instead enter engine-manager's pinned mTLS control server,
+including its reverse transport, through the explicit `controlServer.routes`
+registry and the existing settings, switch and policy relays. That path has no
+generic peer-to-broker JSON-RPC ingress and no credential route, remote wrapper
+or credential subscription. Local dispatch refuses
+`internal:local-engine-credential` before generic relaying, regardless of a
+client's node selector. Only broker-owned calls retrieve that snapshot for local
+health and proxy configuration, and use its key only when the returned port
+exactly matches the effective engine port. This boundary trusts same-user
+processes; it does not depend on a UI remote-node check or a method's name.
+
+Keyed LM Studio health checks use loopback and refuse redirects. A failed health or
+unavailable manager withdraws ordinary engine readiness and clears the proxy's
+obsolete key. An independently eligible managed facade can remain advertised
+while its local engine is not ready.
+
 The broker supervises **ten** worker subprocesses, so a client gets the whole
 backend behind one endpoint. Each is spawned at startup and relayed under its own
 namespace:

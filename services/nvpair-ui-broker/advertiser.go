@@ -191,15 +191,19 @@ func (b *Broker) reconcileAdvertiseLMStudio(client *http.Client) {
 			probe = false
 		}
 	}
-	up := probe && proxyPort != 0 && enginePort != proxyPort && checkEngineHealth(lmstudioProxyProfile, client, enginePort, "")
+	credential := ""
+	if enginePort > 0 {
+		credential = b.localEngineCredential("lmstudio", enginePort)
+	}
+	up := probe && proxyPort != 0 && enginePort != proxyPort && checkEngineHealth(lmstudioProxyProfile, client, enginePort, credential)
 	if up {
 		b.registerService(noderec.RegisterParams{Service: noderec.ServiceLMStudio, Port: proxyPort})
-		b.setProxyLocalBackend(b.getLMStudioProxy(), "lmstudio", enginePort, true)
+		b.setProxyLocalBackendKeyed(b.getLMStudioProxy(), "lmstudio", enginePort, true, credential)
 	} else {
 		if !b.registerBindingFacadeLocked(lmstudioProxyProfile) {
 			b.unregisterService(noderec.ServiceLMStudio)
 		}
-		b.setProxyLocalBackend(b.getLMStudioProxy(), "lmstudio", enginePort, false)
+		b.setProxyLocalBackendKeyed(b.getLMStudioProxy(), "lmstudio", enginePort, false, "")
 	}
 }
 
@@ -313,9 +317,10 @@ func (b *Broker) setProxyLocalBackendKeyed(p *proxyProcess, engine string, port 
 }
 
 // localEngineCredential asks engine-manager for the native API key of the
-// engine's owned launch, and keeps it only when that launch serves the port
-// about to be configured. Any failure gives no key; the engine then rejects
-// PAIR's requests and is not advertised, with no unauthenticated fallback.
+// engine's running instance (an owned launch or adopted command-mode server),
+// and keeps it only when that instance serves the port about to be configured.
+// Any failure gives no key. A protected engine then fails its health probe;
+// a managed cold facade may remain registered without a ready local engine.
 func (b *Broker) localEngineCredential(engine string, port int) string {
 	em := b.getEngineMgr()
 	if em == nil {
