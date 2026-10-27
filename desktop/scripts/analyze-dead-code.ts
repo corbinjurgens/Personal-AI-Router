@@ -620,8 +620,13 @@ function main(): void {
         agg.unusedFiles.length +
         countExports(agg.unusedExportsByFile) +
         countExports(agg.unusedTypesByFile) +
+        countExports(agg.unusedEnumMembersByFile) +
+        countExports(agg.duplicatesByFile) +
+        countExports(agg.unlistedByFile) +
+        countExports(agg.missingBinariesByFile) +
         agg.unusedDependencies.length +
         agg.unusedDevDependencies.length +
+        agg.unusedOptionalPeers.length +
         tscNode.length +
         tscWeb.length
     console.log('\nDead-code report written to dead-code-report.md')
