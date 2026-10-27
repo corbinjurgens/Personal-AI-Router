@@ -294,15 +294,17 @@ func darwinProcessIdentity(pid int) (ProcessIdentity, error) {
 	if err != nil {
 		return ProcessIdentity{}, err
 	}
-	// SYS_proc_info, PROC_INFO_CALL_PIDINFO, PROC_PIDPATHINFO.
+	// SYS_proc_info, PROC_INFO_CALL_PIDINFO, PROC_PIDPATHINFO. The raw call
+	// returns 0 on success (libproc's proc_pidpath derives the length with
+	// strlen), so the copied path is bounded by its terminator instead.
 	var buffer [4096]byte
-	n, _, errno := syscall.Syscall6(336, 2, uintptr(pid), 11, 0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
+	_, _, errno := syscall.Syscall6(336, 2, uintptr(pid), 11, 0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)))
 	runtime.KeepAlive(buffer)
 	if errno != 0 {
 		return ProcessIdentity{}, errno
 	}
 	end := bytes.IndexByte(buffer[:], 0)
-	if n == 0 || n >= uintptr(len(buffer)) || end <= 0 {
+	if end <= 0 {
 		return ProcessIdentity{}, errors.New("native process image unavailable")
 	}
 	image := string(buffer[:end])
