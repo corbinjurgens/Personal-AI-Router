@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -127,7 +126,7 @@ func (m *Mesh) Refresh() {
 	}
 	m.trust.Reload()
 
-	certPEM, certErr := os.ReadFile(filepath.Join(m.dir, "node.crt"))
+	certPEM, certErr := readAuthorityFile(filepath.Join(m.dir, "node.crt"))
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// Re-parse only when the leaf on disk differs from the one we hold: the
@@ -259,7 +258,7 @@ func (m *Mesh) HasPin(uuid string) bool {
 // changing authority rather than carrying cached admissions across teardown.
 // It never writes or upgrades the cluster-manager's records.
 func (m *Mesh) PeerServiceIncarnation(peerUUID string) (string, bool) {
-	return m.peerServiceIncarnation(peerUUID, os.ReadFile)
+	return m.peerServiceIncarnation(peerUUID, readAuthorityFile)
 }
 
 // PeerServiceDiagnostic describes the original deciding reads, without another
@@ -295,7 +294,7 @@ func (d *PeerServiceDiagnostic) refuse(predicate string, err error) (peerService
 // the same order as PeerServiceIncarnation. Callers log only on refusal.
 func (m *Mesh) PeerServiceIncarnationWithDiagnostic(peerUUID string) (string, bool, PeerServiceDiagnostic) {
 	var diagnostic PeerServiceDiagnostic
-	incarnation, ok := m.peerServiceIncarnationDiagnostic(peerUUID, os.ReadFile, &diagnostic)
+	incarnation, ok := m.peerServiceIncarnationDiagnostic(peerUUID, readAuthorityFile, &diagnostic)
 	return incarnation, ok, diagnostic
 }
 
@@ -326,7 +325,7 @@ func (m *Mesh) peerServiceIncarnationDiagnostic(peerUUID string, readFile func(s
 // epoch, including when it has no peers. Invalid or changing authority fails
 // closed; the cluster-manager's records are never written or upgraded.
 func (m *Mesh) LocalAdmissionEpoch() (uint64, bool) {
-	return m.localAdmissionEpoch(os.ReadFile)
+	return m.localAdmissionEpoch(readAuthorityFile)
 }
 
 func (m *Mesh) localAdmissionEpoch(readFile func(string) ([]byte, error)) (uint64, bool) {
@@ -364,7 +363,7 @@ func (m *Mesh) localAdmissionEpoch(readFile func(string) ([]byte, error)) (uint6
 // It requires the same local admission, roster and loaded pin agreement as
 // PeerServiceIncarnation, and is distinct from that receiver-local hash token.
 func (m *Mesh) PeerAdmissionEpoch(peerUUID string) (uint64, bool) {
-	return m.peerAdmissionEpoch(peerUUID, os.ReadFile)
+	return m.peerAdmissionEpoch(peerUUID, readAuthorityFile)
 }
 
 func (m *Mesh) peerAdmissionEpoch(peerUUID string, readFile func(string) ([]byte, error)) (uint64, bool) {

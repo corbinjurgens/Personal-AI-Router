@@ -867,6 +867,58 @@ func TestRemoteManagementRecoveryPermissionPrecedesFence(t *testing.T) {
 	test("granted peer waits for recovery", true, false, http.StatusServiceUnavailable)
 }
 
+// Hold target hydration explicitly. A readiness refusal can leave revision zero,
+// but it is an HTTP response after authenticated entry, unlike a zero-POST
+// controller/transport failure. No listener or engine is needed for this proof.
+func TestRemoteManagementPullBeforeHydration(t *testing.T) {
+	f := rmNewFixture(t, "uuid-self", "uuid-a")
+	f.writePermissions("1", map[string]bool{"uuid-a": true})
+	ex := &Executor{downloads: newModelDownloads(strings.Repeat("a", 32), t.TempDir(), nil)}
+	ex.switchRecoveryPending.Store(true)
+	s := &controlServer{mesh: f.mesh, exec: ex}
+	route := findRMRoute(t, s, controlPullPath)
+	before := ex.downloads.snapshot()
+	if before.Revision != "0" || before.RecoveryRequired || len(before.Entries) != 0 {
+		t.Fatalf("initial download state=%+v, want empty revision zero", before)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	releaseHydration, hydrated := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(hydrated)
+		select {
+		case <-releaseHydration:
+			ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
+		case <-ctx.Done():
+		}
+	}()
+	t.Cleanup(func() { cancel(); <-hydrated })
+	assertRefusal := func(wantMessage string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, controlPullPath, strings.NewReader(`{"opId":"hydration-proof","engine":"fixture","model":"fixture/model"}`))
+		// The caller is already pinned at this boundary. The process fixture's
+		// observation proxy counts entry before forwarding to this owner.
+		s.authorize(route, route.handle)(rec, req, "uuid-a")
+		if rec.Code != http.StatusServiceUnavailable || strings.TrimSpace(rec.Body.String()) != wantMessage {
+			t.Fatalf("readiness refusal HTTP=%d body=%q, want 503 %q", rec.Code, rec.Body.String(), wantMessage)
+		}
+		if got := rpcCode(remoteStatusError("remote "+controlPullPath, rec.Code, rec.Body.Bytes())); got != codeOperationError {
+			t.Fatalf("readiness RPC code=%d, want %d", got, codeOperationError)
+		}
+		if !ex.downloads.snapshot().Equal(before) {
+			t.Fatalf("readiness refusal snapshot=%+v, want unchanged revision zero", ex.downloads.snapshot())
+		}
+	}
+	assertRefusal(errNoProjection.Error())
+	close(releaseHydration)
+	select {
+	case <-hydrated:
+	case <-time.After(5 * time.Second):
+		t.Fatal("target hydration barrier did not release")
+	}
+	assertRefusal("engine manager switch recovery is pending; try again shortly")
+}
+
 func TestRemoteManagementRouteMatrixGrantsMutation(t *testing.T) {
 	f := rmNewFixture(t, "uuid-self", "uuid-a", "uuid-b")
 	f.writePermissions("1", map[string]bool{"uuid-a": true, "uuid-b": false})
@@ -1281,6 +1333,124 @@ func TestRemoteManagementSelfCertHasNoMutationBypass(t *testing.T) {
 	}
 }
 
+func TestControlAuthorityRefusalAuditCapturesDecidingRead(t *testing.T) {
+	test := func(name string, resolve bool) {
+		t.Run(name, func(t *testing.T) {
+			f := rmNewFixture(t, "uuid-self", "uuid-a")
+			if err := os.Remove(filepath.Join(f.dir, "members.json")); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			m := &Manager{mesh: f.mesh}
+			operation := "remote-client"
+			if resolve {
+				operation = "resolve-control-route"
+				if _, ok := m.resolveControlRoute("uuid-a", noderec.ServiceEngineControl); ok {
+					t.Fatal("missing members authority admitted a route")
+				}
+			} else if _, err := m.remoteClient(context.Background(), ecPeer{nodeID: "uuid-a", clusterUUID: "uuid-a"}); err == nil {
+				t.Fatal("missing members authority admitted a client")
+			}
+			var audit struct {
+				Message                             string `json:"msg"`
+				Operation, Peer, AuthorityPredicate string
+				AuthorityErrorCode, AuthorityEpoch  uint64
+			}
+			decoder := json.NewDecoder(&logs)
+			if err := decoder.Decode(&audit); err != nil {
+				t.Fatal(err)
+			}
+			if audit.Message != "ec authority refusal" || audit.Operation != operation || audit.Peer != "uuid-a" || audit.AuthorityPredicate != "members_read" || audit.AuthorityErrorCode == 0 || audit.AuthorityEpoch != rmEpoch {
+				t.Fatalf("original authority audit=%+v", audit)
+			}
+			if err := decoder.Decode(&audit); err != io.EOF {
+				t.Fatalf("extra refusal audit: %v", err)
+			}
+		})
+	}
+	test("client admission", false)
+	test("route resolution", true)
+}
+
+func TestRemoteManagementDecisionAuditPreservesCapturedPermission(t *testing.T) {
+	f := rmNewFixture(t, "uuid-self", "uuid-a")
+	f.writePermissions("1", map[string]bool{"uuid-a": false})
+	permission := f.mesh.RemoteManagement("uuid-a")
+	if permission.Allowed || permission.Diagnostic.Predicate != "permission_denied" {
+		t.Fatalf("original permission=%+v", permission)
+	}
+	// Repair the store before logging: the audit must retain the decision's
+	// captured diagnostic and must not explain it with a fresh permission read.
+	f.writePermissions("2", map[string]bool{"uuid-a": true})
+	if !f.mesh.RemoteManagement("uuid-a").Allowed {
+		t.Fatal("later permission was not repaired")
+	}
+	const sentinel = "SENTINEL-UNEMITTED-DIAGNOSTIC-IDENTITY"
+	permission.Diagnostic.NodeID = sentinel
+	permission.Diagnostic.ClusterID = sentinel
+	permission.Diagnostic.ExpectedIncarnation = sentinel
+	permission.Diagnostic.ObservedIncarnation = sentinel
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	logControlDecision(f.mesh, "uuid-a", controlRoute{family: "engine-pull", class: controlMutation}, "denied", permission.Revision, permission.Reason, &permission)
+	if strings.Contains(logs.String(), sentinel) || strings.Contains(logs.String(), f.dir) {
+		t.Fatal("permission audit exposed unneeded identities or private paths")
+	}
+	var audit struct {
+		Decision, PermissionRevision, PermissionState, AuthorityPredicate string
+		AuthorityErrorCode                                                uint64
+	}
+	decoder := json.NewDecoder(&logs)
+	if err := decoder.Decode(&audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.Decision != "denied" || audit.PermissionRevision != "1" || audit.PermissionState != "denied" || audit.AuthorityPredicate != "permission_denied" || audit.AuthorityErrorCode != 0 {
+		t.Fatalf("original permission audit=%+v", audit)
+	}
+	if err := decoder.Decode(&audit); err != io.EOF {
+		t.Fatalf("extra permission audit: %v", err)
+	}
+}
+
+func TestControlRouteRefusalAuditDistinguishesDiscovery(t *testing.T) {
+	test := func(name, predicate string, peers map[string]ecPeer) {
+		t.Run(name, func(t *testing.T) {
+			f := rmNewFixture(t, "uuid-self", "uuid-a")
+			m := &Manager{mesh: f.mesh, peers: newPeerDirectory()}
+			m.peers.peers = peers
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			if _, ok := m.resolveControlRoute("uuid-a", noderec.ServiceEngineControl); ok {
+				t.Fatal("invalid discovery admitted a route")
+			}
+			var audit struct {
+				Operation, AuthorityPredicate string
+				AuthorityErrorCode            uint64
+			}
+			decoder := json.NewDecoder(&logs)
+			if err := decoder.Decode(&audit); err != nil {
+				t.Fatal(err)
+			}
+			if audit.Operation != "resolve-control-route" || audit.AuthorityPredicate != predicate || audit.AuthorityErrorCode != 0 {
+				t.Fatalf("discovery refusal audit=%+v, want %s", audit, predicate)
+			}
+			if err := decoder.Decode(&audit); err != io.EOF {
+				t.Fatalf("extra discovery audit: %v", err)
+			}
+		})
+	}
+	test("missing peer", "route_peer_missing", nil)
+	test("unselected address", "route_address_unselected", map[string]ecPeer{"a": {clusterUUID: "uuid-a"}})
+	test("ambiguous principal", "route_principal_ambiguous", map[string]ecPeer{"a": {clusterUUID: "uuid-a"}, "b": {clusterUUID: "uuid-a"}})
+}
+
 func TestRemoteManagementDecisionAuditHasNoSecrets(t *testing.T) {
 	f := rmNewFixture(t, "uuid-self", "uuid-a", "uuid-b")
 	f.writePermissions("1", map[string]bool{"uuid-a": true})
@@ -1317,6 +1487,26 @@ func TestRemoteManagementDecisionAuditHasNoSecrets(t *testing.T) {
 	}
 	if strings.Contains(out, sentinel) {
 		t.Fatalf("audit line leaked request content: %s", out)
+	}
+	decoder := json.NewDecoder(strings.NewReader(out))
+	for range requests {
+		var audit struct {
+			Decision, PermissionState, AuthorityPredicate string
+		}
+		if err := decoder.Decode(&audit); err != nil {
+			t.Fatal(err)
+		}
+		if audit.Decision == "denied" {
+			if audit.PermissionState != "unreviewed" || audit.AuthorityPredicate != "permission_unreviewed" {
+				t.Fatalf("denied gate lost its original permission: %+v", audit)
+			}
+		} else if audit.PermissionState != "" || audit.AuthorityPredicate != "" {
+			t.Fatalf("allowed audit semantics changed: %+v", audit)
+		}
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		t.Fatalf("duplicate authorization audit: %v", err)
 	}
 	for _, want := range []string{
 		`"caller":"uuid-a"`, `"caller":"uuid-b"`,

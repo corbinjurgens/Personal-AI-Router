@@ -134,7 +134,7 @@ func (m *Manager) remoteManagementGet(ctx context.Context, msg *Message) {
 // logControlDecision emits the one audit line per gated ec request: verified
 // caller, bounded operation family, allow/deny, permission revision and reason.
 // Request paths, queries, bodies and secrets are never logged.
-func logControlDecision(mesh *clustertrust.Mesh, caller string, route controlRoute, decision, revision, reason string) {
+func logControlDecision(mesh *clustertrust.Mesh, caller string, route controlRoute, decision, revision, reason string, permission *clustertrust.RemoteManagementPermission) {
 	target := ""
 	if mesh != nil {
 		target = mesh.NodeUUID()
@@ -152,5 +152,29 @@ func logControlDecision(mesh *clustertrust.Mesh, caller string, route controlRou
 		slog.Info("ec authorization decision", args...)
 		return
 	}
+	if permission != nil {
+		args = append(args, "permissionState", permission.State)
+		args = append(args, controlAuthorityDiagnosticArgs(permission.Diagnostic)...)
+	}
 	slog.Warn("ec authorization decision", args...)
+}
+
+// Only the diagnostic returned by the deciding read belongs here. Do not
+// refresh authority to explain a refusal: that would describe a later state.
+func controlAuthorityDiagnosticArgs(d clustertrust.PeerServiceDiagnostic) []any {
+	return []any{
+		"authorityPredicate", d.Predicate, "authorityErrorCode", d.ErrorCode,
+		"authorityEpoch", d.Epoch, "authorityCounter", d.Counter,
+		"authorityChangedComponentCompared", d.ChangedComponentCompared,
+		"authorityChangedComponentSame", d.ChangedComponentSame,
+		"authorityExpectedPresent", d.ExpectedIncarnation != "",
+		"authorityObservedPresent", d.ObservedIncarnation != "",
+		"authorityIncarnationSame", d.ExpectedIncarnation != "" && d.ExpectedIncarnation == d.ObservedIncarnation,
+	}
+}
+
+func logControlAuthorityRefusal(operation, peer string, diagnostic clustertrust.PeerServiceDiagnostic) {
+	args := []any{"operation", operation, "peer", peer}
+	args = append(args, controlAuthorityDiagnosticArgs(diagnostic)...)
+	slog.Warn("ec authority refusal", args...)
 }

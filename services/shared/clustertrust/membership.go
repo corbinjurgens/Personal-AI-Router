@@ -5,7 +5,6 @@ package clustertrust
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 )
 
@@ -117,7 +116,7 @@ func hasActiveAdmission(clusterDir string) bool {
 	if clusterDir == "" {
 		return false
 	}
-	data, err := os.ReadFile(filepath.Join(clusterDir, admissionFileName))
+	data, err := readAuthorityFile(filepath.Join(clusterDir, admissionFileName))
 	if err != nil {
 		return false
 	}

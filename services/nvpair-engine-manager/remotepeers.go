@@ -102,8 +102,9 @@ func (m *Manager) resolveControlRoute(uuid string, service noderec.ServiceKey) (
 		return clustertrust.PeerServiceRoute{}, false
 	}
 	m.mesh.Refresh()
-	incarnation, ok := m.mesh.PeerServiceIncarnation(uuid)
+	incarnation, ok, diagnostic := m.mesh.PeerServiceIncarnationWithDiagnostic(uuid)
 	if !ok {
+		logControlAuthorityRefusal("resolve-control-route", uuid, diagnostic)
 		return clustertrust.PeerServiceRoute{}, false
 	}
 	m.peers.mu.RLock()
@@ -113,12 +114,18 @@ func (m *Manager) resolveControlRoute(uuid string, service noderec.ServiceKey) (
 	for _, peer := range m.peers.peers {
 		if peer.clusterUUID == uuid {
 			if found { // Discovery cannot assign one principal to two targets.
+				logControlAuthorityRefusal("resolve-control-route", uuid, clustertrust.PeerServiceDiagnostic{Predicate: "route_principal_ambiguous"})
 				return clustertrust.PeerServiceRoute{}, false
 			}
 			selected, found = peer, true
 		}
 	}
-	if !found || selected.selected == "" {
+	if !found {
+		logControlAuthorityRefusal("resolve-control-route", uuid, clustertrust.PeerServiceDiagnostic{Predicate: "route_peer_missing"})
+		return clustertrust.PeerServiceRoute{}, false
+	}
+	if selected.selected == "" {
+		logControlAuthorityRefusal("resolve-control-route", uuid, clustertrust.PeerServiceDiagnostic{Predicate: "route_address_unselected"})
 		return clustertrust.PeerServiceRoute{}, false
 	}
 	return clustertrust.PeerServiceRoute{Incarnation: incarnation, Address: selected.selected,

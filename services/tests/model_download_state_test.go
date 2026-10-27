@@ -820,10 +820,338 @@ func (f *downloadProcessFixture) pull(t *testing.T, model string) int {
 	return id
 }
 
-// Inspect retained controller metadata without waiting for a terminal or consuming
-// frames. Only the failure path performs the extra, one-second target read.
+type downloadProcessRefusalDiagnostic struct {
+	Class, Message, Route, Direct, Reverse, DataKind string
+	HTTPStatus                                       int
+}
+
+// Error.Message may contain a native HTTP body, and Data is arbitrary JSON.
+// Emit only fixed labels and exactly allowlisted operational messages. In
+// particular, never classify text nested inside an unrecognized HTTP body.
+func downloadProcessRefusal(err *jsonrpc.RPCError, node string) downloadProcessRefusalDiagnostic {
+	d := downloadProcessRefusalDiagnostic{Class: "unclassified", Message: "redacted", DataKind: "absent"}
+	if len(err.Data) != 0 {
+		d.DataKind = "redacted"
+		var data struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(err.Data, &data) == nil {
+			switch data.Kind {
+			case "busy", "interrupted":
+				d.DataKind = data.Kind
+			}
+		}
+	}
+	message := err.Message
+	switch message {
+	case "node " + node + " is not a discovered ec peer":
+		d.Class, d.Message = "peer_lookup", "node is not a discovered ec peer"
+	case "this node is not clustered; remote engine management is unavailable":
+		d.Class, d.Message = "membership", "this node is not clustered"
+	case fmt.Sprintf("node %q is not a pinned cluster peer", node):
+		d.Class, d.Message = "peer_pin", "node is not a pinned cluster peer"
+	case fmt.Sprintf("node %q ec endpoint changed before dispatch", node):
+		d.Class, d.Message = "endpoint_changed", "ec endpoint changed before dispatch"
+	case "remote pull: invalid request identity", "remote pull: frame after terminal result",
+		"remote pull: mismatched request identity", "remote pull: unsupported frame type",
+		"remote pull: missing or invalid download state", "remote pull: mismatched target download identity",
+		"remote pull: target source changed", "remote pull: inconsistent download revision",
+		"remote pull: terminal outcome does not match download state",
+		"remote /v1/models/pull: stream ended without a result":
+		d.Class, d.Message = "pull_stream", message
+	}
+	if rest, ok := strings.CutPrefix(message, "remote /v1/models/pull: HTTP "); ok {
+		status, body, found := strings.Cut(rest, ": ")
+		code, err := strconv.Atoi(status)
+		if found && err == nil && len(status) == 3 && code >= 100 && code <= 599 {
+			d.Class, d.HTTPStatus = "control_http", code
+			switch strings.TrimSpace(body) {
+			case "this node's policy is not known yet; try again shortly",
+				"engine manager switch recovery is pending; try again shortly",
+				"Remote management is blocked on this device. Change permission locally on that device.",
+				"model content is busy", "model download capacity exhausted", "model download recovery required",
+				"model download persistence unavailable", "invalid model download engine", "unsupported model naming",
+				"pull model does not match action parameters", "model is required", "model must be a string",
+				"model must be nonempty valid UTF-8 of at most 512 bytes", "model must not contain control characters",
+				"This node is paused. Resume it on this node before managing it remotely.",
+				`"engine" is required`, `"model" or "params" is required`,
+				"unknown engine", "invalid JSON body", "streaming unsupported":
+				d.Message = strings.TrimSpace(body)
+			}
+		}
+		return d
+	}
+	// net/http wraps transport failures with the method and request URL. Accept
+	// only this fixture's loopback pull route; never expose the URL or its port.
+	if rest, ok := strings.CutPrefix(message, "Post \""); ok {
+		address, cause, found := strings.Cut(rest, "\": ")
+		parsed, err := url.Parse(address)
+		if !found || err != nil || parsed.Scheme != "https" || parsed.Hostname() != "127.0.0.1" || parsed.Path != "/v1/models/pull" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return d
+		}
+		d.Class = "transport"
+		for _, route := range []struct{ prefix, label string }{
+			{"peer " + node + " unavailable (direct, then reverse): ", "direct_then_reverse"},
+			{"peer " + node + " unavailable (direct): ", "direct"},
+			{"peer " + node + " unavailable (reverse): ", "reverse"},
+			{"peer " + node + " unavailable: ", "before_route"},
+		} {
+			if detail, ok := strings.CutPrefix(cause, route.prefix); ok {
+				d.Route = route.label
+				if route.label == "direct_then_reverse" {
+					if direct, reverse, found := strings.Cut(detail, "; reverse: "); found {
+						d.Direct = downloadProcessTransportCause(strings.TrimPrefix(direct, "direct: "))
+						d.Reverse = downloadProcessTransportCause(reverse)
+					}
+				} else {
+					d.Message = downloadProcessTransportCause(detail)
+				}
+				return d
+			}
+		}
+		d.Message = downloadProcessTransportCause(cause)
+	}
+	return d
+}
+
+func downloadProcessTransportCause(message string) string {
+	switch message {
+	case "context canceled", "context deadline exceeded", "EOF", "unexpected EOF",
+		"peer service is not currently admitted", "peer service authority changed before dispatch",
+		"URL does not match current peer service endpoint", "peer service slots are occupied",
+		"private service dial refused: no current reverse session",
+		"private service dial refused: reverse capacity exhausted",
+		"private service dial refused: peer admission failed",
+		"private service dial refused: reverse service unavailable",
+		"private service dial refused: reverse stream open failed":
+		return message
+	}
+	switch {
+	case strings.HasPrefix(message, "dial tcp "):
+		return "tcp_dial_error"
+	case strings.HasPrefix(message, "read tcp "), strings.HasPrefix(message, "write tcp "):
+		return "tcp_io_error"
+	case strings.HasPrefix(message, "tls: "), strings.HasPrefix(message, "remote error: tls: "), strings.HasPrefix(message, "x509: "):
+		return "tls_error"
+	case strings.HasPrefix(message, "open "), strings.HasPrefix(message, "CreateFile "):
+		return "private_dial_error"
+	}
+	return "redacted"
+}
+
+// Parse only this fixture's original refusal audits, not arbitrary log text.
+// Unknown attributes (including reason/error/body/path) are never emitted.
+func downloadProcessAuthorityAudit(line string, controller bool) (map[string]string, bool) {
+	ts, rest, ok := strings.Cut(line, " [nvpair-engine-manager] WARN ")
+	if _, err := time.Parse("15:04:05.000", ts); !ok || err != nil || len(line) > 4096 {
+		return nil, false
+	}
+	event := "ec authorization decision "
+	if controller {
+		event = "ec authority refusal "
+	}
+	rest, ok = strings.CutPrefix(rest, event)
+	if !ok {
+		return nil, false
+	}
+	fields := make(map[string]string)
+	for rest != "" {
+		key, value, found := strings.Cut(rest, "=")
+		if !found || key == "" || strings.ContainsAny(key, " \t\r\n") {
+			return nil, false
+		}
+		end := strings.IndexByte(value, ' ')
+		if strings.HasPrefix(value, `"`) {
+			end = 1
+			for end < len(value) {
+				if value[end] == '\\' {
+					end += 2
+					continue
+				}
+				if value[end] == '"' {
+					end++
+					break
+				}
+				end++
+			}
+			if end > len(value) || end < len(value) && value[end] != ' ' {
+				return nil, false
+			}
+		} else if end < 0 {
+			end = len(value)
+		}
+		raw := value[:end]
+		rest = strings.TrimPrefix(value[end:], " ")
+		if strings.HasPrefix(raw, `"`) {
+			var err error
+			raw, err = strconv.Unquote(raw)
+			if err != nil {
+				return nil, false
+			}
+		}
+		if _, duplicate := fields[key]; duplicate {
+			return nil, false
+		}
+		fields[key] = raw
+	}
+	result := make(map[string]string)
+	operation := fields["operation"]
+	if controller {
+		if fields["peer"] != "download-target" || operation != "remote-client" && operation != "resolve-control-route" {
+			return nil, false
+		}
+	} else {
+		if fields["caller"] != "download-controller" || fields["target"] != "download-target" || operation != "engine-pull" || fields["class"] != "mutation" || fields["decision"] != "denied" {
+			return nil, false
+		}
+		switch fields["permissionState"] {
+		case "denied", "unreviewed", "unavailable":
+			result["permissionState"] = fields["permissionState"]
+		default:
+			return nil, false
+		}
+		revision := fields["permissionRevision"]
+		result["permissionRevisionPresent"] = strconv.FormatBool(revision != "")
+		if revision != "" {
+			value, err := strconv.ParseUint(revision, 10, 64)
+			if err != nil || strconv.FormatUint(value, 10) != revision {
+				return nil, false
+			}
+			result["permissionRevision"] = revision
+		}
+	}
+	result["operation"] = operation
+	switch fields["authorityPredicate"] {
+	case "peer_invalid", "local_identity_unavailable", "admission_read", "admission_decode", "admission_invalid",
+		"pin_read", "pin_decode", "pin_admission_mismatch", "pin_certificate_invalid",
+		"members_read", "members_decode", "member_admission_mismatch", "member_missing",
+		"members_bracket_read", "members_changed", "pin_bracket_read", "pin_changed",
+		"admission_bracket_read", "admission_changed", "local_identity_changed", "loaded_pin_mismatch",
+		"permission_peer_invalid", "permission_initializing_guard", "permission_marker_read",
+		"permission_marker_invalid", "permission_migration_incomplete", "permission_document_read",
+		"permission_document_invalid", "permission_migration_mismatch", "permission_document_bracket_read",
+		"permission_document_changed", "permission_marker_bracket_read", "permission_marker_changed",
+		"permission_incarnation_changed", "permission_initializing_guard_changed", "permission_unreviewed", "permission_denied",
+		"route_principal_ambiguous", "route_peer_missing", "route_address_unselected":
+		result["authorityPredicate"] = fields["authorityPredicate"]
+	default:
+		return nil, false
+	}
+	for _, key := range []string{"authorityErrorCode", "authorityEpoch", "authorityCounter"} {
+		value, err := strconv.ParseUint(fields[key], 10, 64)
+		if err != nil || strconv.FormatUint(value, 10) != fields[key] {
+			return nil, false
+		}
+		result[key] = fields[key]
+	}
+	for _, key := range []string{"authorityChangedComponentCompared", "authorityChangedComponentSame", "authorityExpectedPresent", "authorityObservedPresent", "authorityIncarnationSame"} {
+		if fields[key] != "true" && fields[key] != "false" {
+			return nil, false
+		}
+		result[key] = fields[key]
+	}
+	return result, true
+}
+
+func downloadProcessLogAuthorityAudits(t *testing.T, source, text string, controller, truncated bool) {
+	t.Helper()
+	matched := 0
+	for _, line := range strings.Split(text, "\n") {
+		if audit, ok := downloadProcessAuthorityAudit(strings.TrimSuffix(line, "\r"), controller); ok {
+			t.Logf("first-shard original_authority source=%s fields=%v", source, audit)
+			matched++
+		}
+	}
+	t.Logf("first-shard original_authority source=%s matched=%d missing=%t retention_limit_reached=%t", source, matched, matched == 0, truncated)
+}
+
+func (f *downloadProcessFixture) logOriginalAuthorityAudits(t *testing.T) {
+	t.Helper()
+	output := f.controller.output.String()
+	t.Logf("first-shard original_authority source=controller-stderr incomplete_last_line=%t", output != "" && !strings.HasSuffix(output, "\n"))
+	// serviceOutput retains a prefix, not a tail. Discard an incomplete last
+	// line and report the cap, since a later refusal may have been dropped.
+	if end := strings.LastIndexByte(output, '\n'); end >= 0 {
+		downloadProcessLogAuthorityAudits(t, "controller-stderr", output[:end], true, len(output) >= 128*1024)
+	} else {
+		downloadProcessLogAuthorityAudits(t, "controller-stderr", "", true, len(output) >= 128*1024)
+	}
+	const limit = 64 * 1024
+	file, err := os.Open(filepath.Join(f.service.dir, "logs", "broker.log"))
+	if err != nil {
+		t.Logf("first-shard original_authority source=target-broker missing=true open_failed=true")
+	} else {
+		info, statErr := file.Stat()
+		if statErr != nil || !info.Mode().IsRegular() {
+			t.Logf("first-shard original_authority source=target-broker missing=true stat_failed=true")
+		} else {
+			length := min(info.Size(), int64(limit))
+			tail, readErr := io.ReadAll(io.NewSectionReader(file, info.Size()-length, length))
+			if readErr != nil {
+				t.Logf("first-shard original_authority source=target-broker missing=true read_failed=true")
+			} else {
+				text := string(tail)
+				t.Logf("first-shard original_authority source=target-broker incomplete_last_line=%t", text != "" && !strings.HasSuffix(text, "\n"))
+				if info.Size() > length { // Skip the possibly partial first line.
+					_, text, _ = strings.Cut(text, "\n")
+				}
+				if end := strings.LastIndexByte(text, '\n'); end >= 0 {
+					text = text[:end]
+				} else {
+					text = ""
+				}
+				downloadProcessLogAuthorityAudits(t, "target-broker", text, false, info.Size() > length)
+			}
+		}
+		if err := file.Close(); err != nil {
+			t.Logf("first-shard original_authority source=target-broker close_failed=true")
+		}
+	}
+	for _, item := range []struct {
+		name   string
+		client *serviceRPCClient
+	}{{"target-local-service-log", f.local}, {"target-other-service-log", f.other}} {
+		var retained []json.RawMessage
+		size, truncated := 0, false
+		item.client.mu.Lock()
+		for i := len(item.client.frames) - 1; i >= 0; i-- {
+			frame := item.client.frames[i]
+			if frame.Method != "service/log" {
+				continue
+			}
+			if size+len(frame.Params) > limit {
+				truncated = true
+				break
+			}
+			retained = append(retained, frame.Params)
+			size += len(frame.Params)
+		}
+		item.client.mu.Unlock()
+		var lines strings.Builder
+		decodeFailed := false
+		for i := len(retained) - 1; i >= 0; i-- {
+			var params struct{ Source, Stream, Text string }
+			if json.Unmarshal(retained[i], &params) != nil {
+				decodeFailed = true
+				continue
+			}
+			if params.Source == "nvpair-ui-broker" && params.Stream == "stderr" {
+				lines.WriteString(params.Text)
+				lines.WriteByte('\n')
+			}
+		}
+		downloadProcessLogAuthorityAudits(t, item.name, lines.String(), false, truncated)
+		if decodeFailed {
+			t.Logf("first-shard original_authority source=%s decode_failed=true", item.name)
+		}
+	}
+}
+
+// Inspect retained original audits before fixture cleanup. The subsequent model
+// read describes later lifecycle state, never the original authority predicate.
 func (f *downloadProcessFixture) logStartTimeout(t *testing.T, model string) {
 	t.Helper()
+	f.logOriginalAuthorityAudits(t)
 	id, known := f.pullIDs[model]
 	var response jsonrpc.Message
 	f.controller.mu.Lock()
@@ -836,8 +1164,7 @@ func (f *downloadProcessFixture) logStartTimeout(t *testing.T, model string) {
 	readErr := f.controller.readErr
 	f.controller.mu.Unlock()
 	if response.Error != nil {
-		// Remote error messages can embed an engine HTTP response body.
-		t.Logf("first-shard controller request_id=%d response=error code=%d stdout_error=%v", id, response.Error.Code, readErr)
+		t.Logf("first-shard controller request_id=%d response=error code=%d refusal=%+v stdout_error_present=%t", id, response.Error.Code, downloadProcessRefusal(response.Error, f.targetNode.uuid), readErr != nil)
 	} else if response.ID != nil {
 		// Do not print the raw result, which can contain an engine response body.
 		var result struct {
@@ -845,31 +1172,35 @@ func (f *downloadProcessFixture) logStartTimeout(t *testing.T, model string) {
 			ID   string `json:"id"`
 		}
 		err := json.Unmarshal(response.Result, &result)
-		t.Logf("first-shard controller request_id=%d response=success op_id=%q download_id=%q decode_error=%v stdout_error=%v", id, result.OpID, result.ID, err, readErr)
+		t.Logf("first-shard controller request_id=%d response=success op_id_present=%t download_id_present=%t decode_error_present=%t stdout_error_present=%t", id, result.OpID != "", result.ID != "", err != nil, readErr != nil)
 	} else {
-		t.Logf("first-shard controller request_id=%d request_known=%t response=pending stdout_error=%v", id, known, readErr)
+		t.Logf("first-shard controller request_id=%d request_known=%t response=pending stdout_error_present=%t", id, known, readErr != nil)
 	}
 	t.Logf("first-shard authenticated_control_posts=%d", f.controlCount(http.MethodPost, "/v1/models/pull"))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://127.0.0.1:%d/v1/models", f.service.ports.engineManagerHTTP), nil)
 	if err != nil {
-		t.Logf("first-shard target models request_error=%v", err)
+		t.Log("first-shard later_target_models request_error_present=true")
 		return
 	}
 	resp, err := f.observer.Do(req)
 	if err != nil {
-		t.Logf("first-shard target models read_error=%v", err)
+		t.Log("first-shard later_target_models read_error_present=true")
 		return
 	}
 	var models downloadProcessModels
 	err = json.NewDecoder(io.LimitReader(resp.Body, modeldownload.MaxSnapshotBytes+65536)).Decode(&models)
 	closeErr := resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || err != nil || models.DownloadState == nil {
-		t.Logf("first-shard target models http=%d decode_error=%v snapshot_present=%t close_error=%v", resp.StatusCode, err, models.DownloadState != nil, closeErr)
+		t.Logf("first-shard later_target_models http=%d decode_error_present=%t snapshot_present=%t close_error_present=%t", resp.StatusCode, err != nil, models.DownloadState != nil, closeErr != nil)
 		return
 	}
 	snapshot := models.DownloadState
+	if snapshot.Validate() != nil {
+		t.Log("first-shard later_target_models validation_error_present=true")
+		return
+	}
 	var entry modeldownload.Entry
 	found := false
 	for _, candidate := range snapshot.Entries {
@@ -878,7 +1209,7 @@ func (f *downloadProcessFixture) logStartTimeout(t *testing.T, model string) {
 			break
 		}
 	}
-	t.Logf("first-shard target source_id=%q revision=%q entry_present=%t phase=%q download_id=%q reason=%q close_error=%v", snapshot.SourceID, snapshot.Revision, found, entry.Phase, entry.ID, entry.Reason, closeErr)
+	t.Logf("first-shard later_target_models revision=%s recovery_required=%t entry_present=%t phase=%q reason=%q close_error_present=%t", snapshot.Revision, snapshot.RecoveryRequired, found, entry.Phase, entry.Reason, closeErr != nil)
 }
 
 func (f *downloadProcessFixture) reply(t *testing.T, id int, success bool) jsonrpc.Message {
@@ -1165,6 +1496,119 @@ func (f *downloadProcessFixture) wrongOperationProxy(t *testing.T) {
 		}
 	})
 	f.controller.send(t, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{{HostUUID: f.targetNode.uuid, ClusterUUID: f.targetNode.uuid, IP: "127.0.0.1", Name: f.targetNode.uuid, Trusted: true, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineControl: {Port: port}}}}}, false)
+}
+
+func TestModelDownloadProcessAuthorityAuditDiagnostics(t *testing.T) {
+	const sentinel = "SENTINEL-PRIVATE-PATH-ERROR-BODY"
+	const common = " authorityPredicate=members_read authorityErrorCode=5 authorityEpoch=3 authorityCounter=4 authorityChangedComponentCompared=false authorityChangedComponentSame=false authorityExpectedPresent=false authorityObservedPresent=false authorityIncarnationSame=false"
+	const prefix = "12:34:56.789 [nvpair-engine-manager] WARN "
+	const controller = prefix + "ec authority refusal operation=resolve-control-route peer=download-target" + common
+	const target = prefix + "ec authorization decision caller=download-controller target=download-target operation=engine-pull class=mutation decision=denied permissionState=unavailable" + common
+	want := map[string]string{
+		"operation": "resolve-control-route", "authorityPredicate": "members_read", "authorityErrorCode": "5",
+		"authorityEpoch": "3", "authorityCounter": "4", "authorityChangedComponentCompared": "false",
+		"authorityChangedComponentSame": "false", "authorityExpectedPresent": "false",
+		"authorityObservedPresent": "false", "authorityIncarnationSame": "false",
+	}
+	accept := func(name, line string, isController bool, expected map[string]string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			got, ok := downloadProcessAuthorityAudit(line, isController)
+			if !ok || !reflect.DeepEqual(got, expected) {
+				t.Fatalf("original audit=%v accepted=%t, want %v", got, ok, expected)
+			}
+			if strings.Contains(fmt.Sprint(got), sentinel) {
+				t.Fatal("original audit exposed private log attributes")
+			}
+		})
+	}
+	accept("original controller read", controller, true, want)
+	accept("private attributes omitted", controller+` reason="`+sentinel+` authorityErrorCode=999" error=`+sentinel+` path=`+sentinel+` body=`+sentinel, true, want)
+	targetWant := make(map[string]string)
+	for key, value := range want {
+		targetWant[key] = value
+	}
+	targetWant["operation"], targetWant["permissionState"] = "engine-pull", "unavailable"
+	targetWant["permissionRevisionPresent"] = "false"
+	accept("original target permission", target+` reason="`+sentinel+`"`, false, targetWant)
+	reject := func(name, line string, isController bool) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			if got, ok := downloadProcessAuthorityAudit(line, isController); ok || got != nil {
+				t.Fatalf("untrusted audit accepted: %v", got)
+			}
+		})
+	}
+	reject("other peer", strings.Replace(controller, "peer=download-target", "peer=other", 1), true)
+	reject("other operation", strings.Replace(target, "operation=engine-pull", "operation=engine-inventory", 1), false)
+	reject("allowed decision", strings.Replace(target, "decision=denied", "decision=allowed", 1), false)
+	reject("other caller", strings.Replace(target, "caller=download-controller", "caller=download-observer", 1), false)
+	reject("unknown predicate", strings.Replace(controller, "members_read", sentinel, 1), true)
+	reject("numeric field redacted", strings.Replace(controller, "authorityErrorCode=5", "authorityErrorCode="+sentinel, 1), true)
+	reject("boolean field redacted", strings.Replace(controller, "authorityChangedComponentSame=false", "authorityChangedComponentSame="+sentinel, 1), true)
+	reject("state redacted", strings.Replace(target, "permissionState=unavailable", "permissionState="+sentinel, 1), false)
+	reject("revision redacted", target+" permissionRevision="+sentinel, false)
+	reject("duplicate key", controller+" authorityErrorCode=99", true)
+	reject("partial quoted attribute", controller+` reason="`+sentinel, true)
+	reject("unrelated log cannot impersonate audit", prefix+`unrelated error="`+controller+`"`, true)
+}
+
+func TestModelDownloadProcessRefusalDiagnostics(t *testing.T) {
+	const node = "download-target"
+	const request = `Post "https://127.0.0.1:14323/v1/models/pull": `
+	const sentinel = "SENTINEL-ENGINE-BODY-SECRET"
+	test := func(name, message string, data json.RawMessage, want downloadProcessRefusalDiagnostic) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			got := downloadProcessRefusal(&jsonrpc.RPCError{Code: -32000, Message: message, Data: data}, node)
+			if got != want {
+				t.Fatalf("refusal diagnostic=%+v, want %+v", got, want)
+			}
+			if strings.Contains(fmt.Sprintf("%+v", got), sentinel) {
+				t.Fatal("refusal diagnostic exposed engine body or error data")
+			}
+		})
+	}
+	test("undiscovered peer", "node download-target is not a discovered ec peer", nil,
+		downloadProcessRefusalDiagnostic{Class: "peer_lookup", Message: "node is not a discovered ec peer", DataKind: "absent"})
+	test("local membership", "this node is not clustered; remote engine management is unavailable", nil,
+		downloadProcessRefusalDiagnostic{Class: "membership", Message: "this node is not clustered", DataKind: "absent"})
+	test("missing pin", `node "download-target" is not a pinned cluster peer`, nil,
+		downloadProcessRefusalDiagnostic{Class: "peer_pin", Message: "node is not a pinned cluster peer", DataKind: "absent"})
+	test("changed endpoint", `node "download-target" ec endpoint changed before dispatch`, nil,
+		downloadProcessRefusalDiagnostic{Class: "endpoint_changed", Message: "ec endpoint changed before dispatch", DataKind: "absent"})
+	test("target projection pending", "remote /v1/models/pull: HTTP 503: this node's policy is not known yet; try again shortly\n", nil,
+		downloadProcessRefusalDiagnostic{Class: "control_http", Message: "this node's policy is not known yet; try again shortly", HTTPStatus: http.StatusServiceUnavailable, DataKind: "absent"})
+	test("target recovery pending", "remote /v1/models/pull: HTTP 503: engine manager switch recovery is pending; try again shortly", nil,
+		downloadProcessRefusalDiagnostic{Class: "control_http", Message: "engine manager switch recovery is pending; try again shortly", HTTPStatus: http.StatusServiceUnavailable, DataKind: "absent"})
+	test("target remote management denied", "remote /v1/models/pull: HTTP 409: Remote management is blocked on this device. Change permission locally on that device.", nil,
+		downloadProcessRefusalDiagnostic{Class: "control_http", Message: "Remote management is blocked on this device. Change permission locally on that device.", HTTPStatus: http.StatusConflict, DataKind: "absent"})
+	test("target persistence unavailable", "remote /v1/models/pull: HTTP 500: model download persistence unavailable", nil,
+		downloadProcessRefusalDiagnostic{Class: "control_http", Message: "model download persistence unavailable", HTTPStatus: http.StatusInternalServerError, DataKind: "absent"})
+	test("target pre-native parameters", "remote /v1/models/pull: HTTP 500: pull model does not match action parameters", nil,
+		downloadProcessRefusalDiagnostic{Class: "control_http", Message: "pull model does not match action parameters", HTTPStatus: http.StatusInternalServerError, DataKind: "absent"})
+	test("denial with appended private body redacted", "remote /v1/models/pull: HTTP 409: Remote management is blocked on this device. Change permission locally on that device.\n"+sentinel, nil,
+		downloadProcessRefusalDiagnostic{Class: "control_http", Message: "redacted", HTTPStatus: http.StatusConflict, DataKind: "absent"})
+	test("transport authority", request+"peer download-target unavailable: peer service is not currently admitted", nil,
+		downloadProcessRefusalDiagnostic{Class: "transport", Message: "peer service is not currently admitted", Route: "before_route", DataKind: "absent"})
+	test("direct setup and reverse refusal", request+"peer download-target unavailable (direct, then reverse): direct: context deadline exceeded; reverse: private service dial refused: no current reverse session", nil,
+		downloadProcessRefusalDiagnostic{Class: "transport", Message: "redacted", Route: "direct_then_reverse", Direct: "context deadline exceeded", Reverse: "private service dial refused: no current reverse session", DataKind: "absent"})
+	test("direct TLS detail redacted", request+"peer download-target unavailable (direct): tls: "+sentinel, nil,
+		downloadProcessRefusalDiagnostic{Class: "transport", Message: "tls_error", Route: "direct", DataKind: "absent"})
+	test("reverse private path redacted", request+"peer download-target unavailable (reverse): open "+sentinel, nil,
+		downloadProcessRefusalDiagnostic{Class: "transport", Message: "private_dial_error", Route: "reverse", DataKind: "absent"})
+	test("stream identity", "remote pull: mismatched request identity", nil,
+		downloadProcessRefusalDiagnostic{Class: "pull_stream", Message: "remote pull: mismatched request identity", DataKind: "absent"})
+	test("HTTP body and data redacted", "remote /v1/models/pull: HTTP 500: "+sentinel, json.RawMessage(`{"body":"`+sentinel+`"}`),
+		downloadProcessRefusalDiagnostic{Class: "control_http", Message: "redacted", HTTPStatus: http.StatusInternalServerError, DataKind: "redacted"})
+	test("HTTP body cannot impersonate transport", "remote /v1/models/pull: HTTP 500: "+request+"peer download-target unavailable (direct): "+sentinel, nil,
+		downloadProcessRefusalDiagnostic{Class: "control_http", Message: "redacted", HTTPStatus: http.StatusInternalServerError, DataKind: "absent"})
+	test("allowlisted message with appended body redacted", "remote /v1/models/pull: HTTP 503: engine manager switch recovery is pending; try again shortly\n"+sentinel, nil,
+		downloadProcessRefusalDiagnostic{Class: "control_http", Message: "redacted", HTTPStatus: http.StatusServiceUnavailable, DataKind: "absent"})
+	test("arbitrary terminal and data redacted", sentinel, json.RawMessage(`{"kind":"`+sentinel+`"}`),
+		downloadProcessRefusalDiagnostic{Class: "unclassified", Message: "redacted", DataKind: "redacted"})
+	test("operational data kind only", sentinel, json.RawMessage(`{"kind":"busy","body":"`+sentinel+`"}`),
+		downloadProcessRefusalDiagnostic{Class: "unclassified", Message: "redacted", DataKind: "busy"})
 }
 
 func TestModelDownloadStateProcess(t *testing.T) {
