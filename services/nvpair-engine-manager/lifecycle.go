@@ -662,6 +662,17 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 // daemon-style engine such as LM Studio), then waits for readiness.
 // There is no owned process — liveness comes from the probe.
 func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
+	if len(rt.AuthStatuses) > 0 {
+		_, status := e.probeStatus(ctx, rt.Ready, port)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if slices.Contains(rt.AuthStatuses, status) {
+			err := errors.New(diagnosisMessage(st.manifest.DisplayName, diagnosisAuthRequired))
+			e.reportStartFailedUnlessShuttingDown(ctx, engine, err)
+			return err
+		}
+	}
 	st.mu.Lock()
 	st.proc = nil
 	st.mu.Unlock()
