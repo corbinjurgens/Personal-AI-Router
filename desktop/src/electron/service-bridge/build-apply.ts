@@ -296,10 +296,19 @@ export function parseBuildApplyOperationResult(
     return result(value, parseBuildApplyOperation)
 }
 
+let operationObserver: ((operation: BuildApplyOperation) => void) | null = null
+
+export function setBuildApplyOperationObserver(
+    observer: (operation: BuildApplyOperation) => void
+): void {
+    operationObserver = observer
+}
+
 // Called only by the existing private ModularSupervisor notification dispatcher.
 // Native IPC uses the same window fanout as other Electron-native operations.
 export function dispatchBuildApplyChanged(value: JsonValue | undefined): void {
     const operation = parseBuildApplyOperation(value)
+    operationObserver?.(operation)
     for (const window of BrowserWindow.getAllWindows()) {
         if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
             window.webContents.send('build-apply:changed', operation)

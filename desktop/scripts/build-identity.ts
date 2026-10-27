@@ -17,7 +17,14 @@ export function buildIdentity(directory: string): string {
     try {
         const revision = git(['rev-parse', 'HEAD'])
         if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(revision)) return ''
-        const dirty = git(['status', '--porcelain', '--untracked-files=normal']) !== ''
+        const status = git(['status', '--porcelain', '--untracked-files=all'])
+        // electron-vite writes this temporary bundled config in desktop's root.
+        const dirty = status
+            .split('\n')
+            .some(
+                line =>
+                    line !== '' && !/^\?\? desktop\/electron\.vite\.config\.[0-9]+\.mjs$/.test(line)
+            )
         return `git:${revision}${dirty ? '+dirty' : ''}`
     } catch {
         return ''

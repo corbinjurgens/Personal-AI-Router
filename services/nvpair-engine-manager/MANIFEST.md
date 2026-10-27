@@ -594,6 +594,7 @@ applies to the host the test runs on.
 | `ready` | probe | no | Readiness probe; `start` waits for it before reporting Running. |
 | `stop` | object | no | Process mode: `signal` (`"term"` default, or `"kill"`) + `grace_s` (seconds before force-kill). Command mode: `cmd` (argv) to bring the engine down. |
 | `health` | probe | no | Periodic liveness probe while Running; `interval_s` between checks. |
+| `user_credential` | bool | no | Declares that the engine accepts a user-entered API key. Defaults to false. This flag alone does not implement credential storage or RPC handling. |
 | `auth_statuses` | int[] | no | HTTP statuses meaning a listener is present but requires a credential. Applies to HTTP `ready` and `health` probes; requires `ready.http`. Only `401` and `403` are allowed, without duplicates. Diagnosis only; never makes an engine ready. |
 | `app_processes` | string[] | no | App or daemon process image base names, matched case-insensitively. Entries must be nonempty after trimming whitespace, contain no `/` or `\`, and have no case-insensitive duplicates. Diagnosis only; process presence never makes an engine ready. |
 

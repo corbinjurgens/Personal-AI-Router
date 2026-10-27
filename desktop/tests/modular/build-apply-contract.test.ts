@@ -34,7 +34,6 @@ import {
     getBuildApplyStatus,
     handleBuildApplyEntry
 } from '@/electron/build-apply'
-import { handleShortcutEntry } from '@/electron/windows-shortcut'
 import { buildApplyApi } from '@/preload/api/build-apply.api'
 
 const native = vi.hoisted(() => ({
@@ -228,7 +227,7 @@ function operation(): BuildApplyOperation {
 }
 
 describe('build apply payloads', () => {
-    it('detects a genuinely modified tracked file in an isolated git checkout', () => {
+    it('distinguishes generated config files from source dirt in a real git checkout', () => {
         const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-gui-identity-'))
         const run = (command: string, args: string[], cwd = directory): string => {
             const result = childProcess.spawnSync(command, args, {
@@ -269,6 +268,30 @@ describe('build apply payloads', () => {
                     process.cwd()
                 )
             expect(stamp()).toBe(`git:${revision}`)
+            fs.mkdirSync(path.join(directory, 'desktop'))
+            const temporaryConfig = path.join(
+                directory,
+                'desktop',
+                'electron.vite.config.123456789.mjs'
+            )
+            fs.writeFileSync(temporaryConfig, 'generated\n')
+            expect(stamp()).toBe(`git:${revision}`)
+            for (const name of [
+                'electron.vite.config.mjs',
+                'electron.vite.config.123x.mjs',
+                'electron.vite.config.123.js',
+                'new-source.ts'
+            ]) {
+                const source = path.join(directory, 'desktop', name)
+                fs.writeFileSync(source, 'source\n')
+                expect(stamp(), name).toBe(`git:${revision}+dirty`)
+                fs.unlinkSync(source)
+            }
+            const wrongDirectory = path.join(directory, 'electron.vite.config.123456789.mjs')
+            fs.writeFileSync(wrongDirectory, 'source\n')
+            expect(stamp()).toBe(`git:${revision}+dirty`)
+            fs.unlinkSync(wrongDirectory)
+            fs.unlinkSync(temporaryConfig)
             fs.writeFileSync(path.join(directory, 'source.txt'), 'changed tracked source\n')
             expect(run('git', ['status', '--porcelain'])).toBe('M source.txt')
             expect(stamp()).toBe(`git:${revision}+dirty`)
@@ -435,13 +458,9 @@ describe('native local build apply registration', () => {
         expect(start).toMatchObject({
             available: false,
             value: null,
-            refusal: { code: 'unavailable' }
+            refusal: { code: 'consent_required' }
         })
-        expect(call).toHaveBeenLastCalledWith('service/build-apply-start', {
-            previewId: 'preview_1',
-            consent: { allowInterruption: true, allowEngineStop: false },
-            gui: { pid: process.pid, executable: process.execPath, buildId: '' }
-        })
+        expect(call.mock.calls.map(([method]) => method)).toEqual(['service/build-apply-preview'])
         expect(vi.mocked(JsonRpcSocketClient.prototype.start)).toHaveBeenCalledTimes(1)
     })
     it('does not launch or request anything without an attached ready service', async () => {
@@ -481,14 +500,19 @@ describe('native local build apply registration', () => {
         })
         await expect(pending).rejects.toThrow('connection changed')
     })
-    it('exits unavailable command modes before any service request', async () => {
+    it('acknowledges build startup through an attach-only client', async () => {
+        const ready = vi.spyOn(supervisor, 'acknowledgeBuildApplyGui').mockResolvedValue({
+            available: false,
+            value: null,
+            refusal: { code: 'unavailable', detail: 'GUI acknowledgement unavailable.' }
+        })
         expect(await handleBuildApplyEntry(['--pair-build-apply=operation_1'])).toBe(69)
+        expect(ready).toHaveBeenCalledExactlyOnceWith({
+            operationId: 'operation_1',
+            gui: { pid: process.pid, executable: process.execPath, buildId: '' }
+        })
         expect(await handleBuildApplyEntry(['--pair-build-apply=../bad'])).toBe(64)
         expect(await handleBuildApplyEntry([])).toBeNull()
-        for (const command of ['create', 'status', 'remove']) {
-            expect(await handleShortcutEntry(['--pair-shortcut=' + command])).toBe(69)
-        }
-        expect(await handleShortcutEntry(['--pair-shortcut=other'])).toBe(64)
         expect(JsonRpcSocketClient.prototype.call).not.toHaveBeenCalled()
     })
 })

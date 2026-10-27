@@ -207,6 +207,8 @@ type Runtime struct {
 	Ready  *Probe    `json:"ready,omitempty"`
 	Stop   *StopSpec `json:"stop,omitempty"`
 	Health *Probe    `json:"health,omitempty"`
+	// UserCredential declares support for a user-entered API key.
+	UserCredential bool `json:"user_credential,omitempty"`
 	// AuthStatuses identify credential-required responses from HTTP ready and health probes.
 	AuthStatuses []int `json:"auth_statuses,omitempty"`
 	// AppProcesses are app or daemon image base names used only for connection diagnosis.

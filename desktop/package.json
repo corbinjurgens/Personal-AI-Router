@@ -52,8 +52,6 @@
         "stage:vc-redist": "node ../scripts/stage-vc-redist.mjs",
         "prestart": "npm run generate:icons",
         "start": "npm run build:modular-binaries && electron-vite dev",
-        "start:mock-updater": "tsx scripts/start-mock-updater.ts",
-        "start:mock-updater:error": "tsx scripts/start-mock-updater.ts --error",
         "build": "npm run build:electron",
         "prebuild:electron": "npm run generate:icons && npm run licenses && npm run vendor:kaizen-css && npm run verify:build-scripts",
         "build:electron": "electron-vite build",
