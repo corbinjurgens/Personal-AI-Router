@@ -345,8 +345,24 @@ func TestStopReconcilesAdoptedProcessAfterExternalStop(t *testing.T) {
 	}
 
 	srv.Close()
+	if err := ex.Stop("fake"); err == nil {
+		t.Fatal("listener closure alone proved external process termination")
+	}
+	if st, _ := ex.Status("fake"); !st.Running || st.Healthy || st.TerminationVerified || portServing(port) {
+		t.Fatalf("closed endpoint lost unknown external ownership: %+v", st)
+	}
+	state, err := ex.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	state.reclaimPID = os.Getpid()
+	state.mu.Unlock()
+	ex.reconcilePresenceStateWithProcessProof(t.Context(), "fake", state, true, port, true,
+		func(int) (int, string, bool) { return os.Getpid(), "fixture-owner", true },
+		func(pid int) bool { return pid == os.Getpid() })
 	if err := ex.Stop("fake"); err != nil {
-		t.Fatalf("retry after external stop: %v", err)
+		t.Fatalf("retry after positive external exit: %v", err)
 	}
 	if st, _ := ex.Status("fake"); st.Running || st.Healthy {
 		t.Fatalf("closed external endpoint must reconcile to stopped, got %+v", st)
@@ -529,7 +545,7 @@ func TestCommandStopReportsStoppedOnlyAfterEndpointCloses(t *testing.T) {
 		srv.Close()
 		close(closed)
 	}()
-	ex := commandStopTestExecutor(t, srv.URL, []string{fakeEngineBin, "touch", marker}, 2, true)
+	ex := commandStopTestExecutor(t, srv.URL, []string{fakeEngineBin, "touch", marker}, 2, false)
 
 	if err := ex.Stop("command"); err != nil {
 		t.Fatalf("stop: %v", err)
@@ -541,6 +557,27 @@ func TestCommandStopReportsStoppedOnlyAfterEndpointCloses(t *testing.T) {
 	}
 	if st, _ := ex.Status("command"); st.Running || st.Healthy {
 		t.Fatalf("closed endpoint must report stopped, got %+v", st)
+	}
+}
+
+func TestCommandStopRefusesAdoptedExternalOwner(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "unscoped-stop-attempted")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(srv.Close)
+	ex := commandStopTestExecutor(t, srv.URL, []string{fakeEngineBin, "touch", marker}, 2, true)
+	if err := ex.Stop("command"); err == nil || !strings.Contains(err.Error(), "external management") {
+		t.Fatalf("adopted command Stop=%v, want external-ownership refusal", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unscoped stop command ran or marker could not be inspected: %v", err)
+	}
+	status, err := ex.Status("command")
+	if err != nil || !status.Running || !status.Healthy {
+		t.Fatalf("external endpoint state=%+v err=%v", status, err)
+	}
+	enabled, known, err := ex.desired.get("command")
+	if err != nil || !known || enabled {
+		t.Fatalf("refused local Stop lost Off intent: enabled=%v known=%v err=%v", enabled, known, err)
 	}
 }
 

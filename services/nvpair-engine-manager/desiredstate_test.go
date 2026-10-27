@@ -739,6 +739,16 @@ func TestConfirmedStopPersistsOffDespiteCommandExitError(t *testing.T) {
 	if err := first.Start(context.Background(), "fake"); err != nil {
 		t.Fatalf("adopt and save ON: %v", err)
 	}
+	state, err := first.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This endpoint and stop command model a PAIR-owned daemon. External
+	// refusal and its untouched sentinel are covered by
+	// TestCommandStopRefusesAdoptedExternalOwner.
+	state.mu.Lock()
+	state.adopted = false
+	state.mu.Unlock()
 	closed := make(chan struct{})
 	go func() {
 		for !fileExists(marker) {

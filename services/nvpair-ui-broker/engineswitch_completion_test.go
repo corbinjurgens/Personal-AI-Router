@@ -465,6 +465,11 @@ func TestSwitchLocalOnRelayOwnsOperationLock(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			h := newSwitchHarness(t)
+			// Join initial projection publication and keep its independent
+			// journal sampling out of this relay-owner lock assertion.
+			projection := h.b.nodePolicyRuntime()
+			projection.projectionMu.Lock()
+			defer projection.projectionMu.Unlock()
 			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 				locked := !h.b.settingsApplyMu.TryLock()
 				if !locked {

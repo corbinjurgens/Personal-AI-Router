@@ -306,6 +306,10 @@ func (b *Broker) loadNodePolicy(path string) {
 	r.path = path
 	r.current = policy
 	r.live = policy.Availability
+	if r.live == nodepolicy.Paused {
+		// Persisted intent is not proof that the current manager stopped its engines.
+		r.live = nodepolicy.Draining
+	}
 	r.recoveryRequired = recovery
 	r.mu.Unlock()
 	slog.Info("node policy loaded", "path", path, "availability", policy.Availability, "revision", policy.Revision, "recoveryRequired", recovery)

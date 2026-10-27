@@ -136,21 +136,57 @@ func pauseLifecycleCalls(calls []policyCall) []policyCall {
 	return lifecycle
 }
 
+func requirePauseManagerCleanup(t *testing.T, b *Broker, names ...string) {
+	t.Helper()
+	worker, source := b.pauseManager()
+	if !b.engineManagerSourceCurrent(source) || !b.engineMgrPairCurrent(worker, source) {
+		t.Fatal("cleanup readback has no current manager/source pair")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	statuses, err := pauseEngineInventory(ctx, worker)
+	if err != nil {
+		t.Fatalf("read physical shutdown proof: %v", err)
+	}
+	raw, err := callEngineOn(ctx, worker, "engine:models", nil)
+	if err != nil {
+		t.Fatalf("read manager-owned model cleanup: %v", err)
+	}
+	var models struct {
+		LoadedByEngine map[string][]string `json:"loadedByEngine"`
+	}
+	if err := json.Unmarshal(raw, &models); err != nil {
+		t.Fatalf("decode model cleanup: %v", err)
+	}
+	for _, name := range names {
+		status, known := statuses[name]
+		if !known || status.Running || !status.TerminationVerified {
+			t.Fatalf("engine %s cleanup proof=%+v known=%v", name, status, known)
+		}
+		loaded, known := models.LoadedByEngine[name]
+		if !known || len(loaded) != 0 {
+			t.Fatalf("engine %s residency=%v known=%v; want positive empty readback", name, loaded, known)
+		}
+	}
+}
+
 func TestPauseAlwaysStopsAndUnloadsDespiteLegacyOptions(t *testing.T) {
 	test := func(name string, origin nodepolicy.PauseOrigin) {
 		t.Run(name, func(t *testing.T) {
 			b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive, StopEngines: false, UnloadModels: false})
-			// Neither this engine nor its model has reached broker notifications.
-			running := true
+			// The second engine and its resident model have not reached broker
+			// notifications. The manager owns both cleanup and its readback.
+			running := map[string]bool{"ollama": true, "llamacpp": true}
+			loaded := map[string][]string{"ollama": {"m1"}, "llamacpp": {"fresh-model"}}
 			engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 				switch method {
 				case "engine:get-installed":
 					return map[string]any{"engines": []any{
-						map[string]any{"engine": "ollama", "running": running},
-						map[string]any{"engine": "llamacpp", "running": running},
+						map[string]any{"engine": "ollama", "running": running["ollama"], "terminationVerified": !running["ollama"]},
+						map[string]any{"engine": "llamacpp", "running": running["llamacpp"], "terminationVerified": !running["llamacpp"]},
 					}}, ""
 				case "engine:models":
-					return map[string]any{"loadedByEngine": map[string][]string{"llamacpp": {"fresh-model"}}}, ""
+					return map[string]any{"loadedByEngine": loaded}, ""
 				case engineSleepMethod:
 					var p struct {
 						Engine string `json:"engine"`
@@ -158,9 +194,9 @@ func TestPauseAlwaysStopsAndUnloadsDespiteLegacyOptions(t *testing.T) {
 					if err := json.Unmarshal(raw, &p); err != nil {
 						return nil, err.Error()
 					}
-					if p.Engine == "ollama" {
-						running = false
-					}
+					running[p.Engine] = false
+					loaded[p.Engine] = []string{}
+					return map[string]any{"engine": p.Engine, "running": false, "terminationVerified": true}, ""
 				}
 				return map[string]bool{"ok": true}, ""
 			})
@@ -182,9 +218,10 @@ func TestPauseAlwaysStopsAndUnloadsDespiteLegacyOptions(t *testing.T) {
 					unloaded[p.Engine] = append(unloaded[p.Engine], p.Model)
 				}
 			}
-			if !reflect.DeepEqual(unloaded, map[string][]string{"ollama": {"m1"}, "llamacpp": {"fresh-model"}}) || !reflect.DeepEqual(slept, map[string]bool{"ollama": true, "llamacpp": true}) {
-				t.Fatalf("unloaded=%v slept=%v, want cached and fresh models/engines", unloaded, slept)
+			if len(unloaded) != 0 || !reflect.DeepEqual(slept, map[string]bool{"ollama": true, "llamacpp": true}) {
+				t.Fatalf("broker unloads=%v sleeps=%v, want manager-owned cleanup of cached and freshly discovered engines", unloaded, slept)
 			}
+			requirePauseManagerCleanup(t, b, "ollama", "llamacpp")
 			requirePolicyIntent(t, b, map[string]bool{"ollama": true})
 			for _, call := range engine.snapshot() {
 				if call.method == "engine:stop" {
@@ -222,6 +259,7 @@ func TestPauseStopFailureRetainsFenceAndCanRetryLocally(t *testing.T) {
 				return nil, "external process cannot be stopped"
 			}
 			running[p.Engine] = false
+			return map[string]any{"engine": p.Engine, "running": false, "terminationVerified": true}, ""
 		}
 		return map[string]bool{"ok": true}, ""
 	})
@@ -380,6 +418,7 @@ func TestPauseIgnoresSleepRefusalWithTerminationEvidence(t *testing.T) {
 			if p.Engine == "custom" {
 				return nil, "engine has no platform support on this host"
 			}
+			return map[string]any{"engine": p.Engine, "running": false, "terminationVerified": true}, ""
 		}
 		return map[string]bool{"ok": true}, ""
 	})

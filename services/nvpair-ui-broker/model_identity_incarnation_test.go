@@ -114,6 +114,9 @@ func TestEngineManagerIdentityIncarnationActivationWithdrawsPredecessor(t *testi
 func TestEngineManagerIdentityIncarnationRetiresFailedStartup(t *testing.T) {
 	ab := newActivatedBroker(t)
 	ab.b.engineMgrPath = filepath.Join(t.TempDir(), "missing-engine-manager.exe")
+	// Reach the spawn/retirement boundary rather than fail host validation
+	// before the replacement source has even been allocated.
+	ab.b.engineMgrControlHost = "127.0.0.1"
 	if _, err := ab.b.spawnEngineMgr(); err == nil {
 		t.Fatal("starting a nonexistent executable succeeded")
 	}

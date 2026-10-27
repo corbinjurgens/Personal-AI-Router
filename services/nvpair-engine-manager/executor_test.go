@@ -700,8 +700,27 @@ func TestAdoptedExternalLivenessIsTruthful(t *testing.T) {
 
 	srv.Close()
 	st, _ = ex.Status(m.Engine)
+	if !st.Running || st.Healthy || st.TerminationVerified || portServing(port) {
+		t.Fatalf("closed external listener must retain unknown process ownership: %+v", st)
+	}
+	if err := ex.Sleep(m.Engine); err == nil {
+		t.Fatal("listener closure alone completed physical Pause")
+	}
+	state, err := ex.state(m.Engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Supply the missing process-exit observation through the same seam used
+	// by the no-exit/exit ownership regressions; never stop the fixture owner.
+	state.mu.Lock()
+	state.reclaimPID = os.Getpid()
+	state.mu.Unlock()
+	ex.reconcilePresenceStateWithProcessProof(t.Context(), m.Engine, state, false, port, true,
+		func(int) (int, string, bool) { return os.Getpid(), "fixture-owner", true },
+		func(pid int) bool { return pid == os.Getpid() })
+	st, _ = ex.Status(m.Engine)
 	if st.Installed || st.Running || st.Healthy {
-		t.Fatalf("closed external listener remained present: %+v", st)
+		t.Fatalf("positive external exit did not reconcile to stopped: %+v", st)
 	}
 }
 

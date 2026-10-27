@@ -513,7 +513,7 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 						running = *state.Running
 					}
 				}
-				engines = append(engines, map[string]any{"engine": config.Engine, "running": running && !h.sleeping[config.Engine]})
+				engines = append(engines, map[string]any{"engine": config.Engine, "running": running && !h.sleeping[config.Engine], "terminationVerified": h.sleeping[config.Engine]})
 			}
 			return map[string]any{"engines": engines}, ""
 		case "engine:models":
@@ -536,7 +536,7 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 					h.cp.Target = switchTestState(false, false, h.cp.Target.Intent)
 				}
 			}
-			return map[string]any{"engine": p.Engine, "running": false}, ""
+			return map[string]any{"engine": p.Engine, "running": false, "terminationVerified": true}, ""
 		case "engine:stop":
 			var p struct {
 				Engine     string `json:"engine"`
