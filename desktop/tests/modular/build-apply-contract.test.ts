@@ -3,6 +3,8 @@
 
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import * as childProcess from 'node:child_process'
 import { buildIdentity } from '../../scripts/build-identity'
 import { dialog, ipcRenderer } from 'electron'
@@ -50,9 +52,10 @@ const native = vi.hoisted(() => ({
         ) => void
     >()
 }))
-vi.mock('node:child_process', () => ({
-    execFileSync: vi.fn<typeof childProcess.execFileSync>()
-}))
+vi.mock('node:child_process', async importOriginal => {
+    const original = await importOriginal<typeof childProcess>()
+    return { ...original, execFileSync: vi.fn<typeof childProcess.execFileSync>() }
+})
 vi.mock('electron', () => ({
     app: { isPackaged: false, getAppPath: () => '/inert-pair-fixture' },
     dialog: { showOpenDialog: vi.fn<typeof dialog.showOpenDialog>() },
@@ -225,6 +228,54 @@ function operation(): BuildApplyOperation {
 }
 
 describe('build apply payloads', () => {
+    it('detects a genuinely modified tracked file in an isolated git checkout', () => {
+        const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-gui-identity-'))
+        const run = (command: string, args: string[], cwd = directory): string => {
+            const result = childProcess.spawnSync(command, args, {
+                cwd,
+                encoding: 'utf8',
+                timeout: 10000,
+                maxBuffer: 64 * 1024,
+                windowsHide: true
+            })
+            if (result.error || result.status !== 0)
+                throw new Error(`Identity fixture command failed: ${result.error ?? result.stderr}`)
+            return result.stdout.trim()
+        }
+        try {
+            run('git', ['init', '--quiet'])
+            fs.writeFileSync(path.join(directory, 'source.txt'), 'reviewed source\n')
+            run('git', ['add', '--', 'source.txt'])
+            run('git', [
+                '-c',
+                'user.name=PAIR fixture',
+                '-c',
+                'user.email=fixture@example.invalid',
+                '-c',
+                'commit.gpgsign=false',
+                'commit',
+                '--quiet',
+                '--no-signoff',
+                '-m',
+                'fixture'
+            ])
+            const revision = run('git', ['rev-parse', 'HEAD'])
+            const modulePath = path.resolve('scripts/build-identity.ts')
+            const script = `const { buildIdentity } = require(${JSON.stringify(modulePath)}); console.log(buildIdentity(process.argv[1]));`
+            const stamp = (): string =>
+                run(
+                    process.execPath,
+                    ['--require', 'tsx/cjs', '--eval', script, directory],
+                    process.cwd()
+                )
+            expect(stamp()).toBe(`git:${revision}`)
+            fs.writeFileSync(path.join(directory, 'source.txt'), 'changed tracked source\n')
+            expect(run('git', ['status', '--porcelain'])).toBe('M source.txt')
+            expect(stamp()).toBe(`git:${revision}+dirty`)
+        } finally {
+            fs.rmSync(directory, { recursive: true, force: true })
+        }
+    })
     it('embeds only build-time GUI source facts and keeps a failed stamp unknown', () => {
         const git = vi.mocked(childProcess.execFileSync)
         git.mockReset()
