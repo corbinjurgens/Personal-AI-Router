@@ -227,7 +227,7 @@ function operation(): BuildApplyOperation {
 }
 
 describe('build apply payloads', () => {
-    it('detects a genuinely modified tracked file in an isolated git checkout', () => {
+    it('distinguishes generated config files from source dirt in a real git checkout', () => {
         const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pair-gui-identity-'))
         const run = (command: string, args: string[], cwd = directory): string => {
             const result = childProcess.spawnSync(command, args, {
@@ -268,6 +268,30 @@ describe('build apply payloads', () => {
                     process.cwd()
                 )
             expect(stamp()).toBe(`git:${revision}`)
+            fs.mkdirSync(path.join(directory, 'desktop'))
+            const temporaryConfig = path.join(
+                directory,
+                'desktop',
+                'electron.vite.config.123456789.mjs'
+            )
+            fs.writeFileSync(temporaryConfig, 'generated\n')
+            expect(stamp()).toBe(`git:${revision}`)
+            for (const name of [
+                'electron.vite.config.mjs',
+                'electron.vite.config.123x.mjs',
+                'electron.vite.config.123.js',
+                'new-source.ts'
+            ]) {
+                const source = path.join(directory, 'desktop', name)
+                fs.writeFileSync(source, 'source\n')
+                expect(stamp(), name).toBe(`git:${revision}+dirty`)
+                fs.unlinkSync(source)
+            }
+            const wrongDirectory = path.join(directory, 'electron.vite.config.123456789.mjs')
+            fs.writeFileSync(wrongDirectory, 'source\n')
+            expect(stamp()).toBe(`git:${revision}+dirty`)
+            fs.unlinkSync(wrongDirectory)
+            fs.unlinkSync(temporaryConfig)
             fs.writeFileSync(path.join(directory, 'source.txt'), 'changed tracked source\n')
             expect(run('git', ['status', '--porcelain'])).toBe('M source.txt')
             expect(stamp()).toBe(`git:${revision}+dirty`)
