@@ -117,6 +117,7 @@ type engineState struct {
 // layer runs the long ones (install, start) in goroutines so the read
 // loop stays responsive.
 type Executor struct {
+	credentials     credentialStore
 	modelInspection modelInspectionState
 	boundActivation *boundEngineActivation // switchAdmission; current cold operation
 	// switchAdmission protects reservation admission and active mutation counts;
@@ -230,6 +231,7 @@ type Executor struct {
 
 func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), baseDir string) *Executor {
 	e := &Executor{
+		credentials:         credentialStore{factory: newCredentialBackend},
 		switchIncarnation:   newOpID(),
 		reg:                 reg,
 		reporter:            reporter,

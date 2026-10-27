@@ -37,7 +37,11 @@ func TestProbeHTTPReusesConnections(t *testing.T) {
 			probe := &Probe{HTTP: "http://127.0.0.1:{port}/api/version"}
 			const rounds = 32
 			for i := 0; i < rounds; i++ {
-				if got, want := ex.probe(context.Background(), probe, 1), i%2 == 0; got != want {
+				got, err := ex.probe(context.Background(), probe, 1, candidateCredential{port: 1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := i%2 == 0; got != want {
 					t.Fatalf("poll %d: healthy = %v, want %v", i, got, want)
 				}
 			}
@@ -64,7 +68,11 @@ func TestProbeHTTPMatchesJSONIdentity(t *testing.T) {
 				HTTP:      "http://127.0.0.1:{port}/props",
 				JSONMatch: &ProbeJSONMatch{Field: "service.role", Value: "router"},
 			}
-			if got := ex.probe(context.Background(), probe, 1); got != want {
+			got, err := ex.probe(context.Background(), probe, 1, candidateCredential{port: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
 				t.Fatalf("probe = %v, want %v", got, want)
 			}
 		})
@@ -83,7 +91,7 @@ func TestProbeHTTPBoundsBodyDrain(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusAccepted, Body: body, Header: make(http.Header)}, nil
 	})}}
 	probe := &Probe{HTTP: "http://127.0.0.1:{port}/", Status: http.StatusAccepted}
-	if !ex.probe(context.Background(), probe, 1) {
+	if ok, err := ex.probe(context.Background(), probe, 1, candidateCredential{port: 1}); err != nil || !ok {
 		t.Fatal("body drain changed the configured HTTP status health result")
 	}
 	if body.read == 0 || body.read > 1<<20 || !body.closed {
@@ -100,7 +108,7 @@ func TestProbeHTTPRejectsOversizedJSONIdentityBody(t *testing.T) {
 		HTTP:      "http://127.0.0.1:{port}/",
 		JSONMatch: &ProbeJSONMatch{Field: "role", Value: "router"},
 	}
-	if ex.probe(context.Background(), probe, 1) {
+	if ok, err := ex.probe(context.Background(), probe, 1, candidateCredential{port: 1}); err != nil || ok {
 		t.Fatal("oversized JSON identity body passed the probe")
 	}
 	if body.read == 0 || body.read > 2*maxProbeJSONBytes+1 || !body.closed {
@@ -118,7 +126,7 @@ func TestProbeHTTPBodyDrainHonorsDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	if !ex.probe(ctx, probe, 1) {
+	if ok, err := ex.probe(ctx, probe, 1, candidateCredential{port: 1}); err != nil || !ok {
 		t.Fatal("body drain changed the HTTP status health result")
 	}
 	if !body.attempted || !body.closed || time.Since(start) > time.Second {

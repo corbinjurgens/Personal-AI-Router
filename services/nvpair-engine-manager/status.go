@@ -20,6 +20,7 @@ const presenceRefusalWindow = 500 * time.Millisecond
 type presenceResult struct {
 	Identified bool
 	Occupied   bool
+	Err        error
 }
 
 // Detect updates installation completeness while retaining the executable path
@@ -113,7 +114,7 @@ func (e *Executor) StatusAtPort(engine string, probePort int) (EngineStatus, err
 		}
 		return EngineStatus{}, err
 	}
-	return e.refreshStatus(engine, st, probePort), nil
+	return e.refreshStatus(engine, st, probePort)
 }
 
 // GetInstalled lists every known engine with its current status.
@@ -129,7 +130,8 @@ func (e *Executor) GetInstalled() []EngineStatus {
 			}
 			continue
 		}
-		out = append(out, e.refreshStatus(name, st, 0))
+		status, _ := e.refreshStatus(name, st, 0)
+		out = append(out, status)
 	}
 	return out
 }
@@ -137,7 +139,7 @@ func (e *Executor) GetInstalled() []EngineStatus {
 // refreshStatus publishes the completed refresh once. Detect's intermediate
 // installed value must not notify before adoption reconciles it: a service-only
 // adoption would otherwise publish false/true on every unchanged poll.
-func (e *Executor) refreshStatus(engine string, st *engineState, probePort int) EngineStatus {
+func (e *Executor) refreshStatus(engine string, st *engineState, probePort int) (EngineStatus, error) {
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	before := e.snapshot(engine, st)
@@ -148,12 +150,12 @@ func (e *Executor) refreshStatus(engine string, st *engineState, probePort int) 
 	if probePort > 0 {
 		port = probePort
 	}
-	_, presenceChanged := e.reconcilePresenceState(context.Background(), engine, st, pathInstalled, port, false)
+	presence, presenceChanged := e.reconcilePresenceState(context.Background(), engine, st, pathInstalled, port, false)
 	after := e.snapshot(engine, st)
 	if presenceChanged || before.Installed != after.Installed {
 		e.emitState(engine)
 	}
-	return after
+	return after, presence.Err
 }
 
 // Logs returns the engine's captured-output ring.
@@ -244,6 +246,14 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 	if port == 0 || ready == nil || proc != nil || (running && !adopted) {
 		return presenceResult{Identified: running, Occupied: running}, false
 	}
+	credential, credentialErr := e.credentialForCandidate(ctx, st, port)
+	if credentialErr != nil {
+		st.mu.Lock()
+		changed := st.healthy
+		st.healthy = false
+		st.mu.Unlock()
+		return presenceResult{Occupied: true, Err: credentialErr}, changed
+	}
 	// Readiness can establish a running service, but cannot supply declared
 	// mandatory files. Keep liveness truthful without promoting installation.
 	serviceInstalled := pathInstalled || len(st.plat.DetectRequired) == 0
@@ -300,7 +310,14 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 		return presenceResult{Occupied: true}, false
 	}
 
-	identified := e.probe(ctx, ready, port)
+	identified, probeErr := e.probe(ctx, ready, port, credential)
+	if probeErr != nil {
+		st.mu.Lock()
+		changed := st.healthy
+		st.healthy = false
+		st.mu.Unlock()
+		return presenceResult{Occupied: true, Err: probeErr}, changed
+	}
 	if len(st.plat.DetectRequired) > 0 {
 		// The probe may outlive a file change. Refresh mandatory evidence after
 		// network I/O before publishing either healthy or transient adoption.

@@ -61,6 +61,7 @@ func newTestExecutor(t *testing.T, m *Manifest) *Executor {
 	reg := NewRegistry()
 	reg.engines[m.Engine] = m
 	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
+	ex.credentials = credentialStore{backend: &credentialFake{}}
 	acceptModelMutations(ex)
 	return ex
 }

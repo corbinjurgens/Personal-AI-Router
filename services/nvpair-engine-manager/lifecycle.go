@@ -238,6 +238,9 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	fenced, reclaimPID := st.reclaimFailed, st.reclaimPID
 	st.mu.Unlock()
 	presence := e.reconcilePresence(activationAdoptionContext(ctx), engine, st, pathInstalled, port, true)
+	if presence.Err != nil {
+		return presence.Err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -633,7 +636,14 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		case <-readyCtx.Done():
 		}
 	}()
-	readyErr := e.waitReady(readyCtx, rt.Ready, port, rt.AuthStatuses)
+	credential := candidateCredential{port: port}
+	var readyErr error
+	if rt.Ready != nil {
+		credential, readyErr = e.credentialForCandidate(readyCtx, st, port)
+	}
+	if readyErr == nil {
+		readyErr = e.waitReady(readyCtx, rt.Ready, port, rt.AuthStatuses, credential)
+	}
 	select {
 	case <-proc.done:
 		readyErr = fmt.Errorf("process exited before readiness; check the launch options")
@@ -674,13 +684,28 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 // daemon-style engine such as LM Studio), then waits for readiness.
 // There is no owned process — liveness comes from the probe.
 func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
+	credential := candidateCredential{port: port}
+	if rt.Ready != nil {
+		var err error
+		credential, err = e.credentialForCandidate(ctx, st, port)
+		if err != nil {
+			return err
+		}
+	}
 	if len(rt.AuthStatuses) > 0 {
-		_, status := e.probeStatus(ctx, rt.Ready, port)
+		_, status, err := e.probeStatus(ctx, rt.Ready, port, credential)
+		if err != nil {
+			return err
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if slices.Contains(rt.AuthStatuses, status) {
-			err := errors.New(diagnosisMessage(st.manifest.DisplayName, diagnosisAuthRequired))
+			d := diagnosisAuthRequired
+			if credential.key != "" {
+				d = diagnosisAuthRejected
+			}
+			err := errors.New(diagnosisMessage(st.manifest.DisplayName, d))
 			e.reportStartFailedUnlessShuttingDown(ctx, engine, err)
 			return err
 		}
@@ -741,7 +766,7 @@ func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineSta
 			return cleanup(werr)
 		}
 	}
-	if err := e.waitReady(ctx, rt.Ready, port, rt.AuthStatuses); err != nil {
+	if err := e.waitReady(ctx, rt.Ready, port, rt.AuthStatuses, credential); err != nil {
 		werr := fmt.Errorf("engine %q did not become ready: %w", engine, err)
 		werr = e.diagnoseStartFailure(ctx, st, port, err, werr)
 		e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
@@ -1373,6 +1398,7 @@ func (e *Executor) StopAll() {
 		}(st, n)
 	}
 	wg.Wait()
+	e.credentials.close()
 }
 
 func (e *Executor) runHealth(ctx context.Context, st *engineState, engine string, port int, gen int64) {
@@ -1389,7 +1415,11 @@ func (e *Executor) runHealth(ctx context.Context, st *engineState, engine string
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			ok := e.probe(ctx, h, port)
+			credential, probeErr := e.credentialForCandidate(ctx, st, port)
+			ok := false
+			if probeErr == nil {
+				ok, probeErr = e.probe(ctx, h, port, credential)
+			}
 			st.mu.Lock()
 			// Bail if stopped or if a newer start superseded this loop —
 			// a stale loop must never write health for a later run.
@@ -1402,7 +1432,11 @@ func (e *Executor) runHealth(ctx context.Context, st *engineState, engine string
 			st.mu.Unlock()
 			message := engine + " failed its health probe"
 			if !ok && !reported {
-				if d := e.diagnoseConnection(ctx, st, port); d != diagnosisNone {
+				if probeErr != nil {
+					message = probeErr.Error()
+				} else if d, err := e.diagnoseConnection(ctx, st, port); err != nil {
+					message = err.Error()
+				} else if d != diagnosisNone {
 					message = diagnosisMessage(st.manifest.DisplayName, d)
 				}
 			}
@@ -1432,7 +1466,7 @@ func (e *Executor) runHealth(ctx context.Context, st *engineState, engine string
 	}
 }
 
-func (e *Executor) waitReady(ctx context.Context, p *Probe, port int, authStatuses []int) error {
+func (e *Executor) waitReady(ctx context.Context, p *Probe, port int, authStatuses []int, credential candidateCredential) error {
 	if p == nil {
 		return nil
 	}
@@ -1443,13 +1477,19 @@ func (e *Executor) waitReady(ctx context.Context, p *Probe, port int, authStatus
 	deadline := time.Now().Add(timeout)
 	authCount := 0
 	for {
-		ok, status := e.probeStatus(ctx, p, port)
+		ok, status, err := e.probeStatus(ctx, p, port, credential)
+		if err != nil {
+			return err
+		}
 		if ok {
 			return nil
 		}
 		if slices.Contains(authStatuses, status) {
 			authCount++
 			if authCount == 3 && ctx.Err() == nil {
+				if credential.key != "" {
+					return errAuthRejected
+				}
 				return errAuthRequired
 			}
 		} else {
@@ -1466,31 +1506,50 @@ func (e *Executor) waitReady(ctx context.Context, p *Probe, port int, authStatus
 	}
 }
 
-func (e *Executor) probe(ctx context.Context, p *Probe, port int) bool {
-	ok, _ := e.probeStatus(ctx, p, port)
-	return ok
+func (e *Executor) probe(ctx context.Context, p *Probe, port int, credential candidateCredential) (bool, error) {
+	ok, _, err := e.probeStatus(ctx, p, port, credential)
+	return ok, err
 }
 
-func (e *Executor) probeStatus(ctx context.Context, p *Probe, port int) (bool, int) {
+func (e *Executor) probeStatus(ctx context.Context, p *Probe, port int, credential candidateCredential) (bool, int, error) {
 	if p == nil {
-		return true, 0
+		return true, 0, nil
 	}
 	vars := map[string]string{"port": strconv.Itoa(port)}
 	if p.HTTP != "" {
 		u, err := resolvePlaceholders(p.HTTP, vars)
 		if err != nil {
-			return false, 0
+			if credential.key != "" {
+				return false, 0, errCredentialRequest
+			}
+			return false, 0, nil
 		}
 		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(pctx, http.MethodGet, u, nil)
 		if err != nil {
-			return false, 0
+			if credential.key != "" {
+				return false, 0, errCredentialRequest
+			}
+			return false, 0, nil
 		}
 		req.Header.Set(engineIdentityProbeHeader, "1")
-		resp, err := e.client.Do(req)
+		if credential.key != "" && credential.port != port {
+			return false, 0, errCredentialRequest
+		}
+		client, err := credentialHTTPClient(e.client, req, credential)
 		if err != nil {
-			return false, 0
+			return false, 0, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			if isConnectionRefused(err) {
+				return false, 0, nil
+			}
+			if credential.key != "" {
+				return false, 0, errCredentialHTTP
+			}
+			return false, 0, nil
 		}
 
 		want := p.Status
@@ -1500,39 +1559,42 @@ func (e *Executor) probeStatus(ctx context.Context, p *Probe, port int) (bool, i
 		statusMatches := resp.StatusCode == want
 		if p.JSONMatch == nil {
 			httpcon.DrainAndClose(resp.Body)
-			return statusMatches, resp.StatusCode
+			return statusMatches, resp.StatusCode, nil
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxProbeJSONBytes+1))
 		httpcon.DrainAndClose(resp.Body)
+		if err != nil && credential.key != "" {
+			return false, resp.StatusCode, errCredentialHTTP
+		}
 		if !statusMatches || err != nil || len(body) > maxProbeJSONBytes {
-			return false, resp.StatusCode
+			return false, resp.StatusCode, nil
 		}
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal(body, &obj); err != nil {
-			return false, resp.StatusCode
+			return false, resp.StatusCode, nil
 		}
 		value, ok := resolveObjectPath(obj, p.JSONMatch.Field)
 		if !ok {
-			return false, resp.StatusCode
+			return false, resp.StatusCode, nil
 		}
 		var actual string
-		return json.Unmarshal(value, &actual) == nil && actual == p.JSONMatch.Value, resp.StatusCode
+		return json.Unmarshal(value, &actual) == nil && actual == p.JSONMatch.Value, resp.StatusCode, nil
 	}
 	if p.TCP != "" {
 		addr, err := resolvePlaceholders(p.TCP, vars)
 		if err != nil {
-			return false, 0
+			return false, 0, nil
 		}
 		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		conn, err := (&net.Dialer{}).DialContext(pctx, "tcp", addr)
 		if err != nil {
-			return false, 0
+			return false, 0, nil
 		}
 		conn.Close()
-		return true, 0
+		return true, 0, nil
 	}
-	return true, 0
+	return true, 0, nil
 }
 
 func (e *Executor) reportStartFailed(engine string, err error) {

@@ -238,8 +238,8 @@ func TestStrataAuthEngineRequestsCarryTheKey(t *testing.T) {
 		t.Fatalf("redirect: error %v, landing hits %d", err, landed.Load())
 	}
 	_, err := call("list_models", http.MethodGet, "/echo")
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || strings.Contains(httpErr.Body, strataAuthKey) || !strings.Contains(httpErr.Body, "[redacted]") {
-		t.Fatalf("echoed key not redacted: %v", err)
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || strings.Contains(httpErr.Body, strataAuthKey) || httpErr.Body != "Authenticated engine request was refused." {
+		t.Fatalf("authenticated failure did not use the fixed diagnostic: %v", err)
 	}
 	if strings.Contains(err.Error(), strataAuthKey) {
 		t.Fatal("error text carries the key")
