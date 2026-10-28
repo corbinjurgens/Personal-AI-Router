@@ -13,6 +13,10 @@ import (
 )
 
 func TestBuildApplyLocalAdmission(t *testing.T) {
+	profile := t.TempDir()
+	for _, key := range []string{"LOCALAPPDATA", "APPDATA", "HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, profile)
+	}
 	gui := buildapply.GUIFacts{PID: 42, Executable: filepath.Join(t.TempDir(), "PAIR.exe")}
 	cases := []struct {
 		method string
@@ -55,8 +59,24 @@ func TestBuildApplyLocalAdmission(t *testing.T) {
 						if err := json.Unmarshal(response.Result, &result); err != nil {
 							t.Fatal(err)
 						}
-						if result.Available || result.Refusal == nil || result.Refusal.Code != buildapply.RefusalUnavailable {
-							t.Fatalf("result = %+v", result)
+						switch test.method {
+						case "service/build-apply-status":
+							// Task 3's typed no-start status distinguishes idle from
+							// unavailable instead of using Task 1's placeholder.
+							status, err := buildapply.DecodeStatusResult(response.Result, "")
+							if err != nil || !status.Available || status.Value == nil || status.Value.State != buildapply.StatusIdle || status.Value.Operation != nil {
+								t.Fatalf("idle status = %+v, error=%v", status, err)
+							}
+						case "service/build-apply-start":
+							// Task 3 refuses absent stop consent before admission,
+							// without opening the journal or contacting the broker.
+							if result.Available || result.Refusal == nil || result.Refusal.Code != "interruption_required" {
+								t.Fatalf("no-stop refusal = %+v", result)
+							}
+						default:
+							if result.Available || result.Refusal == nil || result.Refusal.Code != buildapply.RefusalUnavailable {
+								t.Fatalf("result = %+v", result)
+							}
 						}
 					}
 				default:
@@ -69,7 +89,7 @@ func TestBuildApplyLocalAdmission(t *testing.T) {
 					t.Fatal("unavailable admission emitted extra frames")
 				}
 			}
-			t.Run("unavailable without broker", func(t *testing.T) { check(t, raw, 0) })
+			t.Run("local result without broker", func(t *testing.T) { check(t, raw, 0) })
 			for _, field := range []string{"nodeId", "remoteCaller", "command", "endpoint"} {
 				t.Run("rejects "+field, func(t *testing.T) {
 					var fields map[string]json.RawMessage

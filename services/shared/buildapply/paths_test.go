@@ -13,7 +13,7 @@ import (
 
 func packageTempRoot(t *testing.T) string {
 	t.Helper()
-	path, err := filepath.EvalSymlinks(t.TempDir())
+	path, err := filepath.EvalSymlinks(packageFixtureTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}

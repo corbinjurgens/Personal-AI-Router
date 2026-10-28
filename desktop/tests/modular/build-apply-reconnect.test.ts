@@ -132,6 +132,7 @@ function operation(): BuildApplyOperation {
     const value = preview()
     return {
         operationId: 'operation_1',
+        previewId: 'preview_1',
         ownershipAcknowledged: true,
         phase: 'quiesce',
         outcome: null,

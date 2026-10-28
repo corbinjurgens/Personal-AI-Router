@@ -182,6 +182,11 @@ type Broker struct {
 	// before engineConfigMu, never the reverse.
 	settingsApplyMu sync.Mutex
 	engineConfigMu  sync.Mutex
+	// Build maintenance uses the settings journal lock for admission only;
+	// its reservation survives unlocked drain/stop and client disconnect.
+	buildApplyMaintenance buildApplyMaintenance
+	// Nil until complete, side-effect-free owner evidence can be supplied.
+	buildApplyOwners buildApplyOwners
 	// Only live install continuations are retained, under engineConfigMu.
 	pendingInstallStarts   map[*pendingInstallStart]struct{}
 	switchInit             sync.Once

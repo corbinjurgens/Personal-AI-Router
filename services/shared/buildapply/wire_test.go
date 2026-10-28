@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -61,8 +62,8 @@ func TestObservationDoesNotInventKnownValues(t *testing.T) {
 }
 
 func TestLocalRequestsRejectUnownedInputs(t *testing.T) {
-	gui := GUIFacts{PID: 42, Executable: filepath.Join(t.TempDir(), "PAIR.exe"), BuildID: ""}
-	encoded, err := json.Marshal(PreviewRequest{CandidatePath: t.TempDir(), GUI: gui})
+	gui := GUIFacts{PID: 42, Executable: filepath.Join(packageFixtureTempDir(t), "PAIR.exe"), BuildID: ""}
+	encoded, err := json.Marshal(PreviewRequest{CandidatePath: packageFixtureTempDir(t), GUI: gui})
 	if err != nil {
 		t.Fatalf("encode request: %v", err)
 	}
@@ -152,6 +153,309 @@ func TestUnavailableAndMaintenanceRefusalsDoNotAcknowledgeOwnership(t *testing.T
 	}
 }
 
+func wireOperationFixture() BuildApplyOperation {
+	return BuildApplyOperation{
+		OperationID: "operation_1", PreviewID: "preview_1", OwnershipAcknowledged: true,
+		Phase: PhasePrepare, ReadbackConfidence: ConfidenceUnknown,
+	}
+}
+
+func TestBuildApplyStatusRoundtripPreservesStateAndCorrelation(t *testing.T) {
+	pending := wireOperationFixture()
+	terminal := wireOperationFixture()
+	outcome := OutcomeUncertain
+	terminal.Outcome = &outcome
+	terminal.Failure = &BuildApplyFailure{
+		Phase: PhasePrepare, Reason: "readback_unavailable", Detail: "Readback is unavailable.",
+		ReadbackConfidence: ConfidenceUnknown, SafeNextAction: "Keep paused and inspect the operation.",
+	}
+	test := func(name string, status BuildApplyStatus) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			want := Result[BuildApplyStatus]{Available: true, Value: &status}
+			raw, err := EncodeStatusResult(want)
+			if err != nil {
+				t.Fatalf("encode status: %v", err)
+			}
+			got, err := DecodeStatusResult(raw, "")
+			if err != nil {
+				t.Fatalf("decode status: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("status = %#v, want %#v", got, want)
+			}
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				t.Fatalf("decode envelope structure: %v", err)
+			}
+			if len(envelope) != 3 || string(envelope["available"]) != "true" || string(envelope["refusal"]) != "null" {
+				t.Fatalf("envelope = %v", envelope)
+			}
+			var value map[string]json.RawMessage
+			if err := json.Unmarshal(envelope["value"], &value); err != nil {
+				t.Fatalf("decode status structure: %v", err)
+			}
+			var state StatusState
+			if err := json.Unmarshal(value["state"], &state); err != nil {
+				t.Fatalf("decode status state: %v", err)
+			}
+			if len(value) != 2 || state != status.State {
+				t.Fatalf("status structure = %v", value)
+			}
+			if status.Operation == nil {
+				if string(value["operation"]) != "null" {
+					t.Fatalf("idle operation = %s", value["operation"])
+				}
+				return
+			}
+			var operation map[string]json.RawMessage
+			if err := json.Unmarshal(value["operation"], &operation); err != nil {
+				t.Fatalf("decode operation structure: %v", err)
+			}
+			var previewID string
+			if err := json.Unmarshal(operation["previewId"], &previewID); err != nil {
+				t.Fatalf("decode preview correlation: %v", err)
+			}
+			if previewID != status.Operation.PreviewID {
+				t.Fatalf("preview ID = %q, want %q", previewID, status.Operation.PreviewID)
+			}
+			if _, err := DecodeStatusResult(raw, previewID); err != nil {
+				t.Fatalf("matching preview: %v", err)
+			}
+			if _, err := DecodeStatusResult(raw, "preview_other"); err == nil {
+				t.Fatal("accepted unrelated preview")
+			}
+		})
+	}
+	test("idle without recorded operation", BuildApplyStatus{State: StatusIdle})
+	test("pending", BuildApplyStatus{State: StatusPending, Operation: &pending})
+	test("terminal", BuildApplyStatus{State: StatusTerminal, Operation: &terminal})
+	test("unknown with pending receipt", BuildApplyStatus{State: StatusUnknown, Operation: &pending})
+	test("unknown with terminal receipt", BuildApplyStatus{State: StatusUnknown, Operation: &terminal})
+}
+
+func TestBuildApplyStatusRejectsMalformedPayloads(t *testing.T) {
+	operation, err := json.Marshal(wireOperationFixture())
+	if err != nil {
+		t.Fatalf("encode operation fixture: %v", err)
+	}
+	status := func(state, operation string) string {
+		return `{"available":true,"value":{"state":"` + state + `","operation":` + operation + `},"refusal":null}`
+	}
+	test := func(name, input string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeStatusResult([]byte(input), ""); err == nil {
+				t.Fatal("accepted malformed status")
+			}
+		})
+	}
+	badOperation := func(name, field string, value json.RawMessage) {
+		t.Helper()
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(operation, &fields); err != nil {
+			t.Fatalf("decode operation fixture: %v", err)
+		}
+		if value == nil {
+			delete(fields, field)
+		} else {
+			fields[field] = value
+		}
+		raw, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatalf("encode malformed operation: %v", err)
+		}
+		test(name, status("unknown", string(raw)))
+	}
+	test("missing state", `{"available":true,"value":{"operation":null},"refusal":null}`)
+	test("missing operation", `{"available":true,"value":{"state":"idle"},"refusal":null}`)
+	test("unknown state name", status("unreadable", string(operation)))
+	test("idle carries operation", status("idle", string(operation)))
+	test("pending lacks operation", status("pending", "null"))
+	test("terminal lacks operation", status("terminal", "null"))
+	test("unknown lacks trusted correlation", status("unknown", "null"))
+	test("terminal lacks outcome", status("terminal", string(operation)))
+	test("pending carries outcome", status("pending", strings.Replace(string(operation), `"outcome":null`, `"outcome":"uncertain"`, 1)))
+	test("duplicate state", `{"available":true,"value":{"state":"unknown","state":"idle","operation":null},"refusal":null}`)
+	test("duplicate preview correlation", status("pending", strings.Replace(string(operation), `"previewId":"preview_1"`, `"previewId":"preview_1","previewId":"preview_2"`, 1)))
+	test("trailing JSON", status("idle", "null")+` {}`)
+	test("null output", `null`)
+	test("array output", `[]`)
+	test("oversized output", strings.Repeat(" ", MaxStatusBytes)+status("idle", "null"))
+	test("unavailable carries idle", `{"available":false,"value":{"state":"idle","operation":null},"refusal":{"code":"unavailable","detail":"Unreadable."}}`)
+	test("available lacks value", `{"available":true,"value":null,"refusal":null}`)
+	test("available carries refusal", `{"available":true,"value":{"state":"idle","operation":null},"refusal":{"code":"unavailable","detail":"Unreadable."}}`)
+	test("unavailable lacks refusal", `{"available":false,"value":null,"refusal":null}`)
+	test("missing availability", `{"value":null,"refusal":{"code":"unavailable","detail":"Unreadable."}}`)
+	test("extra status field", `{"available":true,"value":{"state":"idle","operation":null,"previewId":"preview_1"},"refusal":null}`)
+	badOperation("missing preview correlation", "previewId", nil)
+	badOperation("null preview correlation", "previewId", json.RawMessage(`null`))
+	badOperation("empty preview correlation", "previewId", json.RawMessage(`""`))
+	badOperation("path as preview correlation", "previewId", json.RawMessage(`"../preview"`))
+	badOperation("oversized preview correlation", "previewId", json.RawMessage(`"`+strings.Repeat("p", 129)+`"`))
+	badOperation("missing operation ID", "operationId", nil)
+	badOperation("empty operation ID", "operationId", json.RawMessage(`""`))
+	badOperation("path as operation ID", "operationId", json.RawMessage(`"operation/1"`))
+	badOperation("oversized operation ID", "operationId", json.RawMessage(`"`+strings.Repeat("o", 129)+`"`))
+	badOperation("missing acknowledgement", "ownershipAcknowledged", nil)
+	badOperation("null acknowledgement", "ownershipAcknowledged", json.RawMessage(`null`))
+	badOperation("unknown phase", "phase", json.RawMessage(`"done"`))
+	badOperation("unknown outcome", "outcome", json.RawMessage(`"done"`))
+	badOperation("unknown confidence", "readbackConfidence", json.RawMessage(`"complete"`))
+	badOperation("missing identity facts", "runningService", json.RawMessage(`{}`))
+	badOperation("missing fences", "fences", json.RawMessage(`{}`))
+	badOperation("unknown observation with value", "saved", json.RawMessage(`{"known":false,"value":false}`))
+	badOperation("known observation without value", "saved", json.RawMessage(`{"known":true,"value":null}`))
+	badOperation("case variant observation key", "saved", json.RawMessage(`{"Known":false,"value":null}`))
+	badOperation("extra observation field", "saved", json.RawMessage(`{"known":false,"value":null,"extra":true}`))
+	badOperation("extra operation field", "extra", json.RawMessage(`true`))
+}
+
+func TestBuildApplyOperationRejectsContradictoryFailure(t *testing.T) {
+	test := func(name string, outcome *Outcome, failure *BuildApplyFailure) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			operation := wireOperationFixture()
+			operation.Outcome = outcome
+			operation.Failure = failure
+			if _, err := json.Marshal(operation); err == nil {
+				t.Fatal("encoded contradictory operation")
+			}
+			// Encode through an alias to independently exercise input validation.
+			type wire BuildApplyOperation
+			raw, err := json.Marshal(wire(operation))
+			if err != nil {
+				t.Fatalf("encode malformed fixture: %v", err)
+			}
+			var decoded BuildApplyOperation
+			if err := json.Unmarshal(raw, &decoded); err == nil {
+				t.Fatal("decoded contradictory operation")
+			}
+		})
+	}
+	failure := BuildApplyFailure{Phase: PhasePrepare, ReadbackConfidence: ConfidenceUnknown}
+	succeeded, failed := OutcomeSucceeded, OutcomeFailed
+	test("pending carries failure", nil, &failure)
+	test("success carries failure", &succeeded, &failure)
+	failure.Phase = PhaseSwap
+	test("failure phase differs", &failed, &failure)
+	failure.Phase = PhasePrepare
+	failure.Detail = strings.Repeat("界", MaxDetailBytes/3+1)
+	test("failure detail exceeds UTF-8 bound", &failed, &failure)
+}
+
+func TestBuildApplyStatusRejectsContradictoryOutput(t *testing.T) {
+	pending := wireOperationFixture()
+	terminal := wireOperationFixture()
+	outcome := OutcomeUncertain
+	terminal.Outcome = &outcome
+	test := func(name string, status BuildApplyStatus) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			if _, err := EncodeStatusResult(Result[BuildApplyStatus]{Available: true, Value: &status}); err == nil {
+				t.Fatal("encoded contradictory status")
+			}
+		})
+	}
+	test("idle carries operation", BuildApplyStatus{State: StatusIdle, Operation: &pending})
+	test("pending carries terminal outcome", BuildApplyStatus{State: StatusPending, Operation: &terminal})
+	test("terminal lacks outcome", BuildApplyStatus{State: StatusTerminal, Operation: &pending})
+	test("unknown lacks correlation", BuildApplyStatus{State: StatusUnknown})
+	test("invalid state", BuildApplyStatus{State: "unreadable", Operation: &pending})
+}
+
+func TestBuildApplyStatusEncodingBoundsCompleteOutput(t *testing.T) {
+	operation := wireOperationFixture()
+	// Valid observed strings can expand during JSON escaping. Bound the encoded
+	// envelope rather than assuming per-field bounds bound the command output.
+	value := Known(strings.Repeat("<", MaxPathBytes))
+	operation.Fences = Fences{
+		RuntimeGeneration: value, ServiceInstance: value, BrokerGeneration: value,
+		ManagerIncarnation: value, PolicyRevision: value, SettingsRevision: value,
+		IntentRevision: value, LocksRevision: value, AvailabilityRevision: value,
+	}
+	status := BuildApplyStatus{State: StatusPending, Operation: &operation}
+	result := Result[BuildApplyStatus]{Available: true, Value: &status}
+	if _, err := EncodeStatusResult(result); err == nil {
+		t.Fatal("encoded oversized status output")
+	}
+}
+
+func TestBuildApplyOperationKeepsOpaqueIDsAndOwnershipIndependent(t *testing.T) {
+	operation := wireOperationFixture()
+	operation.OperationID = strings.Repeat("O", 128)
+	operation.PreviewID = strings.Repeat("p_-", 42) + "12"
+	operation.OwnershipAcknowledged = false
+	raw, err := json.Marshal(operation)
+	if err != nil {
+		t.Fatalf("encode bounded IDs: %v", err)
+	}
+	var got BuildApplyOperation
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode bounded IDs: %v", err)
+	}
+	if !reflect.DeepEqual(got, operation) || got.OwnershipAcknowledged {
+		t.Fatalf("operation = %+v", got)
+	}
+}
+
+func TestBuildApplyStatusRequiresExactPreviewMatch(t *testing.T) {
+	operation := wireOperationFixture()
+	status := BuildApplyStatus{State: StatusPending, Operation: &operation}
+	raw, err := EncodeStatusResult(Result[BuildApplyStatus]{Available: true, Value: &status})
+	if err != nil {
+		t.Fatalf("encode status fixture: %v", err)
+	}
+	if _, err := DecodeStatusResult(raw, operation.PreviewID); err != nil {
+		t.Fatalf("matching preview: %v", err)
+	}
+	if _, err := DecodeStatusResult(raw, "preview_other"); err == nil {
+		t.Fatal("accepted unrelated preview")
+	}
+	if _, err := DecodeStatusResult(raw, "../preview"); err == nil {
+		t.Fatal("accepted invalid expected preview")
+	}
+	idle := BuildApplyStatus{State: StatusIdle}
+	raw, err = EncodeStatusResult(Result[BuildApplyStatus]{Available: true, Value: &idle})
+	if err != nil {
+		t.Fatalf("encode idle fixture: %v", err)
+	}
+	if _, err := DecodeStatusResult(raw, operation.PreviewID); err == nil {
+		t.Fatal("idle satisfied operation correlation")
+	}
+}
+
+func TestBuildApplyUnavailableStatusDoesNotInventIdle(t *testing.T) {
+	want := Unavailable[BuildApplyStatus]()
+	raw, err := EncodeStatusResult(want)
+	if err != nil {
+		t.Fatalf("encode unavailable status: %v", err)
+	}
+	got, err := DecodeStatusResult(raw, "preview_1")
+	if err != nil {
+		t.Fatalf("decode unavailable status: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) || got.Available || got.Value != nil {
+		t.Fatalf("unavailable status = %+v", got)
+	}
+}
+
+func TestBuildApplyStartReplyPreservesAdmittedPreview(t *testing.T) {
+	operation := wireOperationFixture()
+	want := Result[BuildApplyOperation]{Available: true, Value: &operation}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("encode start reply: %v", err)
+	}
+	var got Result[BuildApplyOperation]
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode start reply: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) || got.Value.PreviewID != operation.PreviewID {
+		t.Fatalf("start reply = %+v", got)
+	}
+}
+
 func TestBundleLayoutsUseActualPackagingNames(t *testing.T) {
 	cases := []struct {
 		platform string
@@ -167,7 +471,7 @@ func TestBundleLayoutsUseActualPackagingNames(t *testing.T) {
 			if !ok || layout != tc.want {
 				t.Fatalf("layout = %+v, known %v, want %+v", layout, ok, tc.want)
 			}
-			root := filepath.Join(t.TempDir(), layout.RootName)
+			root := filepath.Join(packageFixtureTempDir(t), layout.RootName)
 			// Tiny inert bytes, never executable candidate code or a build.
 			for _, name := range []string{layout.Executable, layout.ServiceDir + "/" + layout.ServiceExecutable} {
 				path := filepath.Join(root, filepath.FromSlash(name))
@@ -215,7 +519,8 @@ func TestTypeScriptBuildApplyFieldParity(t *testing.T) {
 		reflect.TypeOf(BuildApplyOperation{}): "BuildApplyOperation", reflect.TypeOf(PrepareRequest{}): "BuildApplyPrepareRequest",
 		reflect.TypeOf(FinishRequest{}): "BuildApplyFinishRequest",
 		reflect.TypeOf(Phase("")):       "BuildApplyPhase", reflect.TypeOf(Outcome("")): "BuildApplyOutcome",
-		reflect.TypeOf(Confidence("")): "BuildApplyConfidence",
+		reflect.TypeOf(Confidence("")):  "BuildApplyConfidence",
+		reflect.TypeOf(StatusState("")): "BuildApplyStatusState",
 	}
 	var tsType func(reflect.Type) string
 	tsType = func(typ reflect.Type) string {
@@ -274,6 +579,7 @@ func TestTypeScriptBuildApplyFieldParity(t *testing.T) {
 		{"BuildApplyPhase", []string{string(PhasePreflight), string(PhasePrepare), string(PhaseQuiesce), string(PhaseShutdown), string(PhaseSwap), string(PhaseRestart), string(PhaseVerifyBuild), string(PhaseVerifySettings), string(PhaseFinish)}},
 		{"BuildApplyOutcome", []string{string(OutcomeSucceeded), string(OutcomeRefused), string(OutcomeFailed), string(OutcomeInterrupted), string(OutcomeUncertain)}},
 		{"BuildApplyConfidence", []string{string(ConfidenceUnknown), string(ConfidenceIncomplete), string(ConfidenceVerified)}},
+		{"BuildApplyStatusState", []string{string(StatusIdle), string(StatusPending), string(StatusTerminal), string(StatusUnknown)}},
 	}
 	for _, enum := range enums {
 		match := regexp.MustCompile("(?s)export type " + enum.name + "\\s*=\\s*(.*?)(?:export|$)").FindStringSubmatch(string(data))
@@ -289,5 +595,42 @@ func TestTypeScriptBuildApplyFieldParity(t *testing.T) {
 		if !reflect.DeepEqual(got, enum.values) {
 			t.Fatalf("%s = %v, want %v", enum.name, got, enum.values)
 		}
+	}
+	status := reflect.TypeOf(BuildApplyStatus{})
+	stateField, stateOK := status.FieldByName("State")
+	operationField, operationOK := status.FieldByName("Operation")
+	if !stateOK || !operationOK || status.NumField() != 2 || stateField.Type != reflect.TypeOf(StatusState("")) || operationField.Type != reflect.TypeOf((*BuildApplyOperation)(nil)) {
+		t.Fatal("unexpected Go status structure")
+	}
+	match := regexp.MustCompile(`(?s)export type BuildApplyStatus =\s*(.*?)(?:export|$)`).FindStringSubmatch(string(data))
+	if len(match) != 2 {
+		t.Fatal("missing TS status union")
+	}
+	branches := map[string]string{}
+	pattern := `\{\s*` + stateField.Tag.Get("json") + `: '([^']+)'; ` + operationField.Tag.Get("json") + `: ([^}]+)\}`
+	for _, branch := range regexp.MustCompile(pattern).FindAllStringSubmatch(match[1], -1) {
+		branches[branch[1]] = strings.TrimSpace(branch[2])
+	}
+	wantBranches := map[string]string{
+		string(StatusIdle): "null", string(StatusPending): "BuildApplyOperation",
+		string(StatusTerminal): "BuildApplyOperation", string(StatusUnknown): "BuildApplyOperation",
+	}
+	if !reflect.DeepEqual(branches, wantBranches) {
+		t.Fatalf("TS status branches = %v, want %v", branches, wantBranches)
+	}
+	limit := regexp.MustCompile(`BUILD_APPLY_MAX_STATUS_BYTES = (\d+) << (\d+)`).FindStringSubmatch(string(data))
+	if len(limit) != 3 {
+		t.Fatal("missing TS status size bound")
+	}
+	base, err := strconv.Atoi(limit[1])
+	if err != nil {
+		t.Fatalf("decode TS bound base: %v", err)
+	}
+	shift, err := strconv.Atoi(limit[2])
+	if err != nil {
+		t.Fatalf("decode TS bound shift: %v", err)
+	}
+	if base<<shift != MaxStatusBytes {
+		t.Fatalf("TS status bound = %d, Go bound = %d", base<<shift, MaxStatusBytes)
 	}
 }

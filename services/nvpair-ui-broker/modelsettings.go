@@ -38,8 +38,8 @@ func engineSettingsErrorCode(err error) int {
 }
 
 // validateModelSettingsEntry runs before journal initialization or worker IO.
-// No maintenance reservation exists yet: apply-build must include this mutation
-// boundary in its exclusion when that owner lands.
+// The settings entry points reserve maintenance after validation, before either
+// the ordinary or model-change branch can enter an owner or worker.
 func validateModelSettingsEntry(p settings.Request) error {
 	if err := p.Validate(); err != nil {
 		return &invalidParamsError{err: err}

@@ -159,6 +159,7 @@ export interface BuildApplyFailure {
 }
 export interface BuildApplyOperation {
     operationId: string
+    previewId: string
     ownershipAcknowledged: boolean
     phase: BuildApplyPhase
     outcome: BuildApplyOutcome | null
@@ -172,11 +173,21 @@ export interface BuildApplyOperation {
     readbackConfidence: BuildApplyConfidence
     fences: BuildApplyFences
 }
+export type BuildApplyStatusState = 'idle' | 'pending' | 'terminal' | 'unknown'
+// Unknown preserves readable receipt correlation. An unreadable receipt is an
+// unavailable result, never idle. No snapshot alone grants handoff.
+export type BuildApplyStatus =
+    | { state: 'idle'; operation: null }
+    | { state: 'pending'; operation: BuildApplyOperation }
+    | { state: 'terminal'; operation: BuildApplyOperation }
+    | { state: 'unknown'; operation: BuildApplyOperation }
+export const BUILD_APPLY_MAX_STATUS_BYTES = 128 << 10
 export type BuildApplyResult<T> =
     | { available: true; value: T; refusal: null }
     | { available: false; value: null; refusal: BuildApplyRefusal }
 export interface BuildApplyPrepareRequest {
     operationId: string
+    previewId: string
     fences: BuildApplyFences
     consent: BuildApplyConsent
 }

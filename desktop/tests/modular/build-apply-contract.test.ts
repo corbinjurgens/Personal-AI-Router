@@ -14,19 +14,25 @@ import type {
     BuildApplyFences,
     BuildApplyPreview,
     BuildApplyOperation,
+    BuildApplyStatus,
     BuildApplyPrepareRequest,
     BuildApplyFinishRequest,
     BuildApplyGuiReadyRequest
 } from '@/shared/types/build-apply'
-import { BUILD_APPLY_MAINTENANCE_BUSY } from '@/shared/types/build-apply'
+import {
+    BUILD_APPLY_MAINTENANCE_BUSY,
+    BUILD_APPLY_MAX_STATUS_BYTES
+} from '@/shared/types/build-apply'
 import { BUILD_APPLY_MAINTENANCE_BUSY_CODE } from '@/shared/constants/service-errors'
 import type { JsonValue } from '@/shared/types/json'
+import type { JsonObject } from '@/electron/service-bridge/json-rpc-client'
 import { JsonRpcSocketClient } from '@/electron/service-bridge/json-rpc-client'
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 import {
     parseBuildApplyPreviewResult,
     parseBuildApplyOperationResult,
-    parseBuildApplyOperation
+    parseBuildApplyOperation,
+    parseBuildApplyStatusResult
 } from '@/electron/service-bridge/build-apply'
 import {
     chooseBuildApplyPreview,
@@ -202,6 +208,7 @@ function preview(): BuildApplyPreview {
 function operation(): BuildApplyOperation {
     return {
         operationId: 'operation_1',
+        previewId: 'preview_1',
         ownershipAcknowledged: true,
         phase: 'verify-settings',
         outcome: 'uncertain',
@@ -224,6 +231,17 @@ function operation(): BuildApplyOperation {
             safeNextAction: 'Keep paused and inspect the retained operation.'
         }
     }
+}
+
+function pendingOperation(): BuildApplyOperation {
+    return { ...operation(), phase: 'prepare', outcome: null, failure: null }
+}
+
+function operationWire(): JsonObject {
+    const value = wire(operation())
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw new Error('Invalid operation fixture.')
+    return value
 }
 
 describe('build apply payloads', () => {
@@ -344,6 +362,168 @@ describe('build apply payloads', () => {
             parseBuildApplyOperationResult(wire({ available: true, value, refusal: null })).value
         ).toEqual(value)
     })
+    it.each<{ name: string; status: BuildApplyStatus }>([
+        { name: 'idle without a recorded operation', status: { state: 'idle', operation: null } },
+        { name: 'pending', status: { state: 'pending', operation: pendingOperation() } },
+        { name: 'terminal', status: { state: 'terminal', operation: operation() } },
+        {
+            name: 'unknown with a pending receipt',
+            status: { state: 'unknown', operation: pendingOperation() }
+        },
+        {
+            name: 'unknown with a terminal receipt',
+            status: { state: 'unknown', operation: operation() }
+        }
+    ])('preserves $name status and preview correlation', ({ status }) => {
+        const response = { available: true, value: status, refusal: null }
+        expect(parseBuildApplyStatusResult(wire(response))).toEqual(response)
+        if (status.state !== 'idle') {
+            expect(status.operation.previewId).toBe('preview_1')
+            expect(parseBuildApplyStatusResult(wire(response), 'preview_1')).toEqual(response)
+            expect(() => parseBuildApplyStatusResult(wire(response), 'preview_other')).toThrow()
+        }
+    })
+    it.each<{ name: string; status: JsonValue }>([
+        { name: 'missing state', status: { operation: null } },
+        { name: 'missing operation', status: { state: 'idle' } },
+        {
+            name: 'unknown state name',
+            status: { state: 'unreadable', operation: wire(operation()) }
+        },
+        {
+            name: 'idle carrying an operation',
+            status: { state: 'idle', operation: wire(operation()) }
+        },
+        { name: 'pending without an operation', status: { state: 'pending', operation: null } },
+        { name: 'terminal without an operation', status: { state: 'terminal', operation: null } },
+        {
+            name: 'unknown without trusted correlation',
+            status: { state: 'unknown', operation: null }
+        },
+        {
+            name: 'pending with an outcome',
+            status: { state: 'pending', operation: wire(operation()) }
+        },
+        {
+            name: 'terminal without an outcome',
+            status: { state: 'terminal', operation: wire(pendingOperation()) }
+        },
+        { name: 'extra field', status: { state: 'idle', operation: null, previewId: 'preview_1' } }
+    ])('rejects $name status', ({ status }) => {
+        expect(() =>
+            parseBuildApplyStatusResult({ available: true, value: status, refusal: null })
+        ).toThrow()
+    })
+    it('requires the admitted preview on start replies without inventing handoff authority', () => {
+        const value = { ...pendingOperation(), ownershipAcknowledged: false }
+        const response = wire({ available: true, value, refusal: null })
+        expect(parseBuildApplyOperationResult(response, 'preview_1')).toEqual({
+            available: true,
+            value,
+            refusal: null
+        })
+        expect(() => parseBuildApplyOperationResult(response, 'preview_other')).toThrow()
+        expect(() => parseBuildApplyOperationResult(response, '../preview')).toThrow()
+        const missing = operationWire()
+        delete missing.previewId
+        expect(() =>
+            parseBuildApplyOperationResult({ available: true, value: missing, refusal: null })
+        ).toThrow()
+    })
+    it('keeps unavailable status distinct from idle and rejects idle as preview correlation', () => {
+        const unavailable = {
+            available: false,
+            value: null,
+            refusal: { code: 'unavailable', detail: 'Receipt is unreadable.' }
+        }
+        expect(parseBuildApplyStatusResult(wire(unavailable), 'preview_1')).toEqual(unavailable)
+        const idle = { available: true, value: { state: 'idle', operation: null }, refusal: null }
+        expect(() => parseBuildApplyStatusResult(wire(idle), 'preview_1')).toThrow()
+        expect(() =>
+            parseBuildApplyStatusResult(wire({ ...unavailable, value: idle.value }))
+        ).toThrow()
+        expect(() =>
+            parseBuildApplyStatusResult(wire({ ...idle, refusal: unavailable.refusal }))
+        ).toThrow()
+        expect(() => parseBuildApplyStatusResult(wire({ ...unavailable, refusal: null }))).toThrow()
+        expect(() => parseBuildApplyStatusResult(undefined)).toThrow()
+        expect(() => parseBuildApplyStatusResult(null)).toThrow()
+    })
+    it.each<{ name: string; field: string; value: JsonValue }>([
+        { name: 'empty preview ID', field: 'previewId', value: '' },
+        { name: 'null preview ID', field: 'previewId', value: null },
+        { name: 'path as preview ID', field: 'previewId', value: '../preview' },
+        { name: 'oversized preview ID', field: 'previewId', value: 'p'.repeat(129) },
+        { name: 'empty operation ID', field: 'operationId', value: '' },
+        { name: 'path as operation ID', field: 'operationId', value: 'operation/1' },
+        { name: 'oversized operation ID', field: 'operationId', value: 'o'.repeat(129) },
+        { name: 'null acknowledgement', field: 'ownershipAcknowledged', value: null },
+        { name: 'unknown outcome', field: 'outcome', value: 'done' },
+        { name: 'unknown confidence', field: 'readbackConfidence', value: 'complete' },
+        { name: 'incomplete identity', field: 'runningService', value: {} },
+        { name: 'extra operation field', field: 'extra', value: true },
+        {
+            name: 'case variant observation key',
+            field: 'saved',
+            value: { Known: false, value: null }
+        },
+        {
+            name: 'extra observation field',
+            field: 'saved',
+            value: { known: false, value: null, extra: true }
+        }
+    ])('rejects $name in every recorded status', ({ field, value }) => {
+        const malformed = { ...operationWire(), [field]: value }
+        expect(() =>
+            parseBuildApplyStatusResult({
+                available: true,
+                value: { state: 'unknown', operation: malformed },
+                refusal: null
+            })
+        ).toThrow()
+    })
+    it('rejects pending failures, successful failures and inconsistent failure phases', () => {
+        expect(() => parseBuildApplyOperation(wire({ ...operation(), outcome: null }))).toThrow()
+        expect(() =>
+            parseBuildApplyOperation(wire({ ...operation(), outcome: 'succeeded' }))
+        ).toThrow()
+        expect(() => parseBuildApplyOperation(wire({ ...operation(), phase: 'swap' }))).toThrow()
+    })
+    it('accepts bounded opaque IDs without assigning ownership', () => {
+        const value = {
+            ...pendingOperation(),
+            operationId: 'O'.repeat(128),
+            previewId: 'p_-'.repeat(42) + '12',
+            ownershipAcknowledged: false
+        }
+        expect(parseBuildApplyOperation(wire(value), value.previewId)).toEqual(value)
+    })
+    it('rejects oversized status output and bounds diagnostic detail in UTF-8 bytes', () => {
+        expect(() =>
+            parseBuildApplyStatusResult({
+                available: false,
+                value: null,
+                refusal: {
+                    code: 'unavailable',
+                    detail: '界'.repeat(BUILD_APPLY_MAX_STATUS_BYTES / 2)
+                }
+            })
+        ).toThrow()
+        const value = operation()
+        if (!value.failure) throw new Error('Missing failure fixture.')
+        const detail = '界'.repeat(Math.floor(1024 / 3))
+        expect(
+            parseBuildApplyOperation(wire({ ...value, failure: { ...value.failure, detail } }))
+        ).toEqual({
+            ...value,
+            failure: { ...value.failure, detail }
+        })
+        expect(() =>
+            parseBuildApplyOperation(
+                wire({ ...value, failure: { ...value.failure, detail: detail + '界' } })
+            )
+        ).toThrow()
+    })
     it('retains the reciprocal maintenance refusal without inventing ownership', () => {
         const result = {
             available: false,
@@ -354,6 +534,7 @@ describe('build apply payloads', () => {
         expect(BUILD_APPLY_MAINTENANCE_BUSY_CODE).toBe(-32015)
         const prepare: BuildApplyPrepareRequest = {
             operationId: 'operation_1',
+            previewId: 'preview_1',
             fences: fences(),
             consent: { allowInterruption: true, allowEngineStop: true }
         }
@@ -365,7 +546,7 @@ describe('build apply payloads', () => {
             operationId: finish.operationId,
             gui: { pid: 42, executable: '/native/PAIR.exe', buildId: 'embedded-gui' }
         }
-        expect(Object.keys(prepare).sort()).toEqual(['consent', 'fences', 'operationId'])
+        expect(Object.keys(prepare).sort()).toEqual(['consent', 'fences', 'operationId', 'previewId'])
         expect(Object.keys(ready).sort()).toEqual(['gui', 'operationId'])
     })
     it('rejects missing meaningful fields, inconsistent known values and malformed results', () => {

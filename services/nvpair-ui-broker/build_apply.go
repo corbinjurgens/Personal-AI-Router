@@ -4,7 +4,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -15,8 +17,8 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-// Admission is local, before namespace forwarding. This is not the settings
-// maintenance exclusion: Task 3 must wire it at the authoritative settings owner.
+// Admission is local, before namespace forwarding. Maintenance exclusion also
+// belongs at the settings owner, including internal preview/apply callers.
 func (b *Broker) handleBuildApply(msg *Message) {
 	var request any
 	switch msg.Method {
@@ -38,9 +40,338 @@ func (b *Broker) handleBuildApply(msg *Message) {
 			return
 		}
 		_ = b.codec.Respond(msg.ID, buildapply.Result[buildapply.Impact]{Available: true, Value: &impact})
-	} else {
-		_ = b.codec.Respond(msg.ID, buildapply.Unavailable[buildapply.BuildApplyOperation]())
+	} else if prepare, ok := request.(*buildapply.PrepareRequest); ok {
+		go func() { _ = b.codec.Respond(msg.ID, b.prepareBuildApply(*prepare)) }()
+	} else if finish, ok := request.(*buildapply.FinishRequest); ok {
+		go func() { _ = b.codec.Respond(msg.ID, b.finishBuildApply(*finish)) }()
 	}
+}
+
+// WithLocked supplies a detached capture and runs the callback while every
+// contributing external owner is pinned against mutation. The caller already
+// holds engineConfigMu -> policy mu; implementations must not reenter either
+// lock or perform transport I/O, and must return the callback's result without
+// failing after an accepted callback.
+// There is deliberately no production implementation: manager intent/lock
+// revisions, complete roots/inventory, scoped stop and copy/download reservation
+// evidence still lack safe read APIs. A cache or a worker probe cannot fill in.
+type buildApplyOwners interface {
+	WithLocked(func(buildApplyCapturedOwners) error) error
+}
+
+type buildApplyCapturedOwners struct {
+	Impact                        buildapply.Impact
+	Saved, Enforced, PhysicalStop buildapply.Observation[bool]
+}
+
+type buildApplyMaintenance struct {
+	generation uint64
+	active     *buildApplyReservation
+	last       *buildApplyReservation
+	settings   map[*buildApplySettingsLease]struct{}
+}
+
+type buildApplyReservation struct {
+	request   buildapply.PrepareRequest
+	expected  buildapply.ExpectedSettings
+	operation buildapply.BuildApplyOperation
+	preparing bool
+}
+
+type buildApplyBusyError struct{}
+
+func (*buildApplyBusyError) Error() string {
+	return "Build apply and model settings maintenance are mutually exclusive."
+}
+func (*buildApplyBusyError) Code() int { return buildapply.CodeMaintenanceBusy }
+
+// Reserve before previewEngineSettings/applyEngineSettings enter either their
+// ordinary or model-change branch; defer Release across their entire call,
+// including native work with engineConfigMu released. A client-only guard
+// cannot protect internal callers.
+type buildApplySettingsLease struct{ broker *Broker }
+
+func (b *Broker) reserveBuildApplySettings() (*buildApplySettingsLease, error) {
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	if b.buildApplyMaintenance.active != nil {
+		return nil, &buildApplyBusyError{}
+	}
+	lease := &buildApplySettingsLease{broker: b}
+	if b.buildApplyMaintenance.settings == nil {
+		b.buildApplyMaintenance.settings = make(map[*buildApplySettingsLease]struct{})
+	}
+	b.buildApplyMaintenance.settings[lease] = struct{}{}
+	b.buildApplyMaintenance.generation++
+	return lease, nil
+}
+
+func (lease *buildApplySettingsLease) Release() {
+	b := lease.broker
+	b.engineConfigMu.Lock()
+	if _, exists := b.buildApplyMaintenance.settings[lease]; exists {
+		delete(b.buildApplyMaintenance.settings, lease)
+		b.buildApplyMaintenance.generation++
+	}
+	b.engineConfigMu.Unlock()
+}
+
+type buildApplyRefusalError struct{ code, detail string }
+
+func (e *buildApplyRefusalError) Error() string { return e.detail }
+
+func buildApplyRefused(code, detail string) buildapply.Result[buildapply.BuildApplyOperation] {
+	return buildapply.Result[buildapply.BuildApplyOperation]{Refusal: &buildapply.Refusal{Code: code, Detail: detail}}
+}
+
+func buildApplyOwnerRefusal(err error) buildapply.Result[buildapply.BuildApplyOperation] {
+	var refusal *buildApplyRefusalError
+	if errors.As(err, &refusal) {
+		return buildApplyRefused(refusal.code, refusal.detail)
+	}
+	// Do not export arbitrary owner errors or settings contents.
+	return buildapply.Unavailable[buildapply.BuildApplyOperation]()
+}
+
+func buildApplyOperationResult(op buildapply.BuildApplyOperation) buildapply.Result[buildapply.BuildApplyOperation] {
+	return buildapply.Result[buildapply.BuildApplyOperation]{Available: true, Value: &op}
+}
+
+func buildApplyTrue(value buildapply.Observation[bool]) bool {
+	return value.Known && value.Value != nil && *value.Value
+}
+
+func buildApplyFencesKnown(f buildapply.Fences) bool {
+	for _, value := range []buildapply.Observation[string]{f.RuntimeGeneration, f.ServiceInstance, f.BrokerGeneration, f.ManagerIncarnation, f.PolicyRevision, f.SettingsRevision, f.IntentRevision, f.LocksRevision, f.AvailabilityRevision} {
+		if !value.Known || value.Value == nil || *value.Value == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// Pause legitimately changes policy, availability and runtime observations.
+// It never grants permission to cross a manager lifetime or a new settings,
+// intent or lock revision, even if the new values have equal semantic digests.
+func buildApplyStableFences(before, after buildapply.Fences) bool {
+	return reflect.DeepEqual(before.ServiceInstance, after.ServiceInstance) &&
+		reflect.DeepEqual(before.BrokerGeneration, after.BrokerGeneration) &&
+		reflect.DeepEqual(before.ManagerIncarnation, after.ManagerIncarnation) &&
+		reflect.DeepEqual(before.SettingsRevision, after.SettingsRevision) &&
+		reflect.DeepEqual(before.IntentRevision, after.IntentRevision) &&
+		reflect.DeepEqual(before.LocksRevision, after.LocksRevision)
+}
+
+func buildApplyStoppedEvidence(c buildApplyCapturedOwners) bool {
+	if !buildApplyTrue(c.PhysicalStop) || !c.Impact.Availability.Known || c.Impact.Availability.Value == nil || *c.Impact.Availability.Value != nodepolicy.Paused ||
+		!c.Impact.Engines.Known || c.Impact.Engines.Value == nil {
+		return false
+	}
+	for _, engine := range *c.Impact.Engines.Value {
+		if !engine.Running.Known || engine.Running.Value == nil || *engine.Running.Value ||
+			!engine.LoadedModels.Known || engine.LoadedModels.Value == nil || len(*engine.LoadedModels.Value) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// Complete is necessary but never substitutes for the required individual
+// facts. In particular, stopped telemetry does not establish scoped authority.
+func buildApplyEvidenceComplete(c buildApplyCapturedOwners) bool {
+	i := c.Impact
+	if !i.Complete || len(i.Refusals) != 0 || !buildApplyFencesKnown(i.Fences) ||
+		!i.Availability.Known || i.Availability.Value == nil || !i.PauseOrigin.Known || i.PauseOrigin.Value == nil ||
+		!i.Engines.Known || i.Engines.Value == nil || !i.ActiveWork.Known || i.ActiveWork.Value == nil ||
+		*i.ActiveWork.Value < 0 || !i.ModelOperations.Known || i.ModelOperations.Value == nil || !i.SettingsDifferences.Known || i.SettingsDifferences.Value == nil ||
+		!i.InterruptionPolicy.OnActive.Known || i.InterruptionPolicy.OnActive.Value == nil ||
+		!i.InterruptionPolicy.DrainTimeoutSeconds.Known || i.InterruptionPolicy.DrainTimeoutSeconds.Value == nil ||
+		!i.Maintenance.BuildApplyActive.Known || i.Maintenance.BuildApplyActive.Value == nil ||
+		!i.Maintenance.ModelSettingsActive.Known || i.Maintenance.ModelSettingsActive.Value == nil || *i.Maintenance.ModelSettingsActive.Value ||
+		!buildApplyTrue(i.ExpectedSettings.StopEngines) || !buildApplyTrue(i.ExpectedSettings.UnloadModels) {
+		return false
+	}
+	for _, digest := range []buildapply.Observation[string]{i.ExpectedSettings.PolicyDigest, i.ExpectedSettings.EngineSettingsDigest, i.ExpectedSettings.IntentDigest, i.ExpectedSettings.LocksDigest} {
+		if !digest.Known || digest.Value == nil || *digest.Value == "" {
+			return false
+		}
+	}
+	for _, engine := range *i.Engines.Value {
+		if !buildApplyTrue(engine.ScopedStopAuthority) || !engine.Running.Known || engine.Running.Value == nil ||
+			!engine.LoadedModels.Known || engine.LoadedModels.Value == nil || !engine.Locked.Known || engine.Locked.Value == nil ||
+			!engine.DesiredState.Known || engine.DesiredState.Value == nil || !engine.Active.Known || engine.Active.Value == nil {
+			return false
+		}
+	}
+	for _, op := range *i.ModelOperations.Value {
+		if op.BlocksApply {
+			return false
+		}
+	}
+	return true
+}
+
+func (b *Broker) prepareBuildApply(request buildapply.PrepareRequest) buildapply.Result[buildapply.BuildApplyOperation] {
+	// No owner initialization, persistence or Pause acceptance before consent.
+	if !request.Consent.AllowEngineStop || !request.Consent.AllowInterruption {
+		return buildApplyRefused("interruption_required", "Applying a build requires explicit interruption and engine-stop consent.")
+	}
+	if request.PreviewID == "" {
+		return buildApplyRefused("invalid_request", "A service-validated preview ID is required.")
+	}
+	b.engineConfigMu.Lock()
+	m := &b.buildApplyMaintenance
+	if active := m.active; active != nil {
+		if reflect.DeepEqual(active.request, request) {
+			result := buildApplyOperationResult(active.operation)
+			b.engineConfigMu.Unlock()
+			return result
+		}
+		b.engineConfigMu.Unlock()
+		return buildapply.MaintenanceBusy[buildapply.BuildApplyOperation]()
+	}
+	if m.last != nil && m.last.request.OperationID == request.OperationID {
+		last := m.last
+		b.engineConfigMu.Unlock()
+		if reflect.DeepEqual(last.request, request) {
+			return buildApplyOperationResult(last.operation)
+		}
+		return buildApplyRefused("operation_conflict", "The operation ID was already used with different facts.")
+	}
+	if len(m.settings) != 0 {
+		b.engineConfigMu.Unlock()
+		return buildapply.MaintenanceBusy[buildapply.BuildApplyOperation]()
+	}
+	// Production remains refused before even initializing policy. The owner
+	// evidence task must land before wiring this.
+	if b.buildApplyOwners == nil {
+		b.engineConfigMu.Unlock()
+		return buildapply.Unavailable[buildapply.BuildApplyOperation]()
+	}
+	r := &b.nodePolicy
+	r.mu.Lock()
+	var accepted acceptedAvailability
+	var reservation *buildApplyReservation
+	err := b.buildApplyOwners.WithLocked(func(c buildApplyCapturedOwners) error {
+		if !r.ready || r.recoveryRequired || r.pendingPauseRequested || r.live == nodepolicy.Draining || !buildApplyEvidenceComplete(c) {
+			return &buildApplyRefusalError{"owner_evidence_unavailable", "Complete current owner evidence is required before accepting Pause."}
+		}
+		if !reflect.DeepEqual(request.Fences, c.Impact.Fences) || *c.Impact.Fences.PolicyRevision.Value != r.current.Revision ||
+			*c.Impact.ExpectedSettings.PolicyDigest.Value != modelPolicyFingerprint(r.current) {
+			return &buildApplyRefusalError{"changed", "Owner fences changed; obtain a new preview."}
+		}
+		if *c.Impact.Maintenance.BuildApplyActive.Value {
+			return &buildApplyRefusalError{buildapply.RefusalMaintenanceBusy, "Another build operation holds maintenance."}
+		}
+		for _, record := range b.engineSettings {
+			if record != nil && record.Snapshot.Adopted {
+				return &buildApplyRefusalError{"unscoped_engine", "An adopted engine has no verified scoped stop authority for build apply."}
+			}
+		}
+		op := buildapply.BuildApplyOperation{OperationID: request.OperationID, PreviewID: request.PreviewID, Phase: buildapply.PhaseQuiesce, Fences: c.Impact.Fences, ReadbackConfidence: buildapply.ConfidenceIncomplete}
+		if _, err := json.Marshal(op); err != nil {
+			return &buildApplyRefusalError{"owner_evidence_unavailable", "The owner correlation cannot produce a valid operation reply."}
+		}
+		origin := nodepolicy.PausedLocally
+		if r.current.Availability == nodepolicy.Paused && r.current.PausedBy != "" {
+			origin = r.current.PausedBy
+		}
+		reservation = &buildApplyReservation{request: request, expected: c.Impact.ExpectedSettings, preparing: true, operation: op}
+		m.active = reservation
+		m.generation++
+		r.buildApplyOperation = request.OperationID
+		accepted = r.acceptAvailabilityLocked(nodepolicy.Paused, origin, nodepolicy.PauseConfigured)
+		return nil
+	})
+	r.mu.Unlock()
+	b.engineConfigMu.Unlock()
+	if err != nil {
+		return buildApplyOwnerRefusal(err)
+	}
+	// The transport/caller lifetime cannot abandon accepted maintenance.
+	state, pauseErr := b.runAcceptedAvailability(context.Background(), r, accepted)
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	op := &reservation.operation
+	reservation.preparing = false
+	op.RemainsPaused = buildapply.Known(r.current.Availability == nodepolicy.Paused && r.live == nodepolicy.Paused)
+	readErr := b.buildApplyOwners.WithLocked(func(c buildApplyCapturedOwners) error {
+		if !buildApplyEvidenceComplete(c) || !buildApplyTrue(c.Impact.Maintenance.BuildApplyActive) || !buildApplyStableFences(request.Fences, c.Impact.Fences) || !reflect.DeepEqual(c.Impact.ExpectedSettings, reservation.expected) {
+			return errors.New("post-pause evidence changed or is incomplete")
+		}
+		op.Fences = c.Impact.Fences
+		op.Saved, op.Enforced, op.PhysicalStop = c.Saved, c.Enforced, c.PhysicalStop
+		if !buildApplyStoppedEvidence(c) {
+			if buildApplyTrue(op.PhysicalStop) {
+				op.PhysicalStop = buildapply.Observation[bool]{}
+			}
+			return errors.New("physical stop evidence is missing or contradictory")
+		}
+		return nil
+	})
+	if pauseErr != nil || state != nodepolicy.Paused || r.transitionGen != accepted.gen || readErr != nil || !buildApplyTrue(op.Saved) || !buildApplyTrue(op.Enforced) || !buildApplyTrue(op.PhysicalStop) || !buildApplyTrue(op.RemainsPaused) {
+		outcome := buildapply.OutcomeUncertain
+		op.Outcome = &outcome
+		op.Failure = &buildapply.BuildApplyFailure{Phase: op.Phase, Reason: "quiesce_unverified", Detail: "Durable Pause, enforcement and physical shutdown were not all verified.", ReadbackConfidence: buildapply.ConfidenceIncomplete, SafeNextAction: "Keep the node paused and explicitly recover this operation."}
+	}
+	return buildApplyOperationResult(*op)
+}
+
+// Finish releases only this broker's reservation. It never restores a saved
+// document, resumes engines or acknowledges the service/helper handoff. The
+// service owns whole-build readback and durable terminal receipt publication.
+// Explicit recovery can settle prior uncertainty using fresh exact fences, but
+// only after the canonical owner proves Pause with unchanged protected state.
+func (b *Broker) finishBuildApply(request buildapply.FinishRequest) buildapply.Result[buildapply.BuildApplyOperation] {
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	m := &b.buildApplyMaintenance
+	reservation := m.active
+	if reservation == nil {
+		if m.last != nil && m.last.operation.OperationID == request.OperationID && reflect.DeepEqual(m.last.operation.Fences, request.Fences) {
+			return buildApplyOperationResult(m.last.operation)
+		}
+		return buildapply.Unavailable[buildapply.BuildApplyOperation]()
+	}
+	if request.OperationID != reservation.operation.OperationID || !buildApplyFencesKnown(request.Fences) {
+		return buildApplyRefused("operation_conflict", "Finish must match the reserved operation and provide exact current fences.")
+	}
+	if reservation.preparing {
+		return buildapply.MaintenanceBusy[buildapply.BuildApplyOperation]()
+	}
+	if b.buildApplyOwners == nil {
+		return buildapply.Unavailable[buildapply.BuildApplyOperation]()
+	}
+	r := &b.nodePolicy
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	err := b.buildApplyOwners.WithLocked(func(c buildApplyCapturedOwners) error {
+		if r.buildApplyOperation != request.OperationID || !buildApplyEvidenceComplete(c) || !buildApplyTrue(c.Impact.Maintenance.BuildApplyActive) ||
+			!reflect.DeepEqual(request.Fences, c.Impact.Fences) || !buildApplyStableFences(reservation.request.Fences, c.Impact.Fences) ||
+			!reflect.DeepEqual(reservation.expected, c.Impact.ExpectedSettings) {
+			return &buildApplyRefusalError{"changed", "Current owner evidence no longer matches this operation; explicit recovery is required."}
+		}
+		if r.current.Availability != nodepolicy.Paused || r.live != nodepolicy.Paused || r.pendingPauseRequested || r.recoveryRequired ||
+			!buildApplyTrue(c.Saved) || !buildApplyTrue(c.Enforced) || !buildApplyStoppedEvidence(c) {
+			return &buildApplyRefusalError{"pause_unverified", "Finish requires a verified durable and physically enforced Pause."}
+		}
+		reservation.operation.Phase = buildapply.PhaseFinish
+		reservation.operation.Fences = c.Impact.Fences
+		reservation.operation.Outcome = nil
+		reservation.operation.Failure = nil
+		reservation.operation.Saved, reservation.operation.Enforced, reservation.operation.PhysicalStop = c.Saved, c.Enforced, c.PhysicalStop
+		reservation.operation.RemainsPaused = buildapply.Known(true)
+		r.buildApplyOperation = ""
+		m.active, m.last = nil, reservation
+		m.generation++
+		return nil
+	})
+	if err != nil {
+		return buildApplyOwnerRefusal(err)
+	}
+	return buildApplyOperationResult(reservation.operation)
 }
 
 // cachedBuildApplyImpact never initializes an owner, loads a journal, asks a
@@ -89,6 +420,7 @@ type buildApplyOwnerRead struct {
 	policySource                                                             *engineManagerSource
 	policyPath, policyDigest, settingsDigest, operationsDigest, engineDigest string
 	policyGeneration, runningGeneration, modelGeneration                     uint64
+	maintenanceGeneration                                                    uint64
 	recovering                                                               bool
 	pendingInstalls                                                          []buildApplyInstallRead
 }
@@ -102,7 +434,7 @@ type buildApplyInstallRead struct {
 func sameCachedBuildApplyOwners(a, b buildApplyOwnerRead) bool {
 	// Compare live owners by identity, never by reflection into their mutable
 	// transports/mutexes. Every other compared value is a detached observation.
-	if a.worker != b.worker || a.source != b.source || a.proxy != b.proxy || a.policyProxy != b.policyProxy || a.policySource != b.policySource || a.recovering != b.recovering || a.policyGeneration != b.policyGeneration || a.runningGeneration != b.runningGeneration || a.modelGeneration != b.modelGeneration || a.policyPath != b.policyPath || a.policyDigest != b.policyDigest || a.settingsDigest != b.settingsDigest || a.operationsDigest != b.operationsDigest || a.engineDigest != b.engineDigest || len(a.pendingInstalls) != len(b.pendingInstalls) {
+	if a.worker != b.worker || a.source != b.source || a.proxy != b.proxy || a.policyProxy != b.policyProxy || a.policySource != b.policySource || a.recovering != b.recovering || a.policyGeneration != b.policyGeneration || a.runningGeneration != b.runningGeneration || a.modelGeneration != b.modelGeneration || a.maintenanceGeneration != b.maintenanceGeneration || a.policyPath != b.policyPath || a.policyDigest != b.policyDigest || a.settingsDigest != b.settingsDigest || a.operationsDigest != b.operationsDigest || a.engineDigest != b.engineDigest || len(a.pendingInstalls) != len(b.pendingInstalls) {
 		return false
 	}
 	for i, install := range a.pendingInstalls {
@@ -160,6 +492,15 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 	}
 	sort.Slice(capture.pendingInstalls, func(i, j int) bool { return capture.pendingInstalls[i].ID < capture.pendingInstalls[j].ID })
 	settingsEpoch := b.engineSettingsEpoch
+	capture.maintenanceGeneration = b.buildApplyMaintenance.generation
+	impact.Maintenance.BuildApplyActive = buildapply.Known(b.buildApplyMaintenance.active != nil)
+	modelSettingsActive = modelSettingsActive || len(b.buildApplyMaintenance.settings) != 0
+	if b.buildApplyMaintenance.active != nil || len(b.buildApplyMaintenance.settings) != 0 {
+		refuse(buildapply.RefusalMaintenanceBusy, "Build apply or settings maintenance is already reserved.")
+	}
+	if len(b.buildApplyMaintenance.settings) != 0 {
+		impact.Maintenance.ModelSettingsActive = buildapply.Known(true)
+	}
 	capture.settingsDigest = modelSettingsHash(struct {
 		Records  map[string]*engineSettingsRecord
 		Active   map[string]activeSettingsOperation
