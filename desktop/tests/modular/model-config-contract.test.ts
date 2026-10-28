@@ -328,7 +328,14 @@ describe('model settings readback', () => {
     it('preserves inspection facts, descriptors and advisory byte precision', () => {
         const wire = inspection()
         const result = parseInspectModel(wire)
-        expect(result).toEqual(wire)
+        expect(result).toEqual({
+            ...wire,
+            loadObservation: {
+                status: 'unknown',
+                current: false,
+                reason: 'observation-omitted'
+            }
+        })
         expect(result.estimate.domains?.[0].capacityBytes).toBe('18446744073709551615')
         expect(result.estimate.hostBytes).toBe('9007199254740993')
         wire.facts.dimensions.layers = '99'

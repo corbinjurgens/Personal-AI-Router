@@ -108,6 +108,13 @@ function invalidateDraft(draft?: ModelDraft): ModelDraft {
     }
 }
 
+function withdrawLoadObservation(draft: ModelDraft): ModelDraft {
+    if (!draft.inspection?.loadObservation) return draft
+    const inspection = structuredClone(draft.inspection)
+    if (inspection.loadObservation) inspection.loadObservation.current = false
+    return { ...draft, inspection }
+}
+
 function baselineIdentity(snapshot: EngineSettingsSnapshot | undefined): string {
     if (!snapshot) return ''
     return JSON.stringify([
@@ -238,7 +245,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         set(state => ({
             modelDrafts: {
                 ...state.modelDrafts,
-                [key]: invalidateDraft(state.modelDrafts[key])
+                [key]: withdrawLoadObservation(invalidateDraft(state.modelDrafts[key]))
             }
         })),
     inspectModel: async (target, modelId) => {
@@ -686,13 +693,22 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             return
         set(state => ({
             modelDrafts: Object.fromEntries(
-                Object.entries(state.modelDrafts).map(([draftKey, draft]) => [
-                    draftKey,
-                    draftKey.startsWith(`${key}:`) &&
-                    baselineIdentity(current?.snapshot) !== baselineIdentity(snapshot)
-                        ? correlateModelOutcome(invalidateDraft(draft), snapshot)
-                        : draft
-                ])
+                Object.entries(state.modelDrafts).map(([draftKey, draft]) => {
+                    if (!draftKey.startsWith(`${key}:`)) return [draftKey, draft]
+                    const updated =
+                        baselineIdentity(current?.snapshot) !== baselineIdentity(snapshot)
+                            ? correlateModelOutcome(
+                                  withdrawLoadObservation(invalidateDraft(draft)),
+                                  snapshot
+                              )
+                            : draft
+                    return [
+                        draftKey,
+                        !snapshot.running && updated.inspection?.loadObservation?.current
+                            ? withdrawLoadObservation(updated)
+                            : updated
+                    ]
+                })
             ),
             entries: {
                 ...state.entries,
@@ -705,7 +721,9 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             modelDrafts: Object.fromEntries(
                 Object.entries(state.modelDrafts).map(([key, draft]) => [
                     key,
-                    !nodeId || key.startsWith(`${nodeId}:`) ? invalidateDraft(draft) : draft
+                    !nodeId || key.startsWith(`${nodeId}:`)
+                        ? withdrawLoadObservation(invalidateDraft(draft))
+                        : draft
                 ])
             ),
             entries: Object.fromEntries(

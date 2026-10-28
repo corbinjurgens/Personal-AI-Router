@@ -353,6 +353,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	}
 	st.running = true
 	st.runID = newEngineRunID()
+	st.bufferCapture.publishRun(st.runID)
 	st.healthy = true
 	st.adopted = false
 	st.reclaimFailed = false
@@ -471,12 +472,13 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		return err
 	}
 	var prepared *llamaServingLaunch
+	var bufferInputs map[string]modelEstimateInput
 	var releaseSnapshot func()
 	originalLaunch := launch
 	digest := launchDigest(launch)
 	baseDigest := digest
 	if serving {
-		prepared, err = compilePreparedServing(st, launch, rt, true)
+		prepared, err = compilePreparedServing(st, launch, rt, true, &bufferInputs)
 		if err != nil {
 			return fmt.Errorf("NE preset validation: %w", err)
 		}
@@ -565,6 +567,13 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 			return fmt.Errorf("NE pre-spawn source recheck: %w", err)
 		}
 	}
+	capture := e.newModelBufferCapture(st, engine, prepared, bufferInputs, originalLaunch, ctx)
+	spawned := false
+	defer func() {
+		if !spawned {
+			capture.retire()
+		}
+	}()
 	// Source preparation and persistence above may block. Order the actual
 	// spawn against Pause, rather than relying on their earlier context check.
 	e.nodeProjection.mu.Lock()
@@ -576,7 +585,11 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		e.nodeProjection.mu.Unlock()
 		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
 	}
-	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
+	var observeOutput func(managedOutputFrame)
+	if capture != nil {
+		observeOutput = capture.observe
+	}
+	proc, err := startManagedProcObserved(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
 		if serving {
 			if prepared.Credential != "" {
 				line = strings.ReplaceAll(line, prepared.Credential, "[redacted]")
@@ -592,7 +605,7 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		if !rt.hasCustomLaunch() {
 			st.logs.append(stream, line)
 		}
-	})
+	}, observeOutput)
 	e.nodeProjection.mu.Unlock()
 	if err != nil {
 		if allocated {
@@ -605,6 +618,9 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
 		return werr
 	}
+	spawned = true
+	capture.bind(proc)
+	go func() { <-proc.done; capture.retire() }()
 	if releaseSnapshot != nil {
 		release := releaseSnapshot
 		releaseSnapshot = nil
@@ -617,6 +633,8 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		digest = launchDigest(launch)
 	}
 	st.mu.Lock()
+	previousCapture := st.bufferCapture
+	st.bufferCapture = capture
 	st.proc = proc
 	st.launchDigest = digest
 	st.plat.Runtime.servingLaunch = prepared
@@ -627,6 +645,7 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 	st.plat.Runtime.servingBaseDigest = baseDigest
 	st.plat.Runtime.servingDrift = ""
 	st.mu.Unlock()
+	previousCapture.retire()
 	evidence.PID = proc.cmd.Process.Pid
 	if err := e.desired.setProcessStop(engine, evidence); err != nil {
 		if stopErr := proc.stopContext(cleanupCtx, stopGrace(rt)); stopErr != nil {
@@ -668,6 +687,7 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		}
 	}
 	if err := readyErr; err != nil {
+		capture.retire()
 		// Clean up the failed start before returning its single readiness error.
 		st.mu.Lock()
 		st.stopping = true
@@ -830,7 +850,10 @@ func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 		st.mu.Lock()
 		stopping := st.stopping
 		current := st.proc == proc
+		var capture *modelBufferCapture
 		if current {
+			capture = st.bufferCapture
+			st.bufferCapture = nil
 			st.withdrawOwnerKnowledgeLocked()
 			st.proc = nil
 			st.running = false
@@ -842,6 +865,7 @@ func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 			}
 		}
 		st.mu.Unlock()
+		capture.retire()
 		if current && !stopping {
 			e.reporter.report(serviceError{
 				ID: exitedID(engine), Message: engine + " exited unexpectedly",
@@ -1181,6 +1205,8 @@ func commandStopTimeout(rt Runtime) time.Duration {
 
 func (e *Executor) markStopped(st *engineState, engine string) {
 	st.mu.Lock()
+	capture := st.bufferCapture
+	st.bufferCapture = nil
 	if st.healthStop != nil {
 		st.healthStop()
 		st.healthStop = nil
@@ -1198,6 +1224,7 @@ func (e *Executor) markStopped(st *engineState, engine string) {
 	// detached model processes have exited. Keep that physical fact unknown.
 	st.observeOwnerPresenceLocked(st.plat.Runtime.modeOrDefault() == "process")
 	st.mu.Unlock()
+	capture.retire()
 	// A deliberately-stopped engine has no live unhealthy/crash condition.
 	e.reporter.clear(unhealthyID(engine))
 	e.reporter.clear(exitedID(engine))
@@ -1430,6 +1457,7 @@ func (e *Executor) StopAll() {
 		}(st, n)
 	}
 	wg.Wait()
+	e.modelBuffers.close()
 	e.credentials.close()
 }
 

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"nvpair-shared/secretenv"
 )
@@ -45,6 +46,19 @@ func childEnv(overrides map[string]string) []string {
 // and streams stdout/stderr lines to onLine. The returned proc's done
 // channel closes once the process exits.
 func startManagedProc(bin string, args []string, env map[string]string, onLine func(stream, line string)) (*managedProc, error) {
+	return startManagedProcObserved(bin, args, env, onLine, nil)
+}
+
+// Output observations are internal and precede the public diagnostic callback.
+// A frame failure is observable even though the pipe continues to drain.
+type managedOutputFrame struct {
+	Stream   string
+	Sequence uint64
+	Line     string
+	Failure  string
+}
+
+func startManagedProcObserved(bin string, args []string, env map[string]string, onLine func(stream, line string), observe func(managedOutputFrame)) (*managedProc, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Env = childEnv(env)
 	configureSysProcAttr(cmd)
@@ -64,8 +78,15 @@ func startManagedProc(bin string, args []string, env map[string]string, onLine f
 	mp := &managedProc{cmd: cmd, done: make(chan struct{})}
 	var scanWg sync.WaitGroup
 	scanWg.Add(2)
-	go func() { defer scanWg.Done(); scanLines(stdout, "stdout", onLine) }()
-	go func() { defer scanWg.Done(); scanLines(stderr, "stderr", onLine) }()
+	readLines := func(r io.Reader, stream string) {
+		if observe == nil {
+			scanLines(r, stream, onLine)
+		} else {
+			scanObservedLines(r, stream, onLine, observe)
+		}
+	}
+	go func() { defer scanWg.Done(); readLines(stdout, "stdout") }()
+	go func() { defer scanWg.Done(); readLines(stderr, "stderr") }()
 	go func() {
 		// Drain stdout/stderr fully before Wait: Wait closes the pipes on
 		// exit, which would otherwise truncate the final captured lines.
@@ -86,6 +107,52 @@ func scanLines(r io.Reader, stream string, onLine func(stream, line string)) {
 	}
 	if sc.Err() != nil {
 		_, _ = io.Copy(io.Discard, r)
+	}
+}
+
+func scanObservedLines(r io.Reader, stream string, onLine func(string, string), observe func(managedOutputFrame)) {
+	const limit = 64 << 10
+	reader := bufio.NewReaderSize(r, limit)
+	var sequence uint64
+	for {
+		data, err := reader.ReadSlice('\n')
+		sequence++
+		frame := managedOutputFrame{Stream: stream, Sequence: sequence}
+		switch {
+		case err == bufio.ErrBufferFull:
+			frame.Failure = "oversized-frame"
+			for err == bufio.ErrBufferFull {
+				_, err = reader.ReadSlice('\n')
+			}
+		case len(data) == 0 && err == io.EOF:
+			return
+		case err == io.EOF:
+			frame.Failure = "truncated-frame"
+		case err != nil:
+			frame.Failure = "read-failure"
+		case !utf8.Valid(data):
+			frame.Failure = "invalid-utf8"
+		default:
+			frame.Line = strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
+		}
+		if observe != nil {
+			observe(frame)
+		}
+		if frame.Failure == "" && onLine != nil {
+			onLine(stream, frame.Line)
+		}
+		if frame.Failure == "truncated-frame" && onLine != nil && utf8.Valid(data) {
+			onLine(stream, strings.TrimSuffix(string(data), "\r"))
+		}
+		if err != nil {
+			if observe != nil && err != io.EOF && frame.Failure != "read-failure" {
+				sequence++
+				observe(managedOutputFrame{Stream: stream, Sequence: sequence, Failure: "read-failure"})
+			}
+			// Read failures do not turn completion into an early pipe close.
+			_, _ = io.Copy(io.Discard, reader)
+			return
+		}
 	}
 }
 

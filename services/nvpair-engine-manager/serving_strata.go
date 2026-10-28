@@ -328,9 +328,9 @@ func preparedServingRuntime(st *engineState, rt Runtime) bool {
 	return llamaServingRuntime(st, rt) || strataServingRuntime(st, rt.Serving)
 }
 
-func compilePreparedServing(st *engineState, command launchCommand, rt Runtime, approved bool) (*llamaServingLaunch, error) {
+func compilePreparedServing(st *engineState, command launchCommand, rt Runtime, approved bool, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
 	if len(rt.ModelLoads) != 0 {
-		return compileTypedLlama(st, command, rt, approved)
+		return compileTypedLlama(st, command, rt, approved, advisory...)
 	}
 	if strataServingRuntime(st, rt.Serving) {
 		return compileStrataServing(command, rt, approved)

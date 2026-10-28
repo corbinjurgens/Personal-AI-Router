@@ -23,6 +23,8 @@ import { isValidRoutingEngineId } from '@/shared/utils/engines'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 import { proxyEngineFromManagerId } from './proxy-engines'
 
+type LoadBufferObservation = NonNullable<InspectModelResult['loadObservation']>
+
 function object(value: JsonValue | undefined): JsonObject {
     if (!value || typeof value !== 'object' || Array.isArray(value))
         throw new Error('This device does not support engine settings.')
@@ -567,6 +569,338 @@ function estimate(value: JsonValue | undefined): Estimate {
         throw new Error('Invalid estimate domain reference.')
     return result
 }
+function bufferComponent(
+    value: JsonValue | undefined
+): NonNullable<LoadBufferObservation['baseline']>[number]['component'] {
+    return choice(value, [
+        'weights',
+        'attention-cache',
+        'recurrent-state',
+        'compute-workspace',
+        'prompt-cache',
+        'companions'
+    ])
+}
+function bufferReason(value: JsonValue | undefined): NonNullable<LoadBufferObservation['reason']> {
+    return choice(value, [
+        'observation-omitted',
+        'response-budget',
+        'history-unavailable',
+        'no-matching-sample',
+        'missing-boundary',
+        'unsupported-build',
+        'clock-reversal',
+        'unmapped-device',
+        'mixed-role',
+        'incomplete-reserve',
+        'oversized-frame',
+        'truncated-frame',
+        'invalid-utf8',
+        'read-failure',
+        'capture-budget',
+        'unknown-baseline',
+        'source-changed',
+        'source-unavailable',
+        'unsupported-buffer'
+    ])
+}
+function bufferSigned(value: JsonValue | undefined): string | undefined {
+    if (value === undefined) return undefined
+    const result = boundedText(value, 21, true)
+    unsigned(result.startsWith('-') ? result.slice(1) : result)
+    if (result === '-0') throw new Error('Invalid buffer signed interval.')
+    return result
+}
+function bufferTimestamp(value: JsonValue | undefined): string | undefined {
+    if (value === undefined) return undefined
+    const result = boundedText(value, 256, true)
+    const match =
+        /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.exec(
+            result
+        )
+    if (!match || !Number.isFinite(Date.parse(result))) throw new Error('Invalid buffer timestamp.')
+    const year = Number(match[1]),
+        month = Number(match[2]),
+        day = Number(match[3])
+    const days = [
+        31,
+        year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31
+    ]
+    if (
+        month < 1 ||
+        month > 12 ||
+        day < 1 ||
+        day > days[month - 1] ||
+        Number(match[4]) > 23 ||
+        Number(match[5]) > 59 ||
+        Number(match[6]) > 59
+    )
+        throw new Error('Invalid buffer timestamp.')
+    return result
+}
+function bufferReportRow(value: JsonValue): NonNullable<LoadBufferObservation['rows']>[number] {
+    const row = shape(value, [
+        'component',
+        'label',
+        'phase',
+        'sequence',
+        'stream',
+        'role',
+        'reportedMiB',
+        'unit',
+        'precision',
+        'sourceKind',
+        'intervalStatus',
+        'lowerBytes',
+        'upperBytes',
+        'estimatedBytes',
+        'deviceBinding',
+        'poolIdentity',
+        'coverage'
+    ])
+    const result: NonNullable<LoadBufferObservation['rows']>[number] = {
+        component: choice(row.component, ['model', 'kv', 'compute', 'output', 'recurrent']),
+        label: boundedText(row.label, 256, true),
+        phase: choice(row.phase, ['load', 'reserve']),
+        sequence: unsigned(row.sequence),
+        stream: row.stream === undefined ? undefined : choice(row.stream, ['stdout', 'stderr']),
+        role: choice(row.role, ['model', 'mixed', 'unattributed']),
+        reportedMiB: boundedText(row.reportedMiB, 256, true),
+        unit: choice(row.unit, ['MiB']),
+        precision: choice(row.precision, ['0.01', 'unknown']),
+        sourceKind: choice(row.sourceKind, ['log-scraped']),
+        intervalStatus: choice(row.intervalStatus, ['bounded', 'unknown']),
+        lowerBytes: optionalUnsigned(row.lowerBytes),
+        upperBytes: optionalUnsigned(row.upperBytes),
+        estimatedBytes: optionalUnsigned(row.estimatedBytes),
+        deviceBinding: optionalDigest(row.deviceBinding),
+        poolIdentity: optionalDigest(row.poolIdentity),
+        coverage: choice(row.coverage, ['partial', 'unknown', 'compatible'])
+    }
+    const label = /^(?:CUDA(0|[1-9][0-9]?)|MTL(0|[1-9][0-9]?)(?:_Private|_Mapped)?)$/.exec(
+        result.label
+    )
+    if (
+        (!['CPU', 'CPU_Mapped', 'CUDA_Host'].includes(result.label) &&
+            (!label || Number(label[1] ?? label[2]) >= 64)) ||
+        result.sequence === '0' ||
+        !/^(0|[1-9][0-9]*)\.[0-9]{1,16}$/.test(result.reportedMiB)
+    )
+        throw new Error('Unsupported buffer report.')
+    if (result.intervalStatus === 'unknown') {
+        if (
+            result.lowerBytes !== undefined ||
+            result.upperBytes !== undefined ||
+            result.coverage === 'compatible'
+        )
+            throw new Error('Unknown buffer interval has byte endpoints.')
+    } else {
+        const [whole, fraction] = result.reportedMiB.split('.')
+        if (result.precision !== '0.01' || fraction.length !== 2 || BigInt(whole) >= 1n << 30n)
+            throw new Error('Unsupported buffer precision.')
+        const q = BigInt(whole) * 1000n + BigInt(fraction) * 10n
+        const lower = q < 5n ? 0n : ((q - 5n) * 1048576n) / 1000n
+        const upper = ((q + 5n) * 1048576n + 999n) / 1000n
+        if (result.lowerBytes !== lower.toString() || result.upperBytes !== upper.toString())
+            throw new Error('Invalid rounded buffer interval.')
+    }
+    return result
+}
+function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
+    if (value === undefined)
+        return { status: 'unknown', current: false, reason: 'observation-omitted' }
+    if (Buffer.byteLength(JSON.stringify(value), 'utf8') > 4096)
+        throw new Error('Buffer observation exceeds 4 KiB.')
+    const row = shape(value, [
+        'status',
+        'reason',
+        'sampleId',
+        'recordedAt',
+        'current',
+        'persistence',
+        'upstreamPin',
+        'buildAssurance',
+        'estimatorRevision',
+        'inputIdentity',
+        'sourceIdentity',
+        'optionsIdentity',
+        'topologyIdentity',
+        'loadPhase',
+        'perSlotContext',
+        'slots',
+        'capturedOptions',
+        'requestedOptions',
+        'optionUnknowns',
+        'artifacts',
+        'baseline',
+        'comparisons',
+        'rows',
+        'reasons'
+    ])
+    const result: LoadBufferObservation = {
+        status: choice(row.status, ['unknown', 'partial', 'reported']),
+        current: flag(row.current),
+        reason: row.reason === undefined ? undefined : bufferReason(row.reason),
+        sampleId: optionalDigest(row.sampleId),
+        recordedAt: bufferTimestamp(row.recordedAt),
+        persistence:
+            row.persistence === undefined
+                ? undefined
+                : choice(row.persistence, [
+                      'pending',
+                      'saved',
+                      'uncertain',
+                      'failed',
+                      'history-unavailable'
+                  ]),
+        upstreamPin:
+            row.upstreamPin === undefined
+                ? undefined
+                : choice(row.upstreamPin, ['7fe450e19305b828c199d602c23a8337aaa1f03b']),
+        buildAssurance:
+            row.buildAssurance === undefined
+                ? undefined
+                : choice(row.buildAssurance, ['recognized-self-reported-pin']),
+        estimatorRevision: optionalText(row.estimatorRevision, 256),
+        inputIdentity: optionalDigest(row.inputIdentity),
+        sourceIdentity: optionalDigest(row.sourceIdentity),
+        optionsIdentity: optionalDigest(row.optionsIdentity),
+        topologyIdentity: optionalDigest(row.topologyIdentity),
+        loadPhase:
+            row.loadPhase === undefined ? undefined : choice(row.loadPhase, ['initial', 'wakeup']),
+        perSlotContext: optionalInteger(row.perSlotContext, 0),
+        slots: optionalInteger(row.slots, 0),
+        capturedOptions:
+            row.capturedOptions === undefined ? undefined : requested(row.capturedOptions),
+        requestedOptions:
+            row.requestedOptions === undefined ? undefined : requested(row.requestedOptions),
+        optionUnknowns:
+            row.optionUnknowns === undefined
+                ? undefined
+                : boundedArray(row.optionUnknowns, 64).map(value =>
+                      choice(value, [
+                          'mmap',
+                          'load-mode',
+                          'flash-attention',
+                          'batch',
+                          'ubatch',
+                          'cache-k',
+                          'cache-v',
+                          'kv-offload',
+                          'op-offload',
+                          'placement',
+                          'speculation'
+                      ])
+                  ),
+        artifacts:
+            row.artifacts === undefined
+                ? undefined
+                : boundedArray(row.artifacts, 1024).map(value => {
+                      const artifact = shape(value, ['role', 'identity', 'size', 'assurance'])
+                      return {
+                          role: choice(artifact.role, ['model', 'draft', 'companion']),
+                          identity: modelDigest(artifact.identity),
+                          size: unsigned(artifact.size),
+                          assurance: choice(artifact.assurance, ['sampled-local-binding'])
+                      }
+                  }),
+        baseline:
+            row.baseline === undefined
+                ? undefined
+                : boundedArray(row.baseline, 64).map(value => {
+                      const component = shape(value, ['component', 'status', 'bytes'])
+                      return {
+                          component: bufferComponent(component.component),
+                          status: choice(component.status, [
+                              'estimated',
+                              'partial',
+                              'unknown',
+                              'excluded'
+                          ]),
+                          bytes: optionalUnsigned(component.bytes)
+                      }
+                  }),
+        comparisons:
+            row.comparisons === undefined
+                ? undefined
+                : boundedArray(row.comparisons, 6).map(value => {
+                      const comparison = shape(value, [
+                          'component',
+                          'status',
+                          'estimatedBytes',
+                          'lowerBytes',
+                          'upperBytes',
+                          'deltaLowerBytes',
+                          'deltaUpperBytes'
+                      ])
+                      return {
+                          component: bufferComponent(comparison.component),
+                          status: choice(comparison.status, ['compatible', 'unknown']),
+                          estimatedBytes: optionalUnsigned(comparison.estimatedBytes),
+                          lowerBytes: optionalUnsigned(comparison.lowerBytes),
+                          upperBytes: optionalUnsigned(comparison.upperBytes),
+                          deltaLowerBytes: bufferSigned(comparison.deltaLowerBytes),
+                          deltaUpperBytes: bufferSigned(comparison.deltaUpperBytes)
+                      }
+                  }),
+        rows: row.rows === undefined ? undefined : boundedArray(row.rows, 256).map(bufferReportRow),
+        reasons:
+            row.reasons === undefined ? undefined : boundedArray(row.reasons, 16).map(bufferReason)
+    }
+    if (
+        result.estimatorRevision !== undefined &&
+        result.estimatorRevision !==
+            'pair-gguf/1;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385'
+    )
+        throw new Error('Unsupported buffer estimator revision.')
+    if (result.current && (result.status === 'unknown' || !result.sampleId))
+        throw new Error('Unknown current buffer sample.')
+    for (const entries of [result.baseline, result.comparisons]) {
+        if (new Set(entries?.map(entry => entry.component)).size !== (entries?.length ?? 0))
+            throw new Error('Duplicate buffer component.')
+    }
+    const frames = result.rows?.map(row => `${row.stream ?? ''}:${row.sequence}`) ?? []
+    if (new Set(frames).size !== frames.length) throw new Error('Duplicate buffer source frame.')
+    for (const comparison of result.comparisons ?? []) {
+        if (comparison.status === 'unknown') {
+            if (
+                [
+                    comparison.lowerBytes,
+                    comparison.upperBytes,
+                    comparison.deltaLowerBytes,
+                    comparison.deltaUpperBytes
+                ].some(value => value !== undefined)
+            )
+                throw new Error('Unknown comparison has an interval.')
+            continue
+        }
+        const baseline = result.baseline?.find(item => item.component === comparison.component)
+        if (
+            baseline?.status !== 'estimated' ||
+            baseline.bytes !== comparison.estimatedBytes ||
+            comparison.estimatedBytes === undefined ||
+            comparison.lowerBytes === undefined ||
+            comparison.upperBytes === undefined ||
+            BigInt(comparison.lowerBytes) > BigInt(comparison.upperBytes) ||
+            (BigInt(comparison.lowerBytes) - BigInt(comparison.estimatedBytes)).toString() !==
+                comparison.deltaLowerBytes ||
+            (BigInt(comparison.upperBytes) - BigInt(comparison.estimatedBytes)).toString() !==
+                comparison.deltaUpperBytes
+        )
+            throw new Error('Invalid frozen buffer comparison.')
+    }
+    return result
+}
 export function parseInspectModel(value: JsonValue | undefined): InspectModelResult {
     payload(value)
     const row = shape(value, [
@@ -580,7 +914,8 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         'artifacts',
         'facts',
         'options',
-        'estimate'
+        'estimate',
+        'loadObservation'
     ])
     const engine = boundedText(row.engine, 40, true)
     if (!isValidRoutingEngineId(engine)) throw new Error('Invalid inspection engine.')
@@ -640,7 +975,8 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
             unknowns: strings(facts.unknowns)
         },
         options: row.options === undefined ? undefined : boundedArray(row.options, 256).map(option),
-        estimate: estimate(row.estimate)
+        estimate: estimate(row.estimate),
+        loadObservation: loadObservation(row.loadObservation)
     }
     if (result.status === 'resolved' || result.artifacts?.length)
         orderedSummaryArtifacts(result.artifacts ?? [])

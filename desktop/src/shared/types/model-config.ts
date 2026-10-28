@@ -167,6 +167,104 @@ export type InspectModelResult = {
         estimateEffect?: string
     }>
     estimate: Estimate
+    loadObservation?: LoadBufferObservation
+}
+
+type LoadBufferComponent =
+    | 'weights'
+    | 'attention-cache'
+    | 'recurrent-state'
+    | 'compute-workspace'
+    | 'prompt-cache'
+    | 'companions'
+type LoadBufferReason =
+    | 'observation-omitted'
+    | 'response-budget'
+    | 'history-unavailable'
+    | 'no-matching-sample'
+    | 'missing-boundary'
+    | 'unsupported-build'
+    | 'clock-reversal'
+    | 'unmapped-device'
+    | 'mixed-role'
+    | 'incomplete-reserve'
+    | 'oversized-frame'
+    | 'truncated-frame'
+    | 'invalid-utf8'
+    | 'read-failure'
+    | 'capture-budget'
+    | 'unknown-baseline'
+    | 'source-changed'
+    | 'source-unavailable'
+    | 'unsupported-buffer'
+/** Detached, service-owned evidence for one load, outside settings authority. */
+type LoadBufferObservation = {
+    status: 'unknown' | 'partial' | 'reported'
+    current: boolean
+    reason?: LoadBufferReason
+    sampleId?: string
+    recordedAt?: string
+    persistence?: 'pending' | 'saved' | 'uncertain' | 'failed' | 'history-unavailable'
+    upstreamPin?: '7fe450e19305b828c199d602c23a8337aaa1f03b'
+    buildAssurance?: 'recognized-self-reported-pin'
+    estimatorRevision?: string
+    inputIdentity?: string
+    sourceIdentity?: string
+    optionsIdentity?: string
+    topologyIdentity?: string
+    loadPhase?: 'initial' | 'wakeup'
+    perSlotContext?: number
+    slots?: number
+    capturedOptions?: RequestedLoad
+    requestedOptions?: RequestedLoad
+    optionUnknowns?: Array<
+        | 'mmap'
+        | 'load-mode'
+        | 'flash-attention'
+        | 'batch'
+        | 'ubatch'
+        | 'cache-k'
+        | 'cache-v'
+        | 'kv-offload'
+        | 'op-offload'
+        | 'placement'
+        | 'speculation'
+    >
+    artifacts?: ArtifactSummary[]
+    baseline?: Array<{
+        component: LoadBufferComponent
+        status: 'estimated' | 'partial' | 'unknown' | 'excluded'
+        bytes?: string
+    }>
+    comparisons?: Array<{
+        component: LoadBufferComponent
+        status: 'compatible' | 'unknown'
+        estimatedBytes?: string
+        lowerBytes?: string
+        upperBytes?: string
+        deltaLowerBytes?: string
+        deltaUpperBytes?: string
+    }>
+    rows?: Array<{
+        component: 'model' | 'kv' | 'compute' | 'output' | 'recurrent'
+        label: string
+        phase: 'load' | 'reserve'
+        sequence: string
+        stream?: 'stdout' | 'stderr'
+        role: 'model' | 'mixed' | 'unattributed'
+        reportedMiB: string
+        unit: 'MiB'
+        precision: '0.01' | 'unknown'
+        sourceKind: 'log-scraped'
+        intervalStatus: 'bounded' | 'unknown'
+        lowerBytes?: string
+        upperBytes?: string
+        estimatedBytes?: string
+        deviceBinding?: string
+        poolIdentity?: string
+        coverage: 'partial' | 'unknown' | 'compatible'
+    }>
+    reasons?: LoadBufferReason[]
 }
 export type ModelImpact = {
     restartScope: string

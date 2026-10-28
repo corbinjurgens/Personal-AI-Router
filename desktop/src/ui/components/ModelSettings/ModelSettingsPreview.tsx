@@ -5,6 +5,7 @@ import { Stack, Text } from '@nvidia/foundations-react-core'
 import type { EngineSettingsPreview, EngineSettingsSnapshot } from '@/shared/types/engine-settings'
 import type { ArtifactSummary, InspectModelResult } from '@/shared/types/model-config'
 import ModelMemoryEstimate from './ModelMemoryEstimate'
+import ModelLoadBufferReport from './ModelLoadBufferReport'
 
 function artifactLabel(role: string): string {
     switch (role) {
@@ -53,6 +54,13 @@ export default function ModelSettingsPreview({
         load => load.modelId === inspection?.modelId
     )
     const observed = snapshot?.serving?.observed?.find(load => load.modelId === inspection?.modelId)
+    const matchingInspection =
+        inspection &&
+        (!snapshot ||
+            (snapshot.engine === inspection.engine &&
+                snapshot.nodeId === (inspection.nodeId ?? '')))
+            ? inspection
+            : undefined
     return (
         <Stack gap="2">
             <Text kind="body/semibold/sm">Target review</Text>
@@ -61,6 +69,7 @@ export default function ModelSettingsPreview({
                 {inspection?.source ?? 'Unknown'} · Assurance: {inspection?.assurance ?? 'Unknown'}
             </Text>
             <ModelMemoryEstimate estimate={estimate} stale={stale} />
+            <ModelLoadBufferReport inspection={matchingInspection} stale={!snapshot} />
             {preview?.auto && (
                 <>
                     <Text kind="body/regular/sm">
