@@ -29,6 +29,9 @@ func TestModelDownloadFreshProfileProvisionsPrivateJournalDirectory(t *testing.T
 	if ex.downloads.snapshot().RecoveryRequired {
 		t.Fatal("fresh profile requires recovery")
 	}
+	if !ex.downloads.copyRecoveryRequired {
+		t.Fatal("missing historical copy baseline was declared clear")
+	}
 	info, err := os.Stat(base)
 	if err != nil {
 		t.Fatal(err)

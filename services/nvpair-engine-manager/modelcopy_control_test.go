@@ -71,6 +71,13 @@ func TestModelCopyControlRejectsBeforeLookup(t *testing.T) {
 
 func copyControlManager(t *testing.T, exec *Executor, dir string) *Manager {
 	t.Helper()
+	// Establish this private fixture's explicit quiescent baseline before
+	// Manager admission; production never infers one from missing state.
+	d := exec.downloads
+	if _, _, err := d.store.save(d.unsafe, d.copies, true); err != nil {
+		t.Fatal(err)
+	}
+	d.copyRecoveryRequired = false
 	m := NewManager(NewCodec(&syncBuffer{}), exec, clustertrust.Open(dir), dir)
 	exec.switchRecoveryPending.Store(false)
 	exec.nodeProjection.set(nodeProjection{})
@@ -480,46 +487,68 @@ func TestModelCopyControlCancellationClosesSourceAndRetainsPartial(t *testing.T)
 
 func TestModelCopyControlVerifiedRetryPrecedesSourceLookup(t *testing.T) {
 	plentyOfDisk(t)
-	source := newCustomCopyFixture(t)
-	src := sourceFromExecutor(t, source.source, "llamacpp", reportedCopyAlias)
-	dst, store := customDestination(t)
-	if _, err := dst.CopyModelFrom(context.Background(), src, "llamacpp", reportedCopyAlias, nil); err != nil {
-		t.Fatal(err)
+	setup := func(t *testing.T) (*Manager, engineModelStore, *fakeModelSource, copyRequest) {
+		t.Helper()
+		source := newCustomCopyFixture(t)
+		src := sourceFromExecutor(t, source.source, "llamacpp", reportedCopyAlias)
+		dst, store := customDestination(t)
+		if _, err := dst.CopyModelFrom(context.Background(), src, "llamacpp", reportedCopyAlias, nil); err != nil {
+			t.Fatal(err)
+		}
+		f := rmNewFixture(t, "destination-cert", "controller-cert")
+		m := copyControlManager(t, dst, f.dir)
+		copyControlDirectory(m, copyControlNode(t, "destination-host", "destination-cert", nil))
+		p := copyRequest{OpID: strings.Repeat("a", 32), SourceNodeID: "offline-source-not-in-directory", DestinationNodeID: "destination-host", Engine: "llamacpp", Model: reportedCopyAlias, ExpectedExportID: src.list.ExportID}
+		_, copies, complete, err := m.copyJournal.store.loadJournal()
+		if err != nil || !complete || len(copies) != 0 {
+			t.Fatalf("fresh complete copy baseline = %+v / %v / %v", copies, complete, err)
+		}
+		if _, found := m.peers.lookup(p.SourceNodeID); found {
+			t.Fatal("offline source unexpectedly discoverable")
+		}
+		return m, store, src, p
 	}
-	f := rmNewFixture(t, "destination-cert", "controller-cert")
-	m := copyControlManager(t, dst, f.dir)
-	copyControlDirectory(m, copyControlNode(t, "destination-host", "destination-cert", nil))
-	p := copyRequest{OpID: strings.Repeat("a", 32), SourceNodeID: "offline-source-not-in-directory", DestinationNodeID: "destination-host", Engine: "llamacpp", Model: reportedCopyAlias, ExpectedExportID: src.list.ExportID}
-	if _, err := m.copyFromPeer(context.Background(), p, func() error {
-		return &codedError{code: codeRemoteManagementDenied, message: remoteManagementDeniedMessage}
-	}, nil); rpcCode(err) != codeRemoteManagementDenied {
-		t.Fatalf("receipt bypassed destination authorization: %v", err)
-	}
-	res, err := m.executeCopy(context.Background(), p, false, nil, nil)
-	if err != nil || res.ExportID != src.list.ExportID || res.FilesSkipped != len(src.list.Files) || res.BytesCopied != 0 || res.Durability != copyDurabilityUncertain {
-		t.Fatalf("offline receipt retry=%+v, %v", res, err)
-	}
-	assertCustomReceipt(t, store, src.list)
-	p.ExpectedExportID = strings.Repeat("b", 64)
-	if _, err := m.executeCopy(context.Background(), p, false, nil, nil); rpcCode(err) != codePolicyConflict {
-		t.Fatalf("changed identity error=%v", err)
-	}
-	// A hash cached by the original copy must not substitute for re-reading
-	// receipt bytes, even when a changed artifact preserves size and mtime.
-	file := src.list.Files[0]
-	path := filepath.Join(copyAliasDir(store.root, reportedCopyAlias), src.list.ExportID, filepath.FromSlash(file.Path))
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeTestFile(t, path, testBytes(int(file.Size), 17))
-	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	p.ExpectedExportID = src.list.ExportID
-	if _, err := m.executeCopy(context.Background(), p, false, nil, nil); rpcCode(err) != codePolicyConflict {
-		t.Fatalf("tampered receipt bytes error=%v", err)
-	}
+	t.Run("verified retry and changed identity", func(t *testing.T) {
+		m, store, src, p := setup(t)
+		if _, err := m.copyFromPeer(context.Background(), p, func() error {
+			return &codedError{code: codeRemoteManagementDenied, message: remoteManagementDeniedMessage}
+		}, nil); rpcCode(err) != codeRemoteManagementDenied {
+			t.Fatalf("receipt bypassed destination authorization: %v", err)
+		}
+		res, err := m.executeCopy(context.Background(), p, false, nil, nil)
+		if err != nil || res.ExportID != src.list.ExportID || res.FilesSkipped != len(src.list.Files) || res.BytesCopied != 0 || res.Durability != copyDurabilityUncertain {
+			t.Fatalf("offline receipt retry=%+v, %v", res, err)
+		}
+		assertCustomReceipt(t, store, src.list)
+		p.ExpectedExportID = strings.Repeat("b", 64)
+		if _, err := m.executeCopy(context.Background(), p, false, nil, nil); rpcCode(err) != codePolicyConflict {
+			t.Fatalf("changed identity error=%v", err)
+		}
+		m.copyJournal.mu.Lock()
+		retained, exists := m.copyJournal.copies[p.OpID]
+		m.copyJournal.mu.Unlock()
+		if !exists || retained.ExpectedExportID != p.ExpectedExportID {
+			t.Fatal("identity-mismatched attempt lost its retained evidence")
+		}
+	})
+	t.Run("tampered receipt bytes bypass the prior hash cache", func(t *testing.T) {
+		// Use a fresh complete journal, independent of the mismatched operation
+		// retained above, so only receipt validation can cause this conflict.
+		m, store, src, p := setup(t)
+		file := src.list.Files[0]
+		path := filepath.Join(copyAliasDir(store.root, reportedCopyAlias), src.list.ExportID, filepath.FromSlash(file.Path))
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, path, testBytes(int(file.Size), 17))
+		if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.executeCopy(context.Background(), p, false, nil, nil); rpcCode(err) != codePolicyConflict {
+			t.Fatalf("tampered receipt bytes error=%v", err)
+		}
+	})
 }
 
 func TestModelCopyControlRemoteVerifiedRetryHasNoSourceContact(t *testing.T) {
@@ -531,7 +560,10 @@ func TestModelCopyControlRemoteVerifiedRetryHasNoSourceContact(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst.nodeProjection.set(nodeProjection{})
-	f.destination.exec = dst
+	f.destination = copyControlManager(t, dst, f.authority.dir)
+	// This fixture's controller has no llama.cpp installation, but the engine
+	// descriptor still owns the content naming contract for its reservation.
+	f.controller.copyRegistry.engines["llamacpp"] = &Manifest{Engine: "llamacpp"}
 	copyControlDirectory(f.destination, copyControlNode(t, "destination-host", "destination-certificate", nil))
 	server := rmTLSServer(t, f.authority.mesh, (&controlServer{exec: dst, mesh: f.authority.mesh, copyFromPeer: f.destination.copyFromPeer}).mux())
 	copyControlDirectory(f.controller, copyControlNode(t, "controller-host", "controller-certificate", nil), copyControlNode(t, "destination-host", "destination-certificate", server))

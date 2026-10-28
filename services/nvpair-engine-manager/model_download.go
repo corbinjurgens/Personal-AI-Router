@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"math"
 	"sort"
 	"strconv"
@@ -182,24 +183,28 @@ type modelDownloadAttempt struct {
 // release mu before notifications, I/O and any other owner's wait. journalMu
 // orders capture/save/adopt across engines and is acquired outside mu.
 type modelDownloads struct {
-	mu               sync.Mutex
-	journalMu        sync.Mutex
-	source           string
-	revision         uint64
-	heldRevisions    uint64
-	recoveryRequired bool
-	active           map[downloadContentKey]*modelDownloadAttempt
-	unsafe           map[downloadContentKey]modelDownloadMarker
-	outcomes         map[downloadContentKey]modeldownload.Entry
-	recent           []downloadContentKey
-	writers          map[string]bool
-	readers          map[string]int
-	store            modelDownloadStore
+	mu                   sync.Mutex
+	journalMu            sync.Mutex
+	source               string
+	revision             uint64
+	heldRevisions        uint64
+	recoveryRequired     bool
+	copyRecoveryRequired bool
+	active               map[downloadContentKey]*modelDownloadAttempt
+	unsafe               map[downloadContentKey]modelDownloadMarker
+	copies               map[string]modelCopyMarker
+	outcomes             map[downloadContentKey]modeldownload.Entry
+	recent               []downloadContentKey
+	writers              map[string]bool
+	readers              map[string]int
+	store                modelDownloadStore
 }
 
 func newModelDownloads(source, baseDir string, naming map[string]string) *modelDownloads {
 	d := &modelDownloads{source: source, active: make(map[downloadContentKey]*modelDownloadAttempt), unsafe: make(map[downloadContentKey]modelDownloadMarker), outcomes: make(map[downloadContentKey]modeldownload.Entry), writers: make(map[string]bool), readers: make(map[string]int), store: newModelDownloadStore(baseDir)}
-	markers, err := d.store.load()
+	markers, copies, copiesComplete, err := d.store.loadJournal()
+	d.copies = copies
+	d.copyRecoveryRequired = !copiesComplete
 	if err != nil {
 		d.recoveryRequired = true
 		return d
@@ -210,6 +215,11 @@ func newModelDownloads(source, baseDir string, naming map[string]string) *modelD
 			d.recoveryRequired = true
 		}
 		d.outcomes[key] = modeldownload.Entry{ID: marker.ID, Engine: marker.Engine, Model: marker.Model, Phase: "unknown", BlocksReadiness: true, Reason: "interrupted"}
+	}
+	for _, marker := range copies {
+		if naming[marker.Engine] != marker.Naming {
+			d.copyRecoveryRequired = true
+		}
 	}
 	return d
 }
@@ -240,7 +250,7 @@ func (d *modelDownloads) reserve(engine, model, naming string) (*modelDownloadAt
 	if math.MaxUint64-d.revision < uint64(len(d.active)*2+3)+d.heldRevisions {
 		return nil, errDownloadCapacity
 	}
-	slots := len(d.unsafe)
+	slots := len(d.unsafe) + len(d.copies)
 	for k := range d.active {
 		if _, ok := d.unsafe[k]; !ok {
 			slots++
@@ -385,8 +395,9 @@ func (d *modelDownloads) changeMarker(a *modelDownloadAttempt, remove bool) (unc
 	} else {
 		next[a.key] = modelDownloadMarker{ID: a.entry.ID, Engine: a.key.engine, Model: a.entry.Model, ContentKey: a.key.model, Naming: a.naming}
 	}
+	copies, copiesComplete := maps.Clone(d.copies), !d.copyRecoveryRequired
 	d.mu.Unlock()
-	landed, uncertain, err := d.store.save(next)
+	landed, uncertain, err := d.store.save(next, copies, copiesComplete)
 	if landed {
 		d.mu.Lock()
 		d.unsafe = next
@@ -414,8 +425,9 @@ func (d *modelDownloads) resolveMarker(key downloadContentKey, id string) bool {
 			next[k] = value
 		}
 	}
+	copies, copiesComplete := maps.Clone(d.copies), !d.copyRecoveryRequired
 	d.mu.Unlock()
-	landed, uncertain, _ := d.store.save(next)
+	landed, uncertain, _ := d.store.save(next, copies, copiesComplete)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.heldRevisions--
@@ -440,6 +452,58 @@ func (d *modelDownloads) resolveMarker(key downloadContentKey, id string) bool {
 	// Capacity was reserved above and cannot be consumed by other transitions.
 	d.revision++
 	return true
+}
+
+// The same journalMu orders every copy and download writer. Capture both
+// collections only after taking it, and release mu before the durable write.
+// Retained copies are not outcomes and are never evicted by live retirement.
+func (d *modelDownloads) changeCopyMarker(marker modelCopyMarker, remove bool) error {
+	if marker.validate() != nil {
+		return errDownloadPersistence
+	}
+	d.journalMu.Lock()
+	defer d.journalMu.Unlock()
+	d.mu.Lock()
+	if d.recoveryRequired || d.copyRecoveryRequired || marker.ManagerIncarnation != d.source {
+		d.mu.Unlock()
+		return errDownloadRecovery
+	}
+	current, exists := d.copies[marker.OpID]
+	if remove && (!exists || current != marker) || !remove && exists {
+		d.mu.Unlock()
+		return errDownloadBusy
+	}
+	if math.MaxUint64-d.revision <= d.reservedRevisionsLocked() {
+		d.mu.Unlock()
+		return errDownloadCapacity
+	}
+	d.heldRevisions++
+	next, downloads := maps.Clone(d.copies), maps.Clone(d.unsafe)
+	if next == nil {
+		next = make(map[string]modelCopyMarker)
+	}
+	if remove {
+		delete(next, marker.OpID)
+	} else {
+		next[marker.OpID] = marker
+	}
+	d.mu.Unlock()
+	landed, uncertain, err := d.store.save(downloads, next, true)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.heldRevisions--
+	if landed {
+		d.copies = next
+		if uncertain {
+			d.copyRecoveryRequired = true
+			if !remove {
+				marker.Phase = "uncertain"
+				d.copies[marker.OpID] = marker
+			}
+		}
+		d.revision++
+	}
+	return err
 }
 
 func (d *modelDownloads) blockedLocked(key downloadContentKey) bool {
