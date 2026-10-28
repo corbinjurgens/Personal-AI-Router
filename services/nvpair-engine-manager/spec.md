@@ -424,8 +424,10 @@ the manual compiler continues to admit only its existing f16 KV mapping.
 | Draft/projector/other companions | Separate bounded tensor storage subtotal | Runtime cache/workspace and independent placement; absent is explicitly excluded, not Unknown |
 | Prompt cache and exclusions | Emitted `cache-ram` ceiling, explicitly demand-dependent and distinct from actual usage | Driver/runtime, alignment/fragmentation, mmap residency, other processes and simultaneous residents remain unsized |
 
-Components use the existing `estimated`, `partial`, `unknown` and `excluded`
-states. An excluded absent component has no byte field; a mapped zero-cost state
+Components use `weights`, `attention-cache`, `recurrent-state`,
+`compute-workspace`, `prompt-cache` and `companions`, with the existing
+`estimated`, `partial`, `unknown` and `excluded` states. An excluded absent
+component has an explicit absence reason and no byte field; a mapped zero-cost state
 has `estimated` and `"0"`. Known per-domain totals are partial component sums,
 never a complete peak or Fits statement. Selected-model storage is separate
 from simultaneous resident scenarios; no reclaimed memory is credited.
@@ -444,15 +446,41 @@ artifacts, effective allocation, revision, native build/support and the complete
 bounded memory snapshot; unavailable telemetry has an explicit identity.
 Neither the cache nor preview handoff alters Task 5 admission/cache/rechecks.
 
-Task 10 has no runtime trusted-memory producer, telemetry wire input or native
-device map. Runtime capacity, free-memory and fit comparison remain
-Unknown with the exact reason `target memory telemetry unavailable` when memory
-input is absent. Capacity/free byte fields remain empty; useful component sizing
-and its independent uncertainty are preserved, with no Fits claim. The in-memory
-memory helpers and their synthetic fixtures are not runtime support.
-A future authenticated broker adapter must supply a nonempty source/identity and a
-timestamp no older than five seconds, not in the future. Invalid byte ranges,
-free greater than capacity and invalid domains are rejected as advisory Unknowns.
+The node-info producer and broker memory cache exist, but production inspection
+and Auto callers do not yet inject their target-local observations and native
+map. Absent input yields Unknown with the exact reason
+`target memory telemetry unavailable`. Useful component sizing and its independent
+uncertainty are preserved. Real estimator results remain partial even when a
+synthetic caller supplies memory: complete native cost accounting is unresolved.
+
+The shared Go comparison owner produces `capacityFit` and `freeFit` as `unknown`,
+`exceeds`, `tight` or `fits`. Each charged domain must equal the checked sum of
+its sized components; every component category needs a charge or explicit
+exclusion. Required bytes greater than the compared capacity or available bytes
+are Exceeds. Otherwise, checked required bytes plus the pool's reserve greater
+than that value are Tight; equality is Fits. The reserve is capacity divided by
+ten, rounded up, plus 512 MiB. Overflow, partial costs, overlap or an unmatched
+physical pool makes the comparison Unknown. Every charged pool must pass;
+capacity on another GPU cannot compensate for a shortfall.
+
+Worker-only inspection and preview envelopes keep memory facts outside public
+`InspectRequest` and portable changes. They reuse node-info's independent fact
+sources, sample times and carried ages, plus a broker dispatch boot-clock stamp.
+The manager adds measured same-host transit before comparison and rechecks age
+on cache hits and before returning. Invalid clocks or hop stamps withdraw
+comparisons. Measurement timestamps are distinct from estimator timestamps;
+domain replies include source/sample identities and bounded remaining validity.
+Public strict decoders reject worker-only fields. Frozen finite validation is
+separate from a new preview and does not require historical memory to recur.
+Reviewed Auto GPU allocations carry one target-owned physical `DeviceBinding`
+(host, domain, device, exact selector and binding digest); CPU carries none.
+Public `ModelChange` cannot supply that binding, and no measured bytes,
+timestamps or producer-run identity becomes native settings authority.
+Manual and external-conversion finite GPU allocations remain readable and
+launchable without a binding. Their unproven GPU-domain comparisons are Unknown.
+External-conversion provenance cannot authorize an Auto allocation.
+Invalid byte ranges, free greater than capacity and invalid domains are
+rejected as advisory Unknowns.
 No GPU utilization percentage is interpreted as capacity. Device identity
 requires an explicit native-to-physical mapping; arrays never imply identity.
 UMA accepts one shared pool and removes host/device aggregate double counting.

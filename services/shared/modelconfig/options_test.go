@@ -153,6 +153,7 @@ func TestResolvedAutoRequiresOnlyExplicitRangeAndReviewedIdentity(t *testing.T) 
 	m.Requested.Context = &Context{Mode: "auto", Floor: 8192, Cap: 16384}
 	m.Resolved.ResolverRevision = "auto/test"
 	m.Resolved.ReviewedInputID = "reviewed-memory-and-artifact-input"
+	m.Resolved.DeviceBinding = &DeviceBinding{HostID: "host", DomainID: "vram", DeviceID: "GPU-11111111-1111-1111-1111-111111111111", Selector: "CUDA0", Digest: strings.Repeat("d", 64)}
 	got, err := DecodeLoads(mustJSON(t, []ModelLoad{m}))
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +169,49 @@ func TestResolvedAutoRequiresOnlyExplicitRangeAndReviewedIdentity(t *testing.T) 
 	m.Requested.Context.Cap = 8192
 	if _, err := DecodeLoads(mustJSON(t, []ModelLoad{m})); err == nil {
 		t.Fatal("accepted resolution outside explicit Auto cap")
+	}
+}
+
+func TestResolvedDeviceBindingStrictReadback(t *testing.T) {
+	m := testResolvedLoad()
+	m.Resolved.DeviceBinding = &DeviceBinding{HostID: "host", DomainID: "vram", DeviceID: "GPU-11111111-1111-1111-1111-111111111111", Selector: "CUDA0", Digest: strings.Repeat("d", 64)}
+	m.Resolved.ResolverRevision, m.Resolved.ReviewedInputID = "auto/test", "historical-run-does-not-need-to-recur"
+	loads, err := DecodeLoads(mustJSON(t, []ModelLoad{m}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clone := CloneLoads(loads)
+	clone[0].Resolved.DeviceBinding.DomainID = "changed"
+	if loads[0].Resolved.DeviceBinding.DomainID != "vram" {
+		t.Fatal("binding clone aliased")
+	}
+	m.Resolved.DeviceBinding = nil
+	if err := m.Resolved.Validate(); err == nil {
+		t.Fatal("reviewed GPU accepted without DeviceBinding")
+	}
+	m.Resolved.DeviceBinding = loads[0].Resolved.DeviceBinding
+	m.Resolved.GPU = GPU{Mode: "cpu"}
+	if err := m.Resolved.Validate(); err == nil {
+		t.Fatal("CPU accepted GPU binding")
+	}
+}
+
+func TestDeviceBindingRequirementIsReviewedAutoOnly(t *testing.T) {
+	for _, revision := range []string{"", "external-conversion/llama", "auto/test"} {
+		t.Run(revision, func(t *testing.T) {
+			load := testResolvedLoad()
+			load.Requested = RequestedLoad{}
+			load.Resolved.DeviceBinding = nil
+			load.Resolved.ResolverRevision = revision
+			load.Resolved.ReviewedInputID = ""
+			if revision != "" {
+				load.Resolved.ReviewedInputID = "synthetic-provenance"
+			}
+			err := load.Validate()
+			if (err != nil) != strings.HasPrefix(revision, "auto/") {
+				t.Fatalf("binding requirement for %q: %v", revision, err)
+			}
+		})
 	}
 }
 

@@ -257,7 +257,8 @@ function resolved(value: JsonValue | undefined): ResolvedLoad {
         'sourceInputDigest',
         'presetDigest',
         'resolverRevision',
-        'reviewedInputId'
+        'reviewedInputId',
+        'deviceBinding'
     ])
     const placement = gpu(row.gpu)
     if (placement.mode !== 'cpu' && placement.mode !== 'layers')
@@ -293,7 +294,9 @@ function resolved(value: JsonValue | undefined): ResolvedLoad {
         sourceInputDigest: modelDigest(row.sourceInputDigest),
         presetDigest: modelDigest(row.presetDigest),
         resolverRevision: optionalText(row.resolverRevision, 256),
-        reviewedInputId: optionalText(row.reviewedInputId, 256)
+        reviewedInputId: optionalText(row.reviewedInputId, 256),
+        deviceBinding:
+            row.deviceBinding === undefined ? undefined : deviceBinding(row.deviceBinding)
     }
     if (
         result.perSlotContext % 256 !== 0 ||
@@ -315,6 +318,12 @@ function resolved(value: JsonValue | undefined): ResolvedLoad {
         throw new Error('Resolved options disagree with allocation.')
     if (!!result.resolverRevision !== !!result.reviewedInputId)
         throw new Error('Incomplete reviewed model identity.')
+    const usesGPU = result.gpu.mode === 'layers' && (result.gpu.layers ?? 0) > 0
+    if (
+        (result.deviceBinding && !usesGPU) ||
+        (usesGPU && result.resolverRevision?.startsWith('auto/') && !result.deviceBinding)
+    )
+        throw new Error('Invalid reviewed device binding.')
     orderedResolvedArtifacts(result.artifacts)
     if (
         new Set(result.artifacts.map(item => item.path)).size !== result.artifacts.length ||
@@ -357,7 +366,7 @@ function validateResolution(intent: RequestedLoad, actual: ResolvedLoad | undefi
         throw new Error('Resolved placement differs from requested GPU.')
     if (
         (c?.mode === 'auto' || intent.gpu?.mode === 'auto') &&
-        (!actual.resolverRevision || !actual.reviewedInputId)
+        (!actual.resolverRevision?.startsWith('auto/') || !actual.reviewedInputId)
     )
         throw new Error('Auto resolution requires reviewed identity.')
     const explicitFields: readonly (keyof RequestedLoad)[] = [
@@ -416,6 +425,31 @@ function summary(value: JsonValue): ArtifactSummary {
         assurance: boundedText(row.assurance, 256, true)
     }
 }
+function deviceBinding(value: JsonValue | undefined): NonNullable<ResolvedLoad['deviceBinding']> {
+    const row = shape(value, ['hostId', 'domainId', 'deviceId', 'selector', 'digest'])
+    const deviceId = boundedText(row.deviceId, 40, true)
+    if (
+        !/^GPU-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(deviceId) ||
+        deviceId === 'GPU-00000000-0000-0000-0000-000000000000'
+    )
+        throw new Error('Unsupported physical device identity.')
+    return {
+        hostId: boundedText(row.hostId, 256, true),
+        domainId: boundedText(row.domainId, 256, true),
+        deviceId,
+        selector: choice(row.selector, ['CUDA0']),
+        digest: modelDigest(row.digest)
+    }
+}
+function memoryFit(value: JsonValue | undefined): Estimate['capacityFit'] {
+    return value === undefined ? undefined : choice(value, ['unknown', 'exceeds', 'tight', 'fits'])
+}
+function memoryValidity(value: JsonValue | undefined): number | undefined {
+    if (value === undefined) return undefined
+    const duration = integer(value, 0)
+    if (duration > 5000) throw new Error('Memory validity exceeds observation budget.')
+    return duration
+}
 function estimate(value: JsonValue | undefined): Estimate {
     const row = shape(value, [
         'status',
@@ -424,6 +458,8 @@ function estimate(value: JsonValue | undefined): Estimate {
         'timestamp',
         'memorySource',
         'memoryTimestamp',
+        'capacityFit',
+        'freeFit',
         'hostBytes',
         'deviceBytes',
         'domains',
@@ -438,6 +474,8 @@ function estimate(value: JsonValue | undefined): Estimate {
         timestamp: optionalText(row.timestamp),
         memorySource: optionalText(row.memorySource),
         memoryTimestamp: optionalText(row.memoryTimestamp),
+        capacityFit: memoryFit(row.capacityFit),
+        freeFit: memoryFit(row.freeFit),
         hostBytes: optionalUnsigned(row.hostBytes),
         deviceBytes: optionalUnsigned(row.deviceBytes),
         domains:
@@ -450,7 +488,18 @@ function estimate(value: JsonValue | undefined): Estimate {
                           'deviceId',
                           'capacityBytes',
                           'freeBytes',
-                          'requiredBytes'
+                          'requiredBytes',
+                          'reserveBytes',
+                          'capacityFit',
+                          'freeFit',
+                          'source',
+                          'sampleId',
+                          'capacitySource',
+                          'capacityTimestamp',
+                          'freeSource',
+                          'freeTimestamp',
+                          'remainingValidityMs',
+                          'unknowns'
                       ])
                       return {
                           id: boundedText(item.id, 256, true),
@@ -458,7 +507,18 @@ function estimate(value: JsonValue | undefined): Estimate {
                           deviceId: optionalText(item.deviceId),
                           capacityBytes: optionalUnsigned(item.capacityBytes),
                           freeBytes: optionalUnsigned(item.freeBytes),
-                          requiredBytes: optionalUnsigned(item.requiredBytes)
+                          requiredBytes: optionalUnsigned(item.requiredBytes),
+                          reserveBytes: optionalUnsigned(item.reserveBytes),
+                          capacityFit: memoryFit(item.capacityFit),
+                          freeFit: memoryFit(item.freeFit),
+                          source: optionalText(item.source, 256),
+                          sampleId: optionalText(item.sampleId, 513),
+                          capacitySource: optionalText(item.capacitySource, 256),
+                          capacityTimestamp: optionalText(item.capacityTimestamp, 256),
+                          freeSource: optionalText(item.freeSource, 256),
+                          freeTimestamp: optionalText(item.freeTimestamp, 256),
+                          remainingValidityMs: memoryValidity(item.remainingValidityMs),
+                          unknowns: strings(item.unknowns)
                       }
                   }),
         components:
@@ -467,7 +527,14 @@ function estimate(value: JsonValue | undefined): Estimate {
                 : boundedArray(row.components, 256).map(value => {
                       const item = shape(value, ['name', 'domainId', 'status', 'bytes', 'reason'])
                       return {
-                          name: boundedText(item.name, 256, true),
+                          name: choice(item.name, [
+                              'weights',
+                              'attention-cache',
+                              'recurrent-state',
+                              'compute-workspace',
+                              'prompt-cache',
+                              'companions'
+                          ]),
                           domainId: optionalText(item.domainId),
                           status: choice(item.status, [
                               'estimated',
@@ -483,9 +550,19 @@ function estimate(value: JsonValue | undefined): Estimate {
         unknowns: strings(row.unknowns)
     }
     const domains = new Set(result.domains?.map(item => item.id))
+    const physicalDevices =
+        result.domains?.flatMap(item => (item.deviceId ? [item.deviceId] : [])) ?? []
+    const hostPools =
+        result.domains?.filter(item => item.kind === 'host' || item.kind === 'shared') ?? []
     if (
         domains.size !== (result.domains?.length ?? 0) ||
-        result.components?.some(item => item.domainId && !domains.has(item.domainId))
+        new Set(physicalDevices).size !== physicalDevices.length ||
+        hostPools.length > 1 ||
+        result.components?.some(
+            item =>
+                (item.domainId && !domains.has(item.domainId)) ||
+                (item.status === 'excluded' && (!item.reason || item.bytes !== undefined))
+        )
     )
         throw new Error('Invalid estimate domain reference.')
     return result

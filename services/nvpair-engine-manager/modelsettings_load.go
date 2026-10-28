@@ -274,6 +274,10 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 					resolved.ResolverRevision, resolved.ReviewedInputID = externalConversionResolver, source
 				}
 			}
+			if resolved.ResolverRevision != "" && resolved.ReviewedInputID != "" && resolved.GPU.Mode == "layers" && resolved.GPU.Layers != nil && *resolved.GPU.Layers > 0 && previous.DeviceBinding != nil {
+				binding := *previous.DeviceBinding
+				resolved.DeviceBinding = &binding
+			}
 		}
 		sections[load.ModelID], lists[i] = options, list
 		load.Resolved = resolved

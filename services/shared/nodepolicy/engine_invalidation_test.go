@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package nodepolicy
+package nodepolicy_test
 
 import (
 	"encoding/json"
@@ -9,17 +9,18 @@ import (
 	"testing"
 
 	"nvpair-shared/enginesettings"
+	"nvpair-shared/nodepolicy"
 )
 
 func TestInvalidateEngineParams(t *testing.T) {
 	test := func(name, engine, operation, reason string, valid bool) {
 		t.Run(name, func(t *testing.T) {
-			want := InvalidateEngineParams{Engine: engine, OperationID: operation, Reason: reason}
+			want := nodepolicy.InvalidateEngineParams{Engine: engine, OperationID: operation, Reason: reason}
 			data, err := json.Marshal(want)
 			if err != nil {
 				t.Fatal(err)
 			}
-			var got InvalidateEngineParams
+			var got nodepolicy.InvalidateEngineParams
 			err = json.Unmarshal(data, &got)
 			if (err == nil) != valid {
 				t.Fatalf("decode error=%v, valid=%v", err, valid)
@@ -32,17 +33,17 @@ func TestInvalidateEngineParams(t *testing.T) {
 			}
 		})
 	}
-	test("built in", "ollama", "switch-1", InvalidationReasonEngineSwitch, true)
-	test("variant and request punctuation", "llamacpp-custom", "A._:-09", InvalidationReasonEngineSwitch, true)
-	test("maximum request id", "ollama", strings.Repeat("a", enginesettings.MaxSwitchRequestIDBytes), InvalidationReasonEngineSwitch, true)
-	test("empty engine", "", "switch-1", InvalidationReasonEngineSwitch, false)
-	test("invalid engine syntax", "../ollama", "switch-1", InvalidationReasonEngineSwitch, false)
-	test("empty operation", "ollama", "", InvalidationReasonEngineSwitch, false)
-	test("oversized operation", "ollama", strings.Repeat("a", enginesettings.MaxSwitchRequestIDBytes+1), InvalidationReasonEngineSwitch, false)
-	test("invalid first character", "ollama", "-switch", InvalidationReasonEngineSwitch, false)
-	test("non ASCII operation", "ollama", "switch-é", InvalidationReasonEngineSwitch, false)
-	test("operation whitespace", "ollama", "switch 1", InvalidationReasonEngineSwitch, false)
-	test("operation newline", "ollama", "switch\n", InvalidationReasonEngineSwitch, false)
+	test("built in", "ollama", "switch-1", nodepolicy.InvalidationReasonEngineSwitch, true)
+	test("variant and request punctuation", "llamacpp-custom", "A._:-09", nodepolicy.InvalidationReasonEngineSwitch, true)
+	test("maximum request id", "ollama", strings.Repeat("a", enginesettings.MaxSwitchRequestIDBytes), nodepolicy.InvalidationReasonEngineSwitch, true)
+	test("empty engine", "", "switch-1", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("invalid engine syntax", "../ollama", "switch-1", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("empty operation", "ollama", "", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("oversized operation", "ollama", strings.Repeat("a", enginesettings.MaxSwitchRequestIDBytes+1), nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("invalid first character", "ollama", "-switch", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("non ASCII operation", "ollama", "switch-é", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("operation whitespace", "ollama", "switch 1", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("operation newline", "ollama", "switch\n", nodepolicy.InvalidationReasonEngineSwitch, false)
 	test("empty reason", "ollama", "switch-1", "", false)
 	test("unknown reason", "ollama", "switch-1", "restart", false)
 }
@@ -61,7 +62,7 @@ func TestInvalidateEngineStrictJSON(t *testing.T) {
 		"trailing object":   `{"engine":"ollama","operationId":"switch-1","reason":"engine-switch"}{}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			var got InvalidateEngineParams
+			var got nodepolicy.InvalidateEngineParams
 			if err := json.Unmarshal([]byte(input), &got); err == nil {
 				t.Fatal("accepted invalid invalidation params")
 			}
@@ -70,12 +71,12 @@ func TestInvalidateEngineStrictJSON(t *testing.T) {
 }
 
 func TestAdmissionSnapshotParams(t *testing.T) {
-	if err := json.Unmarshal([]byte(`{}`), &AdmissionSnapshotParams{}); err != nil {
+	if err := json.Unmarshal([]byte(`{}`), &nodepolicy.AdmissionSnapshotParams{}); err != nil {
 		t.Fatal(err)
 	}
 	for name, input := range map[string]string{"null": `null`, "array": `[]`, "unknown field": `{"engine":"ollama"}`, "trailing object": `{}{}`} {
 		t.Run(name, func(t *testing.T) {
-			if err := json.Unmarshal([]byte(input), &AdmissionSnapshotParams{}); err == nil {
+			if err := json.Unmarshal([]byte(input), &nodepolicy.AdmissionSnapshotParams{}); err == nil {
 				t.Fatal("accepted invalid snapshot params")
 			}
 		})

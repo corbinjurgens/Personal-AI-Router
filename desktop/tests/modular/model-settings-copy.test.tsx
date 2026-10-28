@@ -735,6 +735,18 @@ describe('portable target-previewed copy', () => {
                                     request.nodeId === 'peer'
                                         ? { mode: 'cpu' }
                                         : { mode: 'layers', layers: 8 },
+                                // Synthetic physical/map identity for the successful GPU fixture.
+                                ...(request.nodeId === 'peer'
+                                    ? {}
+                                    : {
+                                          deviceBinding: {
+                                              hostId: 'second',
+                                              domainId: 'synthetic-vram',
+                                              deviceId: 'GPU-11111111-1111-1111-1111-111111111111',
+                                              selector: 'CUDA0',
+                                              digest: 'f'.repeat(64)
+                                          }
+                                      }),
                                 options: {},
                                 artifacts: [
                                     {

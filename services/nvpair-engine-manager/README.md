@@ -213,8 +213,9 @@ Previews disclose whole-router scope, affected configured models, the broker's
 observations remain an explicit unknown for the broker to resolve. Off, Pause,
 engine locks and adopted-process ownership keep their existing behavior.
 Apply-build must add model-settings apply to its maintenance exclusion when
-implemented; no exclusion symbol exists yet. Production Auto has no trusted memory
-producer and refuses with `target memory telemetry unavailable`. Native
+implemented; no exclusion symbol exists yet. Production Auto's target-memory
+and native-map caller wiring remains unavailable and refuses with
+`target memory telemetry unavailable`. Native
 configuration does not create qualification or establish strict readiness.
 
 Advisory memory estimates use the private MIT `gguf-parser-go` v0.27.0 pin
@@ -232,13 +233,29 @@ dense/GQA, LFM2 recurrence, Qwen variants, SWA, mixed cache precision and tensor
 placement. Unsupported components stay independently Unknown. Companions have
 separate known storage and unsized runtime costs. Totals remain partial and
 uncalibrated, with no Fits claim. CPU and unmapped offload byte projections are
-not native device allocation readback. Task 10 has no runtime trusted-memory
-producer, telemetry wire input or native device map. Capacity, free memory and
-fit comparison remain Unknown with reason `target memory telemetry unavailable`.
+not native device allocation readback. The existing node-info telemetry and
+broker cache are not yet connected to production inspection or Auto callers.
+Missing input leaves comparisons Unknown with reason
+`target memory telemetry unavailable`.
 The engine's private owner-injected Auto selector implements bounded comparison
 and freezing with synthetic fixtures; it does not establish runtime telemetry support.
 Useful component estimates remain available. Simultaneous residents are unsized
 and no release credit is assumed. Auto's no-facts helper remains Unknown.
+
+Go owns advisory `capacityFit` and `freeFit` comparisons per physical pool.
+Complete synthetic cost fixtures exercise Fits, Tight and Exceeds, with checked
+component sums and a reserve of 10 percent of capacity plus 512 MiB per pool.
+Missing, expired, incomplete or unmapped evidence stays Unknown. UMA is one
+shared pool; another device's free memory cannot cover a shortfall. Replies
+carry measurement provenance and bounded remaining validity separately from
+the estimate timestamp. Cached arithmetic never renews a measurement.
+Private worker envelopes reuse timestamped node-info facts and account for
+the same-host dispatch hop; public requests cannot upload this authority.
+Reviewed Auto GPU results retain an exact physical device binding through cloning,
+finite recompilation and readback; CPU results have none. This plumbing does
+not complete the unresolved native cost accounting or enable production Auto.
+Manual and external-conversion GPU settings remain usable without a binding;
+their unproven GPU-domain comparisons stay Unknown.
 
 Auto searches only the existing validated bounded facts, at most 128 candidate
 evaluations: highest context first, then greatest finite GPU offload. Its default
@@ -267,7 +284,8 @@ for the selected model; old Apply/restart and frozen siblings still reject drift
 A manual edit cannot silently retune saved
 Auto. Conversion labels alone never authorize Auto. Manual preview and Task 10
 advisory digest behavior are preserved. Broker end-to-end frozen forwarding and
-recovery integration remain deferred until a trusted memory producer exists;
+recovery integration remain deferred until target-memory/map caller wiring and
+complete native cost accounting are implemented;
 engine unit support does not establish end-to-end Auto Apply.
 
 Each executor owns a derived LRU with ceilings of 128 records, 1 MiB retained

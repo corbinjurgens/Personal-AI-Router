@@ -40,6 +40,13 @@ export type ResolvedLoad = {
     presetDigest: string
     resolverRevision?: string
     reviewedInputId?: string
+    deviceBinding?: {
+        hostId: string
+        domainId: string
+        deviceId: string
+        selector: string
+        digest: string
+    }
 }
 export type ModelLoad = {
     modelId: string
@@ -86,6 +93,8 @@ export type Estimate = {
     timestamp?: string
     memorySource?: string
     memoryTimestamp?: string
+    capacityFit?: 'unknown' | 'exceeds' | 'tight' | 'fits'
+    freeFit?: 'unknown' | 'exceeds' | 'tight' | 'fits'
     /** Advisory uint64 decimal text, never native allocation authority. */
     hostBytes?: string
     deviceBytes?: string
@@ -96,6 +105,17 @@ export type Estimate = {
         capacityBytes?: string
         freeBytes?: string
         requiredBytes?: string
+        reserveBytes?: string
+        capacityFit?: 'unknown' | 'exceeds' | 'tight' | 'fits'
+        freeFit?: 'unknown' | 'exceeds' | 'tight' | 'fits'
+        source?: string
+        sampleId?: string
+        capacitySource?: string
+        capacityTimestamp?: string
+        freeSource?: string
+        freeTimestamp?: string
+        remainingValidityMs?: number
+        unknowns?: string[]
     }>
     components?: Array<{
         name: string
