@@ -122,40 +122,60 @@ func modelConstrainCommand(command launchCommand, loads []modelconfig.ModelLoad)
 
 // File-only source validation, also used during accepted replay and immediately
 // before spawn. It never opens native libraries or enumerates devices.
-func modelReviewedNativeSource(ctx context.Context, st *engineState, command launchCommand) (string, error) {
+func modelReviewedNativeSource(ctx context.Context, st *engineState, command launchCommand, diagnostic ...*modelBufferSourceDiagnostic) (string, error) {
+	fail := func(stage string, err error) {
+		if len(diagnostic) > 0 {
+			diagnostic[0].stage, diagnostic[0].err = stage, err
+		}
+	}
 	runtime, err := modelDeviceRuntimeSnapshot(ctx, st, modelDevicesBuild)
 	if err != nil {
+		fail("runtime-snapshot", err)
 		return "", servingError("Reviewed Auto native library source unavailable.")
 	}
+	return modelReviewedNativeRuntimeSource(ctx, runtime, command, fail)
+}
+
+func modelReviewedNativeRuntimeSource(ctx context.Context, runtime modelDeviceRuntime, command launchCommand, fail func(string, error)) (string, error) {
 	entries, err := os.ReadDir(runtime.Root)
 	if err != nil {
+		fail("root-read", err)
 		return "", servingError("Reviewed Auto native library source unavailable.")
 	}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
+			fail("root-read", err)
 			return "", err
 		}
 		if strings.HasPrefix(strings.ToLower(entry.Name()), "libcuda.so") || strings.EqualFold(entry.Name(), "nvcuda.dll") {
+			fail("driver-library", servingError("Reviewed Auto build root contains an unsupported driver library."))
 			return "", servingError("Reviewed Auto build root contains an unsupported driver library.")
 		}
 	}
 	executable, err := servingFileBinding(command.Bin)
 	if err != nil {
+		fail("executable-binding", err)
 		return "", err
 	}
 	env, err := modelNativeEnvironment(runtime.Root, command.Env)
 	if err != nil {
+		fail("native-environment", err)
 		return "", err
 	}
 	_, err = modelDeviceEnvironment(env, "")
 	if err != nil {
+		fail("device-environment", err)
 		return "", err
 	}
-	return modelDeviceDigest(struct {
+	source, err := modelDeviceDigest(struct {
 		Executable  *engines.ServingBinding
 		Runtime     modelDeviceRuntime
 		Environment []string
 	}{executable, runtime, env})
+	if err != nil {
+		fail("source-digest", err)
+	}
+	return source, err
 }
 
 // ServingFieldError deliberately contains field/model identifiers, never source
