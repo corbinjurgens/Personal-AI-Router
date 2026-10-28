@@ -23,7 +23,13 @@ const estimate: Estimate = {
     ],
     components: [
         { name: 'weights', domainId: 'shared', status: 'estimated', bytes: '4294967296' },
-        ...['kv', 'state', 'workspace', 'prompt-cache', 'companions'].map(
+        ...[
+            'attention-cache',
+            'recurrent-state',
+            'compute-workspace',
+            'prompt-cache',
+            'companions'
+        ].map(
             name =>
                 ({
                     name,
@@ -51,7 +57,9 @@ describe('advisory memory estimate', () => {
         {
             name: 'unexplained exclusion',
             components: estimate.components?.map(component =>
-                component.name === 'kv' ? { ...component, reason: undefined } : component
+                component.name === 'attention-cache'
+                    ? { ...component, reason: undefined }
+                    : component
             )
         },
         {
@@ -68,23 +76,24 @@ describe('advisory memory estimate', () => {
             expect(html).toContain('Unknown')
         }
     )
-    it.each(['kv', 'state', 'workspace', 'prompt-cache', 'companions'])(
-        'requires an explicit cost or exclusion for %s',
-        name => {
-            const html = renderToStaticMarkup(
-                <ModelMemoryEstimate
-                    estimate={{
-                        ...estimate,
-                        components: estimate.components?.filter(
-                            component => component.name !== name
-                        )
-                    }}
-                />
-            )
-            expect(html).not.toContain('(Fits)')
-            expect(html).toContain(`explicit exclusions: ${name}`)
-        }
-    )
+    it.each([
+        'attention-cache',
+        'recurrent-state',
+        'compute-workspace',
+        'prompt-cache',
+        'companions'
+    ])('requires an explicit cost or exclusion for %s', name => {
+        const html = renderToStaticMarkup(
+            <ModelMemoryEstimate
+                estimate={{
+                    ...estimate,
+                    components: estimate.components?.filter(component => component.name !== name)
+                }}
+            />
+        )
+        expect(html).not.toContain('(Fits)')
+        expect(html).toContain(`explicit exclusions: ${name}`)
+    })
     it('does not add host and device capacities to an overlapping shared UMA pool', () => {
         const html = renderToStaticMarkup(
             <ModelMemoryEstimate
