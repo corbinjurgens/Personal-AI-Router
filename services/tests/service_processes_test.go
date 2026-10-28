@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -14,13 +15,85 @@ import (
 	"sync"
 	"time"
 
+	gnet "github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
+	"nvpair-shared/testbin"
 )
 
 type serviceProcessIdentity struct {
 	PID     int32
 	Path    string
 	Created int64
+}
+
+type installedServiceSnapshot struct {
+	Processes []serviceProcessIdentity
+	Listeners []string
+}
+
+// Read native tables without dialing an installed endpoint. This is a lifetime
+// comparison only; transient-contact proof belongs to fixture counters/config.
+// Firewall snapshots remain an external PC3 interval requirement.
+func snapshotInstalledServiceProcesses() (installedServiceSnapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	snapshot := installedServiceSnapshot{Processes: []serviceProcessIdentity{}, Listeners: []string{}}
+	root := os.Getenv(testbin.EnvRoot)
+	if !filepath.IsAbs(root) {
+		return snapshot, errors.New("installed snapshot requires the fixed testbin root")
+	}
+	pids, err := process.PidsWithContext(ctx)
+	if err != nil {
+		return snapshot, err
+	}
+	for _, pid := range pids {
+		p, err := process.NewProcessWithContext(ctx, pid)
+		if err != nil {
+			continue
+		}
+		name, err := p.NameWithContext(ctx)
+		if err != nil {
+			continue
+		} // Protected unrelated system processes are not owners.
+		name = strings.TrimSuffix(strings.ToLower(name), ".exe")
+		if !strings.HasPrefix(name, "nvpair-") && !slices.Contains([]string{"pair", "ollama", "llama-server", "lms", "strata"}, name) {
+			continue
+		}
+		identity, err := serviceProcessIdentityAt(ctx, pid)
+		if err != nil {
+			return snapshot, fmt.Errorf("installed %s pid %d: %w", name, pid, err)
+		}
+		rel, err := filepath.Rel(strings.ToLower(root), strings.ToLower(identity.Path))
+		if err != nil {
+			return snapshot, err
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			continue
+		}
+		snapshot.Processes = append(snapshot.Processes, identity)
+	}
+	connections, err := gnet.ConnectionsWithContext(ctx, "tcp")
+	if err != nil {
+		return snapshot, err
+	}
+	for _, connection := range connections {
+		if connection.Status == "LISTEN" {
+			if _, installed := installedServicePorts[int(connection.Laddr.Port)]; installed {
+				snapshot.Listeners = append(snapshot.Listeners, fmt.Sprintf("%s:%d pid=%d", connection.Laddr.IP, connection.Laddr.Port, connection.Pid))
+			}
+		}
+	}
+	slices.SortFunc(snapshot.Processes, func(a, b serviceProcessIdentity) int {
+		if a.PID < b.PID {
+			return -1
+		}
+		if a.PID > b.PID {
+			return 1
+		}
+		return 0
+	})
+	slices.Sort(snapshot.Listeners)
+	return snapshot, ctx.Err()
 }
 
 var errServiceProcessDeparted = errors.New("recorded fixture process departed")
