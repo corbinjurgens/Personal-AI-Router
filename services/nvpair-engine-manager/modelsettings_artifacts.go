@@ -606,6 +606,27 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 			*output = modelEstimateInput{Facts: facts, Bindings: slices.Clone(result.Artifacts), BuildID: "unverified-launch-snapshot:" + exportBinding(list, snapshot.command)}
 		}
 	}
+	var observedArtifacts []modelconfig.ArtifactSummary
+	for _, load := range snapshot.state.plat.Runtime.ModelLoads {
+		if load.ModelID == p.ModelID && load.Resolved != nil {
+			observedArtifacts = modelEstimateBindings(load.Resolved.Artifacts)
+			for i := range observedArtifacts {
+				observedArtifacts[i].Assurance = "sampled-local-binding"
+			}
+			break
+		}
+	}
+	if len(observedArtifacts) == 0 {
+		var bindings []modelconfig.ArtifactBinding
+		for _, file := range list.Files {
+			bindings = append(bindings, modelconfig.ArtifactBinding{Role: file.Role, Path: file.configured, ResolvedTarget: file.abs, Size: strconv.FormatInt(file.Size, 10), MtimeNS: strconv.FormatInt(file.info.ModTime().UnixNano(), 10), SampleSHA256: file.sample})
+		}
+		observedArtifacts = modelEstimateBindings(bindings)
+		for i := range observedArtifacts {
+			observedArtifacts[i].Assurance = "sampled-local-binding"
+		}
+	}
+	result = attachModelBufferObservation(result, e.projectModelBufferObservation(st, p.Engine, p.ModelID, observedArtifacts))
 	return result, nil
 }
 

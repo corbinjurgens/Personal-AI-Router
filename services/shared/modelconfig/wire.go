@@ -209,17 +209,18 @@ type Estimate struct {
 	Unknowns        []string            `json:"unknowns,omitempty"`
 }
 type InspectResult struct {
-	Engine    string             `json:"engine"`
-	NodeID    string             `json:"nodeId,omitempty"`
-	ModelID   string             `json:"modelId"`
-	Status    string             `json:"status"`
-	Reason    string             `json:"reason,omitempty"`
-	Source    string             `json:"source,omitempty"`
-	Assurance string             `json:"assurance,omitempty"`
-	Artifacts []ArtifactSummary  `json:"artifacts,omitempty"`
-	Facts     *Facts             `json:"facts,omitempty"`
-	Options   []OptionDescriptor `json:"options,omitempty"`
-	Estimate  Estimate           `json:"estimate"`
+	Engine          string             `json:"engine"`
+	NodeID          string             `json:"nodeId,omitempty"`
+	ModelID         string             `json:"modelId"`
+	Status          string             `json:"status"`
+	Reason          string             `json:"reason,omitempty"`
+	Source          string             `json:"source,omitempty"`
+	Assurance       string             `json:"assurance,omitempty"`
+	Artifacts       []ArtifactSummary  `json:"artifacts,omitempty"`
+	Facts           *Facts             `json:"facts,omitempty"`
+	Options         []OptionDescriptor `json:"options,omitempty"`
+	Estimate        Estimate           `json:"estimate"`
+	LoadObservation *BufferObservation `json:"loadObservation,omitempty"`
 }
 
 // Impact represents unresolved owner choices without manufacturing a timeout,
@@ -744,6 +745,10 @@ func (a AutoProposal) Clone() AutoProposal {
 	return a
 }
 func (r InspectResult) Clone() InspectResult {
+	if r.LoadObservation != nil {
+		o := r.LoadObservation.Clone()
+		r.LoadObservation = &o
+	}
 	r.Artifacts = slices.Clone(r.Artifacts)
 	if r.Facts != nil {
 		f := *r.Facts
@@ -773,6 +778,11 @@ func DecodeInspectResult(data []byte) (InspectResult, error) {
 	return r, nil
 }
 func (r InspectResult) Validate() error {
+	if r.LoadObservation != nil {
+		if err := r.LoadObservation.Validate(); err != nil {
+			return err
+		}
+	}
 	if err := (InspectRequest{Engine: r.Engine, NodeID: r.NodeID, ModelID: r.ModelID}).Validate(); err != nil {
 		return err
 	}

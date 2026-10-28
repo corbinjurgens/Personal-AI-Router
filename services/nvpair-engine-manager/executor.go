@@ -103,6 +103,7 @@ type engineState struct {
 	portCleanupPending bool
 	binPath            string
 	proc               *managedProc
+	bufferCapture      *modelBufferCapture
 	healthStop         context.CancelFunc
 	// startCancel lets StopAll unblock doStart before waiting on opMu.
 	startCancel context.CancelCauseFunc
@@ -122,6 +123,7 @@ type Executor struct {
 	credentials     credentialStore
 	modelInspection modelInspectionState
 	modelEstimates  modelEstimateState
+	modelBuffers    modelBufferOwner
 	boundActivation *boundEngineActivation // switchAdmission; current cold operation
 	// switchAdmission protects reservation admission and active mutation counts;
 	// switchMu serializes checkpoint steps without holding the admission gate.
@@ -271,6 +273,7 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 		}
 	}
 	e.downloads = newModelDownloads(e.switchIncarnation, baseDir, naming)
+	e.modelBuffers.store = newModelBufferStore(baseDir)
 	return e
 }
 

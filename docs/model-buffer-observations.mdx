@@ -1,0 +1,281 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Native load buffer observations
+
+The Model Settings review includes **Estimated versus native-reported buffers
+for this load**. It compares a frozen estimate with allocation messages from a
+load that the engine already performed. It does not start a load, inference,
+device helper, native initialization, qualification or measurement interval.
+The surrounding explicit Inspect, Preview or Recalculate operation retains its
+existing permission-gated device-map behavior. Observation adds no permission
+and no additional helper call to that operation.
+
+These are rounded native allocation reports. They are not physical GPU usage,
+RSS, working set, a process total, an inference peak or a guaranteed bound.
+There is no fit badge, percent error, automatic recalculation or calibration
+action. Samples never change load choices, estimates, safety margins, Auto,
+admission, routing, qualification, policy, settings or accepted journals.
+
+## Reading the review
+
+The existing draft estimate remains separate. The buffer table uses the
+service's **frozen baseline for the captured load**, its estimator revision,
+captured options and requested options. Editing a draft or receiving an Auto
+proposal does not replace that baseline. Unresolved native inheritance,
+including mmap/load mode and unsupported speculation details, stays explicit.
+
+The report identifies the sample, load time, initial or wakeup phase, upstream
+pin and persistence state. Current means the same owned load was confirmed at
+inspection, not a promise that it remains loaded afterward. A stale inspection
+cannot assert currentness. Changing target or model hides the prior report
+while that context awaits inspection. Recovered samples are historical even
+when their identities match the selected model.
+
+**Unmapped** preserves the reported number without guessing a physical device.
+Component comparisons appear only when their scopes agree. A component
+estimate is not copied into every repeated buffer row. Unknown or partial
+coverage never becomes a total. The initial comparison supports the conservative
+CPU weights correspondence; inherited KV settings, mixed roles, mapped buffers
+and partial compute estimates keep their corresponding comparisons Unknown.
+
+Save states are independent of loading: pending/omitted, saved in this manager
+session, failed, history unavailable, or durability uncertain. An uncertain
+replacement landed, but directory synchronization did not establish its
+durability. History recovered after restart remains historical and retains
+uncertainty. Unknown observations remain usable alongside manual configuration.
+An absent optional observation means **Unknown (observation omitted)**, not
+that no load occurred. An unsupported build shows Unknown, without plausible
+numbers from an earlier supported load.
+
+## Supported source and assurance
+
+The adapter supports only llama.cpp **b11146**, full commit
+`7fe450e19305b828c199d602c23a8337aaa1f03b`. It recognizes exactly the
+`b11146-7fe450e` tuple and its explicitly mapped full-hash spelling. It does not
+guess a version from an executable name or arbitrary hash prefix.
+
+The native [build string template](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/common/build-info.cpp.in#L26-L29)
+combines the build number and commit string. The
+[generator](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/cmake/build-info.cmake#L18-L39)
+reads Git's commit count and short HEAD without checking modified source. The
+assurance is therefore `recognized-self-reported-pin`, never verified clean
+source. An undisclosed modified build can report the same tuple. Rejecting an
+explicit dirty suffix does not prove that hidden modifications are detectable.
+
+The actual executable, metadata libraries and effective environment have a
+separate local source digest. That digest binds the manager-owned source; it
+does not attest its upstream provenance. Artifact bindings sample local files
+and can miss same-stat modifications outside those samples. A future
+clean-source assertion would need a separately trusted build receipt tying
+exact executable/library digests to reviewed clean source. This feature
+neither creates nor requires that authority. It never launches `--version`.
+
+The source basis for this adapter is the following pinned implementation:
+
+| Primary source | Interpretation |
+| --- | --- |
+| [Model buffers](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-model.cpp#L1849-L1855) | Each backend buffer is an occurrence. Repeated labels are legitimate and are retained. |
+| [KV allocation and overlapping summaries](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-kv-cache.cpp#L274-L305) | Buffer rows describe allocated cache buffers. Later K/V summaries overlap them. Dummy buffers from no-allocation passes are not evidence of a real load. |
+| [Scheduler reservation](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-context.cpp#L617-L764) | Reservation follows graph passes. Successive blocks replace a reservation snapshot; they are not additive. Buffers at most one byte can be omitted, so absence is not zero. |
+| [Output allocation](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-context.cpp#L373-L384), [recurrent RS](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-memory-recurrent.cpp#L120-L137), [SWA caches](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-kv-cache-iswa.cpp#L83-L104) | Output, recurrent state and attention caches have different scopes. SWA can repeat the same device label. |
+| [Mapped model buffers](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-model.cpp#L1772-L1797) | A host-file mapping is not independent RAM plus VRAM allocation. Buffer-type and mapping uncertainty remain visible. |
+| [Combined child output and port framing](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-models.cpp#L150-L190), [spawn binding](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-models.cpp#L1157-L1215), [exit in server_monitor::run](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-models.cpp#L235-L242) | Parent model names bind child ports. Exit retires that binding. Child state commands are consumed internally; ordinary lines have the padded child-port prefix. |
+| [Loading and sleeping](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-context.cpp#L954-L1050), [initial ready marker](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server.cpp#L475-L486), [argument state](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/common/common.h#L302-L317), [load source text](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-context.cpp#L1386-L1397), [router ready transition](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-models.cpp#L1668-L1676) | Initial startup and wakeup differ. A wakeup's internal READY command is not another visible initial-ready line. Loading text may name a path or repository and is not artifact identity. |
+| [Props route](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server.cpp#L241-L257), [router props and non-loading proxy](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-models.cpp#L1947-L1985), [child props](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-context.cpp#L4600-L4647) | Build tuple, slot count and per-slot context can confirm a loaded child. They are not allocation-byte endpoints. |
+| [Model states](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-models.cpp#L2037-L2103), [metrics implementation](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-context.cpp#L4543-L4564), [metrics API](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/README.md#L1122-L1149) | Model metadata sizes and request/token/timing metrics do not supply model/KV/compute allocation bytes. No SSE subscription is added. |
+| [Fit JSONL](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/common/fit.cpp#L34-L67), [fit passes and tables](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/common/fit.cpp#L903-L1086), [shutdown reporting](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server.cpp#L550-L553) | Integer-divided MiB breakdowns can describe fitting, no-allocation passes or teardown. They are excluded. |
+| [Diagnostic logger](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/common/log.cpp#L82-L180) | JSONL log envelopes remain scraped diagnostics, not an exact-byte structured measurement interface. |
+| [CPU names](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-backend.cpp#L2438-L2445), [mapped CPU name](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-backend.cpp#L2486-L2491), [CUDA names](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-cuda/ggml-cuda.cu#L729-L734), [CUDA host allocation](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-cuda/ggml-cuda.cu#L1262-L1266) | Native labels describe buffer types and native visibility, not physical array indices. |
+| [Metal prefix](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-metal/ggml-metal.cpp#L15), [device label](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-metal/ggml-metal.cpp#L307), [private allocation](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-metal/ggml-metal.cpp#L382), [mapped allocation](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-metal/ggml-metal.cpp#L458) | The supported spelling is MTL. Metal/UMA aliases are not independently additive physical pools. |
+
+## Finite message grammar
+
+The adapter accepts complete UTF-8 frames only. It recognizes anchored native
+emitters, never matching arbitrary substrings in other diagnostics:
+
+| Emitter | Report category and fixed suffix |
+| --- | --- |
+| `load_tensors:` | model: `model buffer size = q MiB` |
+| `llama_kv_cache:` | attention cache: `KV buffer size = q MiB` |
+| `sched_reserve:` | compute: `compute buffer size = q MiB` |
+| `llama_context:` | output: `output buffer size = q MiB` |
+| `llama_memory_recurrent:` | recurrent state: `RS buffer size = q MiB` |
+
+Native padding spaces separate the emitter, label and fixed suffix. Supported
+labels are `CPU`, `CPU_Mapped`, `CUDA_Host`, `CUDA<N>` and
+`MTL<N>[_Private|_Mapped]`, with canonical unsigned `N` below 64. `Metal`, other
+backend vocabularies and arbitrary labels remain unsupported. No Vulkan, ROCm
+or SYCL semantics are inferred from similar spelling.
+
+Finite envelopes are plain messages; the logger's I/W/E/D prefix with its
+optional decimal timestamp and exact ANSI colors; or a strict JSONL object with
+only `type`, `time`, `level`, `msg`. JSONL requires `type=log`, a nonnegative
+canonical int64 timestamp, and one of info/warn/error/debug/cont/none. The
+timestamp prefix has digits followed by two, three and three digits in
+dot-separated groups. Other escapes and extra JSONL members are unsupported.
+The router's child envelope is `[%5d] ` with an exact padded port. Matching a
+JSONL envelope never changes `sourceKind=log-scraped`.
+
+Parent spawn is anchored to `srv load:` and its exact model-name/port message.
+Parent exit is anchored to **`srv run:`**, emitted by `server_monitor::run`.
+There is no operator-envelope compatibility fallback. Prefixed loading,
+sleep/wakeup and initial-ready messages establish separate load generations.
+Scheduler blocks begin with `reserving ...` and end with the matching reserve
+timing/copy-count message. The latest complete block replaces prior compute
+rows. Repeated model or SWA rows remain separate occurrences; frame sequence,
+not identical text, deduplicates delivery.
+
+Initial startup requires spawn, loading/allocation/reservation, visible initial
+ready, positive public loaded status and matching child/router props. Wakeup
+requires the retained child binding, sleep exit, a fresh loading/allocation
+block, positive loaded status and matching props, without another initial-ready
+line. Port reuse, missing/reordered/dropped boundaries, duplicate bindings or
+conflicting frame replay produce incomplete/Unknown evidence rather than
+mixing lifetimes. Load source text is discarded immediately.
+
+## Precision and comparison scope
+
+The native formatter normally rounds decimal MiB to two places. Each occurrence
+keeps its canonical reported value, `unit=MiB`, `precision=0.01` and
+`sourceKind=log-scraped`. For reports below `2^30 MiB`, checked decimal arithmetic
+constructs the inclusive outward interval:
+
+```text
+lower = max(0, floor((q - 0.005) * 1048576))
+upper = ceil((q + 0.005) * 1048576)
+```
+
+This includes midpoint ties. `0.00 MiB` spans zero through 5243 bytes; it is not
+a zero-allocation proof. Unsupported precision, unknown formatter rounding,
+overflow or larger values retain a bounded canonical numeric report with an
+Unknown byte interval. Integer-MiB fit tables use different truncation semantics
+and are excluded. Compatible occurrences can be compared using summed rounded
+intervals; the desktop displays only service-owned comparisons and signed
+reported-minus-estimated intervals. It does not recompute estimates or scopes.
+
+The native label, reviewed native-device binding and physical memory pool are
+separate identities. CUDA aliases resolve only through the actual child's
+already reviewed full UUID/visibility binding and matching, still valid
+topology. Array position, capacity or matching descriptions do not identify a
+GPU. Host allocation types require explicit semantics and existing topology.
+Missing, stale or mismatched mapping leaves numbers unbound. No helper or native
+enumeration repairs the mapping for observation.
+
+Draft and companion constructors can share labels and child output. Without
+unambiguous source-backed role boundaries, rows remain mixed/unattributed and
+role-specific totals/comparisons stay Unknown. Recurrent state, SWA, companion
+scratch, prompt caches, mapped memory, driver/context/kernel allocations and
+unreported categories prevent complete-process coverage. A CPU partial compute
+estimate cannot stand for a complete CUDA reservation.
+
+## Capture, limits and local history
+
+The engine manager captures raw frames at the existing owned process-start
+boundary before public log redaction. It allocates its capture token before
+spawn and binds the actual proc, manager incarnation and published run afterward.
+Pipe completion drains before retirement. This identity is independent of
+serving declarations; an ordinary typed load does not need a ServingConfig.
+Missing observations never weaken serving qualification or latch serving drift.
+
+The existing model sweep supplies public loaded state. Existing non-loading
+props reads are shared; any additional bounded props read is for an already
+positively loaded owned model, with `autoload=false`, the identity-probe header
+and no redirects. Cold sets perform no props request. Inspect performs no
+model-list/props query and creates no sample. There is no second poller or SSE.
+Per-model estimator inputs are detached from actual-start compilation and kept
+outside settings, prepared-launch digests and admission. A bounded worker runs
+the existing estimator, without telemetry acquisition, search or retuning.
+
+Fixed implementation ceilings are:
+
+| Resource | Ceiling |
+| --- | --- |
+| Retained samples / age | 128 / 30 days by recorded wall time |
+| Encoded sample / history file | 64 KiB / 4 MiB |
+| Conservatively charged retained history | 16 MiB |
+| Active child captures / total charged pending capture memory | 64 / 4 MiB |
+| Input frame / report rows | 64 KiB / 256 |
+| Option entries / diagnostic reason codes | 64 / 16 |
+| Ordinary identifiers and labels | 256 UTF-8 bytes, within closed vocabularies |
+| Selected Inspect summary / whole reply | 4 KiB / 64 KiB |
+| Compact omission | At most 256 encoded bytes |
+
+Existing artifact ceilings also apply. Memory can exhaust before the child
+count. Oversized, invalid, truncated or failed reads invalidate affected
+coverage while the pipes drain. No raw-line ring is retained. One executor-owned
+worker and one coalescing pending checkpoint bound publication pressure; an
+older retry cannot displace a newer pending load. Queued omissions are explicit
+and never block the output pump or engine lifecycle on disk I/O. Shutdown waits
+only within its bounded cleanup allowance.
+
+The derived file is `Executor.baseDir/model-buffer-samples.json`, separate from
+engine state, overrides, operation journals, download markers, qualification and
+policy. Its instance mutex serializes retention/publication/adoption; read
+projections use immutable complete snapshots. The existing durable-file replacer
+writes mode 0600 under a private parent. Count/byte eviction removes oldest
+completed samples deterministically. Age is pruned at recovery/publication and
+filtered from read projections without Inspect writing. Clock reversal
+withdraws currentness and marks age uncertain, while count/byte bounds remain.
+
+Recovery uses replacement-sharing file opens and bounded reads. Duplicate keys,
+invalid decimals/enums/references and malformed/truncated/oversized documents
+make history unavailable. The file is preserved and further writes disabled
+until explicit operator repair; this feature adds no repair RPC. A normal
+pre-replacement failure retains the old publication and exposes save failure.
+`durablefile.ErrReplaced` adopts the landed candidate and reports uncertainty,
+without rollback or retry duplication. Neither outcome controls model loading.
+
+The privacy allowlist contains opaque correlation and binding identities,
+bounded timestamps, artifact roles/order/sizes/assurance, upstream pin and
+source/options/topology digests, closed typed non-secret options, numeric frozen
+components, rounded reports and closed status/reason codes. It excludes aliases,
+paths, raw logs, command arguments, presets, environment, credentials, URLs,
+device descriptions, templates, tokens, prompts and inference content. There
+is no telemetry upload or new history export. The existing authenticated local
+or peer Inspect path carries only the newest relevant path-free summary.
+
+The combined response preflight includes descriptors, fallback estimate and
+the observation, with 1 KiB reserved for fallback/target stamping. It removes
+optional observation rows deterministically, marks omitted coverage and clears
+component deltas. If necessary it substitutes Unknown/response-budget, then
+omits the optional field. Original artifact facts and the estimate fallback
+remain available; transport limits do not increase. Desktop validation enforces
+closed fields, canonical decimal strings, exact intervals, duplicate frame and
+component rejection, opaque identities, self-reported assurance and budgets.
+
+## Synthetic process gate and remaining evidence
+
+The process scenarios use the real manager for capture/publication and the real
+broker for Inspect relay. Their fake router is the existing registered
+services/tests package image, selected only by its private fixture environment.
+No native engine, real model, GPU or dynamic library is initialized.
+
+On PC3 only, run serialized through the existing Windows test wrapper after
+lease, protected-process/listener and exact firewall-rule checks. The authorized
+test-only footprint is a private `engine-bin/llamacpp` junction to that registered
+image directory and one exclusively created `libggml-pair-model-buffer-fixture.dll`
+metadata stub beside the image. There is no new executable destination or rule.
+Before use, the junction must resolve to that directory case-insensitively,
+actual process identity must equal the registered image, and the source library
+set must contain exactly the inert non-PE stub. An existing stub fails loudly
+and is preserved for root inspection.
+
+Cleanup runs before temporary-directory cleanup: remove the junction itself
+with `os.Remove`, then the owned stub, then require unchanged fixed-directory
+entry names/sizes and image SHA-256. Never recursively remove through the
+junction. Acceptance records before/after fixed-directory listing delta
+(expected zero), firewall delta, fixed-path survivors and lock delta, with
+protected workloads preserved. An unwatched screen remains unmonitored.
+Missing lease, executable rules or safe isolation leaves execution pending.
+
+The named process selection is `^TestModelBufferSamplesProcess`, plain and race,
+followed by services/tests vet on PC3. Mac may compile and vet these sources
+without executing TestMain or any test; it must not run `-list`, `-run` or the
+compiled executable. Native numerical accuracy, physical occupancy, driver
+overhead and calibration quality remain unverified. A future native measurement
+requires its own explicit artifact/build/options/topology, machine lease,
+protected-workload checks and cleanup. No numerical accuracy threshold or
+automatic calibration rule is established here.

@@ -187,11 +187,18 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 			loadedTransportFailed := false
 			servingState, stateErr := e.state(name)
 			if stateErr == nil {
-				if run, err := snapshotLlamaObservation(servingState); err == nil {
-					defer func() {
-						e.observeLlamaServing(ctx, servingState, run, sweep, loaded[i], loadedOK[i], loadedRaw[i], loadedTransportFailed)
-					}()
-				}
+				servingState.mu.Lock()
+				capture := servingState.bufferCapture
+				servingState.mu.Unlock()
+				bufferBoundary := capture.captureBoundary()
+				run, runErr := snapshotLlamaObservation(servingState)
+				defer func() {
+					sharedProps := map[string]modelBufferProps{}
+					if runErr == nil {
+						e.observeLlamaServing(ctx, servingState, run, sweep, loaded[i], loadedOK[i], loadedRaw[i], loadedTransportFailed, sharedProps)
+					}
+					e.observeModelBufferSweep(ctx, servingState, capture, sweep, loaded[i], loadedOK[i] && !loadedTransportFailed, loadedRaw[i], sharedProps, bufferBoundary)
+				}()
 			}
 			st, err := e.Status(name)
 			if err != nil || !st.Running {

@@ -70,10 +70,20 @@ func llamaLoadedSemantics(raw json.RawMessage, loaded []string) bool {
 }
 
 func (e *Executor) llamaServingProps(ctx context.Context, port int, model string) (engines.ServingObservation, error) {
+	value, _, err := e.llamaServingPropsObserved(ctx, port, model)
+	return value, err
+}
+
+type modelBufferProps struct {
+	Build, RouterBuild string
+	Context, Slots     int64
+}
+
+func (e *Executor) llamaServingPropsObserved(ctx context.Context, port int, model string) (engines.ServingObservation, modelBufferProps, error) {
 	query := url.Values{"model": {model}, "autoload": {"false"}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/props?%s", port, query.Encode()), nil)
 	if err != nil {
-		return engines.ServingObservation{}, err
+		return engines.ServingObservation{}, modelBufferProps{}, err
 	}
 	req.Header.Set(engineIdentityProbeHeader, "1")
 	// A redirected request can lose autoload=false. Never follow it.
@@ -81,16 +91,16 @@ func (e *Executor) llamaServingProps(ctx context.Context, port int, model string
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := client.Do(req)
 	if err != nil {
-		return engines.ServingObservation{}, err
+		return engines.ServingObservation{}, modelBufferProps{}, err
 	}
 	defer resp.Body.Close()
 	const limit = 8 * 1024 * 1024
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil || resp.StatusCode != http.StatusOK {
-		return engines.ServingObservation{}, fmt.Errorf("loaded allocation read failed")
+		return engines.ServingObservation{}, modelBufferProps{}, fmt.Errorf("loaded allocation read failed")
 	}
 	if len(data) > limit {
-		return engines.ServingObservation{}, &ServingIdentityRefusal{"Loaded allocation exceeds the response bound."}
+		return engines.ServingObservation{}, modelBufferProps{}, &ServingIdentityRefusal{"Loaded allocation exceeds the response bound."}
 	}
 	var props struct {
 		Defaults struct {
@@ -98,15 +108,15 @@ func (e *Executor) llamaServingProps(ctx context.Context, port int, model string
 		} `json:"default_generation_settings"`
 		Slots int64 `json:"total_slots"`
 	}
-	if json.Unmarshal(data, &props) != nil || props.Defaults.Context <= 0 || props.Slots <= 0 {
-		return engines.ServingObservation{}, &ServingIdentityRefusal{"Loaded allocation is unknown."}
+	if json.Unmarshal(data, &props) != nil || model != "" && (props.Defaults.Context <= 0 || props.Slots <= 0) {
+		return engines.ServingObservation{}, modelBufferProps{}, &ServingIdentityRefusal{"Loaded allocation is unknown."}
 	}
-	return engines.ServingObservation{ModelID: model, PerSlotContextTokens: props.Defaults.Context, Slots: props.Slots}, nil
+	return engines.ServingObservation{ModelID: model, PerSlotContextTokens: props.Defaults.Context, Slots: props.Slots}, modelBufferReadProps(data), nil
 }
 
 // Invoked only with the loaded_names response from this sweep. A cold set does
 // not query /props. Only semantic failures latch owned-run withdrawal.
-func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s servingRunSnapshot, sweep uint64, loaded []string, known bool, raw json.RawMessage, transportFailed bool) {
+func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s servingRunSnapshot, sweep uint64, loaded []string, known bool, raw json.RawMessage, transportFailed bool, shared ...map[string]modelBufferProps) {
 	st.mu.Lock()
 	if !s.current(st) || sweep < st.plat.Runtime.servingObservationSweep {
 		st.mu.Unlock()
@@ -137,7 +147,12 @@ func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s s
 				reason = "Loaded model has no declared serving envelope."
 				break
 			}
-			value, err := e.llamaServingProps(ctx, port, model)
+			value, observed, err := e.llamaServingPropsObserved(ctx, port, model)
+			if err == nil {
+				for _, m := range shared {
+					m[model] = observed
+				}
+			}
 			var semantic *ServingIdentityRefusal
 			if err != nil && !errors.As(err, &semantic) {
 				// Keep checking the sweep: unavailable props cannot hide an
