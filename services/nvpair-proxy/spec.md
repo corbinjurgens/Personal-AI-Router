@@ -1030,6 +1030,7 @@ text:
 - `malformed upstream stream`
 - `upstream reported an error`
 - `peer response interrupted`
+- `node paused`
 
 An already forwarded upstream error is retained without another error frame.
 Failure never fabricates a successful finish reason or `done:true`.
@@ -1719,6 +1720,12 @@ the job deadline.
 here. A self candidate refused while the node is not `available` is excluded
 for the rest of the request; when nothing else can take it, the request is
 answered at once with the admission `503` instead of spending its retry budget.
+Before raw-byte commitment an interrupted local attempt may redispatch within
+the remaining candidates and budgets. After commitment it fails, with an SC-a
+error ending for supported streams where delivery permits; it cannot splice a
+replacement, invoke paid continuation, or provide SC-b. Authenticated peer
+ingress is terminal and leaves any fallback to the origin. Routing listeners
+and work already executing on another node survive this node's pause.
 
 **Peers that are paused.** The same admission runs on the cluster ingress (§7),
 so a request that reaches a peer that is paused or draining is refused there
@@ -1820,9 +1827,11 @@ before local or directly configured manual engines. Final `X-PAIR-Model`,
 actual execution. Waits feed the existing attempt/admission timing facts; no
 additional diagnostics store is introduced.
 
-**cancelActive** cancels every admitted execution: an ingress request's context
-is cancelled; a self dispatch that has not committed moves on to another
-candidate (this node excluded), and one that has committed ends as `cancelled`.
+**cancelActive** withdraws admitted target-local execution for Pause. Before
+commit, the origin can try another eligible candidate with this node excluded
+and within the remaining request budget. A committed Pause interruption ends
+as `failed` with reason `node paused`; delivery stays live long enough to emit
+the supported failure ending. Requester cancellation remains `cancelled`.
 
 ### 12.3 Tiers
 

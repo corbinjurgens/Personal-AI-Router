@@ -341,7 +341,9 @@ does not stop the engines itself. The broker stops the proxy first, so no new
 inference arrives, then calls `engine:prepare-shutdown`, which stops local
 engine processes without clearing their persisted desired state, then waits for
 each worker to exit without force-killing it, so engines are not orphaned. The
-broker restores enabled engines on the next startup.
+broker restores eligible enabled engines on the next startup, unless node Pause
+suppresses restoration; engine locks still block activation. Target-local Resume
+delegates wake and resident reconciliation through the existing owners.
 
 ## Discovery and models
 

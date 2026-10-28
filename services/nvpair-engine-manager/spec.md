@@ -865,11 +865,16 @@ extensibility story for an open-source product.
   display_name: string
   installed: boolean
   running: boolean
+  terminationVerified: boolean
   healthy: boolean
   port: number
   locked?: boolean
 }
 ```
+
+`terminationVerified` is positive physical-stop evidence. `running:false` alone
+does not prove termination, including when orphan reclamation failed. A completed
+physical Pause requires verified shutdown rather than an inferred stopped state.
 
 `locked` is the engine's durable lock on its own node. Present `true` or `false`
 is authoritative; absent means lock state is unavailable, as from an older
@@ -953,10 +958,12 @@ values are `configured` or `immediate`, valid only with `state:"paused"`.
 After fresh target permission (`-32012`) and pause-fence (`-32011`) checks,
 an authorized peer's immediate request is refused with `-32602`,
 `Immediate pause must be requested on this node.` The authenticated caller,
-not payload `nodeId`, determines locality. Valid local immediate requests are
-currently unavailable with no persistence, supersession or execution effects;
-the existing configured transition is never used for them. Timing is never
-persisted. The target's policy readback and availability result preserve actual
+not payload `nodeId`, determines locality. An accepted target-local immediate
+request fences execution and requests cancellation before the persistence barrier,
+supersedes the previous transition, and persists Pause. It starts controlled
+shutdown without the configured drain or cancel-settle wait; missing physical
+shutdown proof leaves the node draining and fenced. Timing is never persisted.
+The target's policy readback and availability result preserve actual
 `pausedBy` (`local`/`peer`, empty/omitted when unknown, cleared while available).
 Peer responses omit activation and origin-private routing fields.
 
@@ -1095,7 +1102,12 @@ files. No second production route registry is introduced.
 
 Either-origin pause projection cancels accepted starts, loads, crash relaunch
 and pending activation. Local start/load/switch also refuse known pause; local
-reads, configuration, lock/unlock, stop and unload remain available. Settings
+reads, configuration, lock/unlock, stop and unload remain available. Accepted
+file-only transfers can continue, but new destination copy admission still
+refuses known Pause, and peer mutations remain fenced. Sleep preserves saved
+intent and protects external ownership from automatic unload or unscoped stop.
+Unverified ownership or termination prevents a completed physical Pause; the
+broker retains its draining fence until proof or local retry. Settings
 apply/recovery can change metadata but cannot restart while paused or locked.
 Accepted content installation/download may finish, without starting an engine.
 When available, a locked engine still admits granted stop/unload/delete/pull,
