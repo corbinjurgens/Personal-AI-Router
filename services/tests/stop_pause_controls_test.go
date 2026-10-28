@@ -874,6 +874,43 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 	f.publish(t, false)
 	if pinned {
 		origin.publishTarget(t, f)
+		// This origin has no cluster-manager reverse gateway; its direct route
+		// may still be in the 30 s probe cooldown after interrupted output.
+		deadline := time.Now().Add(45 * time.Second)
+		task1Eventually(t, "origin inference transport sees the resumed switch model", 45*time.Second, func() bool {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return false
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), min(2*time.Second, remaining))
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/v1/models", port), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				return false
+			}
+			var models struct {
+				Data []struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			}
+			decodeErr := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&models)
+			if err := response.Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusOK || decodeErr != nil {
+				return false
+			}
+			for _, model := range models.Data {
+				if model.ID == "switch-model" {
+					return true
+				}
+			}
+			return false
+		})
 	}
 	assertEngineBindingSuccess(t, engineBindingAwait(t, f.request(t, client, port, false, 5000)), "llamacpp", f.nodeID)
 	f.native.assertCounts(t, 2, 0, 0)
