@@ -16,6 +16,91 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestMemoryDirectoryGenerationStrictDecode(t *testing.T) {
+	for _, raw := range []string{
+		`{"node":{},"memoryGeneration":"1","memoryGeneration":"2"}`,
+		`{"node":{},"MemoryGeneration":"1"}`,
+		`{"node":{},"memoryGeneration":null}`,
+		`{"node":{},"memoryGeneration":"01"}`,
+		`{"node":{},"memoryGeneration":"-1"}`,
+		`{"node":{},"memoryGeneration":"18446744073709551616"}`,
+		`{"node":{},"memoryGeneration":"1","producerFlag":true}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			var event NodeEvent
+			if err := json.Unmarshal([]byte(raw), &event); err == nil {
+				t.Fatal("accepted malformed owner generation")
+			}
+		})
+	}
+}
+
+func TestMemoryRequestContextStrictDecode(t *testing.T) {
+	for _, raw := range []string{
+		`{}`, `{"generation":"1","requestBootNs":"1"}`,
+		`{"generation":"1","requestBootNs":"1","verifiedSelfLoopback":false,"verifiedSelfLoopback":true}`,
+		`{"generation":"1","requestBootNs":"1","VerifiedSelfLoopback":true}`,
+		`{"generation":"01","requestBootNs":"1","verifiedSelfLoopback":true}`,
+		`{"generation":"1","requestBootNs":"-1","verifiedSelfLoopback":true}`,
+		`{"generation":"1","requestBootNs":"1","verifiedSelfLoopback":null}`,
+		`{"generation":"1","requestBootNs":"1","verifiedSelfLoopback":true,"producerFlag":true}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			var value MemoryRequestContext
+			if err := json.Unmarshal([]byte(raw), &value); err == nil {
+				t.Fatal("accepted malformed scanner context")
+			}
+		})
+	}
+	var value MemoryRequestContext
+	if err := json.Unmarshal([]byte(`{"generation":"0","requestBootNs":"1","verifiedSelfLoopback":false}`), &value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMemoryTelemetryEnvelopeAllowsObservationBudget(t *testing.T) {
+	observation := `{"runId":"producer","domains":[]}`
+	// Whitespace is valid wire JSON and counts against the nested decode budget.
+	observation = "{" + strings.Repeat(" ", MaxMemoryObservationBytes-len(observation)) + observation[1:]
+	var memory MemoryObservation
+	if err := json.Unmarshal([]byte(observation), &memory); err != nil {
+		t.Fatalf("observation at its own budget is invalid: %v", err)
+	}
+	envelope := `{"hostUuid":"self","gpuUtilizationPercent":95,"telemetryValid":true,"msSince":100,"memory":` + observation + `}`
+	var value NodeTelemetry
+	if err := json.Unmarshal([]byte(envelope), &value); err != nil {
+		t.Fatalf("valid observation lost in telemetry envelope: %v", err)
+	}
+	if value.Memory == nil || value.Memory.RunID != "producer" || value.GPUUtilizationPct != 95 || !value.TelemetryValid {
+		t.Fatal("envelope round trip lost memory or utilization")
+	}
+	oversized := strings.Replace(envelope, observation, "{ "+observation[1:], 1)
+	if json.Unmarshal([]byte(oversized), &value) == nil {
+		t.Fatal("outer envelope bypassed the nested observation budget")
+	}
+}
+
+func TestMemoryTelemetryEnvelopeStrictDecode(t *testing.T) {
+	valid := `{"hostUuid":"self","gpuUtilizationPercent":95,"telemetryValid":true,"msSince":100}`
+	for _, tc := range []struct{ name, raw string }{
+		{"missing validity", strings.Replace(valid, `,"telemetryValid":true`, "", 1)},
+		{"null age", strings.Replace(valid, `"msSince":100`, `"msSince":null`, 1)},
+		{"duplicate age", strings.Replace(valid, `"msSince":100`, `"msSince":100,"msSince":0`, 1)},
+		{"case alias", strings.Replace(valid, `"msSince":100`, `"MSSince":0`, 1)},
+		{"escaped duplicate", strings.Replace(valid, `"msSince":100`, `"msSince":100,"ms\u0053ince":0`, 1)},
+		{"unknown flag", strings.Replace(valid, `"msSince":100`, `"msSince":100,"producerFlag":true`, 1)},
+		{"trailing value", valid + "{}"},
+		{"oversized envelope", "{" + strings.Repeat(" ", MaxMemoryObservationBytes+4096) + valid[1:]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var value NodeTelemetry
+			if json.Unmarshal([]byte(tc.raw), &value) == nil {
+				t.Fatal("accepted ambiguous telemetry envelope")
+			}
+		})
+	}
+}
+
 func TestEngineBindingOffersDirectoryWire(t *testing.T) {
 	node := DirectoryNode{HostUUID: "fixture", Models: []string{}, ModelsByEngine: map[string][]string{"lmstudio": {}},
 		Policy: &nodepolicy.Advertisement{Revision: "1", EngineBindingOffers: &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role{{Engine: "lmstudio", Model: "cold-model"}}}}}

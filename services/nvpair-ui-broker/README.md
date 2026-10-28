@@ -11,7 +11,24 @@ comparing remote UTC clocks. Independent facts expire after five seconds;
 missing clocks, malformed facts and invalid hop stamps cannot make them fresh.
 Scanner precedence and original manual alias receipt/hop are preserved.
 Retired scanner callbacks are rejected using the supervised worker source.
-This pipeline adds no model-memory trust lookup, device map or Fits/Auto claim.
+`LookupMemory` returns detached per-fact advice for an exact host, source and
+producer run, with distinct missing, invalid and stale outcomes. Scanner claims
+retain precedence over manual observations even after expiry. Read operations
+never fetch or renew samples. The scheduler's utilization timing is unchanged.
+
+`lookupLocalMemory` additionally requires the broker's own node ID, the current
+supervised scanner and verified self/loopback request context. Local UTC can
+only increase age or withdraw freshness. Manual UUID matches and other hosts
+remain advisory. Request boot stamps order responses within an existing owner
+generation; random producer IDs never establish ordering. Scanner-only request
+context is removed from forwarded cache projections and client discovery data.
+
+Directory events must supply the scanner owner's `memoryGeneration` before
+memory can pass the broker's generation fence. Missing generation context fails
+closed. The scanner event emitter stamps that existing owner counter under the
+directory read lock. A changed directory event retires old memory immediately;
+an unchanged generation preserves the observation's original age. This pipeline
+makes no device-map, complete-cost, Fits or Auto claim; native accuracy is untested.
 
 ## Local build maintenance contract
 

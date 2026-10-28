@@ -18,6 +18,58 @@ import (
 	"nvpair-ui-broker/relay"
 )
 
+func TestMemoryTelemetryRetiredSourceCannotRetireReplacementMemory(t *testing.T) {
+	b := &Broker{telemetry: newTelemetryCache()}
+	b.telemetry.clock = func() (uint64, error) { return 1_000_000_000, nil }
+	old, current := &scannerProcess{}, &scannerProcess{}
+	b.bindScannerSource(old)
+	b.bindScannerSource(current)
+	b.telemetry.Upsert(sourceScanner, noderec.NodeTelemetry{HostUUID: "self", Memory: memoryTelemetryFixture(), MemoryHop: noderec.NewMemoryHop("scanner", b.telemetry.clock)}, time.Now())
+	old.onMemoryRetired("self")
+	if got := b.telemetry.LookupMemory("self", sourceScanner, "producer", time.Now()); got.Reason != "" {
+		t.Fatalf("retired source invalidated replacement: %s", got.Reason)
+	}
+	current.onMemoryRetired("self")
+	if got := b.telemetry.LookupMemory("self", sourceScanner, "producer", time.Now()); got.Reason != "invalid" {
+		t.Fatalf("live source failed to retire memory: %s", got.Reason)
+	}
+}
+
+func TestMemoryTelemetryGenerationRetainsSchedulerObservation(t *testing.T) {
+	b := &Broker{nodeID: "self", telemetry: newTelemetryCache()}
+	b.telemetry.clock = func() (uint64, error) { return 1_000_000_000, nil }
+	s := &scannerProcess{}
+	b.bindScannerSource(s)
+	emit := func(generation string) {
+		t.Helper()
+		node := noderec.DirectoryNode{HostUUID: "self", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: 14318}}}
+		raw, err := json.Marshal(noderec.NodeEvent{Node: node, MemoryGeneration: &generation})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.handleNotify(noderec.NotifyNodeUpdated, raw)
+	}
+	emit("1")
+	received := time.Unix(1_700_000_000, 0)
+	b.telemetry.Upsert(sourceScanner, noderec.NodeTelemetry{HostUUID: "self", GPUUtilizationPct: 95, TelemetryValid: true, MSSince: 100, Memory: memoryTelemetryFixture(), MemoryHop: &noderec.MemoryHop{ForwarderID: "scanner", BootNS: "1000000000"}}, received)
+	emit("2")
+	got := b.telemetry.Snapshot(received)
+	if len(got) != 1 {
+		t.Fatal("generation change removed scheduler observation")
+	}
+	if got[0].GPUUtilizationPct != 95 || !got[0].TelemetryValid || got[0].MSSince != 100 {
+		t.Fatalf("generation changed scheduler observation: gpu=%d valid=%v age=%d", got[0].GPUUtilizationPct, got[0].TelemetryValid, got[0].MSSince)
+	}
+	if got[0].Memory != nil {
+		t.Fatal("generation retained retired memory")
+	}
+	b.telemetry.mu.RLock()
+	defer b.telemetry.mu.RUnlock()
+	if !b.telemetry.nodes["self"].scanner.receivedAt.Equal(received) {
+		t.Fatal("generation reset original receipt")
+	}
+}
+
 func TestMemoryTelemetryRetiredScannerCallback(t *testing.T) {
 	b := &Broker{telemetry: newTelemetryCache()}
 	old := &scannerProcess{onTelemetry: func(value noderec.NodeTelemetry) { b.ingestTelemetry(sourceScanner, value) }}
@@ -47,6 +99,7 @@ func TestMemoryTelemetryAdmittedScannerCallbackRetiresBeforeMutation(t *testing.
 	b.telemetry.clock = func() (uint64, error) { return 1000000000, nil }
 	source := &scannerProcess{onTelemetry: func(value noderec.NodeTelemetry) { b.ingestTelemetry(sourceScanner, value) }}
 	b.bindScannerSource(source)
+	source.memoryGenerations = map[string]string{"peer": "1"}
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	current := source.current
 	source.current = func() bool {
@@ -55,7 +108,7 @@ func TestMemoryTelemetryAdmittedScannerCallbackRetiresBeforeMutation(t *testing.
 		<-release
 		return admitted
 	}
-	params, err := json.Marshal(noderec.NodeTelemetry{HostUUID: "peer", Memory: memoryTelemetryFixture(), MemoryHop: &noderec.MemoryHop{ForwarderID: "fixture", BootNS: "1000000000"}})
+	params, err := json.Marshal(noderec.NodeTelemetry{HostUUID: "peer", Memory: memoryTelemetryFixture(), MemoryHop: &noderec.MemoryHop{ForwarderID: "fixture", BootNS: "1000000000"}, MemoryRequest: &noderec.MemoryRequestContext{Generation: "1", RequestBootNS: "1000000000"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +131,7 @@ func TestMemoryTelemetryAdmittedScannerCallbackRetiresBeforeMutation(t *testing.
 	}
 	replacement := &scannerProcess{}
 	b.bindScannerSource(replacement)
+	replacement.memoryGenerations = map[string]string{"peer": "1"}
 	liveDone := make(chan struct{})
 	go func() { defer close(liveDone); replacement.handleNotify(noderec.NotifyNodeTelemetry, params) }()
 	select {
@@ -703,6 +757,49 @@ func TestHandleNotifyNodeLostUsesHostUUID(t *testing.T) {
 	}
 	if gotName != name {
 		t.Errorf("onNodeLost name = %q, want %q", gotName, name)
+	}
+}
+
+func TestMemoryTelemetryScannerGenerationOwner(t *testing.T) {
+	b := &Broker{nodeID: "self", telemetry: newTelemetryCache()}
+	b.telemetry.clock = func() (uint64, error) { return 1000000000, nil }
+	s := &scannerProcess{}
+	b.bindScannerSource(s)
+	emit := func(method string, value interface{}) {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.handleNotify(method, raw)
+	}
+	generation := "1"
+	node := noderec.DirectoryNode{HostUUID: "self", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: 12345}}}
+	emit(noderec.NotifyNodeDiscovered, noderec.NodeEvent{Node: node, MemoryGeneration: &generation})
+	sample := noderec.NodeTelemetry{HostUUID: "self", Memory: memoryTelemetryFixture(), MemoryHop: noderec.NewMemoryHop("worker", b.telemetry.clock), MemoryRequest: &noderec.MemoryRequestContext{Generation: "1", RequestBootNS: "1000000000", VerifiedSelfLoopback: true}}
+	now := time.Now().UTC()
+	sample.Memory.Domains[0].Total.SampledAt = now
+	sample.Memory.Domains[0].Free.SampledAt = now
+	emit(noderec.NotifyNodeTelemetry, sample)
+	if got := b.lookupLocalMemory("self", "producer", time.Now().UTC()); !got.TargetLocal {
+		t.Fatalf("current owner refused: %+v", got)
+	}
+	emit(noderec.NotifyNodeUpdated, noderec.NodeEvent{Node: node, MemoryGeneration: &generation})
+	if got := b.lookupLocalMemory("self", "producer", time.Now().UTC()); !got.TargetLocal {
+		t.Fatalf("unchanged directory withdrew authority: %+v", got)
+	}
+	generation = "2"
+	emit(noderec.NotifyNodeUpdated, noderec.NodeEvent{Node: node, MemoryGeneration: &generation})
+	emit(noderec.NotifyNodeTelemetry, sample)
+	if got := b.lookupLocalMemory("self", "producer", now); got.TargetLocal {
+		t.Fatal("old generation authorized")
+	}
+	sample.MemoryRequest.Generation = generation
+	emit(noderec.NotifyNodeTelemetry, sample)
+	b.bindScannerSource(&scannerProcess{})
+	emit(noderec.NotifyNodeTelemetry, sample)
+	if got := b.lookupLocalMemory("self", "producer", now); got.TargetLocal {
+		t.Fatal("retired scanner authorized")
 	}
 }
 

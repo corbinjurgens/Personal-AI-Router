@@ -29,10 +29,15 @@
 package noderec
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"nvpair-shared/buildinfo"
 	"nvpair-shared/modeldownload"
@@ -591,16 +596,163 @@ type GetNodesResult struct {
 // fields).
 type NodeEvent struct {
 	Node DirectoryNode `json:"node"`
+	// MemoryGeneration is scanner-to-broker owner context, never client data.
+	MemoryGeneration *string `json:"memoryGeneration,omitempty"`
+}
+
+func (e *NodeEvent) UnmarshalJSON(data []byte) error {
+	type wire NodeEvent
+	var value wire
+	d := json.NewDecoder(bytes.NewReader(data))
+	start, err := d.Token()
+	if err != nil || start != json.Delim('{') {
+		return errors.New("node event must be an object")
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		token, err := d.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := token.(string)
+		if !ok || seen[key] || (key != "node" && key != "memoryGeneration") {
+			return errors.New("unknown or repeated node event field")
+		}
+		seen[key] = true
+		var raw json.RawMessage
+		if err := d.Decode(&raw); err != nil {
+			return err
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return errors.New("null node event field")
+		}
+		if key == "node" {
+			if err := json.Unmarshal(raw, &value.Node); err != nil {
+				return err
+			}
+		} else {
+			if err := json.Unmarshal(raw, &value.MemoryGeneration); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := d.Token(); err != nil {
+		return err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return errors.New("trailing node event JSON")
+	}
+	if !seen["node"] {
+		return errors.New("missing node event node")
+	}
+	if value.MemoryGeneration != nil {
+		if _, err := memoryDecimal(*value.MemoryGeneration); err != nil {
+			return err
+		}
+	}
+	*e = NodeEvent(value)
+	return nil
+}
+
+// MemoryRequestContext contains facts established by the scanner request owner.
+// Node-info responses must never supply these fields.
+type MemoryRequestContext struct {
+	Generation           string `json:"generation"`
+	RequestBootNS        string `json:"requestBootNs"`
+	VerifiedSelfLoopback bool   `json:"verifiedSelfLoopback"`
+}
+
+func (c *MemoryRequestContext) UnmarshalJSON(data []byte) error {
+	if err := memoryObject(data, []string{"generation", "requestBootNs", "verifiedSelfLoopback"}, []string{"generation", "requestBootNs", "verifiedSelfLoopback"}); err != nil {
+		return err
+	}
+	type wire MemoryRequestContext
+	var v wire
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	decoded := MemoryRequestContext(v)
+	if err := decoded.Validate(); err != nil {
+		return err
+	}
+	*c = decoded
+	return nil
+}
+
+func (c MemoryRequestContext) Validate() error {
+	if _, err := memoryDecimal(c.Generation); err != nil {
+		return err
+	}
+	if _, err := memoryDecimal(c.RequestBootNS); err != nil {
+		return err
+	}
+	return nil
 }
 
 // NodeTelemetry is a fresh GPU-utilization observation for one node. The
 // scanner emits it independently of directory changes so scheduling telemetry
 // stays current even when discovery identity and inventory are stable.
 type NodeTelemetry struct {
-	HostUUID          string             `json:"hostUuid"`
-	GPUUtilizationPct uint32             `json:"gpuUtilizationPercent"`
-	TelemetryValid    bool               `json:"telemetryValid"`
-	MSSince           int64              `json:"msSince"`
-	Memory            *MemoryObservation `json:"memory,omitempty"`
-	MemoryHop         *MemoryHop         `json:"memoryHop,omitempty"`
+	HostUUID          string                `json:"hostUuid"`
+	GPUUtilizationPct uint32                `json:"gpuUtilizationPercent"`
+	TelemetryValid    bool                  `json:"telemetryValid"`
+	MSSince           int64                 `json:"msSince"`
+	Memory            *MemoryObservation    `json:"memory,omitempty"`
+	MemoryHop         *MemoryHop            `json:"memoryHop,omitempty"`
+	MemoryRequest     *MemoryRequestContext `json:"memoryRequest,omitempty"`
+}
+
+func (t *NodeTelemetry) UnmarshalJSON(data []byte) error {
+	// The nested observation keeps its own 64 KiB bound. Allow limited room
+	// for host identity, utilization, hop and request context around it.
+	if len(data) > MaxMemoryObservationBytes+4096 || !utf8.Valid(data) {
+		return errors.New("invalid node telemetry size or UTF-8")
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
+	start, err := d.Token()
+	if err != nil || start != json.Delim('{') {
+		return errors.New("node telemetry must be an object")
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		token, err := d.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := token.(string)
+		if !ok || seen[key] {
+			return errors.New("repeated node telemetry field")
+		}
+		switch key {
+		case "hostUuid", "gpuUtilizationPercent", "telemetryValid", "msSince", "memory", "memoryHop", "memoryRequest":
+		default:
+			return errors.New("unknown node telemetry field")
+		}
+		seen[key] = true
+		var raw json.RawMessage
+		if err := d.Decode(&raw); err != nil {
+			return err
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return errors.New("null node telemetry field")
+		}
+	}
+	if _, err := d.Token(); err != nil {
+		return err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return errors.New("trailing node telemetry JSON")
+	}
+	for _, key := range []string{"hostUuid", "gpuUtilizationPercent", "telemetryValid", "msSince"} {
+		if !seen[key] {
+			return errors.New("missing node telemetry field")
+		}
+	}
+	type wire NodeTelemetry
+	var value wire
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*t = NodeTelemetry(value)
+	return nil
 }

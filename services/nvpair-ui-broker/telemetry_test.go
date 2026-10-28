@@ -19,6 +19,109 @@ func memoryTelemetryFixture() *noderec.MemoryObservation {
 	return &noderec.MemoryObservation{RunID: "producer", Domains: []noderec.MemoryDomain{{ID: "ram", Kind: "system", Total: f, Free: f}}}
 }
 
+func TestMemoryTelemetryLookupPrecedenceAndIdentity(t *testing.T) {
+	c := newTelemetryCache()
+	boot := uint64(1e9)
+	c.clock = func() (uint64, error) { return boot, nil }
+	now := time.Unix(1700000000, 0).UTC()
+	sample := func(run string) noderec.NodeTelemetry {
+		m := memoryTelemetryFixture()
+		m.RunID = run
+		return noderec.NodeTelemetry{HostUUID: "self", Memory: m, MemoryHop: noderec.NewMemoryHop("worker", c.clock)}
+	}
+	if got := c.LookupMemory("self", sourceScanner, "scanner", now); got.Reason != "missing" {
+		t.Fatalf("missing: %+v", got)
+	}
+	c.Upsert(sourceScanner, sample("scanner"), now)
+	boot += 5000000000
+	got := c.LookupMemory("self", sourceScanner, "scanner", now)
+	if got.Reason != "" || got.Observation.Domains[0].Free.AgeMS != 5000 {
+		t.Fatalf("boundary: %+v", got)
+	}
+	got.Observation.Domains[0].Free.Bytes = "9"
+	boot++
+	c.Upsert(sourceManual, sample("manual"), now)
+	if got := c.LookupMemory("self", sourceScanner, "scanner", now); got.Reason != "stale" {
+		t.Fatalf("scanner precedence: %+v", got)
+	}
+	if got := c.LookupMemory("self", sourceManual, "manual", now); got.Reason != "source-mismatch" {
+		t.Fatalf("manual bypass: %+v", got)
+	}
+	c.Remove("self", sourceScanner, now)
+	if got := c.LookupMemory("self", sourceManual, "wrong", now); got.Reason != "producer-mismatch" {
+		t.Fatalf("producer identity: %+v", got)
+	}
+	if got := c.LookupMemory("self", sourceManual, "manual", now); got.Reason != "" || got.TargetLocal {
+		t.Fatalf("manual advice: %+v", got)
+	}
+	c.Upsert(sourceManual, noderec.NodeTelemetry{HostUUID: "self"}, now)
+	if got := c.LookupMemory("self", sourceManual, "manual", now); got.Reason != "invalid" {
+		t.Fatalf("withdrawal: %+v", got)
+	}
+	c.Remove("self", sourceManual, now)
+	if got := c.LookupMemory("self", sourceManual, "manual", now); got.Reason != "missing" {
+		t.Fatalf("final removal: %+v", got)
+	}
+}
+
+func TestMemoryTelemetryLateProducerReplyIgnored(t *testing.T) {
+	c := newTelemetryCache()
+	c.clock = func() (uint64, error) { return 3000000000, nil }
+	makeSample := func(run, start string) noderec.NodeTelemetry {
+		m := memoryTelemetryFixture()
+		m.RunID = run
+		return noderec.NodeTelemetry{HostUUID: "self", Memory: m, MemoryHop: noderec.NewMemoryHop("worker", c.clock), MemoryRequest: &noderec.MemoryRequestContext{Generation: "1", RequestBootNS: start}}
+	}
+	c.Upsert(sourceScanner, makeSample("z-old", "1000000000"), time.Now())
+	c.Upsert(sourceScanner, makeSample("a-new", "2000000000"), time.Now())
+	if _, ok := c.Upsert(sourceScanner, makeSample("z-old", "1000000000"), time.Now()); ok {
+		t.Fatal("late old request replaced current producer")
+	}
+	if got := c.LookupMemory("self", sourceScanner, "a-new", time.Now()); got.Reason != "" {
+		t.Fatalf("current run: %+v", got)
+	}
+}
+
+func TestMemoryTelemetryLocalAuthorityAndUTC(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		self, scanner, verified bool
+		offset                  time.Duration
+		reason                  string
+	}{
+		{"current loopback", true, true, true, 0, ""},
+		{"nonloopback GET", true, true, false, 0, "unverified-local-source"},
+		{"other node", false, true, true, 0, "unverified-local-source"},
+		{"manual UUID", true, false, true, 0, "unverified-local-source"},
+		{"future UTC", true, true, true, time.Second, "invalid"},
+		{"old UTC", true, true, true, -6 * time.Second, "stale"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTelemetryCache()
+			c.clock = func() (uint64, error) { return 1000000000, nil }
+			now := time.Unix(1700000000, 0).UTC()
+			b := &Broker{nodeID: "self", telemetry: c}
+			b.bindScannerSource(&scannerProcess{})
+			m := memoryTelemetryFixture()
+			m.Domains[0].Total.SampledAt = now.Add(tc.offset)
+			m.Domains[0].Free.SampledAt = now.Add(tc.offset)
+			host := "self"
+			if !tc.self {
+				host = "other"
+			}
+			source := sourceManual
+			if tc.scanner {
+				source = sourceScanner
+			}
+			c.Upsert(source, noderec.NodeTelemetry{HostUUID: host, Memory: m, MemoryHop: noderec.NewMemoryHop("worker", c.clock), MemoryRequest: &noderec.MemoryRequestContext{Generation: "1", RequestBootNS: "1000000000", VerifiedSelfLoopback: tc.verified}}, now)
+			got := b.lookupLocalMemory(host, "producer", now)
+			if got.Reason != tc.reason || got.TargetLocal != (tc.reason == "") {
+				t.Fatalf("local view: %+v", got)
+			}
+		})
+	}
+}
+
 type memoryBlockedWriter struct {
 	bytes.Buffer
 	entered, release chan struct{}
@@ -28,6 +131,25 @@ func (w *memoryBlockedWriter) Write(p []byte) (int, error) {
 	close(w.entered)
 	<-w.release
 	return w.Buffer.Write(p)
+}
+
+func TestMemoryTelemetryIndependentFactsAndClockFailure(t *testing.T) {
+	c := newTelemetryCache()
+	boot := uint64(1000000000)
+	c.clock = func() (uint64, error) { return boot, nil }
+	m := memoryTelemetryFixture()
+	m.Domains[0].Total.AgeMS = 4900
+	m.Domains[0].Free.AgeMS = 100
+	c.Upsert(sourceScanner, noderec.NodeTelemetry{HostUUID: "peer", Memory: m, MemoryHop: noderec.NewMemoryHop("worker", c.clock)}, time.Now())
+	boot += 200000000
+	got := c.LookupMemory("peer", sourceScanner, "producer", time.Now())
+	if got.Reason != "stale" || got.Observation.Domains[0].Total.Valid || !got.Observation.Domains[0].Free.Valid || got.Observation.Domains[0].Free.AgeMS != 300 {
+		t.Fatalf("independent ages: %+v", got)
+	}
+	boot = 1
+	if got := c.LookupMemory("peer", sourceScanner, "producer", time.Now()); got.Reason != "invalid" {
+		t.Fatalf("regression: %+v", got)
+	}
 }
 
 func TestMemoryTelemetryBlockedSerializationExpiresOnReceipt(t *testing.T) {

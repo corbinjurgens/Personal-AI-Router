@@ -68,6 +68,13 @@ func (b *Broker) bindScannerSource(source *scannerProcess) {
 	}
 	b.workersMu.Unlock()
 	source.current = func() bool { b.workersMu.Lock(); defer b.workersMu.Unlock(); return b.scannerSource == source }
+	source.onMemoryRetired = func(hostUUID string) {
+		b.workersMu.Lock()
+		defer b.workersMu.Unlock()
+		if b.scannerSource == source && b.telemetry != nil {
+			b.telemetry.retireScannerHostMemory(hostUUID)
+		}
+	}
 	source.onTelemetry = func(value noderec.NodeTelemetry) {
 		b.workersMu.Lock()
 		if b.scannerSource != source || b.telemetry == nil {

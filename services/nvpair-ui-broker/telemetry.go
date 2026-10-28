@@ -6,6 +6,7 @@ package main
 import (
 	"log/slog"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -75,7 +76,19 @@ func (c *telemetryCache) retireScannerMemory() {
 		if sources.scanner != nil {
 			sources.scanner.value.Memory = nil
 			sources.scanner.value.MemoryHop = nil
+			sources.scanner.value.MemoryRequest = nil
 		}
+	}
+}
+
+// retireScannerHostMemory leaves scheduler utilization and its receipt intact.
+func (c *telemetryCache) retireScannerHostMemory(hostUUID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if observation := c.nodes[hostUUID].scanner; observation != nil {
+		observation.value.Memory = nil
+		observation.value.MemoryHop = nil
+		observation.value.MemoryRequest = nil
 	}
 }
 
@@ -91,6 +104,11 @@ func (c *telemetryCache) Upsert(source nodeSource, value noderec.NodeTelemetry, 
 		receivedAt: receivedAt,
 	}
 	observation.value.Memory = value.Memory.Clone()
+	observation.value.MemoryRequest = nil
+	if source == sourceScanner && value.MemoryRequest != nil && value.MemoryRequest.Validate() == nil {
+		context := *value.MemoryRequest
+		observation.value.MemoryRequest = &context
+	}
 	observation.value.MemoryHop = nil
 	if value.Memory != nil {
 		boot, err := c.clock()
@@ -107,11 +125,25 @@ func (c *telemetryCache) Upsert(source nodeSource, value noderec.NodeTelemetry, 
 		}
 		observation.memoryBoot = boot
 		observation.memoryClockValid = err == nil
+		if context := observation.value.MemoryRequest; context != nil {
+			start, parseErr := strconv.ParseUint(context.RequestBootNS, 10, 64)
+			if parseErr != nil || err != nil || start > boot {
+				observation.value.MemoryRequest = nil
+			}
+		}
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	sources := c.nodes[value.HostUUID]
+	if previous := sources.source(source); previous != nil && previous.value.MemoryRequest != nil && value.MemoryRequest != nil {
+		old, next := previous.value.MemoryRequest, value.MemoryRequest
+		oldStart, oldErr := strconv.ParseUint(old.RequestBootNS, 10, 64)
+		nextStart, nextErr := strconv.ParseUint(next.RequestBootNS, 10, 64)
+		if old.Generation == next.Generation && oldErr == nil && nextErr == nil && nextStart <= oldStart {
+			return noderec.NodeTelemetry{}, false
+		}
+	}
 	sources.setSource(source, &observation)
 	c.nodes[value.HostUUID] = sources
 	projected, ok := sources.projected()
@@ -170,7 +202,113 @@ func (c *telemetryCache) observedAt(observation telemetryObservation, now time.T
 	}
 	value.Memory.Expire()
 	value.MemoryHop = nil
+	value.MemoryRequest = nil
 	return value
+}
+
+// memoryView is detached advice, with target authority granted only by the
+// broker's local lookup after checking its current scanner and own identity.
+type memoryView struct {
+	HostUUID      string
+	Source        nodeSource
+	ProducerRunID string
+	Observation   *noderec.MemoryObservation
+	Reason        string
+	TargetLocal   bool
+}
+
+func (c *telemetryCache) LookupMemory(hostUUID string, source nodeSource, producerRunID string, now time.Time) memoryView {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lookupMemoryLocked(hostUUID, source, producerRunID, now)
+}
+
+func (c *telemetryCache) lookupMemoryLocked(hostUUID string, source nodeSource, producerRunID string, now time.Time) memoryView {
+	view := memoryView{HostUUID: hostUUID, Source: source, ProducerRunID: producerRunID, Reason: "missing"}
+	sources, present := c.nodes[hostUUID]
+	observation, ok := sources.projected()
+	if !present || !ok {
+		return view
+	}
+	if sources.source(source) != observation {
+		view.Reason = "source-mismatch"
+		return view
+	}
+	if observation.value.Memory == nil {
+		view.Reason = "invalid"
+		return view
+	}
+	if observation.value.Memory.RunID != producerRunID {
+		view.Reason = "producer-mismatch"
+		return view
+	}
+	view.Observation = c.observedAt(*observation, now).Memory
+	view.Reason = ""
+	if view.Observation == nil || len(view.Observation.Domains) == 0 {
+		view.Reason = "invalid"
+		return view
+	}
+	for _, domain := range view.Observation.Domains {
+		for _, fact := range []noderec.MemoryFact{domain.Total, domain.Free} {
+			if !fact.Valid {
+				if fact.Reason != "stale" {
+					view.Reason = "invalid"
+					return view
+				}
+				view.Reason = "stale"
+			}
+		}
+	}
+	return view
+}
+
+func (b *Broker) lookupLocalMemory(hostUUID, producerRunID string, now time.Time) memoryView {
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	refused := memoryView{HostUUID: hostUUID, Source: sourceScanner, ProducerRunID: producerRunID, Reason: "unverified-local-source"}
+	if hostUUID == "" || hostUUID != b.nodeID || b.scannerSource == nil || b.telemetry == nil {
+		return refused
+	}
+	c := b.telemetry
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	observation := c.nodes[hostUUID].scanner
+	if observation == nil || observation.value.MemoryRequest == nil || !observation.value.MemoryRequest.VerifiedSelfLoopback {
+		return refused
+	}
+	view := c.lookupMemoryLocked(hostUUID, sourceScanner, producerRunID, now)
+	// UTC can withdraw self freshness, never grant it or reduce carried age.
+	if view.Observation != nil {
+		for i := range view.Observation.Domains {
+			for _, f := range []*noderec.MemoryFact{&view.Observation.Domains[i].Total, &view.Observation.Domains[i].Free} {
+				if !f.Valid {
+					continue
+				}
+				if now.Before(f.SampledAt) || now.Before(observation.receivedAt) {
+					*f = noderec.MemoryFact{Reason: "invalid-clock"}
+					view.Reason = "invalid"
+					continue
+				}
+				if now.Sub(f.SampledAt) > time.Duration(noderec.MemoryFreshMS)*time.Millisecond {
+					*f = noderec.MemoryFact{Reason: "stale"}
+					if view.Reason == "" {
+						view.Reason = "stale"
+					}
+				} else {
+					wallAge := now.Sub(f.SampledAt)
+					ms := int64(wallAge / time.Millisecond)
+					if wallAge%time.Millisecond != 0 {
+						ms++
+					}
+					if ms > f.AgeMS {
+						f.AgeMS = ms
+					}
+				}
+			}
+		}
+	}
+	view.TargetLocal = view.Reason == ""
+	return view
 }
 
 func observedTelemetryAt(observation telemetryObservation, now time.Time) noderec.NodeTelemetry {
