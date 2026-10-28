@@ -217,7 +217,8 @@ the fake and mTLS fixture checks.
 
 ## Model settings contract
 
-`engine:inspect-model` accepts `{engine,modelId}` at the target-local worker.
+`engine:inspect-model` at the target-local worker accepts only the parent
+broker's worker envelope, whose `request` is `{engine,modelId}`.
 The public broker request may also select `nodeId`; the broker resolves that
 target and supplies authenticated node identity in the reply. The worker rejects
 a nonempty node selector, rather than labelling local results as a remote node.
