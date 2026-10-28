@@ -398,7 +398,9 @@ func newModelBufferProcessFixture(t *testing.T, configure ...func(*modelSettings
 			t.Fatal("unsafe fixture junction path")
 		}
 	}
-	command := exec.Command("cmd.exe", "/d", "/c", `mklink /J "`+install+`" "`+imageDir+`"`)
+	// Separate arguments let Go quote each path; a pre-quoted single argument
+	// reaches cmd.exe with escaped quotes and mklink rejects the syntax.
+	command := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", install, imageDir)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("private fixed-image junction: %v: %s", err, output)
 	}
