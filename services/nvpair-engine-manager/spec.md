@@ -5,6 +5,72 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Private model memory device metadata
+
+`mapModelSettingsDevices(ctx, operation, runner)` consumes an operation snapshot,
+not public settings or an uploaded capacity claim. Inputs are bounded host/run/
+topology identity, physical pools, selected native selector, complete effective
+environment, selected b11146 library hashes, and an explicit native-init gate.
+The runtime snapshot resolver accepts the existing managed llama.cpp state and
+checks the pinned install declaration; it does not accept a public library path.
+The adapter is review-only and has no startup, Apply or recovery caller.
+
+CPU maps to one host/shared pool without native initialization. GPU identity
+requires dedicated physical PCI/full UUID agreement; Windows additionally
+requires the driver's LUID to agree with supplied DXGI LUID. A second helper
+enumeration under full UUID-only visibility must expose exactly one GPU,
+`CUDA0`, with that identity. The binding returns host, pool, UUID, PCI, LUID,
+selector, constrained child environment and a digest of physical/native/build/
+library/environment identity. No memory bytes, sample times or producer run
+enter that digest. A separate bounded observation digest binds host, run and
+the exact supplied topology observation. Pool ordering is canonicalized.
+Unknown results retain native inventory when available; they confer no replay
+or capacity authority. Missing identities, duplicate aliases, ambiguous joins,
+unsupported exports/ABI, MIG/MPS, mixed UMA/discrete and split placements refuse
+a GPU binding. Unsupported Metal/Vulkan/HIP remain visible as Unknown.
+
+The existing executable recognizes `--private-model-devices` before flags,
+registry, transport or service startup. Its stdin is an internal selected-runtime
+snapshot capped at 64 KiB. It verifies the selected library set/hashes, checks
+the pinned source revision through `ggml_commit()` before CUDA registration or
+property calls, and refuses unknown, dirty or different revisions. It checks
+64-bit `ggml_backend_dev_props` layout and required exports, and enumerates at
+most 64 devices. It discards native memory amounts. `ggml_backend_load` loads
+only the selected CUDA module and checks the native engine ABI; no `load_all`
+or ambient engine search is used. Linux requires the effective library search
+path to be exactly the selected install directory. Windows uses DLL-load-dir
+plus System32 dependency resolution and System32 for the CUDA driver.
+
+The parent uses a three-second context budget (including reserved pipe drain),
+combined 64 KiB stdout/stderr limit, reserved provider-secret filtering, hidden
+Windows child, command cancellation and `Wait`/`WaitDelay` reaping. It never
+logs raw native diagnostics or environment. The mode performs metadata reads
+only, with no engine launch, model loading, listener or network request. Those
+reads can initialize a driver context, so operation permission must be supplied
+by the existing activation/Pause owner. CPU remains available when prohibited.
+An independent helper-local hard exit is armed before input parsing, bounding
+native calls even if the manager dies. Unix environment keys keep their exact
+case. Linux review and replay set `CUDA_MPS_PIPE_DIRECTORY=/dev/null` after
+verifying the character device, excluding implicit default-directory MPS.
+
+Primary ABI/selection sources:
+
+- [Pinned ggml metadata declarations](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/include/ggml-backend.h)
+- [Pinned ggml module ABI check](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-backend-reg.cpp)
+- [Pinned ggml revision export](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/include/ggml.h)
+- [MPS pipe directory](https://docs.nvidia.com/deploy/mps/latest/appendix-environment-variables.html#cuda-mps-pipe-directory)
+- [CUDA driver UUID/LUID APIs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__DEVICE.html)
+- [CUDA visibility and enumeration contract](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html)
+
+Task 5 must join target telemetry/topology, operation permissions, public
+inspection/preview and target-owned frozen settings to this adapter, and compile
+the returned environment/selector through serving. Full topology is not present
+in the current memory-domain wire. No hook into held settings/inspection/serving
+files is part of this foundation. Unit sources use injected runners and the
+existing test executable's TestMain sentinel, never real libraries/drivers or a
+new fixture path. Source formatting is not compilation, test or native evidence;
+native acceptance remains UNTESTED.
+
 ## Host-local credentials
 
 Only broker stdio accepts `engine:set-credential` (`{engine,credential}`) and
