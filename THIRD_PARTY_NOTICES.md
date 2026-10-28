@@ -209,7 +209,7 @@ binaries across the Windows, Linux, and macOS targets. First-party modules
 | `github.com/tklauser/go-sysconf` | v0.3.16 | BSD-3-Clause |
 | `github.com/xo/terminfo` | v0.0.0-20220910002029-abceb7e1c41e | MIT |
 | `github.com/yusufpapurcu/wmi` | v1.2.4 | MIT |
-| `golang.org/x/crypto` | v0.29.0 | BSD-3-Clause |
+| `golang.org/x/crypto` | v0.55.0 | BSD-3-Clause |
 | `golang.org/x/exp` | v0.0.0-20241108190413-2d47ceb2692f | BSD-3-Clause |
 | `golang.org/x/net` | v0.58.0 | BSD-3-Clause |
 | `golang.org/x/sync` | v0.9.0 | BSD-3-Clause |
@@ -8718,7 +8718,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### golang.org/x/crypto v0.29.0
+### golang.org/x/crypto v0.55.0
 
 License: BSD-3-Clause
 
