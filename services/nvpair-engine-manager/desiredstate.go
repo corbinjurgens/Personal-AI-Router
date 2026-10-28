@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"nvpair-shared/durablefile"
 	"nvpair-shared/engineintent"
 	settings "nvpair-shared/enginesettings"
 	"os"
@@ -314,17 +315,31 @@ func (state *desiredStateFile) setIntent(engine string, enabled bool, origin int
 }
 
 func (s *desiredStateStore) load() (desiredStateFile, error) {
-	state := desiredStateFile{Engines: make(map[string]bool), OffBy: make(map[string]intentOrigin), Locked: make(map[string]bool)}
-	if s.path == "" {
-		return state, nil
+	data, err := s.readDocument()
+	if err != nil {
+		return desiredStateFile{}, err
 	}
-	data, err := os.ReadFile(s.path)
+	return decodeDesiredState(data)
+}
+
+// Callers hold mu. An absent document has empty saved semantics, but reading it
+// never creates the owner directory or the file.
+func (s *desiredStateStore) readDocument() ([]byte, error) {
+	if s.path == "" {
+		return []byte(`{}`), nil
+	}
+	data, err := durablefile.ReadFile(s.path)
 	if os.IsNotExist(err) {
-		return state, nil
+		return []byte(`{}`), nil
 	}
 	if err != nil {
-		return state, fmt.Errorf("read desired engine state: %w", err)
+		return nil, fmt.Errorf("read desired engine state: %w", err)
 	}
+	return data, nil
+}
+
+func decodeDesiredState(data []byte) (desiredStateFile, error) {
+	var state desiredStateFile
 	if err := json.Unmarshal(data, &state); err != nil {
 		return desiredStateFile{}, fmt.Errorf("decode desired engine state: %w", err)
 	}
