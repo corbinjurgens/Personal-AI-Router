@@ -20,6 +20,9 @@ func modelSettingsParamsError(err error) error {
 // Artifact inspection reads bounded local metadata and samples without native,
 // network, lifecycle, qualification or settings effects.
 func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectRequest) (modelconfig.InspectResult, error) {
+	// Artifact inspection and advisory estimation share the operation budget.
+	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
+	defer cancel()
 	if err := p.Validate(); err != nil {
 		return modelconfig.InspectResult{}, modelSettingsParamsError(err)
 	}
@@ -29,7 +32,8 @@ func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectReques
 	if err := ctx.Err(); err != nil {
 		return modelconfig.InspectResult{}, err
 	}
-	result, err := e.inspectModelArtifacts(ctx, p)
+	var advisory modelEstimateInput
+	result, err := e.inspectModelArtifacts(ctx, p, &advisory)
 	if err != nil {
 		return modelconfig.InspectResult{}, err
 	}
@@ -39,11 +43,12 @@ func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectReques
 			return modelconfig.InspectResult{}, err
 		}
 	}
-	estimate, err := estimateModelSettings(ctx, p, modelconfig.RequestedLoad{})
-	if err != nil {
-		return modelconfig.InspectResult{}, err
+	result.Estimate = e.modelEstimates.estimate(ctx, advisory)
+	// The final public reply keeps its existing ceiling. An advisory result
+	// cannot turn a successful artifact inspection into a payload-size failure.
+	if err := modelconfig.CheckPayloadSize(result); err != nil {
+		result.Estimate = modelEstimateUnknown("estimate omitted: complete inspection reply size limit")
 	}
-	result.Estimate = estimate
 	if err := result.Validate(); err != nil {
 		return modelconfig.InspectResult{}, err
 	}

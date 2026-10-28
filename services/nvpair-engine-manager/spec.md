@@ -76,10 +76,12 @@ The public broker request may also select `nodeId`; the broker resolves that
 target and supplies authenticated node identity in the reply. The worker rejects
 a nonempty node selector, rather than labelling local results as a remote node.
 `Executor.InspectModel(ctx, request)` validates exact identity and cancellation,
-then composes the artifact, descriptor and advisory-estimate seams. The temporary
-artifact/facts and estimate bodies return `unavailable` with reasons and no
-paths, bindings, sizes, native build, device mapping, memory or allocation claim.
-They do not call lifecycle, inventory, download, model hashing or native helpers.
+then composes bounded artifact facts, descriptors and an advisory estimate.
+The estimate consumes the same validated facts through a separate read-only
+handoff, without another read, parser or resolver. Inspect has no effective
+allocation and identifies its native launch snapshot as unverified; it can size
+tensor storage while cache/workspace/placement remain Unknown. No lifecycle,
+inventory, download, full model hashing or native helper is invoked.
 
 `engine:remote-inspect-model` accepts `{engine,nodeId,modelId}` with a required
 remote target. It uses POST `/v1/engine-settings/inspect`, a `controlRead` route on
@@ -118,8 +120,9 @@ native settings and validates them before effects. Selected-patch acceptance,
 policy writes and preservation of ordinary public baseline echoes belong to the
 broker. Worker policy-edit traffic remains refused. Auto validates preferences
 and returns no resolution, review identity, candidate or default trades.
-Estimates and Auto remain unavailable until their respective owners implement
-them. Missing or changed artifacts and unreviewed resolutions remain refusals.
+Auto remains unavailable until its resolver is implemented. Missing or changed
+artifacts and unreviewed resolutions remain refusals. Advisory estimation errors
+are data, never an additional manual-preview or Apply refusal.
 
 Direct previews compile typed records without persistence or activation.
 `launchStateLocked` clones stored requested/resolved records; configured native
@@ -176,6 +179,83 @@ Unchanged typed settings do not restart an owned process. Saving Off, paused or
 locked settings never activates it; adopted processes remain read-only.
 No typed settings create qualification. Apply-build must
 add this mutation to its future maintenance exclusion; no symbol exists today.
+
+### Advisory memory estimate support
+
+The estimator uses MIT `github.com/gpustack/gguf-parser-go` v0.27.0, commit
+`9257743a3c1775b882ba1b58ec7f5a856c2cc385`. Its only library operations are
+in-memory architecture projection, checked GGML row sizing and the bounded dense
+CPU graph estimator. It never calls a library file/URL parser, mmap, network or
+native API. Native field semantics are the finite typed compiler contract
+`finite-llama/non-unified/1`; the executable's sampled build binding is included
+in the result/cache identity. This identifies the inputs, not native calibration
+or proof that an arbitrary executable implements the reference allocator.
+
+Reference mappings come from the pinned library's `ggml.go`,
+`file_architecture.go` and `file_estimate__llamacpp.go`, including the linked
+GGML type traits and llama.cpp `16d222fc5f2c0fdc3d0180e0b772516ec6e2eddd`
+hparams/LFM2 state contracts. No Unsloth implementation, defaults or constants
+are used. The matrix is an advisory projection, not extra native option support:
+the manual compiler continues to admit only its existing f16 KV mapping.
+
+| Architecture or option | Estimated when mapped | Unknown or partial |
+| --- | --- | --- |
+| Dense/GQA: llama, qwen2, qwen3 | All tensor storage; per-layer K/V with scalar or complete KV-head array, positive/divisible embedding and attention heads, explicit widths or the native embedding/head quotient | Missing/malformed dimensions or unresolved precision/FA; zero heads without recurrent mapping |
+| Qwen2/Qwen3 MoE | All resident tensors, including every expert; ordinary attention cache | MoE workspace; active experts never discount resident weights |
+| LFM2/LFM2MoE | Declared zero-KV-head recurrent mask; F32 short-convolution state per layer and slot when `shortconv.l_cache` is present; attention layers alone hold KV | Missing recurrent mask/state dimensions; recurrent workspace |
+| LFM and unmapped recurrent families | Tensor storage | Attention/state/workspace need a distinct native mapping; no dense substitution |
+| Qwen3Next/Qwen3.5/Qwen3.5MoE | Attention KV for a complete head mask or explicit full-attention interval | Delta-net/SSM recurrent state dimensions are not fully retained/mapped; workspace Unknown |
+| MLA (including DeepSeek) | Tensor storage | Compressed/shared/NextN cache and workspace need their own mapping; no dense formula |
+| SWA: mapped dense families and LFM2 | Explicit window plus scalar layer pattern (LFM2 uses its declared attention mask), effective logical batch and attention alignment; separate SWA widths when supplied | Missing/malformed pattern or unresolved batch; boolean-array patterns are not mapped; SWA workspace |
+| Mixed K/V | Independent f16, bf16, q8_0 and q4_0 GGML block traits; row divisibility checked for each axis | Unresolved precision; quantized V without explicit FA; no silent f16 fallback |
+| CPU graph | Partial pinned library CPU graph portion for dense llama/Qwen2/Qwen3 with complete conventional tensor shapes, scalar dimensions, explicit batches/FA/precision and `op-offload=false` | Complete CPU scratch remains unsized: the library reserves hypothetical GPU scratch even at zero GPU layers and cannot disable op offload; that buffer is not charged as host. GPU graph and special architectures remain Unknown |
+| CPU/full/partial placement | CPU domain or output-first tensor-based host/offload projection; full offload cache with explicit KV offload; disabled KV offload stays host | Native device identity absent without broker mapping; partial KV/state placement stays unsized; no proportional layer-fraction split |
+| Draft/projector/other companions | Separate bounded tensor storage subtotal | Runtime cache/workspace and independent placement; absent is explicitly excluded, not Unknown |
+| Prompt cache and exclusions | Emitted `cache-ram` ceiling, explicitly demand-dependent and distinct from actual usage | Driver/runtime, alignment/fragmentation, mmap residency, other processes and simultaneous residents remain unsized |
+
+Components use the existing `estimated`, `partial`, `unknown` and `excluded`
+states. An excluded absent component has no byte field; a mapped zero-cost state
+has `estimated` and `"0"`. Known per-domain totals are partial component sums,
+never a complete peak or Fits statement. Selected-model storage is separate
+from simultaneous resident scenarios; no reclaimed memory is credited.
+
+The adapter checks scalar/array/tensor dimensions and products before library
+arithmetic, restricts facts to 16,384 tensors, 512 layers/array values and 8 MiB
+retained accounting, context to 1,048,576 allocated cells and slots to 256.
+The dense graph has additional batch/dimension/element bounds before its
+synchronous library call. Checks honor the existing five-second operation
+deadline before/after bounded work; no abandoned timeout goroutine exists.
+Library panic, overflow and budget exhaustion produce specific Unknown reasons.
+The zero-ready executor-owned estimator uses nonblocking cache admission.
+Its derived LRU has 128-record, 1-MiB and 30-second limits, including charged
+record/string/slice overhead and detached backing storage. Keys bind ordered
+artifacts, effective allocation, revision, native build/support and the complete
+bounded memory snapshot; unavailable telemetry has an explicit identity.
+Neither the cache nor preview handoff alters Task 5 admission/cache/rechecks.
+
+Task 10 has no runtime trusted-memory producer, telemetry wire input or native
+device map. Capacity, free-memory and fit comparison are deferred and remain
+Unknown with the exact reason `target memory telemetry unavailable` when memory
+input is absent. Capacity/free byte fields remain empty; useful component sizing
+and its independent uncertainty are preserved, with no Fits claim. The in-memory
+future memory helpers and their synthetic fixtures are not runtime support.
+A future authenticated broker adapter must supply a nonempty source/identity and a
+timestamp no older than five seconds, not in the future. Invalid byte ranges,
+free greater than capacity and invalid domains are rejected as advisory Unknowns.
+No GPU utilization percentage is interpreted as capacity. Device identity
+requires an explicit native-to-physical mapping; arrays never imply identity.
+UMA accepts one shared pool and removes host/device aggregate double counting.
+Snapshot free memory is timestamped and unreserved. No estimate creates memory
+admission, ME2 input, observation, qualification or automatic retuning.
+
+The compiler emits a separate optional read-only handoff only after its existing
+artifact/build rechecks. Preview consumes it after its ordinary digest and base
+reply-size check. Other compiler callers ignore it. A failing/panicking estimate
+or oversized advisory attachment leaves manual settings and review/native
+digests unchanged. Sampling recommendation provenance remains descriptor-owned.
+Synthetic `TestModelSettingsEstimate` cases specify arithmetic, support/Unknown
+boundaries, cache limits/identity, memory domains and digest independence. Source
+fixtures do not establish numerical accuracy on native builds or real hardware.
 
 ## Installation completeness
 

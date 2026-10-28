@@ -13,7 +13,9 @@ Where a library is selected at multiple versions across components (Go MVS picks
 
 The workers are pure Go services with no GUI/native-webview dependencies, so there are no system-package native dependencies to track beyond the Go libraries below. Build tags keep platform-specific packages out of other targets; in particular, `nvpair-node-info` links the purego-backed gopsutil collector only on macOS.
 
-`nvpair-engine-manager` links no third-party library that the other binaries don't already (only `go-winio` for its Windows named-pipe IPC, plus `golang.org/x/sys`, which it uses directly on Windows to resolve the PID owning a listening port when reclaiming an orphaned managed engine).
+`nvpair-engine-manager` privately links `gpustack/gguf-parser-go` v0.27.0, whose tag resolves to the reviewed estimator commit `9257743a3c1775b882ba1b58ec7f5a856c2cc385`. The advisory adapter constructs bounded metadata in memory; it does not use the dependency's file, URL or mmap parsers. Its compiled dependency closure was checked for Windows, Linux and macOS on amd64 and arm64 with CGO disabled. Graph-only modules are not described as linked runtime dependencies. The version-bound license supplements retain the estimator's MIT grant, incorporated Prometheus Apache-2.0 attribution and both distinct checked NOTICE texts; httpretty also retains Fatih Arslan's MIT grant. The exact incorporated Prometheus revision is unrecorded, as disclosed in the generated notice.
+
+The generated repository-root [third-party notice](../THIRD_PARTY_NOTICES.md) is the canonical complete grant inventory. The estimator dependency is private to the engine-manager module; it does not add dependencies to the broker or shared module.
 
 `nvpair-service` likewise links only `go-winio` (its per-user named pipe on Windows) and `golang.org/x/sys`, which it uses directly on Windows for its `HKCU\...\Run` autostart entry.
 
@@ -28,6 +30,7 @@ As of the mDNS dedup, `grandcat/zeroconf`, `miekg/dns`, and `golang.org/x/net` a
 | `github.com/charmbracelet/bubbletea` | v1.3.10 | nvpair-tui | MIT | [LICENSE](https://github.com/charmbracelet/bubbletea/blob/master/LICENSE) |
 | `github.com/charmbracelet/lipgloss` | v1.1.0 | nvpair-tui | MIT | [LICENSE](https://github.com/charmbracelet/lipgloss/blob/master/LICENSE) |
 | `github.com/grandcat/zeroconf` | v1.0.0 | nvpair-proxy, nvpair-node-scanner, nvpair-errors, nvpair-cluster-manager | MIT | [LICENSE](https://github.com/grandcat/zeroconf/blob/master/LICENSE) |
+| `github.com/gpustack/gguf-parser-go` | v0.27.0 | nvpair-engine-manager | MIT AND Apache-2.0 | [LICENSE](https://github.com/gpustack/gguf-parser-go/blob/9257743a3c1775b882ba1b58ec7f5a856c2cc385/LICENSE), version-bound incorporated grants in the canonical notice |
 | `github.com/jaypipes/ghw` | v0.24.0 | nvpair-node-info | Apache-2.0 | [COPYING](https://github.com/jaypipes/ghw/blob/main/COPYING) |
 | `github.com/miekg/dns` | v1.1.55 / v1.1.72 | nvpair-proxy, nvpair-node-scanner, nvpair-errors, nvpair-cluster-manager | BSD-3-Clause | [LICENSE](https://github.com/miekg/dns/blob/master/LICENSE) |
 | `github.com/shirou/gopsutil/v4` | v4.26.7 | nvpair-node-info (macOS) | BSD-3-Clause | [LICENSE](https://github.com/shirou/gopsutil/blob/master/LICENSE) |
@@ -49,14 +52,18 @@ As of the mDNS dedup, `grandcat/zeroconf`, `miekg/dns`, and `golang.org/x/net` a
 | `github.com/clipperhouse/displaywidth` | v0.9.0 | charmbracelet/x/ansi | MIT | [LICENSE](https://github.com/clipperhouse/displaywidth/blob/main/LICENSE) |
 | `github.com/clipperhouse/stringish` | v0.1.1 | clipperhouse/uax29 | MIT | [LICENSE](https://github.com/clipperhouse/stringish/blob/main/LICENSE) |
 | `github.com/clipperhouse/uax29/v2` | v2.5.0 | charmbracelet/x/ansi | MIT | [LICENSE](https://github.com/clipperhouse/uax29/blob/master/LICENSE) |
-| `github.com/ebitengine/purego` | v0.10.2 | gopsutil (macOS) | Apache-2.0 | [LICENSE](https://github.com/ebitengine/purego/blob/main/LICENSE) |
+| `github.com/ebitengine/purego` | v0.10.2 | gopsutil (macOS), nvpair-engine-manager | Apache-2.0 AND BSD-3-Clause | [LICENSE](https://github.com/ebitengine/purego/blob/main/LICENSE), incorporated Go Authors grant in the canonical notice |
 | `github.com/erikgeiser/coninput` | v0.0.0-20211004153227 | bubbletea | MIT | [LICENSE](https://github.com/erikgeiser/coninput/blob/main/LICENSE) |
 | `github.com/go-ole/go-ole` | v1.2.6 / v1.3.0 | ghw | MIT | [LICENSE](https://github.com/go-ole/go-ole/blob/master/LICENSE) |
+| `github.com/henvic/httpretty` | v0.1.4 | gguf-parser-go | MIT | [LICENSE.md](https://github.com/henvic/httpretty/blob/v0.1.4/LICENSE.md), incorporated Fatih Arslan grant in the canonical notice |
+| `github.com/json-iterator/go` | v1.1.12 | gguf-parser-go | MIT | [LICENSE](https://github.com/json-iterator/go/blob/v1.1.12/LICENSE) |
 | `github.com/jaypipes/pcidb` | v1.1.1 | ghw | Apache-2.0 | [LICENSE](https://github.com/jaypipes/pcidb/blob/main/LICENSE) |
 | `github.com/lucasb-eyer/go-colorful` | v1.3.0 | lipgloss, termenv | MIT | [LICENSE](https://github.com/lucasb-eyer/go-colorful/blob/master/LICENSE) |
 | `github.com/mattn/go-isatty` | v0.0.20 | bubbletea | MIT | [LICENSE](https://github.com/mattn/go-isatty/blob/master/LICENSE) |
 | `github.com/mattn/go-localereader` | v0.0.1 | bubbletea | MIT | [LICENSE](https://github.com/mattn/go-localereader/blob/master/LICENSE) |
 | `github.com/mattn/go-runewidth` | v0.0.19 | lipgloss, bubbles | MIT | [LICENSE](https://github.com/mattn/go-runewidth/blob/master/LICENSE) |
+| `github.com/modern-go/concurrent` | v0.0.0-20180306012644-bacd9c7ef1dd | json-iterator/go | Apache-2.0 | [LICENSE](https://github.com/modern-go/concurrent/blob/bacd9c7ef1dd/LICENSE) |
+| `github.com/modern-go/reflect2` | v1.0.2 | json-iterator/go | Apache-2.0 | [LICENSE](https://github.com/modern-go/reflect2/blob/v1.0.2/LICENSE) |
 | `github.com/muesli/ansi` | v0.0.0-20230316100256 | termenv | MIT | [LICENSE](https://github.com/muesli/ansi/blob/master/LICENSE) |
 | `github.com/muesli/cancelreader` | v0.2.2 | bubbletea | MIT | [LICENSE](https://github.com/muesli/cancelreader/blob/master/LICENSE) |
 | `github.com/muesli/termenv` | v0.16.0 | lipgloss, bubbletea | MIT | [LICENSE](https://github.com/muesli/termenv/blob/master/LICENSE) |
@@ -64,8 +71,11 @@ As of the mDNS dedup, `grandcat/zeroconf`, `miekg/dns`, and `golang.org/x/net` a
 | `github.com/tklauser/go-sysconf` | v0.3.16 | gopsutil (macOS) | BSD-3-Clause | [LICENSE](https://github.com/tklauser/go-sysconf/blob/master/LICENSE) |
 | `github.com/xo/terminfo` | v0.0.0-20220910002029 | colorprofile | MIT | [LICENSE](https://github.com/xo/terminfo/blob/master/LICENSE) |
 | `github.com/yusufpapurcu/wmi` | v1.2.4 | ghw | MIT | [LICENSE](https://github.com/yusufpapurcu/wmi/blob/master/LICENSE) |
+| `github.com/smallnest/ringbuffer` | v0.0.0-20241116012123-461381446e3d | gguf-parser-go | MIT | [LICENSE](https://github.com/smallnest/ringbuffer/blob/461381446e3d/LICENSE) |
+| `golang.org/x/crypto` | v0.29.0 | gguf-parser-go | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/crypto/+/v0.29.0:LICENSE) |
+| `golang.org/x/exp` | v0.0.0-20241108190413-2d47ceb2692f | gguf-parser-go | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/exp/+/2d47ceb2692f:LICENSE) |
 | `golang.org/x/mod` | v0.12.0 / v0.17.0 / v0.31.0 | zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/mod/+/master:LICENSE) |
-| `golang.org/x/sync` | v0.10.0 / v0.19.0 | zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sync/+/master:LICENSE) |
+| `golang.org/x/sync` | v0.9.0 / v0.10.0 / v0.19.0 | gguf-parser-go, zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sync/+/master:LICENSE) |
 | `golang.org/x/sys` | v0.47.0 | go-winio, zeroconf, ghw, charmbracelet/x/term | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sys/+/master:LICENSE) |
 | `golang.org/x/text` | v0.3.8 | charmbracelet/x/ansi | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/text/+/master:LICENSE) |
 | `golang.org/x/tools` | v0.11.0 / v0.21.1-0.20240508 / v0.40.0 | zeroconf (via miekg/dns) | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/tools/+/master:LICENSE) |

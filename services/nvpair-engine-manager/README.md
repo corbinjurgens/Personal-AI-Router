@@ -63,7 +63,9 @@ untested.
 It returns bounded target-local artifacts/facts plus service-owned llama.cpp
 option descriptors. Inspection uses the canonical artifact resolver and GGUF
 metadata reader, without engine start, HTTP inventory, download, full hashing,
-native probe or settings writes. Estimates remain unavailable.
+native probe or settings writes. Advisory estimates use those same bounded
+facts: tensor weights can be sized without an effective allocation; unresolved
+cache, workspace, placement and memory telemetry stay explicit Unknowns.
 `engine:remote-inspect-model` uses the existing pinned POST
 `/v1/engine-settings/inspect` read route; the target broker supplies node identity.
 The remote reply is strictly decoded and checked against the requested identity.
@@ -120,6 +122,35 @@ engine locks and adopted-process ownership keep their existing behavior.
 Apply-build must add model-settings apply to its maintenance exclusion when
 implemented; no exclusion symbol exists yet. Auto remains unavailable, and native
 configuration does not create qualification or establish strict readiness.
+
+Advisory memory estimates use the private MIT `gguf-parser-go` v0.27.0 pin
+(`9257743a3c1775b882ba1b58ec7f5a856c2cc385`) through in-memory structs only.
+Selected typed previews carry the compiler's already-decoded facts to a separate
+estimator after constructing the ordinary review digest. Estimator failure,
+overflow, panic, contention or budget exhaustion does not change the preview,
+launch identity, requested/resolved settings or Apply behavior. No estimate
+starts an engine, parses another file, writes policy, fills admission memory or
+creates qualification. Embedded sampling recommendations keep their original
+GGUF provenance and remain separate from settings overrides.
+
+The [estimate support matrix](spec.md#advisory-memory-estimate-support) describes
+dense/GQA, LFM2 recurrence, Qwen variants, SWA, mixed cache precision and tensor
+placement. Unsupported components stay independently Unknown. Companions have
+separate known storage and unsized runtime costs. Totals remain partial and
+uncalibrated, with no Fits claim. CPU and unmapped offload byte projections are
+not native device allocation readback. Task 10 has no runtime trusted-memory
+producer, telemetry wire input or native device map. Capacity, free memory and
+fit comparison remain Unknown with reason `target memory telemetry unavailable`;
+implementing those comparisons is deferred. The in-memory future memory helpers
+have synthetic fixtures only and do not establish runtime telemetry support.
+Useful component estimates remain available. Simultaneous residents are unsized
+and no release credit is assumed. Auto's no-facts helper remains Unknown.
+
+Each executor owns a derived LRU with ceilings of 128 records, 1 MiB retained
+accounting and 30 seconds. Its key includes ordered sampled artifact identities,
+effective allocation, estimator revision, native build/support and memory
+snapshot identity (including an explicit unavailable identity). This cache is
+separate from artifact inspection's cache and never replaces source rechecks.
 
 The broker-only parent request `engine:activate-bound-engine` supplies a
 zero-source bound activation with operation ID, engine/model, accepted policy
