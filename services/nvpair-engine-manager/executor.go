@@ -119,6 +119,7 @@ type engineState struct {
 type Executor struct {
 	credentials     credentialStore
 	modelInspection modelInspectionState
+	modelEstimates  modelEstimateState
 	boundActivation *boundEngineActivation // switchAdmission; current cold operation
 	// switchAdmission protects reservation admission and active mutation counts;
 	// switchMu serializes checkpoint steps without holding the admission gate.

@@ -450,7 +450,14 @@ func decodeInspectionFacts(ctx context.Context, list modelFileList, access servi
 	return facts, nil
 }
 
-func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.InspectRequest) (modelconfig.InspectResult, error) {
+func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.InspectRequest, advisory ...*modelEstimateInput) (modelconfig.InspectResult, error) {
+	// A separate read-only handoff; never stored in Task 5's facts cache or
+	// used for admission, binding identity, discovery or source revalidation.
+	for _, output := range advisory {
+		if output != nil {
+			*output = modelEstimateInput{}
+		}
+	}
 	result := modelconfig.InspectResult{Engine: p.Engine, ModelID: p.ModelID}
 	unavailable := func(status, reason string) (modelconfig.InspectResult, error) {
 		if err := ctx.Err(); err != nil {
@@ -591,6 +598,13 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	}
 	if err := ctx.Err(); err != nil {
 		return modelconfig.InspectResult{}, err
+	}
+	for _, output := range advisory {
+		if output != nil {
+			// This is a launch snapshot, not a freshly sampled executable binding.
+			// No effective allocation/build support is asserted by inspection.
+			*output = modelEstimateInput{Facts: facts, Bindings: slices.Clone(result.Artifacts), BuildID: "unverified-launch-snapshot:" + exportBinding(list, snapshot.command)}
+		}
 	}
 	return result, nil
 }

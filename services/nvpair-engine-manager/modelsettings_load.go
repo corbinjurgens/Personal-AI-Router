@@ -132,7 +132,18 @@ func literalAssignments(env map[string]string) []string {
 	return values
 }
 
-func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launchCommand, rt Runtime, approved bool) (*llamaServingLaunch, error) {
+func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launchCommand, rt Runtime, approved bool, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
+	// Advisory output is deliberately distinct from the launch result and every
+	// native/review digest. Only preview asks for it; starts and apply ignore it.
+	for _, output := range advisory {
+		if output != nil {
+			*output = nil
+		}
+	}
+	var estimates map[string]modelEstimateInput
+	if len(advisory) != 0 {
+		estimates = make(map[string]modelEstimateInput)
+	}
 	capacity, err := typedLlamaLaunchOptions(command, rt)
 	if err != nil {
 		return nil, err
@@ -225,6 +236,18 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 		}
 		sections[load.ModelID], lists[i] = options, list
 		load.Resolved = resolved
+		if estimates != nil && factsErr == nil {
+			// Carry the same decoded facts and bindings, without a second read,
+			// resolver or parser. Allocation is detached from ordinary outputs.
+			allocation := resolved.Clone()
+			// This ceiling is already emitted by the compiler; carrying it does
+			// not materialize a new user preference or native default.
+			if cacheRAM, err := strconv.ParseInt(options["cache-ram"], 10, 32); err == nil {
+				mib := int32(cacheRAM)
+				allocation.Options.CacheRAM = &mib
+			}
+			estimates[load.ModelID] = modelEstimateInput{Facts: facts, Bindings: modelEstimateBindings(resolved.Artifacts), Allocation: &allocation, BuildID: buildID, Support: modelEstimatorSupport}
+		}
 	}
 	data, err := typedLlamaPreset(sections)
 	if err != nil {
@@ -309,6 +332,11 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 	}
 	if _, err := modelconfig.CanonicalLoads(loads); err != nil {
 		return nil, err
+	}
+	for _, output := range advisory {
+		if output != nil {
+			*output = estimates
+		}
 	}
 	return result, nil
 }
@@ -580,7 +608,8 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	if err != nil {
 		return fail(err)
 	}
-	prepared, err := compileTypedLlamaInputs(ctx, snapshot.state, command, rt, false)
+	var advisory map[string]modelEstimateInput
+	prepared, err := compileTypedLlamaInputs(ctx, snapshot.state, command, rt, false, &advisory)
 	if err != nil {
 		return fail(err)
 	}
@@ -666,6 +695,13 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	result.PreviewDigest = modelLoadDigest(identity)
 	if err := modelconfig.CheckPayloadSize(result); err != nil {
 		return fail(err)
+	}
+	// All authoritative work is already complete. Estimate failures, panic or
+	// expiration remain advisory, including a reply-size failure after attachment.
+	estimate := e.modelEstimates.estimate(ctx, advisory[p.ModelChange.ModelID])
+	result.Estimate = &estimate
+	if err := modelconfig.CheckPayloadSize(result); err != nil {
+		result.Estimate = nil
 	}
 	return result, nil
 }

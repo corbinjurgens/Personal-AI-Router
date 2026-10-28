@@ -5,6 +5,19 @@
 // A new version or digest requires reviewing every LICENSE/COPYING/NOTICE grant
 // in the version-associated module cache, including incorporated-code notices.
 export const goLicenseFileHashes: Readonly<Record<string, string>> = {
+    'github.com/json-iterator/go@v1.1.12':
+        'c51e71ceb7a04e4462266c0c9e2847f69f0de52a6af187687358310f6f120308',
+    'github.com/modern-go/concurrent@v0.0.0-20180306012644-bacd9c7ef1dd':
+        '283ea6cc2997a1a70da0049e09adf9317bb60ca1b51279b65196b83a69e1996b',
+    'github.com/modern-go/reflect2@v1.0.2':
+        '283ea6cc2997a1a70da0049e09adf9317bb60ca1b51279b65196b83a69e1996b',
+    'github.com/smallnest/ringbuffer@v0.0.0-20241116012123-461381446e3d':
+        'da686686dff4164a151d3b04e42b805549e1b0f144f9edda21c828ffecf8fca5',
+    'golang.org/x/crypto@v0.29.0':
+        '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
+    'golang.org/x/exp@v0.0.0-20241108190413-2d47ceb2692f':
+        '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
+    'golang.org/x/sync@v0.9.0': '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'github.com/atotto/clipboard@v0.1.4':
         '0e1f61fe679ee07057fae3afcfab85b7dc9892fd705e9d2e8708230bf4db7b58',
     'github.com/aymanbagabas/go-osc52/v2@v2.0.1':
@@ -33,8 +46,6 @@ export const goLicenseFileHashes: Readonly<Record<string, string>> = {
         '9f8e640fa57607fad6cbace258acb6200ccff986ffc3b02ea7855b2a2245a331',
     'github.com/danieljoos/wincred@v1.2.3':
         '1702a813fa31858c0d6c7788216fa3dd202472265716998024654c252fc7bb41',
-    'github.com/ebitengine/purego@v0.10.2':
-        '6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a',
     'github.com/erikgeiser/coninput@v0.0.0-20211004153227-1c3628e74d0f':
         '7d2822ece53bc5c83ee27d755c20bb5f7aabdaa7a2041327970867a14604d28a',
     'github.com/go-ole/go-ole@v1.2.6':

@@ -480,14 +480,21 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 	request := p.Clone()
 	request.RequestID, request.ModelChange.PreviewDigest = "", ""
 	preview.PreviewDigest = ""
+	// Estimates are advisory and may change or disappear between preview and
+	// apply. They must not change the authority bound by the review digest.
+	review := preview.Clone()
+	review.Estimate = nil
 	preview.PreviewDigest = modelSettingsHash(struct {
 		Caller                 string
 		Request                settings.Request
 		Policy, Native, Source string
 		Preview                settings.Preview
-	}{caller, request, modelPolicyFingerprint(policy), nativeDigest, source.settingsEpoch, preview})
+	}{caller, request, modelPolicyFingerprint(policy), nativeDigest, source.settingsEpoch, review})
 	if err := modelconfig.CheckPayloadSize(preview); err != nil {
-		return settings.Preview{}, &invalidParamsError{err: err}
+		preview.Estimate = nil
+		if err := modelconfig.CheckPayloadSize(preview); err != nil {
+			return settings.Preview{}, &invalidParamsError{err: err}
+		}
 	}
 	if capture != nil {
 		*capture = modelSettingsReviewSource{Launch: launch, Worker: worker, Source: source}
