@@ -112,28 +112,9 @@ const missThresholdDefault = 12
 // aimed at an inference port.
 const probeAfterMisses = 3
 
-// emptyScanGrace bounds how many consecutive scans that lose EVERY known node at
-// once are treated as this browser's own failure rather than as evidence about
-// the fleet.
-//
-// A scan returning nothing while several nodes are known says much less about
-// those nodes than a scan returning some of them and not others. Independent
-// machines do not leave a network in the same 5-second window; a process too
-// starved to drain its multicast socket inside scanTimeout, however, hears
-// silence from all of them at once. Counting that as a miss against every node
-// is what let one machine saturated by its own inference load evict its whole
-// cluster in a single reconcile — idle peers that were never sent any work
-// included.
-//
-// The strength of the signal is what scales with the node count, so the
-// suppression applies only when more than one node is known (see reconcile).
-// With a single known node there is no "all at once" to be suspicious of: losing
-// it looks the same whether it left or we stopped listening, and the ordinary
-// miss threshold plus the liveness probe already cover that.
-//
-// It is a grace and not a veto because a whole fleet CAN genuinely go — a
-// switch losing power, or the last peers shutting down together — and those
-// records still have to age out. Past the bound, empty scans count normally.
+// emptyScanGrace adds bounded per-peer tolerance for empty scans while several
+// nodes are known. Misses and liveness probes still advance on every scan.
+// Only seeing or successfully probing that peer resets its allowance.
 const emptyScanGrace = 6
 
 // Node is a single discovered service instance. ID is the mDNS instance name.
@@ -204,14 +185,13 @@ type Browser struct {
 	domain  string
 	opt     options
 
-	mu     sync.RWMutex
-	nodes  map[string]Node
-	misses map[string]int
-	// emptyScans counts consecutive scans that returned nothing while nodes were
-	// known, which emptyScanGrace bounds. Any scan that sees a single node clears
-	// it: one answer proves the receive path works, so the next empty scan is
-	// news rather than a continuation.
-	emptyScans int
+	mu         sync.RWMutex
+	nodes      map[string]Node
+	misses     map[string]int
+	emptyGrace map[string]int
+	// At most one uncancellable supplemental send is owned by this browser.
+	sendMu  sync.Mutex
+	sending bool
 	// sendMisses counts each interface's consecutive failed mDNS sends, reset on
 	// any success. Only a run of them is reported as a failure: sends happen
 	// every scan, and treating an isolated blip as evidence would let address
@@ -241,6 +221,7 @@ func New(service, domain string, opts ...Option) *Browser {
 		},
 		nodes:      make(map[string]Node),
 		misses:     make(map[string]int),
+		emptyGrace: make(map[string]int),
 		sendMisses: make(map[string]int),
 	}
 	for _, o := range opts {
@@ -271,6 +252,7 @@ func (b *Browser) Seed(nodes ...Node) {
 		k := b.key(n)
 		b.nodes[k] = n
 		delete(b.misses, k)
+		delete(b.emptyGrace, k)
 	}
 }
 
@@ -367,7 +349,9 @@ func (b *Browser) Run(ctx context.Context, events chan<- Event) {
 // pull-model entry point (workload-manager's PeerSource), an alternative to Run.
 func (b *Browser) Poll(ctx context.Context) []Node {
 	if ctx.Err() == nil {
-		b.reconcile(b.browseFunc(ctx))
+		if seen := b.browseFunc(ctx); seen != nil {
+			b.reconcile(seen)
+		}
 	}
 	return b.Nodes()
 }
@@ -378,7 +362,11 @@ func (b *Browser) scanEmit(ctx context.Context, events chan<- Event) {
 	if ctx.Err() != nil {
 		return
 	}
-	pending := b.reconcile(b.browseFunc(ctx))
+	seen := b.browseFunc(ctx)
+	if seen == nil {
+		return // An incomplete scan is not evidence of absence.
+	}
+	pending := b.reconcile(seen)
 	if events == nil {
 		return
 	}
@@ -415,6 +403,7 @@ func (b *Browser) reconcile(seen map[string]Node) []Event {
 		}
 		b.nodes[k] = node
 		delete(b.misses, k)
+		delete(b.emptyGrace, k)
 	}
 
 	if b.opt.noEvict {
@@ -422,42 +411,26 @@ func (b *Browser) reconcile(seen map[string]Node) []Event {
 		return pending
 	}
 
-	// Losing several independent nodes in one scan is treated as a failure of this
-	// browser before it is treated as news about the fleet — see emptyScanGrace.
-	// Bounded, so a fleet that really has gone still ages out.
-	if len(seen) == 0 && len(b.nodes) > 1 {
-		b.emptyScans++
-		if b.emptyScans <= emptyScanGrace {
-			if b.emptyScans == 1 {
-				slog.Warn("mDNS scan returned no nodes at all; treating it as a local receive failure rather than a departure",
-					"service", b.service, "known_nodes", len(b.nodes))
-			}
-			b.mu.Unlock()
-			return pending
-		}
-		if b.emptyScans == emptyScanGrace+1 {
-			slog.Warn("mDNS scans have returned nothing for too long to keep excusing; nodes will now age out",
-				"service", b.service, "empty_scans", b.emptyScans, "known_nodes", len(b.nodes))
-		}
-	} else {
-		b.emptyScans = 0
-	}
-
 	// Nodes absent from this scan: bump the miss count, then either queue a
 	// liveness probe (from probeAfterMisses onward, well before the threshold) or,
 	// with no probe configured, evict at the threshold.
 	var probe []Node
 	probeAt := b.probeAfter()
+	grantGrace := len(seen) == 0 && len(b.nodes) > 1
 	for k, node := range b.nodes {
 		if _, ok := seen[k]; ok {
 			continue
 		}
 		b.misses[k]++
+		if grantGrace && b.emptyGrace[k] < emptyScanGrace {
+			b.emptyGrace[k]++
+		}
 		if b.opt.liveness == nil {
-			if b.misses[k] >= b.opt.missThreshold {
+			if b.misses[k] >= b.opt.missThreshold+b.emptyGrace[k] {
 				pending = append(pending, Event{Type: Removed, Node: node})
 				delete(b.nodes, k)
 				delete(b.misses, k)
+				delete(b.emptyGrace, k)
 			}
 			continue
 		}
@@ -475,15 +448,17 @@ func (b *Browser) reconcile(seen map[string]Node) []Event {
 			b.mu.Lock()
 			if _, ok := b.nodes[k]; ok {
 				b.misses[k] = 0
+				delete(b.emptyGrace, k)
 			}
 			b.mu.Unlock()
 			continue
 		}
 		b.mu.Lock()
-		if cur, ok := b.nodes[k]; ok && b.misses[k] >= b.opt.missThreshold {
+		if cur, ok := b.nodes[k]; ok && b.misses[k] >= b.opt.missThreshold+b.emptyGrace[k] {
 			pending = append(pending, Event{Type: Removed, Node: cur})
 			delete(b.nodes, k)
 			delete(b.misses, k)
+			delete(b.emptyGrace, k)
 		}
 		b.mu.Unlock()
 	}
@@ -532,16 +507,34 @@ func (b *Browser) probeLiveness(nodes []Node) []verdict {
 // per-interface unicast query re-send, returning the seen set keyed like the
 // node map.
 func (b *Browser) browse(ctx context.Context) map[string]Node {
+	return b.browseWithDependencies(ctx, func() (browseResolver, error) {
+		return zeroconf.NewResolver(nil)
+	}, sendMulticastQuery, context.WithTimeout, context.WithTimeout)
+}
+
+type browseResolver interface {
+	Browse(context.Context, string, string, chan<- *zeroconf.ServiceEntry) error
+}
+
+func (b *Browser) browseWithDependencies(ctx context.Context, newResolver func() (browseResolver, error), send func(string, string) map[string]bool, sendBudget, withTimeout func(context.Context, time.Duration) (context.Context, context.CancelFunc)) map[string]Node {
 	seen := make(map[string]Node)
 
-	resolver, err := zeroconf.NewResolver(nil)
+	resolver, err := newResolver()
 	if err != nil {
 		slog.Warn("failed to create mDNS resolver", "err", err)
-		return seen
+		return nil
 	}
 
+	// zeroconf Browse writes its initial query synchronously. Cancellation closes
+	// its sockets, so the send-phase budget must cover that call as well.
+	sendCtx, cancelSend := sendBudget(ctx, b.opt.scanTimeout)
+	defer cancelSend()
 	entries := make(chan *zeroconf.ServiceEntry)
 	done := make(chan struct{})
+	listenCtx, stopListening := context.WithCancel(ctx)
+	defer stopListening()
+	stopSendDeadline := context.AfterFunc(sendCtx, stopListening)
+	defer stopSendDeadline()
 	go func() {
 		defer close(done)
 		for entry := range entries {
@@ -568,11 +561,11 @@ func (b *Browser) browse(ctx context.Context) map[string]Node {
 		}
 	}()
 
-	scanCtx, cancel := context.WithTimeout(ctx, b.opt.scanTimeout)
-	defer cancel()
-
-	if err := resolver.Browse(scanCtx, b.service, b.domain, entries); err != nil {
+	if err := resolver.Browse(listenCtx, b.service, b.domain, entries); err != nil {
 		slog.Warn("mDNS browse error", "service", b.service, "err", err)
+		stopListening()
+		<-done
+		return nil
 	}
 	// grandcat/zeroconf binds its single send/receive socket to the multicast
 	// wildcard 224.0.0.0:5353. Windows refuses to send from a socket whose local
@@ -581,10 +574,45 @@ func (b *Browser) browse(ctx context.Context) map[string]Node {
 	// We re-send the query from a per-interface unicast-bound socket, which
 	// Windows delivers; receive works fine on Windows (joined sockets receive
 	// multicast regardless of local binding), so we keep zeroconf for that.
-	b.recordSendOutcomes(sendMulticastQuery(b.service, b.domain))
+	// The sender has no cancellation API. Bound its allowance and retain its
+	// ownership until it returns, so repeated scans cannot accumulate workers.
+	b.sendMu.Lock()
+	startSend := !b.sending && sendCtx.Err() == nil
+	if startSend {
+		b.sending = true
+	}
+	b.sendMu.Unlock()
+	if startSend {
+		result := make(chan map[string]bool, 1)
+		go func() {
+			outcomes := send(b.service, b.domain)
+			b.sendMu.Lock()
+			b.sending = false
+			b.sendMu.Unlock()
+			result <- outcomes
+		}()
+		select {
+		case outcomes := <-result:
+			b.recordSendOutcomes(outcomes)
+		case <-sendCtx.Done():
+		}
+	}
+	// An over-budget send cannot authorize a shortened receive phase. A still
+	// outstanding prior send also makes this scan incomplete.
+	if !startSend || !stopSendDeadline() || sendCtx.Err() != nil {
+		stopListening()
+		<-done
+		return nil
+	}
+	cancelSend()
+	scanCtx, cancel := withTimeout(ctx, b.opt.scanTimeout)
 	<-scanCtx.Done()
+	cancel()
+	stopListening()
 	<-done
-
+	if ctx.Err() != nil {
+		return nil
+	}
 	return seen
 }
 
