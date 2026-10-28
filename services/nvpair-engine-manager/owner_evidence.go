@@ -302,7 +302,7 @@ func (m *Manager) ownerReservations() ownerReservationEvidence {
 	defer d.mu.Unlock()
 	r.Token.DownloadSource, r.Token.DownloadRevision, r.Token.ContentGeneration = d.source, d.revision, d.authorityGeneration
 	r.RecoveryRequired, r.CopyRecoveryRequired, r.Uncertain = d.recoveryRequired, d.copyRecoveryRequired, d.authorityUncertain
-	r.Complete = !r.RecoveryRequired && !r.CopyRecoveryRequired && !r.Uncertain && d.source != "" && r.Token.Incarnation == d.source
+	r.Complete = d.copiesComplete && !r.RecoveryRequired && !r.CopyRecoveryRequired && !r.Uncertain && d.source != "" && r.Token.Incarnation == d.source
 	r.Reason = ""
 	for _, copy := range r.Copies {
 		if copy.Role != "controller" && copy.Role != "destination" {

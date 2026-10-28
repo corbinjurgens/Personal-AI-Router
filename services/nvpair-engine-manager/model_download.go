@@ -199,6 +199,7 @@ type modelDownloads struct {
 	unsafeOrigins        map[downloadContentKey]string
 	recoveryRequired     bool
 	copyRecoveryRequired bool
+	copiesComplete       bool
 	active               map[downloadContentKey]*modelDownloadAttempt
 	unsafe               map[downloadContentKey]modelDownloadMarker
 	copies               map[string]modelCopyMarker
@@ -211,11 +212,13 @@ type modelDownloads struct {
 
 func newModelDownloads(source, baseDir string, naming map[string]string) *modelDownloads {
 	d := &modelDownloads{source: source, active: make(map[downloadContentKey]*modelDownloadAttempt), unsafe: make(map[downloadContentKey]modelDownloadMarker), outcomes: make(map[downloadContentKey]modeldownload.Entry), writers: make(map[string]bool), readers: make(map[string]int), store: newModelDownloadStore(baseDir), copyRetirements: make(map[string]bool), unsafeOrigins: make(map[downloadContentKey]string)}
-	markers, copies, copiesComplete, err := d.store.loadJournal()
+	markers, copies, copiesComplete, copyRecoveryRequired, err := d.store.loadJournal()
 	d.copies = copies
-	d.copyRecoveryRequired = !copiesComplete
+	d.copiesComplete = copiesComplete
+	d.copyRecoveryRequired = copyRecoveryRequired
 	if err != nil {
 		d.recoveryRequired = true
+		d.copyRecoveryRequired = true
 		return d
 	}
 	d.unsafe = markers
@@ -226,7 +229,7 @@ func newModelDownloads(source, baseDir string, naming map[string]string) *modelD
 		d.outcomes[key] = modeldownload.Entry{ID: marker.ID, Engine: marker.Engine, Model: marker.Model, Phase: "unknown", BlocksReadiness: true, Reason: "interrupted"}
 	}
 	for _, marker := range copies {
-		if naming[marker.Engine] != marker.Naming {
+		if marker.Phase == "uncertain" || naming[marker.Engine] != marker.Naming {
 			d.copyRecoveryRequired = true
 		}
 	}
@@ -450,9 +453,9 @@ func (d *modelDownloads) changeMarker(a *modelDownloadAttempt, remove bool) (unc
 	} else {
 		next[a.key] = modelDownloadMarker{ID: a.entry.ID, Engine: a.key.engine, Model: a.entry.Model, ContentKey: a.key.model, Naming: a.naming}
 	}
-	copies, copiesComplete := maps.Clone(d.copies), !d.copyRecoveryRequired
+	copies, copiesComplete, copyRecoveryRequired := maps.Clone(d.copies), d.copiesComplete, d.copyRecoveryRequired
 	d.mu.Unlock()
-	landed, uncertain, err := d.store.save(next, copies, copiesComplete)
+	landed, uncertain, err := d.store.save(next, copies, copiesComplete, copyRecoveryRequired)
 	if landed {
 		d.mu.Lock()
 		d.unsafe = next
@@ -495,9 +498,9 @@ func (d *modelDownloads) resolveMarker(key downloadContentKey, id string) bool {
 			next[k] = value
 		}
 	}
-	copies, copiesComplete := maps.Clone(d.copies), !d.copyRecoveryRequired
+	copies, copiesComplete, copyRecoveryRequired := maps.Clone(d.copies), d.copiesComplete, d.copyRecoveryRequired
 	d.mu.Unlock()
-	landed, uncertain, _ := d.store.save(next, copies, copiesComplete)
+	landed, uncertain, _ := d.store.save(next, copies, copiesComplete, copyRecoveryRequired)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.heldRevisions--
@@ -563,7 +566,7 @@ func (d *modelDownloads) changeCopyMarker(marker modelCopyMarker, remove bool) e
 		}
 		d.heldRevisions += steps
 	}
-	next, downloads := maps.Clone(d.copies), maps.Clone(d.unsafe)
+	next, downloads, copiesComplete, copyRecoveryRequired := maps.Clone(d.copies), maps.Clone(d.unsafe), d.copiesComplete, d.copyRecoveryRequired
 	if next == nil {
 		next = make(map[string]modelCopyMarker)
 	}
@@ -573,7 +576,7 @@ func (d *modelDownloads) changeCopyMarker(marker modelCopyMarker, remove bool) e
 		next[marker.OpID] = marker
 	}
 	d.mu.Unlock()
-	landed, uncertain, err := d.store.save(downloads, next, true)
+	landed, uncertain, err := d.store.save(downloads, next, copiesComplete, copyRecoveryRequired)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if landed {

@@ -131,11 +131,11 @@ func TestModelDownloadJournalMalformedRecovery(t *testing.T) {
 		})
 	}
 	test("invalid JSON", "{")
-	test("null entries", `{"version":1,"entries":null,"copies":[],"copiesComplete":true}`)
-	test("duplicate entries", `{"version":1,"entries":[],"entries":[],"copies":[],"copiesComplete":true}`)
-	test("case variant", `{"version":1,"Entries":[],"copies":[],"copiesComplete":true}`)
-	test("unknown field", `{"version":1,"entries":[],"copies":[],"copiesComplete":true,"unexpected":true}`)
-	test("duplicate marker model", `{"version":1,"entries":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","engine":"llamacpp","model":"one","model":"two","contentKey":"two","naming":"exact"}],"copies":[],"copiesComplete":true}`)
+	test("null entries", `{"version":1,"entries":null,"copies":[],"copiesComplete":true,"copyRecoveryRequired":false}`)
+	test("duplicate entries", `{"version":1,"entries":[],"entries":[],"copies":[],"copiesComplete":true,"copyRecoveryRequired":false}`)
+	test("case variant", `{"version":1,"Entries":[],"copies":[],"copiesComplete":true,"copyRecoveryRequired":false}`)
+	test("unknown field", `{"version":1,"entries":[],"copies":[],"copiesComplete":true,"copyRecoveryRequired":false,"unexpected":true}`)
+	test("duplicate marker model", `{"version":1,"entries":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","engine":"llamacpp","model":"one","model":"two","contentKey":"two","naming":"exact"}],"copies":[],"copiesComplete":true,"copyRecoveryRequired":false}`)
 	test("oversize journal", strings.Repeat(" ", modeldownload.MaxJournalBytes+1))
 }
 
@@ -186,6 +186,162 @@ func TestModelDownloadJournalSerializesCrossEnginePublication(t *testing.T) {
 
 // All effects below are callbacks over private journal files. No executor,
 // native engine, model store, listener or transfer is started by these cases.
+func TestOwnerEvidenceCopyAdmissionBaseline(t *testing.T) {
+	test := func(name, journal string, wantAdmission bool) {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := newModelDownloadStore(dir)
+			if journal == "unreadable" {
+				if err := os.Mkdir(store.path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else if journal != "" {
+				if err := os.WriteFile(store.path, []byte(journal), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			source := newOpID()
+			d := newModelDownloads(source, dir, map[string]string{"llamacpp": engines.ModelNamingExact})
+			registry := NewRegistry()
+			registry.engines["llamacpp"] = &Manifest{Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}
+			m := &Manager{exec: &Executor{switchIncarnation: source}, copyJournal: d, copyRegistry: registry}
+			p := copyRequest{OpID: newOpID(), Engine: "llamacpp", Model: "private-model", SourceNodeID: "source", DestinationNodeID: "destination"}
+			ctx, release, err := m.reserveCopy(context.Background(), p)
+			if err != nil {
+				t.Fatalf("reserve: %v", err)
+			}
+			defer release()
+			effects := 0
+			_, err = m.copyWithEvidence(ctx, p, "destination", func() (copyModelResult, error) {
+				effects++
+				_, copies, complete, _, loadErr := d.store.loadJournal()
+				if loadErr != nil {
+					t.Fatalf("load before effect: %v", loadErr)
+				}
+				marker := copies[p.OpID]
+				if complete || len(copies) != 1 || marker.OpID != p.OpID || marker.Engine != p.Engine || marker.Model != p.Model || marker.ContentKey != p.Model || marker.Role != "destination" || marker.OwnerNodeID != "destination" || marker.SourceNodeID != p.SourceNodeID || marker.DestinationNodeID != p.DestinationNodeID || marker.ManagerIncarnation != source || marker.Phase != "unsafe" {
+					t.Fatalf("before effect: marker = %+v, complete = %v", marker, complete)
+				}
+				return copyModelResult{Engine: p.Engine, Model: p.Model, Files: 1, BytesTotal: 10, BytesCopied: 10}, nil
+			})
+			if !wantAdmission {
+				if err == nil || effects != 0 {
+					t.Fatalf("unsafe journal: error = %v, effects = %d", err, effects)
+				}
+				return
+			}
+			if err != nil || effects != 1 {
+				t.Fatalf("copy: error = %v, effects = %d", err, effects)
+			}
+			release()
+			if r := m.ownerReservations(); r.Complete || r.Busy.Known {
+				t.Fatalf("incomplete history authorized readiness: %+v", r)
+			}
+			_, copies, complete, _, err := d.store.loadJournal()
+			if err != nil || complete || len(copies) != 0 {
+				t.Fatalf("terminal journal: copies = %+v, complete = %v, error = %v", copies, complete, err)
+			}
+			download := reserveModelDownload(t, d, "llamacpp", "download", engines.ModelNamingExact)
+			if _, err := d.changeMarker(download, false); err != nil {
+				t.Fatalf("download publication: %v", err)
+			}
+			if r := m.ownerReservations(); r.Complete {
+				t.Fatalf("download publication completed history: %+v", r)
+			}
+			successor := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
+			_, copies, complete, _, err = successor.store.loadJournal()
+			if err != nil || complete || len(copies) != 0 {
+				t.Fatalf("reloaded journal: copies = %+v, complete = %v, error = %v", copies, complete, err)
+			}
+			if r := (&Manager{exec: &Executor{switchIncarnation: successor.source}, copyJournal: successor}).ownerReservations(); r.Complete {
+				t.Fatalf("historical baseline became complete: %+v", r)
+			}
+		})
+	}
+	test("missing journal admits copy", "", true)
+	test("current incomplete journal admits copy", `{"version":1,"entries":[],"copies":[],"copiesComplete":false,"copyRecoveryRequired":false}`, true)
+	test("old download-only journal refuses copy", `{"version":1,"entries":[]}`, false)
+	test("previous current shape refuses copy", `{"version":1,"entries":[],"copies":[],"copiesComplete":true}`, false)
+	test("malformed journal refuses copy", `{`, false)
+	test("unreadable journal refuses copy", "unreadable", false)
+	uncertain := func(name string, publication int) {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := newModelDownloadStore(dir)
+			if _, _, err := store.save(nil, nil, true, false); err != nil {
+				t.Fatal(err)
+			}
+			d := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
+			registry := NewRegistry()
+			registry.engines["llamacpp"] = &Manifest{Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}
+			m := &Manager{copyJournal: d, copyRegistry: registry}
+			p := copyRequest{OpID: newOpID(), Engine: "llamacpp", Model: "private-model", SourceNodeID: "source", DestinationNodeID: "destination"}
+			writes := 0
+			d.store.replace.SyncDir = func(string) error {
+				writes++
+				if writes == publication {
+					return errors.New("injected sync failure")
+				}
+				return nil
+			}
+			ctx, release, err := m.reserveCopy(context.Background(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			effects := 0
+			effect := func() (copyModelResult, error) {
+				effects++
+				return copyModelResult{Engine: p.Engine, Model: p.Model, Files: 1, BytesTotal: 10, BytesCopied: 10}, nil
+			}
+			_, err = m.copyWithEvidence(ctx, p, "destination", effect)
+			release()
+			if err == nil || effects != publication-1 {
+				t.Fatalf("uncertain publication: error = %v, effects = %d", err, effects)
+			}
+			d.store.replace.SyncDir = nil
+			p.OpID, p.Model = newOpID(), "other-model"
+			ctx, release, err = m.reserveCopy(context.Background(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			_, err = m.copyWithEvidence(ctx, p, "destination", effect)
+			if err == nil || effects != publication-1 {
+				t.Fatalf("later copy: error = %v, effects = %d", err, effects)
+			}
+			release()
+			// A later download publication carries the retained uncertainty to disk.
+			download := reserveModelDownload(t, d, "llamacpp", "download", engines.ModelNamingExact)
+			if _, err := d.changeMarker(download, false); err != nil {
+				t.Fatalf("publish download alongside uncertainty: %v", err)
+			}
+			_, retained, complete, recovery, err := d.store.loadJournal()
+			if err != nil || !complete || !recovery || len(retained) != 2-publication {
+				t.Fatalf("persisted uncertainty: copies = %+v, complete = %v, recovery = %v, error = %v", retained, complete, recovery, err)
+			}
+			for _, marker := range retained {
+				if marker.Phase != "uncertain" {
+					t.Fatalf("lost uncertain marker phase: %q", marker.Phase)
+				}
+			}
+			successor := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
+			m.copyJournal = successor
+			p.OpID, p.Model = newOpID(), "after-restart"
+			ctx, release, err = m.reserveCopy(context.Background(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			_, err = m.copyWithEvidence(ctx, p, "destination", effect)
+			if !errors.Is(err, errDownloadRecovery) || effects != publication-1 || !successor.copyRecoveryRequired {
+				t.Fatalf("reloaded uncertainty: error = %v, effects = %d, recovery = %v", err, effects, successor.copyRecoveryRequired)
+			}
+		})
+	}
+	uncertain("landed uncertain addition refuses later copy", 1)
+	uncertain("landed uncertain removal refuses later copy", 2)
+}
+
 func TestOwnerEvidenceCopyRetention(t *testing.T) {
 	type fixture struct {
 		manager   *Manager
@@ -197,7 +353,7 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		store := newModelDownloadStore(dir)
-		if _, _, err := store.save(nil, nil, true); err != nil {
+		if _, _, err := store.save(nil, nil, true, false); err != nil {
 			t.Fatalf("seed explicit private baseline: %v", err)
 		}
 		d := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
@@ -220,7 +376,7 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 	}
 	read := func(t *testing.T, d *modelDownloads) (map[downloadContentKey]modelDownloadMarker, map[string]modelCopyMarker, bool) {
 		t.Helper()
-		downloads, copies, complete, err := d.store.loadJournal()
+		downloads, copies, complete, _, err := d.store.loadJournal()
 		if err != nil {
 			t.Fatalf("load journal: %v", err)
 		}
@@ -237,7 +393,7 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				_, err := f.manager.copyWithEvidence(ctx, f.request, f.self, func() (copyModelResult, error) {
-					_, copies, complete, loadErr := f.downloads.store.loadJournal()
+					_, copies, complete, _, loadErr := f.downloads.store.loadJournal()
 					if loadErr != nil {
 						return copyModelResult{}, loadErr
 					}
@@ -287,7 +443,7 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 			stopped := errors.New("synthetic copy effect stopped")
 			m.copyEffect = func(ctx context.Context, p copyRequest, owner string, _ func(copyProgress)) (copyModelResult, error) {
 				effects <- struct{}{}
-				_, copies, complete, err := f.downloads.store.loadJournal()
+				_, copies, complete, _, err := f.downloads.store.loadJournal()
 				if err != nil {
 					return copyModelResult{}, err
 				}
@@ -572,7 +728,7 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 	t.Run("missing historical baseline stays unknown after download writes", func(t *testing.T) {
 		dir := t.TempDir()
 		d := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
-		if !d.copyRecoveryRequired {
+		if d.copiesComplete || d.copyRecoveryRequired {
 			t.Fatal("missing state fabricated copy safety")
 		}
 		a := reserveModelDownload(t, d, "llamacpp", "download", engines.ModelNamingExact)
@@ -581,7 +737,7 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 		}
 		_, _, complete := read(t, d)
 		successor := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
-		if complete || !successor.copyRecoveryRequired {
+		if complete || successor.copiesComplete || successor.copyRecoveryRequired {
 			t.Fatal("download write fabricated historical completeness")
 		}
 		registry := NewRegistry()
@@ -594,12 +750,15 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 		}
 		defer release()
 		effects := 0
-		if _, err := m.copyWithEvidence(ctx, p, "destination", func() (copyModelResult, error) { effects++; return result(p), nil }); !errors.Is(err, errDownloadRecovery) || effects != 0 {
+		if _, err := m.copyWithEvidence(ctx, p, "destination", func() (copyModelResult, error) { effects++; return result(p), nil }); err != nil || effects != 1 {
 			t.Fatalf("historical admission = %v, effects = %d", err, effects)
+		}
+		if m.ownerReservations().Complete {
+			t.Fatal("completed copy fabricated historical completeness")
 		}
 	})
 
-	t.Run("malformed and old shapes fail closed without rewriting", func(t *testing.T) {
+	t.Run("malformed shapes fail closed without rewriting", func(t *testing.T) {
 		f := setup(t, "destination")
 		ctx, _ := reserve(t, f)
 		if _, err := f.manager.copyWithEvidence(ctx, f.request, f.self, func() (copyModelResult, error) { return copyModelResult{}, copyUnknown(io.EOF) }); err == nil {
@@ -624,14 +783,23 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 				if !d.recoveryRequired || !d.copyRecoveryRequired {
 					t.Fatal("malformed recovery claimed complete")
 				}
+				marker := journal.Copies[0]
+				marker.OpID, marker.ManagerIncarnation = newOpID(), d.source
+				if err := d.changeCopyMarker(marker, false); !errors.Is(err, errDownloadRecovery) {
+					t.Fatalf("malformed journal admitted a new copy marker: %v", err)
+				}
 				got, err := os.ReadFile(path)
 				if err != nil || !bytes.Equal(got, input) {
 					t.Fatalf("recovery rewrote journal: %v", err)
 				}
 			})
 		}
-		malformed("old shape", []byte(`{"version":1,"entries":[]}`))
 		malformed("missing completeness", bytes.Replace(data, []byte(`,"copiesComplete":true`), nil, 1))
+		malformed("old download-only shape", []byte(`{"version":1,"entries":[]}`))
+		malformed("missing copy recovery", bytes.Replace(data, []byte(`,"copyRecoveryRequired":false`), nil, 1))
+		malformed("null copy recovery", bytes.Replace(data, []byte(`"copyRecoveryRequired":false`), []byte(`"copyRecoveryRequired":null`), 1))
+		malformed("nonboolean copy recovery", bytes.Replace(data, []byte(`"copyRecoveryRequired":false`), []byte(`"copyRecoveryRequired":"false"`), 1))
+		malformed("unknown journal field", bytes.Replace(data, []byte(`"copyRecoveryRequired":false`), []byte(`"copyRecoveryRequired":false,"extra":true`), 1))
 		malformed("null copies", bytes.Replace(data, []byte(`"copies":[`), []byte(`"copies":null,"ignored":[`), 1))
 		malformed("duplicate role", bytes.Replace(data, []byte(`"role":"destination"`), []byte(`"role":"controller","role":"destination"`), 1))
 		malformed("case variant role", bytes.Replace(data, []byte(`"role":`), []byte(`"Role":`), 1))

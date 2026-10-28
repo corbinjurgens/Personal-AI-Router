@@ -74,7 +74,7 @@ func copyControlManager(t *testing.T, exec *Executor, dir string) *Manager {
 	// Establish this private fixture's explicit quiescent baseline before
 	// Manager admission; production never infers one from missing state.
 	d := exec.downloads
-	if _, _, err := d.store.save(d.unsafe, d.copies, true); err != nil {
+	if _, _, err := d.store.save(d.unsafe, d.copies, true, false); err != nil {
 		t.Fatal(err)
 	}
 	d.copyRecoveryRequired = false
@@ -499,7 +499,7 @@ func TestModelCopyControlVerifiedRetryPrecedesSourceLookup(t *testing.T) {
 		m := copyControlManager(t, dst, f.dir)
 		copyControlDirectory(m, copyControlNode(t, "destination-host", "destination-cert", nil))
 		p := copyRequest{OpID: strings.Repeat("a", 32), SourceNodeID: "offline-source-not-in-directory", DestinationNodeID: "destination-host", Engine: "llamacpp", Model: reportedCopyAlias, ExpectedExportID: src.list.ExportID}
-		_, copies, complete, err := m.copyJournal.store.loadJournal()
+		_, copies, complete, _, err := m.copyJournal.store.loadJournal()
 		if err != nil || !complete || len(copies) != 0 {
 			t.Fatalf("fresh complete copy baseline = %+v / %v / %v", copies, complete, err)
 		}
