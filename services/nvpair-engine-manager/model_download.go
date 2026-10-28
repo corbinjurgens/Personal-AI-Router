@@ -177,17 +177,26 @@ type modelDownloadAttempt struct {
 	key    downloadContentKey
 	naming string
 	entry  modeldownload.Entry
+	// Marker publications and terminal retirement, reserved before admission.
+	authorityHeld uint64
 }
 
 // modelDownloads is a bounded content gate, not an execution owner. Callers
 // release mu before notifications, I/O and any other owner's wait. journalMu
 // orders capture/save/adopt across engines and is acquired outside mu.
 type modelDownloads struct {
-	mu                   sync.Mutex
-	journalMu            sync.Mutex
-	source               string
-	revision             uint64
-	heldRevisions        uint64
+	mu                  sync.Mutex
+	journalMu           sync.Mutex
+	source              string
+	revision            uint64
+	heldRevisions       uint64
+	authorityGeneration uint64
+	authorityHeld       uint64
+	authorityUncertain  bool
+	// Current-run marker additions reserve their eventual removal in both
+	// revision domains. Loaded markers retain their original provenance.
+	copyRetirements      map[string]bool
+	unsafeOrigins        map[downloadContentKey]string
 	recoveryRequired     bool
 	copyRecoveryRequired bool
 	active               map[downloadContentKey]*modelDownloadAttempt
@@ -201,7 +210,7 @@ type modelDownloads struct {
 }
 
 func newModelDownloads(source, baseDir string, naming map[string]string) *modelDownloads {
-	d := &modelDownloads{source: source, active: make(map[downloadContentKey]*modelDownloadAttempt), unsafe: make(map[downloadContentKey]modelDownloadMarker), outcomes: make(map[downloadContentKey]modeldownload.Entry), writers: make(map[string]bool), readers: make(map[string]int), store: newModelDownloadStore(baseDir)}
+	d := &modelDownloads{source: source, active: make(map[downloadContentKey]*modelDownloadAttempt), unsafe: make(map[downloadContentKey]modelDownloadMarker), outcomes: make(map[downloadContentKey]modeldownload.Entry), writers: make(map[string]bool), readers: make(map[string]int), store: newModelDownloadStore(baseDir), copyRetirements: make(map[string]bool), unsafeOrigins: make(map[downloadContentKey]string)}
 	markers, copies, copiesComplete, err := d.store.loadJournal()
 	d.copies = copies
 	d.copyRecoveryRequired = !copiesComplete
@@ -222,6 +231,22 @@ func newModelDownloads(source, baseDir string, naming map[string]string) *modelD
 		}
 	}
 	return d
+}
+
+// Caller holds mu. Reserve all mandatory future transitions before admitting
+// work. Progress notifications never consume authority retirement capacity.
+func (d *modelDownloads) reserveAuthorityLocked(steps uint64) bool {
+	remaining := math.MaxUint64 - d.authorityGeneration
+	if remaining < d.authorityHeld || remaining-d.authorityHeld < steps {
+		return false
+	}
+	d.authorityHeld += steps
+	return true
+}
+
+func (d *modelDownloads) advanceAuthorityLocked() {
+	d.authorityHeld--
+	d.authorityGeneration++
 }
 
 func (d *modelDownloads) advanceLocked() error {
@@ -259,12 +284,16 @@ func (d *modelDownloads) reserve(engine, model, naming string) (*modelDownloadAt
 	if _, retained := d.unsafe[key]; !retained && slots >= modeldownload.MaxUnsafeEntries {
 		return nil, errDownloadCapacity
 	}
+	if !d.reserveAuthorityLocked(5) {
+		return nil, errDownloadCapacity
+	}
 	if err := d.advanceLocked(); err != nil {
 		return nil, err
 	}
 	d.removeRecentLocked(key)
-	a := &modelDownloadAttempt{key: key, naming: naming, entry: modeldownload.Entry{ID: newOpID(), Engine: engine, Model: model, Phase: "queued", BlocksReadiness: true}}
+	a := &modelDownloadAttempt{key: key, naming: naming, entry: modeldownload.Entry{ID: newOpID(), Engine: engine, Model: model, Phase: "queued", BlocksReadiness: true}, authorityHeld: 4}
 	d.active[key] = a
+	d.advanceAuthorityLocked()
 	d.outcomes[key] = a.entry
 	return a, nil
 }
@@ -295,6 +324,16 @@ func (d *modelDownloads) update(a *modelDownloadAttempt, phase string, percent *
 	}
 	if math.MaxUint64-d.revision <= reserved {
 		return errDownloadCapacity
+	}
+	if a.entry.Phase != phase {
+		if a.authorityHeld <= 1 {
+			if !d.reserveAuthorityLocked(1) {
+				return errDownloadCapacity
+			}
+			a.authorityHeld++
+		}
+		a.authorityHeld--
+		d.advanceAuthorityLocked()
 	}
 	if err := d.advanceLocked(); err != nil {
 		return err
@@ -343,6 +382,9 @@ func (d *modelDownloads) finishSnapshot(a *modelDownloadAttempt, phase, reason, 
 	a.entry.Phase, a.entry.Reason, a.entry.Persistence = phase, reason, persistence
 	a.entry.BlocksReadiness, a.entry.Percent = blocked, nil
 	delete(d.active, a.key)
+	d.advanceAuthorityLocked()
+	d.authorityHeld -= a.authorityHeld - 1
+	a.authorityHeld = 0
 	d.outcomes[a.key] = a.entry
 	if !blocked {
 		d.recent = append(d.recent, a.key)
@@ -386,6 +428,19 @@ func (d *modelDownloads) changeMarker(a *modelDownloadAttempt, remove bool) (unc
 		d.mu.Unlock()
 		return false, errDownloadRecovery
 	}
+	if d.active[a.key] != a {
+		d.mu.Unlock()
+		return false, errDownloadBusy
+	}
+	// Keep the terminal step untouched. Retries beyond the normal add/remove
+	// pair obtain extra capacity before any journal effect.
+	if a.authorityHeld <= 1 {
+		if !d.reserveAuthorityLocked(1) {
+			d.mu.Unlock()
+			return false, errDownloadCapacity
+		}
+		a.authorityHeld++
+	}
 	next := make(map[downloadContentKey]modelDownloadMarker, len(d.unsafe)+1)
 	for key, marker := range d.unsafe {
 		next[key] = marker
@@ -401,6 +456,17 @@ func (d *modelDownloads) changeMarker(a *modelDownloadAttempt, remove bool) (unc
 	if landed {
 		d.mu.Lock()
 		d.unsafe = next
+		if remove {
+			delete(d.unsafeOrigins, a.key)
+		} else {
+			if d.unsafeOrigins == nil {
+				d.unsafeOrigins = make(map[downloadContentKey]string)
+			}
+			d.unsafeOrigins[a.key] = d.source
+		}
+		d.authorityUncertain = d.authorityUncertain || uncertain
+		a.authorityHeld--
+		d.advanceAuthorityLocked()
 		d.mu.Unlock()
 	}
 	return uncertain, err
@@ -418,6 +484,10 @@ func (d *modelDownloads) resolveMarker(key downloadContentKey, id string) bool {
 		d.mu.Unlock()
 		return false
 	}
+	if !d.reserveAuthorityLocked(1) {
+		d.mu.Unlock()
+		return false
+	}
 	d.heldRevisions++
 	next := make(map[downloadContentKey]modelDownloadMarker, len(d.unsafe))
 	for k, value := range d.unsafe {
@@ -432,9 +502,13 @@ func (d *modelDownloads) resolveMarker(key downloadContentKey, id string) bool {
 	defer d.mu.Unlock()
 	d.heldRevisions--
 	if !landed {
+		d.authorityHeld--
 		return false
 	}
 	d.unsafe = next
+	delete(d.unsafeOrigins, key)
+	d.authorityUncertain = d.authorityUncertain || uncertain
+	d.advanceAuthorityLocked()
 	if d.active[key] == nil {
 		entry := d.outcomes[key]
 		entry.BlocksReadiness = false
@@ -473,11 +547,22 @@ func (d *modelDownloads) changeCopyMarker(marker modelCopyMarker, remove bool) e
 		d.mu.Unlock()
 		return errDownloadBusy
 	}
-	if math.MaxUint64-d.revision <= d.reservedRevisionsLocked() {
+	reservedRetirement := remove && d.copyRetirements[marker.OpID]
+	steps := uint64(1)
+	if !remove {
+		steps = 2
+	}
+	if !reservedRetirement && (math.MaxUint64-d.revision < d.reservedRevisionsLocked() || math.MaxUint64-d.revision-d.reservedRevisionsLocked() < steps) {
 		d.mu.Unlock()
 		return errDownloadCapacity
 	}
-	d.heldRevisions++
+	if !reservedRetirement {
+		if !d.reserveAuthorityLocked(steps) {
+			d.mu.Unlock()
+			return errDownloadCapacity
+		}
+		d.heldRevisions += steps
+	}
 	next, downloads := maps.Clone(d.copies), maps.Clone(d.unsafe)
 	if next == nil {
 		next = make(map[string]modelCopyMarker)
@@ -491,9 +576,19 @@ func (d *modelDownloads) changeCopyMarker(marker modelCopyMarker, remove bool) e
 	landed, uncertain, err := d.store.save(downloads, next, true)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.heldRevisions--
 	if landed {
+		d.heldRevisions--
+		d.advanceAuthorityLocked()
 		d.copies = next
+		if remove {
+			delete(d.copyRetirements, marker.OpID)
+		} else {
+			if d.copyRetirements == nil {
+				d.copyRetirements = make(map[string]bool)
+			}
+			d.copyRetirements[marker.OpID] = true
+		}
+		d.authorityUncertain = d.authorityUncertain || uncertain
 		if uncertain {
 			d.copyRecoveryRequired = true
 			if !remove {
@@ -502,6 +597,9 @@ func (d *modelDownloads) changeCopyMarker(marker modelCopyMarker, remove bool) e
 			}
 		}
 		d.revision++
+	} else if !reservedRetirement {
+		d.heldRevisions -= steps
+		d.authorityHeld -= steps
 	}
 	return err
 }
@@ -535,10 +633,25 @@ func (d *modelDownloads) acquireRead(key downloadContentKey, ownedWriter bool) (
 		d.mu.Unlock()
 		return nil, errDownloadBusy
 	}
+	if !d.reserveAuthorityLocked(2) {
+		d.mu.Unlock()
+		return nil, errDownloadCapacity
+	}
 	d.readers[key.engine]++
+	d.advanceAuthorityLocked()
 	d.mu.Unlock()
 	var once sync.Once
-	return func() { once.Do(func() { d.mu.Lock(); d.readers[key.engine]--; d.mu.Unlock() }) }, nil
+	return func() {
+		once.Do(func() {
+			d.mu.Lock()
+			d.readers[key.engine]--
+			if d.readers[key.engine] == 0 {
+				delete(d.readers, key.engine)
+			}
+			d.advanceAuthorityLocked()
+			d.mu.Unlock()
+		})
+	}, nil
 }
 
 func (d *modelDownloads) acquireWrite(engine string) (func(), error) {
@@ -547,8 +660,20 @@ func (d *modelDownloads) acquireWrite(engine string) (func(), error) {
 		d.mu.Unlock()
 		return nil, errDownloadBusy
 	}
+	if !d.reserveAuthorityLocked(2) {
+		d.mu.Unlock()
+		return nil, errDownloadCapacity
+	}
 	d.writers[engine] = true
+	d.advanceAuthorityLocked()
 	d.mu.Unlock()
 	var once sync.Once
-	return func() { once.Do(func() { d.mu.Lock(); delete(d.writers, engine); d.mu.Unlock() }) }, nil
+	return func() {
+		once.Do(func() {
+			d.mu.Lock()
+			delete(d.writers, engine)
+			d.advanceAuthorityLocked()
+			d.mu.Unlock()
+		})
+	}, nil
 }

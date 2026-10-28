@@ -18,10 +18,140 @@ import (
 
 	"nvpair-shared/buildapply"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modeldownload"
 )
 
 var errOwnerAdmissionCapacity = errors.New("engine owner admission generation exhausted")
 var errOwnerEvidenceBusy = errors.New("engine owner evidence busy")
+
+// A comparison token for one read, never an admission pin. Percent-only
+// notifications change DownloadRevision without changing ContentGeneration.
+type ownerReservationToken struct {
+	Incarnation, DownloadSource                       string
+	CopyRevision, DownloadRevision, ContentGeneration uint64
+}
+
+type ownerDownloadReservation struct {
+	Incarnation string // Empty for retained markers whose format has no origin.
+	Entry       modeldownload.Entry
+}
+
+type ownerUnsafeDownload struct {
+	Incarnation string
+	Marker      modelDownloadMarker
+}
+
+type ownerCopyReservation struct {
+	copyRequest
+	Incarnation        string
+	Role               string
+	PendingPublication bool
+	Progress           *copyProgress
+}
+
+type ownerReservationEvidence struct {
+	Token                                  ownerReservationToken
+	Complete                               bool
+	Busy                                   buildapply.Observation[bool]
+	Reason                                 string
+	Shutdown                               bool
+	RecoveryRequired, CopyRecoveryRequired bool
+	Uncertain                              bool
+	ActiveDownloads                        []ownerDownloadReservation
+	UnsafeDownloads                        []ownerUnsafeDownload
+	Copies                                 []ownerCopyReservation
+	RetainedCopies                         []modelCopyMarker
+	Readers                                map[string]int
+	Writers                                []string
+}
+
+// This is the only joint reservation capture. The lock order is copyMu then
+// downloads.mu. Mutation paths take these separately and release them before
+// journal I/O, transport, notifications, cancellation or completion callbacks.
+// Both gate and list are evaluated here, from precisely the same owner state.
+func (m *Manager) ownerReservations() ownerReservationEvidence {
+	r := ownerReservationEvidence{Reason: "busy"}
+	if m.exec != nil {
+		r.Token.Incarnation = m.exec.switchIncarnation
+	}
+	if !m.copyMu.TryLock() {
+		return r
+	}
+	defer m.copyMu.Unlock()
+	r.Token.CopyRevision, r.Shutdown = m.copyRevision, m.copiesClosed
+	for _, entry := range m.copies {
+		copy := ownerCopyReservation{copyRequest: entry.copyRequest, Incarnation: r.Token.Incarnation, Role: entry.role, PendingPublication: entry.pendingPublication}
+		copy.Progress = cloneCopyProgress(entry.Progress)
+		if copy.Progress != nil {
+			// Free-form diagnostics and filenames are not reservation authority.
+			copy.Progress.Message, copy.Progress.File = "", ""
+		}
+		r.Copies = append(r.Copies, copy)
+	}
+	busy := r.Shutdown || len(r.Copies) != 0
+	d := m.copyJournal
+	if d == nil || !d.mu.TryLock() {
+		if busy {
+			r.Busy = buildapply.Known(true)
+		}
+		return r
+	}
+	defer d.mu.Unlock()
+	r.Token.DownloadSource, r.Token.DownloadRevision, r.Token.ContentGeneration = d.source, d.revision, d.authorityGeneration
+	r.RecoveryRequired, r.CopyRecoveryRequired, r.Uncertain = d.recoveryRequired, d.copyRecoveryRequired, d.authorityUncertain
+	r.Complete = !r.RecoveryRequired && !r.CopyRecoveryRequired && !r.Uncertain && d.source != "" && r.Token.Incarnation == d.source
+	r.Reason = ""
+	for _, copy := range r.Copies {
+		if copy.Role != "controller" && copy.Role != "destination" {
+			r.Complete = false
+		}
+	}
+	for _, attempt := range d.active {
+		entry := attempt.entry
+		entry.Percent = cloneDownloadPercent(entry.Percent)
+		r.ActiveDownloads = append(r.ActiveDownloads, ownerDownloadReservation{Incarnation: d.source, Entry: entry})
+	}
+	for key, marker := range d.unsafe {
+		origin := d.unsafeOrigins[key]
+		r.UnsafeDownloads = append(r.UnsafeDownloads, ownerUnsafeDownload{Incarnation: origin, Marker: marker})
+		active := d.active[key]
+		if origin == "" || active == nil || active.entry.ID != marker.ID {
+			r.Complete = false
+		}
+	}
+	for _, marker := range d.copies {
+		r.RetainedCopies = append(r.RetainedCopies, marker)
+		live := m.copies[marker.OpID]
+		identity := copyRequest{OpID: marker.OpID, Engine: marker.Engine, Model: marker.Model, SourceNodeID: marker.SourceNodeID, DestinationNodeID: marker.DestinationNodeID, ExpectedExportID: marker.ExpectedExportID}
+		if marker.ManagerIncarnation != d.source || marker.Phase == "uncertain" || live == nil || live.copyRequest != identity || live.role != marker.Role {
+			r.Complete = false
+		}
+	}
+	r.Readers = make(map[string]int)
+	for engine, count := range d.readers {
+		if count != 0 {
+			r.Readers[engine] = count
+		}
+	}
+	for engine, writing := range d.writers {
+		if writing {
+			r.Writers = append(r.Writers, engine)
+		}
+	}
+	busy = busy || len(r.ActiveDownloads) != 0 || len(r.UnsafeDownloads) != 0 || len(r.RetainedCopies) != 0 || len(r.Readers) != 0 || len(r.Writers) != 0
+	if busy || r.Complete {
+		r.Busy = buildapply.Known(busy)
+	}
+	if !r.Complete {
+		r.Reason = "content_authority_unknown"
+	}
+	sort.Slice(r.Copies, func(i, j int) bool { return r.Copies[i].OpID < r.Copies[j].OpID })
+	sort.Slice(r.ActiveDownloads, func(i, j int) bool { return r.ActiveDownloads[i].Entry.ID < r.ActiveDownloads[j].Entry.ID })
+	sort.Slice(r.UnsafeDownloads, func(i, j int) bool { return r.UnsafeDownloads[i].Marker.ID < r.UnsafeDownloads[j].Marker.ID })
+	sort.Slice(r.RetainedCopies, func(i, j int) bool { return r.RetainedCopies[i].OpID < r.RetainedCopies[j].OpID })
+	sort.Strings(r.Writers)
+	return r
+}
 
 func (e *Executor) ownerAdmissionCapacityLocked() bool {
 	return math.MaxUint64-e.ownerAdmissionGeneration >= e.ownerAdmissionHeld &&
@@ -270,6 +400,9 @@ func (e *Executor) ownerReservationNames() ([]string, bool) {
 	}
 	for k := range d.unsafe {
 		names[k.engine] = true
+	}
+	for _, marker := range d.copies {
+		names[marker.Engine] = true
 	}
 	for k := range d.outcomes {
 		names[k.engine] = true

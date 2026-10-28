@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -75,6 +76,8 @@ type activeCopy struct {
 	cancel   context.CancelFunc
 	// Admission is visible while the durable owner publishes its marker.
 	pendingPublication bool
+	role               string
+	authorityHeld      uint64
 }
 
 type copyCapabilities struct {
@@ -247,17 +250,25 @@ func (m *Manager) reserveCopy(parent context.Context, p copyRequest) (context.Co
 	if len(m.copies) >= maxActiveCopies {
 		return nil, nil, copyConflict("eight model copies are already active")
 	}
+	// Admission, identity binding, role binding, publication and retirement.
+	// Preserve shutdown even if every remaining revision is reserved.
+	if math.MaxUint64-m.copyRevision <= m.copyHeld || math.MaxUint64-m.copyRevision-m.copyHeld-1 < 5 {
+		return nil, nil, errOwnerAdmissionCapacity
+	}
 	ctx, cancel := context.WithCancel(parent)
-	entry := &activeCopy{copyRequest: p, cancel: cancel, pendingPublication: true}
+	entry := &activeCopy{copyRequest: p, cancel: cancel, pendingPublication: true, authorityHeld: 4}
 	if m.copies == nil {
 		m.copies = map[string]*activeCopy{}
 	}
 	m.copies[p.OpID] = entry
+	m.copyRevision++
+	m.copyHeld += entry.authorityHeld
 	return ctx, func() {
 		cancel()
 		m.copyMu.Lock()
 		if m.copies[p.OpID] == entry {
 			delete(m.copies, p.OpID)
+			m.retireCopyAuthorityLocked(entry)
 		}
 		m.copyMu.Unlock()
 	}, nil
@@ -276,16 +287,50 @@ func (m *Manager) cancelCopy(opID string) bool {
 
 func (m *Manager) stopCopies() {
 	m.copyMu.Lock()
-	m.copiesClosed = true
+	if !m.copiesClosed {
+		m.copiesClosed = true
+		m.copyRevision++
+	}
 	entries := make([]*activeCopy, 0, len(m.copies))
 	for id, entry := range m.copies {
 		entries = append(entries, entry)
 		delete(m.copies, id)
+		m.retireCopyAuthorityLocked(entry)
 	}
 	m.copyMu.Unlock()
 	for _, entry := range entries {
 		entry.cancel()
 	}
+}
+
+func (m *Manager) retireCopyAuthorityLocked(entry *activeCopy) {
+	m.copyHeld -= entry.authorityHeld
+	entry.authorityHeld = 0
+	m.copyRevision++
+}
+
+// These bindings happen once in the existing execution path. Their steps were
+// reserved at admission, independently of progress publication.
+func (m *Manager) bindCopyAuthorityLocked(entry *activeCopy, p copyRequest, role string) error {
+	if entry.copyRequest != p || entry.role != role {
+		reserved := uint64(1)
+		if entry.pendingPublication {
+			reserved++
+		}
+		if entry.authorityHeld <= reserved {
+			remaining := math.MaxUint64 - m.copyRevision
+			if remaining <= m.copyHeld || remaining-m.copyHeld <= 1 {
+				return errOwnerAdmissionCapacity
+			}
+			entry.authorityHeld++
+			m.copyHeld++
+		}
+		entry.copyRequest, entry.role = p, role
+		entry.authorityHeld--
+		m.copyHeld--
+		m.copyRevision++
+	}
+	return nil
 }
 
 // The callback is the synchronous copy completion owner: it returns only after
@@ -322,7 +367,13 @@ func (m *Manager) copyWithEvidence(ctx context.Context, p copyRequest, self stri
 	m.copyMu.Lock()
 	entry := m.copies[p.OpID]
 	live := !m.copiesClosed && entry != nil && entry.copyRequest == p
+	if live {
+		err = m.bindCopyAuthorityLocked(entry, p, role)
+	}
 	m.copyMu.Unlock()
+	if err != nil {
+		return res, err
+	}
 	if !live {
 		return res, errDownloadBusy
 	}
@@ -331,8 +382,11 @@ func (m *Manager) copyWithEvidence(ctx context.Context, p copyRequest, self stri
 	}
 	m.copyMu.Lock()
 	live = !m.copiesClosed && m.copies[p.OpID] == entry
-	if live {
+	if live && entry.pendingPublication {
 		entry.pendingPublication = false
+		entry.authorityHeld--
+		m.copyHeld--
+		m.copyRevision++
 	}
 	m.copyMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -370,10 +424,24 @@ func (m *Manager) activeCopies() []activeCopy {
 	defer m.copyMu.Unlock()
 	out := make([]activeCopy, 0, len(m.copies))
 	for _, entry := range m.copies {
-		out = append(out, *entry)
+		copy := activeCopy{copyRequest: entry.copyRequest, pendingPublication: entry.pendingPublication, role: entry.role}
+		copy.Progress = cloneCopyProgress(entry.Progress)
+		out = append(out, copy)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].OpID < out[j].OpID })
 	return out
+}
+
+func cloneCopyProgress(progress *copyProgress) *copyProgress {
+	if progress == nil {
+		return nil
+	}
+	copy := *progress
+	if progress.DownloadState != nil {
+		state := progress.DownloadState.Clone()
+		copy.DownloadState = &state
+	}
+	return &copy
 }
 
 // Scanner includes its registry-owned self record in discovery:nodes. Match
@@ -511,9 +579,12 @@ func (m *Manager) executeCopy(parent context.Context, p copyRequest, inbound boo
 	}
 	m.copyMu.Lock()
 	if entry := m.copies[p.OpID]; entry != nil {
-		entry.copyRequest = p
+		err = m.bindCopyAuthorityLocked(entry, p, entry.role)
 	}
 	m.copyMu.Unlock()
+	if err != nil {
+		return res, err
+	}
 	if authorize != nil {
 		if err := authorize(); err != nil {
 			return res, err
@@ -532,8 +603,7 @@ func (m *Manager) executeCopy(parent context.Context, p copyRequest, inbound boo
 		latest = cp
 		m.copyMu.Lock()
 		if entry := m.copies[p.OpID]; entry != nil {
-			snapshot := cp
-			entry.Progress = &snapshot
+			entry.Progress = cloneCopyProgress(&cp)
 		}
 		m.copyMu.Unlock()
 		// Every Manager publishes its own accepted work, including incoming
