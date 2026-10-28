@@ -240,10 +240,16 @@ func TestDynamicGPUReadingFromIORegistry(t *testing.T) {
 		t.Fatalf("dynamicGPUReadingFromIORegistry() error = %v", err)
 	}
 	apple := reading.stats["ioreg:2a"]
+	if !apple.Shared || apple.Memory != nil {
+		t.Fatalf("AGX did not alias system pool: %+v", apple)
+	}
 	if apple.VRAMUsed != 8<<30 || apple.UtilizationPct != 100 {
 		t.Fatalf("unexpected Apple stats: %+v", apple)
 	}
 	discrete := reading.stats["ioreg:63"]
+	if discrete.Memory == nil || discrete.Memory.ID != "ioreg:63" || discrete.Memory.Free.Bytes != "6442450944" || !discrete.Memory.Free.Valid {
+		t.Fatalf("discrete physical memory: %+v", discrete.Memory)
+	}
 	if discrete.VRAMUsed != 2<<30 || discrete.UtilizationPct != 25 {
 		t.Fatalf("unexpected discrete stats: %+v", discrete)
 	}

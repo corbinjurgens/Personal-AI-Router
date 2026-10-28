@@ -232,7 +232,7 @@ func detectGPUs() []GPUInfo {
 	}
 
 	var gpus []GPUInfo
-	for i := uint32(0); ; i++ {
+	for i := uint32(0); i < 64; i++ {
 		adapter, hr := enumAdapters1(factory, i)
 		if uint32(hr) == dxgiErrorNotFound {
 			break

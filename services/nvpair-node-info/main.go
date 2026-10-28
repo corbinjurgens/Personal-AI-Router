@@ -76,12 +76,13 @@ type MemoryInfo struct {
 }
 
 type NodeInfoResponse struct {
-	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
-	GPUs           []GPUInfo    `json:"GPUs"`
-	CPU            *CPUInfo     `json:"cpu,omitempty"`
-	Memory         *MemoryInfo  `json:"memory,omitempty"`
-	TelemetryValid bool         `json:"telemetryValid"`
-	MSSince        int64        `json:"msSince"`
+	MemoryObservation *noderec.MemoryObservation `json:"memoryObservation,omitempty"`
+	ServiceBuildID    buildinfo.ID               `json:"serviceBuildId,omitempty"`
+	GPUs              []GPUInfo                  `json:"GPUs"`
+	CPU               *CPUInfo                   `json:"cpu,omitempty"`
+	Memory            *MemoryInfo                `json:"memory,omitempty"`
+	TelemetryValid    bool                       `json:"telemetryValid"`
+	MSSince           int64                      `json:"msSince"`
 	// HostUUID is this node's stable per-host identity (the same value the
 	// node-scanner advertises as uuid= and the cluster uses as nodeUuid). It lets
 	// a consumer that reaches this node only over HTTP — notably a user-added
@@ -195,12 +196,13 @@ func buildResponseAt(gpus []GPUInfo, cpuStatic *CPUInfo, memTotal uint64, snap s
 
 	telemetryValid, msSince := telemetryStatus(snap.GPUSampledAt, now)
 	resp := NodeInfoResponse{
-		ServiceBuildID: serviceBuildID,
-		GPUs:           outGPUs,
-		TelemetryValid: telemetryValid,
-		MSSince:        msSince,
-		HostUUID:       hostUUID,
-		ClusterUUID:    clusterUUID,
+		MemoryObservation: responseMemory(snap),
+		ServiceBuildID:    serviceBuildID,
+		GPUs:              outGPUs,
+		TelemetryValid:    telemetryValid,
+		MSSince:           msSince,
+		HostUUID:          hostUUID,
+		ClusterUUID:       clusterUUID,
 	}
 	if cpuStatic != nil {
 		cpu := *cpuStatic

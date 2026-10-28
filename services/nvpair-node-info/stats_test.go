@@ -5,10 +5,96 @@ package main
 
 import (
 	"encoding/json"
+	"nvpair-shared/noderec"
 	"reflect"
 	"testing"
 	"time"
 )
+
+func init() { memoryClock = func() (uint64, error) { return 1000000000, nil } }
+
+func TestMemoryTelemetryDedicatedFactsRequireCurrentUsage(t *testing.T) {
+	const adapter = "luid_fixture"
+	previous := statsSnapshot{GPUSampledAt: time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC), GPU: map[string]gpuStat{
+		adapter: {VRAMUsed: 40, UtilizationPct: 50, memoryUsed: 40, memoryUsedValid: true},
+	}}
+	at := previous.GPUSampledAt.Add(time.Second)
+	for _, tc := range []struct {
+		name     string
+		sampled  map[string]gpuStat
+		wantFree string
+	}{
+		{"missing counters", nil, ""},
+		{"other adapter only", map[string]gpuStat{"other": {memoryUsed: 1, memoryUsedValid: true}}, ""},
+		{"utilization without usage", map[string]gpuStat{adapter: {UtilizationPct: 10}}, ""},
+		{"current usage", map[string]gpuStat{adapter: {memoryUsed: 30, memoryUsedValid: true}}, "70"},
+		{"known zero available", map[string]gpuStat{adapter: {memoryUsed: 100, memoryUsedValid: true}}, "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var next statsSnapshot
+			applyGPUStats(previous, &next, tc.sampled, time.Time{})
+			if next.GPU[adapter].VRAMUsed != 40 || next.GPUSampledAt != previous.GPUSampledAt {
+				t.Fatal("legacy display retention changed")
+			}
+			applyDedicatedMemoryFacts(&next, []GPUInfo{{statsKey: adapter, VramBytes: 100}}, tc.sampled, at, 100)
+			memory := next.GPU[adapter].Memory
+			if memory == nil || !memory.Total.Valid || !memory.Total.SampledAt.Equal(at) {
+				t.Fatal("current DXGI total was lost")
+			}
+			if memory.Free.Valid != (tc.wantFree != "") || memory.Free.Bytes != tc.wantFree {
+				t.Fatalf("available fact = %+v, wanted bytes %q", memory.Free, tc.wantFree)
+			}
+			if memory.Free.Valid && !memory.Free.SampledAt.Equal(at) {
+				t.Fatal("current usage has wrong sample time")
+			}
+		})
+	}
+}
+
+func TestMemoryTelemetrySystemFacts(t *testing.T) {
+	oldClock := memoryClock
+	t.Cleanup(func() { memoryClock = oldClock })
+	boot := uint64(1000000000)
+	memoryClock = func() (uint64, error) { return boot, nil }
+	snap := sampleSystemMemory(statsSnapshot{}, func() (uint64, uint64, string, bool) { return 100, 0, "fixture", true })
+	if snap.Memory == nil || !snap.Memory.Domains[0].Free.Valid || snap.Memory.Domains[0].Free.Bytes != "0" {
+		t.Fatalf("known zero lost: %+v", snap)
+	}
+	at := snap.Memory.Domains[0].Free.SampledAt
+	boot += 6000000000
+	failed := sampleSystemMemory(*snap, func() (uint64, uint64, string, bool) { return 0, 0, "", false })
+	view := responseMemory(*failed)
+	if view.Domains[0].Free.AgeMS != 6000 || !view.Domains[0].Free.SampledAt.Equal(at) {
+		t.Fatalf("failed read renewed sample: %+v", view)
+	}
+	view.Domains[0].Free.Bytes = "7"
+	if snap.Memory.Domains[0].Free.Bytes != "0" {
+		t.Fatal("response aliases collector")
+	}
+}
+
+func TestMemoryTelemetrySharedPoolAliases(t *testing.T) {
+	snap := statsSnapshot{Memory: systemMemory(100, 20, "fixture", time.Now().UTC()), MemoryBoot: 1000000000, GPU: map[string]gpuStat{"ioreg:a": {Shared: true}, "ioreg:b": {Shared: true}}}
+	m := responseMemory(snap)
+	if m == nil || len(m.Domains) != 1 || m.Domains[0].Kind != "shared" || len(m.Domains[0].DeviceIDs) != 2 {
+		t.Fatalf("shared pools: %+v", m)
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMemoryTelemetryIndependentGPUAge(t *testing.T) {
+	old := memoryClock
+	t.Cleanup(func() { memoryClock = old })
+	memoryClock = func() (uint64, error) { return 7000000000, nil }
+	domain := noderec.MemoryDomain{ID: "gpu", Kind: "dedicated", DeviceIDs: []string{"gpu"}, Total: memoryFact(50, "fixture", time.Now().UTC()), Free: memoryFact(0, "fixture", time.Now().UTC())}
+	snap := statsSnapshot{Memory: systemMemory(100, 20, "fixture", time.Now().UTC()), MemoryBoot: 6000000000, GPU: map[string]gpuStat{"gpu": {Memory: &domain, MemoryBoot: 1000000000}}}
+	m := responseMemory(snap)
+	if m.Domains[0].Free.AgeMS != 1000 || m.Domains[1].Free.AgeMS != 6000 {
+		t.Fatalf("independent ages: %+v", m)
+	}
+}
 
 // TestParseEngineInstance pins the PDH "GPU Engine" instance-name format.
 // If this ever drifts, aggregateUtilization would silently produce an

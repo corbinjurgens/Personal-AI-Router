@@ -5,6 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+The existing telemetry cache retains detached memory observations alongside GPU
+utilization. It adds same-host IPC delay and suspend-aware elapsed time without
+comparing remote UTC clocks. Independent facts expire after five seconds;
+missing clocks, malformed facts and invalid hop stamps cannot make them fresh.
+Scanner precedence and original manual alias receipt/hop are preserved.
+Retired scanner callbacks are rejected using the supervised worker source.
+This pipeline adds no model-memory trust lookup, device map or Fits/Auto claim.
+
 ## Local build maintenance contract
 
 `build:apply-impact`, `build:apply-prepare` and `build:apply-finish` are

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"testing"
@@ -12,6 +13,103 @@ import (
 	"nvpair-shared/noderec"
 	"nvpair-shared/schedulerwire"
 )
+
+func memoryTelemetryFixture() *noderec.MemoryObservation {
+	f := noderec.MemoryFact{Bytes: "0", Source: "fixture", SampledAt: time.Unix(1700000000, 0).UTC(), Valid: true}
+	return &noderec.MemoryObservation{RunID: "producer", Domains: []noderec.MemoryDomain{{ID: "ram", Kind: "system", Total: f, Free: f}}}
+}
+
+type memoryBlockedWriter struct {
+	bytes.Buffer
+	entered, release chan struct{}
+}
+
+func (w *memoryBlockedWriter) Write(p []byte) (int, error) {
+	close(w.entered)
+	<-w.release
+	return w.Buffer.Write(p)
+}
+
+func TestMemoryTelemetryBlockedSerializationExpiresOnReceipt(t *testing.T) {
+	w := &memoryBlockedWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	boot := uint64(1000000000)
+	clock := func() (uint64, error) { return boot, nil }
+	value := noderec.NodeTelemetry{HostUUID: "peer", Memory: memoryTelemetryFixture(), MemoryHop: noderec.NewMemoryHop("worker", clock)}
+	done := make(chan error, 1)
+	go func() { done <- NewCodec(w).Notify(noderec.NotifyNodeTelemetry, value) }()
+	<-w.entered
+	boot = 7000000000
+	close(w.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var msg Message
+	if err := json.Unmarshal(bytes.TrimSpace(w.Bytes()), &msg); err != nil {
+		t.Fatal(err)
+	}
+	var decoded noderec.NodeTelemetry
+	if err := json.Unmarshal(msg.Params, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	cache := newTelemetryCache()
+	cache.clock = clock
+	got, ok := cache.Upsert(sourceScanner, decoded, time.Now())
+	if !ok || got.Memory == nil || got.Memory.Domains[0].Free.Valid || got.Memory.Domains[0].Free.Reason != "stale" {
+		t.Fatalf("delayed first read: %+v", got)
+	}
+}
+
+func TestMemoryTelemetryCacheDetachedAndSuspendAware(t *testing.T) {
+	cache := newTelemetryCache()
+	boot := uint64(1000000000)
+	cache.clock = func() (uint64, error) { return boot, nil }
+	input := noderec.NodeTelemetry{HostUUID: "peer", Memory: memoryTelemetryFixture(), MemoryHop: &noderec.MemoryHop{ForwarderID: "worker", BootNS: "1000000000"}}
+	got, _ := cache.Upsert(sourceManual, input, time.Now())
+	got.Memory.Domains[0].Free.Bytes = "9"
+	input.Memory.Domains[0].Free.Bytes = "8"
+	boot += 5000000000
+	view := cache.Snapshot(time.Now())[0]
+	if !view.Memory.Domains[0].Free.Valid || view.Memory.Domains[0].Free.Bytes != "0" || view.Memory.Domains[0].Free.AgeMS != 5000 {
+		t.Fatalf("boundary/clone: %+v", view)
+	}
+	boot++
+	view = cache.Snapshot(time.Now())[0]
+	if view.Memory.Domains[0].Free.Valid {
+		t.Fatal("suspended time did not expire sample")
+	}
+}
+
+func TestMemoryTelemetryManualReprojectionKeepsOriginalHop(t *testing.T) {
+	cache := newTelemetryCache()
+	boot := uint64(1000000000)
+	cache.clock = func() (uint64, error) { return boot, nil }
+	s := manualNodeStatus{MemoryObservation: memoryTelemetryFixture(), MemoryHop: &noderec.MemoryHop{ForwarderID: "worker", BootNS: "1000000000"}}
+	cache.Upsert(sourceManual, manualNodeTelemetry(s, "peer"), time.Now())
+	boot += 6000000000
+	got, _ := cache.Upsert(sourceManual, manualNodeTelemetry(s, "peer"), time.Now().Add(-time.Second))
+	if got.Memory.Domains[0].Free.Valid {
+		t.Fatal("alias reprojection renewed original sample")
+	}
+}
+
+func TestMemoryTelemetryInvalidHopsCannotRefreshFacts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hop  *noderec.MemoryHop
+	}{
+		{"missing", nil}, {"future", &noderec.MemoryHop{ForwarderID: "worker", BootNS: "2000000000"}},
+		{"noncanonical", &noderec.MemoryHop{ForwarderID: "worker", BootNS: "01"}}, {"missing source", &noderec.MemoryHop{BootNS: "1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := newTelemetryCache()
+			cache.clock = func() (uint64, error) { return 1000000000, nil }
+			got, _ := cache.Upsert(sourceScanner, noderec.NodeTelemetry{HostUUID: "peer", Memory: memoryTelemetryFixture(), MemoryHop: tc.hop}, time.Now())
+			if got.Memory == nil || got.Memory.Domains[0].Free.Valid {
+				t.Fatalf("invalid hop retained valid fact: %+v", got)
+			}
+		})
+	}
+}
 
 func TestTelemetryCacheAgesObservations(t *testing.T) {
 	cache := newTelemetryCache()

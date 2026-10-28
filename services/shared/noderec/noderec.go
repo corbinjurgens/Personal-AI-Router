@@ -597,8 +597,10 @@ type NodeEvent struct {
 // scanner emits it independently of directory changes so scheduling telemetry
 // stays current even when discovery identity and inventory are stable.
 type NodeTelemetry struct {
-	HostUUID          string `json:"hostUuid"`
-	GPUUtilizationPct uint32 `json:"gpuUtilizationPercent"`
-	TelemetryValid    bool   `json:"telemetryValid"`
-	MSSince           int64  `json:"msSince"`
+	HostUUID          string             `json:"hostUuid"`
+	GPUUtilizationPct uint32             `json:"gpuUtilizationPercent"`
+	TelemetryValid    bool               `json:"telemetryValid"`
+	MSSince           int64              `json:"msSince"`
+	Memory            *MemoryObservation `json:"memory,omitempty"`
+	MemoryHop         *MemoryHop         `json:"memoryHop,omitempty"`
 }

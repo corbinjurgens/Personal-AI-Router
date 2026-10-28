@@ -16,8 +16,10 @@ import (
 const maxTelemetryMilliseconds = int64(1<<63 - 1)
 
 type telemetryObservation struct {
-	value      noderec.NodeTelemetry
-	receivedAt time.Time
+	memoryBoot       uint64
+	memoryClockValid bool
+	value            noderec.NodeTelemetry
+	receivedAt       time.Time
 }
 
 type telemetrySources struct {
@@ -57,12 +59,24 @@ func (s telemetrySources) projected() (*telemetryObservation, bool) {
 }
 
 type telemetryCache struct {
+	clock func() (uint64, error)
 	mu    sync.RWMutex
 	nodes map[string]telemetrySources
 }
 
 func newTelemetryCache() *telemetryCache {
-	return &telemetryCache{nodes: make(map[string]telemetrySources)}
+	return &telemetryCache{nodes: make(map[string]telemetrySources), clock: noderec.MemoryBootClock}
+}
+
+func (c *telemetryCache) retireScannerMemory() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, sources := range c.nodes {
+		if sources.scanner != nil {
+			sources.scanner.value.Memory = nil
+			sources.scanner.value.MemoryHop = nil
+		}
+	}
 }
 
 // Upsert records one source's latest observation and returns the source-aware
@@ -76,17 +90,35 @@ func (c *telemetryCache) Upsert(source nodeSource, value noderec.NodeTelemetry, 
 		value:      value,
 		receivedAt: receivedAt,
 	}
+	observation.value.Memory = value.Memory.Clone()
+	observation.value.MemoryHop = nil
+	if value.Memory != nil {
+		boot, err := c.clock()
+		ms := int64(-1)
+		if err == nil && value.MemoryHop != nil {
+			if elapsed, hopErr := value.MemoryHop.ElapsedAt(boot); hopErr == nil {
+				ms = elapsed
+			}
+		}
+		if observation.value.Memory.Validate() != nil {
+			observation.value.Memory = nil
+		} else {
+			observation.value.Memory.AddAge(ms)
+		}
+		observation.memoryBoot = boot
+		observation.memoryClockValid = err == nil
+	}
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	sources := c.nodes[value.HostUUID]
 	sources.setSource(source, &observation)
 	c.nodes[value.HostUUID] = sources
 	projected, ok := sources.projected()
-	c.mu.Unlock()
 	if !ok {
 		return noderec.NodeTelemetry{}, false
 	}
-	return observedTelemetryAt(*projected, receivedAt), true
+	return c.observedAt(*projected, receivedAt), true
 }
 
 // Remove drops one source. If another source survives, its current projection
@@ -97,9 +129,9 @@ func (c *telemetryCache) Remove(hostUUID string, source nodeSource, now time.Tim
 		return noderec.NodeTelemetry{}, false
 	}
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	sources, ok := c.nodes[hostUUID]
 	if !ok || sources.source(source) == nil {
-		c.mu.Unlock()
 		return noderec.NodeTelemetry{}, false
 	}
 	sources.setSource(source, nil)
@@ -109,11 +141,10 @@ func (c *telemetryCache) Remove(hostUUID string, source nodeSource, now time.Tim
 	} else {
 		delete(c.nodes, hostUUID)
 	}
-	c.mu.Unlock()
 	if !survives {
 		return noderec.NodeTelemetry{HostUUID: hostUUID}, true
 	}
-	return observedTelemetryAt(*projected, now), true
+	return c.observedAt(*projected, now), true
 }
 
 func (c *telemetryCache) Snapshot(now time.Time) []noderec.NodeTelemetry {
@@ -121,12 +152,25 @@ func (c *telemetryCache) Snapshot(now time.Time) []noderec.NodeTelemetry {
 	out := make([]noderec.NodeTelemetry, 0, len(c.nodes))
 	for _, sources := range c.nodes {
 		if projected, ok := sources.projected(); ok {
-			out = append(out, observedTelemetryAt(*projected, now))
+			out = append(out, c.observedAt(*projected, now))
 		}
 	}
 	c.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].HostUUID < out[j].HostUUID })
 	return out
+}
+
+func (c *telemetryCache) observedAt(observation telemetryObservation, now time.Time) noderec.NodeTelemetry {
+	value := observedTelemetryAt(observation, now)
+	if !observation.memoryClockValid {
+		value.Memory = value.Memory.Clone()
+		value.Memory.AddAge(-1)
+	} else {
+		value.Memory = value.Memory.Advance(observation.memoryBoot, nil, c.clock)
+	}
+	value.Memory.Expire()
+	value.MemoryHop = nil
+	return value
 }
 
 func observedTelemetryAt(observation telemetryObservation, now time.Time) noderec.NodeTelemetry {

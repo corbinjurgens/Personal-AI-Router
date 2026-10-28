@@ -5,7 +5,10 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"nvpair-shared/noderec"
 	"strings"
+	"time"
 
 	"howett.net/plist"
 )
@@ -30,7 +33,33 @@ type ioRegistryEntry struct {
 	RegistryEntryChildren []ioRegistryEntry     `plist:"IORegistryEntryChildren"`
 }
 
+func (e *ioRegistryEntry) UnmarshalPlist(unmarshal func(interface{}) error) error {
+	// plist struct tags split at commas, so this literal native key needs
+	// dictionary access. Decode the remaining fields through their typed owner.
+	type entryFields ioRegistryEntry
+	var fields entryFields
+	if err := unmarshal(&fields); err != nil {
+		return err
+	}
+	var dictionary map[string]interface{}
+	if err := unmarshal(&dictionary); err != nil {
+		return err
+	}
+	fields.VRAMTotalMB = 0
+	if value, present := dictionary["VRAM,totalMB"]; present {
+		total, ok := value.(uint64)
+		if !ok {
+			return fmt.Errorf("invalid IORegistry VRAM total")
+		}
+		fields.VRAMTotalMB = total
+	}
+	*e = ioRegistryEntry(fields)
+	return nil
+}
+
 type darwinGPURecord struct {
+	shared           bool
+	memory           *noderec.MemoryDomain
 	statsKey         string
 	name             string
 	vramTotal        uint64
@@ -76,6 +105,27 @@ func normalizeIORegistryGPU(entry ioRegistryEntry, name string, systemMemory uin
 	record := darwinGPURecord{
 		statsKey: fmt.Sprintf("ioreg:%x", entry.EntryID),
 		name:     name,
+	}
+	record.shared = strings.HasPrefix(entry.ObjectClass, "AGXAccelerator")
+	if !record.shared {
+		d := noderec.MemoryDomain{ID: record.statsKey, Kind: "unknown", DeviceIDs: []string{record.statsKey}, Total: noderec.MemoryFact{Reason: "unavailable"}, Free: noderec.MemoryFact{Reason: "unavailable"}}
+		if entry.VRAMTotalMB > 0 && entry.VRAMTotalMB <= math.MaxUint64/(1024*1024) {
+			d.Kind = "dedicated"
+			total := entry.VRAMTotalMB * 1024 * 1024
+			d.Total = memoryFact(total, "ioreg-VRAM,totalMB", time.Now().UTC())
+			if f := entry.Performance.VRAMFreeBytes; f != nil && *f <= total {
+				d.Free = memoryFact(*f, "ioreg-vramFreeBytes", time.Now().UTC())
+			} else {
+				u := entry.Performance.VRAMUsedBytes
+				if u == nil {
+					u = entry.Performance.InUseVidMemoryBytes
+				}
+				if u != nil && *u <= total {
+					d.Free = memoryFact(total-*u, "ioreg-total-minus-dedicated-used", time.Now().UTC())
+				}
+			}
+		}
+		record.memory = &d
 	}
 	if isApple {
 		record.vramTotal = systemMemory

@@ -5,6 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-node-scanner
 
+Memory observations travel with compact node telemetry. Each fetch adds its
+suspend-aware duration to producer age and stamps the local hop before codec
+serialization. Directory/route retirement prevents memory emission from an
+obsolete response. The hop is local to scanner and broker, never a remote
+clock comparison. Existing utilization telemetry retains its own semantics.
+
 Model enrichment accepts only nonempty valid UTF-8 identifiers of at most 512
 UTF-8 bytes, with no C0 (U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F)
 characters. Flat, per-engine and loaded model lists are filtered entry by entry

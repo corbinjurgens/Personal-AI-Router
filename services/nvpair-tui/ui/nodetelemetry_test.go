@@ -19,6 +19,16 @@ import (
 	"nvpair-tui/rpc"
 )
 
+func TestMemoryTelemetryFieldsPreserveHardwareProjection(t *testing.T) {
+	var value nodeTelemetry
+	if err := json.Unmarshal([]byte(`{"GPUs":[{"name":"GPU","utilization_percent":55}],"telemetryValid":true,"msSince":1,"memoryObservation":{"runId":"fixture","domains":[{"id":"ram","kind":"system","total":{"valid":false,"ageMs":0,"reason":"unavailable"},"free":{"bytes":"0","source":"fixture","sampledAt":"2026-10-28T00:00:00Z","ageMs":0,"valid":true}}]}}`), &value); err != nil {
+		t.Fatal(err)
+	}
+	if !value.TelemetryValid || value.MSSince != 1 || len(value.GPUs) != 1 || value.GPUs[0].UtilizationPercent != 55 {
+		t.Fatalf("hardware projection changed: %+v", value)
+	}
+}
+
 // TestTelemetryReplyIsGenerationScoped is the companion guard: the reply, not
 // the tick, is what schedules the next poll, so a reply from a previous visit
 // to the same node would start a second chain alongside the current one and

@@ -5,6 +5,30 @@ SPDX-License-Identifier: Apache-2.0
 
 # Measured run performance
 
+Node-info also reports advisory physical memory observations in
+`memoryObservation`. Each pool has independent `total` and `free` facts:
+canonical decimal byte strings, validity or an explicit unknown reason, source,
+UTC collection-start time and suspend-aware age. `free` means available under
+the named OS accounting, including Mach free plus inactive pages on macOS.
+Known zero available bytes remains present. Apple AGX aliases share one system
+pool. Dedicated pools use physical UUID/PCI, LUID or IORegistry identity;
+names, array positions and capacities never establish identity.
+
+An encoded observation is limited to 64 KiB, leaving room in the scanner's
+notification frame. Fact ages and validity must be explicit; null, repeated
+and incorrectly cased fields are rejected. Windows available VRAM uses only
+the current matched PDH usage sample, independently of retained utilization
+values used for display.
+
+The existing scanner and manual-node pipeline adds HTTP duration and a local
+pre-serialization boot-clock hop. The broker's existing telemetry cache adds
+IPC delay and suspend-aware elapsed time; facts older than five seconds become
+unknown. Remote wall clocks do not establish freshness. Failed reads retain
+their original sample times. GPU utilization keeps its existing independent
+freshness and scheduling behavior. These observations do not implement model
+Fits, admission, device binding or Auto; complete cost accounting and native
+platform accuracy acceptance remain separate prerequisites.
+
 Expand a node's performance view to see measured runs below its hardware chart.
 In the TUI, open node detail and press `v` for the measured-performance view.
 Scroll with the arrow or Page Up/Page Down keys; press `v` to return to the

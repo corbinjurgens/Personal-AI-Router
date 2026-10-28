@@ -22,21 +22,23 @@ import (
 // (bridgeManualNode); the rest project into the discovery store via
 // manualToEnriched.
 type manualNodeStatus struct {
-	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
-	ID             string       `json:"id"`
-	Address        string       `json:"address"`
-	OllamaUp       bool         `json:"ollama_up"`
-	OllamaPort     int          `json:"ollama_port"`
-	OllamaModels   []string     `json:"ollama_models,omitempty"`
-	LMStudioUp     bool         `json:"lmstudio_up"`
-	LMStudioPort   int          `json:"lmstudio_port"`
-	LMStudioModels []string     `json:"lmstudio_models,omitempty"`
-	NodeInfoPort   int          `json:"node_info_port"`
-	GPUs           []GPUInfo    `json:"gpus"`
-	CPU            *CPUInfo     `json:"cpu"`
-	Memory         *MemoryInfo  `json:"memory"`
-	TelemetryValid bool         `json:"telemetryValid"`
-	MSSince        int64        `json:"msSince"`
+	MemoryObservation *noderec.MemoryObservation `json:"memoryObservation,omitempty"`
+	MemoryHop         *noderec.MemoryHop         `json:"memoryHop,omitempty"`
+	ServiceBuildID    buildinfo.ID               `json:"serviceBuildId,omitempty"`
+	ID                string                     `json:"id"`
+	Address           string                     `json:"address"`
+	OllamaUp          bool                       `json:"ollama_up"`
+	OllamaPort        int                        `json:"ollama_port"`
+	OllamaModels      []string                   `json:"ollama_models,omitempty"`
+	LMStudioUp        bool                       `json:"lmstudio_up"`
+	LMStudioPort      int                        `json:"lmstudio_port"`
+	LMStudioModels    []string                   `json:"lmstudio_models,omitempty"`
+	NodeInfoPort      int                        `json:"node_info_port"`
+	GPUs              []GPUInfo                  `json:"gpus"`
+	CPU               *CPUInfo                   `json:"cpu"`
+	Memory            *MemoryInfo                `json:"memory"`
+	TelemetryValid    bool                       `json:"telemetryValid"`
+	MSSince           int64                      `json:"msSince"`
 	// HostUUID is the remote's stable per-host identity, learned from its
 	// node-info /v1/node-info. It lets a manual node key by the same permanent
 	// identity as mDNS-discovered nodes (and dedup with itself when the same
@@ -57,6 +59,8 @@ func manualNodeTelemetry(status manualNodeStatus, hostUUID string) noderec.NodeT
 		}
 	}
 	return noderec.NodeTelemetry{
+		Memory:            status.MemoryObservation.Clone(),
+		MemoryHop:         status.MemoryHop,
 		HostUUID:          hostUUID,
 		GPUUtilizationPct: utilization,
 		TelemetryValid:    status.TelemetryValid,

@@ -20,7 +20,37 @@ import (
 	"time"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/noderec"
 )
+
+func init() { manualMemoryClock = func() (uint64, error) { return 1000000000, nil } }
+
+func TestMemoryTelemetryManualFetchAndNotificationAge(t *testing.T) {
+	old := manualMemoryClock
+	t.Cleanup(func() { manualMemoryClock = old })
+	boot := uint64(1000000000)
+	manualMemoryClock = func() (uint64, error) { return boot, nil }
+	m, rw, rt := newTestManager()
+	f := noderec.MemoryFact{Bytes: "0", Source: "fixture", SampledAt: time.Now().UTC(), Valid: true}
+	info := NodeInfoResponse{HostUUID: "peer", MemoryObservation: &noderec.MemoryObservation{RunID: "run", Domains: []noderec.MemoryDomain{{ID: "ram", Kind: "system", Total: f, Free: f}}}}
+	body, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.set(http.MethodGet, "node.local:14318", "/v1/node-info", func(*http.Request) (*http.Response, error) {
+		boot += 6000000000
+		return httpJSON(http.StatusOK, string(body))
+	})
+	entry := ManualEntry{Name: "memory", Address: "node.local"}
+	tn := &trackedNode{entry: entry}
+	m.nodes[nodeID(entry)] = tn
+	m.probeNode(tn)
+	msg := readCaptureUntil(t, rw, methodIs("node/updated"))
+	status := decodeParams[ManualNodeStatus](t, msg)
+	if status.MemoryObservation == nil || status.MemoryObservation.Domains[0].Free.AgeMS != 6000 || status.MemoryHop == nil || status.MemoryHop.BootNS != "7000000000" {
+		t.Fatalf("manual memory: %+v", status)
+	}
+}
 
 // Drive the existing probe owner and its real notification/list serializers.
 // Every HTTP request is intercepted by the private fakeRoundTripper.

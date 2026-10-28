@@ -36,11 +36,12 @@ type statsCollector struct {
 	latest    atomic.Pointer[statsSnapshot]
 	latestGPU atomic.Pointer[darwinGPUReading]
 
-	prevCPU    darwinCPUTimes
-	readCPU    func() darwinCPUTimes
-	readMemory func() (uint64, bool)
-	readGPU    func(context.Context) (darwinGPUReading, error)
-	interval   time.Duration
+	prevCPU         darwinCPUTimes
+	readCPU         func() darwinCPUTimes
+	readMemory      func() (uint64, bool)
+	readMemoryFacts func() (uint64, uint64, string, bool)
+	readGPU         func(context.Context) (darwinGPUReading, error)
+	interval        time.Duration
 
 	gpuWarning sync.Once
 	cancel     context.CancelFunc
@@ -54,6 +55,7 @@ func startStatsCollector() *statsCollector {
 		readDarwinMemoryUsed,
 		readDarwinGPUStats,
 		statsTickInterval,
+		readDarwinMemoryFacts,
 	)
 }
 
@@ -62,6 +64,7 @@ func newDarwinStatsCollector(
 	readMemory func() (uint64, bool),
 	readGPU func(context.Context) (darwinGPUReading, error),
 	interval time.Duration,
+	facts ...func() (uint64, uint64, string, bool),
 ) *statsCollector {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &statsCollector{
@@ -71,7 +74,12 @@ func newDarwinStatsCollector(
 		interval:   interval,
 		cancel:     cancel,
 	}
-	c.latest.Store(initialDarwinMemorySnapshot(readMemory))
+	if len(facts) != 0 {
+		c.readMemoryFacts = facts[0]
+		c.latest.Store(sampleSystemMemory(statsSnapshot{}, c.readMemoryFacts))
+	} else {
+		c.latest.Store(initialDarwinMemorySnapshot(readMemory))
+	}
 	c.prevCPU = readCPU()
 	c.done.Add(2)
 	go c.runSystem(ctx)
@@ -116,6 +124,8 @@ func (c *statsCollector) runGPU(ctx context.Context) {
 }
 
 func (c *statsCollector) collectGPU(ctx context.Context) {
+	boot, clockErr := memoryClock()
+	at := time.Now().UTC()
 	reading, err := c.readGPU(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -128,28 +138,65 @@ func (c *statsCollector) collectGPU(ctx context.Context) {
 	if len(reading.stats) == 0 {
 		return
 	}
+	for key, stat := range reading.stats {
+		stat.MemoryBoot = boot
+		if stat.Memory != nil {
+			if clockErr != nil {
+				stat.Memory = nil
+			} else {
+				if stat.Memory.Total.Valid {
+					stat.Memory.Total.SampledAt = at
+				}
+				if stat.Memory.Free.Valid {
+					stat.Memory.Free.SampledAt = at
+				}
+			}
+		}
+		reading.stats[key] = stat
+	}
 	if reading.utilizationSamples > 0 {
 		reading.sampledAt = time.Now()
 		c.latestGPU.Store(&reading)
 		return
 	}
 	previous := c.latestGPU.Load()
-	if previous == nil || previous.sampledAt.IsZero() {
-		c.latestGPU.Store(&reading)
+	if previous != nil {
+		reading.sampledAt = previous.sampledAt
+		for key, stat := range reading.stats {
+			old := previous.stats[key]
+			old.Memory = stat.Memory
+			old.MemoryBoot = stat.MemoryBoot
+			old.Shared = stat.Shared
+			reading.stats[key] = old
+		}
 	}
+	c.latestGPU.Store(&reading)
 }
 
 func (c *statsCollector) decodeSystemSnapshot() *statsSnapshot {
 	snap := &statsSnapshot{}
+	if c.readMemoryFacts != nil {
+		snap = sampleSystemMemory(c.Snapshot(), c.readMemoryFacts)
+	}
 	cur := c.readCPU()
 	snap.CPUUtilPct = darwinCPUUtilization(c.prevCPU, cur)
 	if cur.valid {
 		c.prevCPU = cur
 	}
-	if used, ok := c.readMemory(); ok {
-		snap.MemUsedBytes = used
+	if c.readMemoryFacts == nil {
+		if used, ok := c.readMemory(); ok {
+			snap.MemUsedBytes = used
+		}
 	}
 	return snap
+}
+
+func readDarwinMemoryFacts() (uint64, uint64, string, bool) {
+	m, err := mem.VirtualMemory()
+	if err != nil {
+		return 0, 0, "", false
+	}
+	return m.Total, m.Available, "mach-free-plus-inactive", true
 }
 
 func (c *statsCollector) Snapshot() statsSnapshot {
@@ -239,6 +286,8 @@ func dynamicGPUReadingFromIORegistry(data []byte, systemMemory uint64) (darwinGP
 			reading.utilizationSamples++
 		}
 		reading.stats[record.statsKey] = gpuStat{
+			Memory:         record.memory,
+			Shared:         record.shared,
 			VRAMUsed:       record.vramUsed,
 			UtilizationPct: record.utilizationPct,
 		}
