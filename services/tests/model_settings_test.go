@@ -909,7 +909,7 @@ func TestModelSettingsMissingContentCopyThenFreshReceiptInspection(t *testing.T)
 	}{1, model.manifest.Model, model.manifest.Files}))
 	inspect := func() modelconfig.InspectResult {
 		t.Helper()
-		response := f.targetEM.call(t, "engine:inspect-model", modelconfig.InspectRequest{Engine: "llamacpp", ModelID: model.manifest.Model})
+		response := f.targetEM.call(t, "engine:inspect-model", settings.WorkerRequest[modelconfig.InspectRequest]{Request: modelconfig.InspectRequest{Engine: "llamacpp", ModelID: model.manifest.Model}})
 		if response.Error != nil {
 			t.Fatal("private target inspection failed")
 		}
