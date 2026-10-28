@@ -43,11 +43,22 @@ type buildApplyRunFixture struct {
 	failTerminal  bool
 }
 
+// buildApplyTempDir resolves the test root: macOS TMPDIR sits under the /var
+// symlink, which the linked-ancestor checks correctly refuse.
+func buildApplyTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func newBuildApplyRunFixture(t *testing.T) *buildApplyRunFixture {
 	t.Helper()
 	// These regular-file identity witnesses are never executed. Process
 	// execution uses only the separately registered fixed-path test image.
-	base := filepath.Join(t.TempDir(), "private")
+	base := filepath.Join(buildApplyTempDir(t), "private")
 	if err := createBuildApplyDirectory(base); err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +749,7 @@ func TestBuildApplyTransactionPreservedImageOverridesStayInsideBundle(t *testing
 }
 
 func TestBuildApplyRecoveryNativeRenameReconcilesExactDirectories(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "private")
+	base := filepath.Join(buildApplyTempDir(t), "private")
 	if err := createBuildApplyDirectory(base); err != nil {
 		t.Fatal(err)
 	}
@@ -792,7 +803,7 @@ func TestBuildApplyRecoveryNativeRenameReconcilesExactDirectories(t *testing.T) 
 }
 
 func TestBuildApplyTransactionNativeMetadataPreservesDataFile(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "private")
+	base := filepath.Join(buildApplyTempDir(t), "private")
 	if err := createBuildApplyDirectory(base); err != nil {
 		t.Fatal(err)
 	}
@@ -819,7 +830,7 @@ func TestBuildApplyTransactionNativeMetadataPreservesDataFile(t *testing.T) {
 }
 
 func TestBuildApplyRecoveryRefusesSubstitutedIncompletePreparation(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "private")
+	base := filepath.Join(buildApplyTempDir(t), "private")
 	if err := createBuildApplyDirectory(base); err != nil {
 		t.Fatal(err)
 	}
@@ -872,7 +883,7 @@ func TestBuildApplyRecoveryRefusesSubstitutedIncompletePreparation(t *testing.T)
 }
 
 func TestBuildApplyTransactionPreparationSyncsParentBeforeQuiesce(t *testing.T) {
-	prepared := filepath.Join(t.TempDir(), "prepared")
+	prepared := filepath.Join(buildApplyTempDir(t), "prepared")
 	entries := []buildapply.InventoryEntry{{Path: "resources", Mode: os.ModeDir | 0o700}, {Path: "resources/payload", Mode: 0o600}}
 	want := []string{filepath.Join(prepared, "resources"), prepared, filepath.Dir(prepared)}
 	var calls []string
@@ -894,7 +905,7 @@ func TestBuildApplyTransactionPreparationSyncsParentBeforeQuiesce(t *testing.T) 
 }
 
 func TestBuildApplyRecoveryPinsDirectoryIdentityBeforeSubstitution(t *testing.T) {
-	base := filepath.Join(t.TempDir(), "private")
+	base := filepath.Join(buildApplyTempDir(t), "private")
 	if err := createBuildApplyDirectory(base); err != nil {
 		t.Fatal(err)
 	}
@@ -969,7 +980,7 @@ func TestBuildApplyRecoveryRunnerCopyModes(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			f := newBuildApplyRunFixture(t)
-			profile := t.TempDir()
+			profile := buildApplyTempDir(t)
 			t.Setenv("HOME", profile)
 			t.Setenv("XDG_CONFIG_HOME", profile)
 			j, err := buildapply.OpenJournal(true)

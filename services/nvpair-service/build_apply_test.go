@@ -13,7 +13,7 @@ import (
 )
 
 func TestBuildApplyLocalAdmission(t *testing.T) {
-	profile := t.TempDir()
+	profile := buildApplyTempDir(t)
 	for _, key := range []string{"LOCALAPPDATA", "APPDATA", "HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
 		t.Setenv(key, profile)
 	}

@@ -5,9 +5,18 @@
 
 package buildapply
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
+// packageFixtureTempDir resolves the test root: macOS TMPDIR sits under the
+// /var symlink, which the linked-ancestor checks correctly refuse.
 func packageFixtureTempDir(t *testing.T) string {
 	t.Helper()
-	return t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
