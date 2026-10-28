@@ -154,6 +154,310 @@ beforeEach(() => {
 })
 
 describe('reviewed model operations', () => {
+    it('preserves an explicit destination review when a source advisory arrives', async () => {
+        const response = deferred<EngineSettingsPreview>()
+        const started = deferred<void>()
+        engine.previewSettings.mockImplementationOnce(() => {
+            started.resolve()
+            return response.promise
+        })
+        const store = useEngineSettingsStore.getState()
+        const explicit = store.previewModel(target, change, 'authority')
+        await started.promise
+        const sourceTarget: EngineSettingsTarget = { ...target, nodeId: 'peer' }
+        expect(modelSettingsKey(sourceTarget, change.modelId)).not.toBe(key)
+        const advisory = store.previewModel(sourceTarget, change, 'source-authority', true)
+        response.resolve({
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            previewDigest: 'destination',
+            errors: {},
+            restart: false,
+            rebind: false
+        })
+        await Promise.all([explicit, advisory])
+        expect(engine.previewSettings).toHaveBeenCalledTimes(1)
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.preview.previewDigest
+        ).toBe('destination')
+    })
+    it('does not replace an explicit review with an advisory for the same input', async () => {
+        const response = deferred<EngineSettingsPreview>()
+        const started = deferred<void>()
+        engine.previewSettings.mockImplementationOnce(() => {
+            started.resolve()
+            return response.promise
+        })
+        const store = useEngineSettingsStore.getState()
+        const explicit = store.previewModel(target, change, 'authority')
+        await started.promise
+        const advisory = store.previewModel(target, change, 'authority', true)
+        response.resolve({
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            previewDigest: 'explicit',
+            errors: {},
+            restart: false,
+            rebind: false
+        })
+        await Promise.all([explicit, advisory])
+        expect(engine.previewSettings).toHaveBeenCalledTimes(1)
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.preview.previewDigest
+        ).toBe('explicit')
+    })
+    it('coalesces bursts behind one in-flight request and runs only the latest input', async () => {
+        const response = deferred<EngineSettingsPreview>()
+        const started = deferred<void>()
+        engine.previewSettings.mockImplementationOnce(() => {
+            started.resolve()
+            return response.promise
+        })
+        const store = useEngineSettingsStore.getState()
+        const first = store.previewModel(target, change, 'authority', true)
+        await started.promise
+        const pending = [3, 4, 5, 6].map(slots =>
+            store.previewModel(target, { ...change, load: { set: { slots } } }, 'authority', true)
+        )
+        const inFlightReads = engine.getSettings.mock.calls.length
+        response.resolve({
+            settings: snapshot().settings,
+            revision: 3,
+            errors: {},
+            restart: false,
+            rebind: false
+        })
+        await Promise.all([first, ...pending])
+        expect(inFlightReads).toBe(1)
+        expect(engine.previewSettings).toHaveBeenCalledTimes(2)
+        expect(engine.previewSettings.mock.calls[1]?.[0].modelChange?.load?.set.slots).toBe(6)
+    })
+    it('stops an obsolete inspection before dispatching Preview', async () => {
+        const result = deferred<InspectModelResult>()
+        const started = deferred<void>()
+        engine.inspectModel.mockImplementationOnce(() => {
+            started.resolve()
+            return result.promise
+        })
+        const store = useEngineSettingsStore.getState()
+        const pending = store.previewModel(target, change, 'authority')
+        await started.promise
+        store.invalidateModel(key)
+        result.resolve(inspection())
+        await pending
+        expect(engine.previewSettings).not.toHaveBeenCalled()
+    })
+    it.each(['settings', 'authorization'])(
+        'stops invalidated work after the awaited %s stage',
+        async stage => {
+            const started = deferred<void>()
+            const settings = deferred<EngineSettingsSnapshot>()
+            const authorization = deferred<NodePolicyDocument>()
+            if (stage === 'settings')
+                engine.getSettings.mockImplementationOnce(() => {
+                    started.resolve()
+                    return settings.promise
+                })
+            else
+                vi.mocked(window.pairApi.nodePolicy.get).mockImplementationOnce(() => {
+                    started.resolve()
+                    return authorization.promise
+                })
+            const store = useEngineSettingsStore.getState()
+            const pending = store.previewModel(target, change, 'authority')
+            await started.promise
+            store.invalidateModel(key)
+            settings.resolve(snapshot())
+            authorization.resolve(policy)
+            await pending
+            expect(engine.inspectModel).not.toHaveBeenCalled()
+            expect(engine.previewSettings).not.toHaveBeenCalled()
+        }
+    )
+    it('keeps a queued explicit review ahead of a same-input advisory', async () => {
+        const response = deferred<EngineSettingsPreview>()
+        const started = deferred<void>()
+        engine.previewSettings.mockImplementationOnce(() => {
+            started.resolve()
+            return response.promise
+        })
+        const store = useEngineSettingsStore.getState()
+        const first = store.previewModel(target, change, 'authority', true)
+        await started.promise
+        const explicit = store.previewModel(target, change, 'authority')
+        const advisory = store.previewModel(target, change, 'authority', true)
+        response.resolve({
+            settings: snapshot().settings,
+            revision: 3,
+            errors: {},
+            restart: false,
+            rebind: false
+        })
+        await Promise.all([first, explicit, advisory])
+        expect(engine.previewSettings).toHaveBeenCalledTimes(2)
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[key].review?.preview.previewDigest
+        ).toBe('reviewed')
+    })
+    it('discards an invalidated coalesced input before starting another request', async () => {
+        const response = deferred<EngineSettingsPreview>()
+        const started = deferred<void>()
+        engine.previewSettings.mockImplementationOnce(() => {
+            started.resolve()
+            return response.promise
+        })
+        const store = useEngineSettingsStore.getState()
+        const first = store.previewModel(target, change, 'authority', true)
+        await started.promise
+        const pending = store.previewModel(
+            target,
+            { ...change, load: { set: { slots: 4 } } },
+            'authority',
+            true
+        )
+        store.invalidateModel(key)
+        response.resolve({
+            settings: snapshot().settings,
+            revision: 3,
+            errors: {},
+            restart: false,
+            rebind: false
+        })
+        await Promise.all([first, pending])
+        expect(engine.getSettings).toHaveBeenCalledTimes(1)
+        expect(engine.previewSettings).toHaveBeenCalledTimes(1)
+        expect(useEngineSettingsStore.getState().modelDrafts[key].review).toBeUndefined()
+    })
+    it('coalesces target changes behind the same request owner', async () => {
+        const response = deferred<EngineSettingsPreview>()
+        const started = deferred<void>()
+        engine.previewSettings.mockImplementationOnce(() => {
+            started.resolve()
+            return response.promise
+        })
+        engine.inspectModel.mockImplementation(async request =>
+            inspection({ modelId: request.modelId })
+        )
+        const store = useEngineSettingsStore.getState()
+        const first = store.previewModel(target, change, 'old authority')
+        await started.promise
+        const next = store.previewModel(target, { ...change, modelId: 'other' }, 'new authority')
+        const reads = engine.getSettings.mock.calls.length
+        response.resolve({
+            settings: snapshot().settings,
+            revision: 3,
+            errors: {},
+            restart: false,
+            rebind: false
+        })
+        await Promise.all([first, next])
+        expect(reads).toBe(1)
+        expect(engine.previewSettings).toHaveBeenCalledTimes(2)
+        expect(useEngineSettingsStore.getState().modelDrafts[key].review).toBeUndefined()
+        expect(
+            useEngineSettingsStore.getState().modelDrafts[modelSettingsKey(target, 'other')].review
+                ?.authority
+        ).toBe('new authority')
+    })
+    it('recalculates Auto without saving and refuses an incomplete proposal even with a digest', async () => {
+        const automatic: ModelChange = {
+            ...change,
+            load: { set: { context: { mode: 'auto', floor: 4096, cap: 8192 } } }
+        }
+        engine.previewSettings.mockResolvedValue({
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            previewDigest: 'digest',
+            errors: {},
+            restart: false,
+            rebind: false,
+            auto: {
+                status: 'unavailable',
+                requested: automatic.load?.set ?? {},
+                estimate: { status: 'partial' }
+            }
+        })
+        const store = useEngineSettingsStore.getState()
+        await store.previewModel(target, automatic, 'authority')
+        await store.previewModel(target, automatic, 'authority')
+        expect(engine.previewSettings).toHaveBeenCalledTimes(2)
+        expect(useEngineSettingsStore.getState().modelDrafts[key].review).toBeUndefined()
+        expect(
+            useEngineSettingsStore.getState().entries['self:llamacpp'].snapshot?.settings
+        ).toEqual(snapshot().settings)
+        await store.applyModel(key, 'authority')
+        expect(engine.applySettings).not.toHaveBeenCalled()
+    })
+    it('keeps the newest advisory when an older preview finishes late', async () => {
+        const old = deferred<EngineSettingsPreview>()
+        const started = deferred<void>()
+        engine.previewSettings
+            .mockImplementationOnce(() => {
+                started.resolve()
+                return old.promise
+            })
+            .mockResolvedValueOnce({
+                settings: snapshot().settings,
+                revision: 3,
+                policyRevision: '7',
+                errors: {},
+                restart: false,
+                rebind: false,
+                estimate: { status: 'unknown', source: 'new' }
+            })
+        const store = useEngineSettingsStore.getState()
+        const first = store.previewModel(target, change, 'authority', true)
+        await started.promise
+        const next = { ...change, load: { set: { slots: 4 } } }
+        const pending = store.previewModel(target, next, 'authority', true)
+        old.resolve({
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            errors: {},
+            restart: false,
+            rebind: false,
+            estimate: { status: 'unknown', source: 'old' }
+        })
+        await Promise.all([first, pending])
+        expect(useEngineSettingsStore.getState().modelDrafts[key].advisory?.estimate?.source).toBe(
+            'new'
+        )
+        expect(useEngineSettingsStore.getState().modelDrafts[key].review).toBeUndefined()
+    })
+    it('retains an unavailable Auto advisory without authorizing Apply, then invalidates it', async () => {
+        const automatic: ModelChange = {
+            ...change,
+            load: { set: { context: { mode: 'auto', floor: 4096, cap: 8192 } } }
+        }
+        engine.previewSettings.mockResolvedValueOnce({
+            settings: snapshot().settings,
+            revision: 3,
+            policyRevision: '7',
+            errors: { context: 'Auto unavailable' },
+            restart: false,
+            rebind: false,
+            auto: {
+                status: 'unavailable',
+                requested: automatic.load?.set ?? {},
+                estimate: { status: 'unknown' }
+            }
+        })
+        const store = useEngineSettingsStore.getState()
+        await store.previewModel(target, automatic, 'authority')
+        expect(store.modelDrafts[key]).toBeUndefined()
+        expect(useEngineSettingsStore.getState().modelDrafts[key].advisory?.auto?.status).toBe(
+            'unavailable'
+        )
+        expect(useEngineSettingsStore.getState().modelDrafts[key].review).toBeUndefined()
+        await store.applyModel(key, 'authority')
+        expect(engine.applySettings).not.toHaveBeenCalled()
+        store.editModel(key, change)
+        expect(useEngineSettingsStore.getState().modelDrafts[key].advisory).toBeUndefined()
+    })
     it('omits empty policy patches and sends only closed inspection keys before Apply', async () => {
         const store = useEngineSettingsStore.getState()
         await store.previewModel(
@@ -265,9 +569,9 @@ describe('reviewed model operations', () => {
                     change
                 })
                 const fresh = store.previewModel(target, change, 'new authority')
-                await secondStarted.promise
                 first.resolve({ ...response, previewDigest: 'obsolete' })
                 await pending
+                await secondStarted.promise
                 expect(useEngineSettingsStore.getState().modelDrafts[key].busy).toBe(true)
                 second.resolve(response)
                 await fresh

@@ -57,6 +57,7 @@ interface Comparison {
 interface Outcome {
     message: string
     comparison?: Comparison
+    modelKey?: string
 }
 
 function findProfile(text: string, identity: NodeModelReference) {
@@ -137,7 +138,12 @@ export default function ModelSettingsCopy({
           )?.requested ?? {})
         : {}
     const typed = extended && (loads.length > 0 || routingFields.length > 0)
-    const sourceLoadIdentity = JSON.stringify([sourceRequested, sourceInspection])
+    const sourceLoadIdentity = JSON.stringify([
+        sourceRequested,
+        sourceInspection?.status,
+        sourceInspection?.artifacts,
+        sourceInspection?.options
+    ])
     useEffect(() => {
         if (!extended || !sourceTarget) return
         const stop = watchEngineSettings()
@@ -197,7 +203,7 @@ export default function ModelSettingsCopy({
                               message:
                                   'Outcome unknown: disconnected after dispatch. Await readback before retrying.'
                           }
-                        : outcome.comparison
+                        : outcome.comparison || outcome.modelKey
                           ? { message: 'Comparison expired. Preview again before confirming.' }
                           : outcome
                 ])
@@ -270,7 +276,7 @@ export default function ModelSettingsCopy({
             Object.fromEntries(
                 Object.entries(current).map(([id, outcome]) => [
                     id,
-                    outcome.comparison
+                    outcome.comparison || outcome.modelKey
                         ? { message: 'Comparison expired. Preview again before confirming.' }
                         : outcome
                 ])
@@ -405,6 +411,7 @@ export default function ModelSettingsCopy({
                     put(
                         target.id,
                         {
+                            modelKey,
                             message: reviewed?.review
                                 ? 'Review target-selected changes and impact, then confirm.'
                                 : (reviewed?.message ?? 'Preview unavailable.'),
@@ -740,34 +747,68 @@ export default function ModelSettingsCopy({
                                     {summary(outcomes[target.id]?.comparison)}
                                 </Text>
                             )}
-                            {settingsEngine && extended && (
-                                <ModelSettingsPreview
-                                    inspection={
-                                        drafts[
-                                            modelSettingsKey(
-                                                { nodeId: target.id, engine: settingsEngine },
-                                                target.identity.model
-                                            )
-                                        ]?.inspection
-                                    }
-                                    preview={
-                                        drafts[
-                                            modelSettingsKey(
-                                                { nodeId: target.id, engine: settingsEngine },
-                                                target.identity.model
-                                            )
-                                        ]?.review?.preview
-                                    }
-                                    snapshot={
-                                        settings[
-                                            engineSettingsKey({
-                                                nodeId: target.id,
-                                                engine: settingsEngine
-                                            })
-                                        ]?.snapshot
-                                    }
-                                />
-                            )}
+                            {settingsEngine &&
+                                extended &&
+                                outcomes[target.id]?.modelKey ===
+                                    modelSettingsKey(
+                                        { nodeId: target.id, engine: settingsEngine },
+                                        target.identity.model
+                                    ) && (
+                                    <ModelSettingsPreview
+                                        stale={
+                                            !drafts[
+                                                modelSettingsKey(
+                                                    { nodeId: target.id, engine: settingsEngine },
+                                                    target.identity.model
+                                                )
+                                            ]?.review &&
+                                            !drafts[
+                                                modelSettingsKey(
+                                                    { nodeId: target.id, engine: settingsEngine },
+                                                    target.identity.model
+                                                )
+                                            ]?.advisory
+                                        }
+                                        inspection={
+                                            drafts[
+                                                modelSettingsKey(
+                                                    { nodeId: target.id, engine: settingsEngine },
+                                                    target.identity.model
+                                                )
+                                            ]?.inspection
+                                        }
+                                        preview={
+                                            drafts[
+                                                modelSettingsKey(
+                                                    { nodeId: target.id, engine: settingsEngine },
+                                                    target.identity.model
+                                                )
+                                            ]?.review?.preview ??
+                                            drafts[
+                                                modelSettingsKey(
+                                                    { nodeId: target.id, engine: settingsEngine },
+                                                    target.identity.model
+                                                )
+                                            ]?.advisory
+                                        }
+                                        reviewed={
+                                            !!drafts[
+                                                modelSettingsKey(
+                                                    { nodeId: target.id, engine: settingsEngine },
+                                                    target.identity.model
+                                                )
+                                            ]?.review
+                                        }
+                                        snapshot={
+                                            settings[
+                                                engineSettingsKey({
+                                                    nodeId: target.id,
+                                                    engine: settingsEngine
+                                                })
+                                            ]?.snapshot
+                                        }
+                                    />
+                                )}
                             {settingsEngine &&
                                 extended &&
                                 drafts[
