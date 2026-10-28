@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +20,59 @@ import (
 
 	"nvpair-shared/noderec"
 )
+
+func init() { telemetryClock = func() (uint64, error) { return 1000000000, nil } }
+
+func TestMemoryTelemetryFetchAgeAndRetiredDirectory(t *testing.T) {
+	for _, retire := range []bool{false, true} {
+		name := "current"
+		if retire {
+			name = "retired"
+		}
+		t.Run(name, func(t *testing.T) {
+			old := telemetryClock
+			t.Cleanup(func() { telemetryClock = old })
+			boot := uint64(1000000000)
+			telemetryClock = func() (uint64, error) { return boot, nil }
+			f := noderec.MemoryFact{Bytes: "0", Source: "fixture", SampledAt: time.Now().UTC(), Valid: true}
+			info := NodeInfoResponse{HostUUID: "peer", MemoryObservation: &noderec.MemoryObservation{RunID: "run", Domains: []noderec.MemoryDomain{{ID: "ram", Kind: "system", Total: f, Free: f}}}}
+			body, err := json.Marshal(info)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			d := &daemon{dir: newDirectory(), codec: NewCodec(&output)}
+			d.dir.upsert(noderec.DirectoryNode{HostUUID: "peer", IP: "127.0.0.1", Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: 14318}}})
+			d.http = &http.Client{Transport: serviceBuildTransport(func(*http.Request) (*http.Response, error) {
+				boot += 6000000000
+				if retire {
+					d.dir.remove("peer")
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+			})}
+			if !d.refreshNodeTelemetry(context.Background(), "peer", "127.0.0.1", 14318) {
+				t.Fatal("fetch failed")
+			}
+			var msg Message
+			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &msg); err != nil {
+				t.Fatal(err)
+			}
+			var got noderec.NodeTelemetry
+			if err := json.Unmarshal(msg.Params, &got); err != nil {
+				t.Fatal(err)
+			}
+			if retire {
+				if got.Memory != nil {
+					t.Fatal("retired directory emitted memory")
+				}
+				return
+			}
+			if got.Memory == nil || got.Memory.Domains[0].Free.AgeMS != 6000 || got.MemoryHop == nil || got.MemoryHop.BootNS != "7000000000" {
+				t.Fatalf("forwarded sample: %+v", got)
+			}
+		})
+	}
+}
 
 func TestRefreshNodeTelemetryEmitsFreshnessAndUtilization(t *testing.T) {
 	response := NodeInfoResponse{

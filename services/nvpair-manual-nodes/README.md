@@ -5,6 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-manual-nodes
 
+Node-info memory facts are forwarded as `memoryObservation`, with HTTP elapsed
+time included in per-fact age. Notifications carry a local boot-clock hop
+captured before serialization; broker alias reprojection preserves that stamp.
+The existing probe remains the only collector. Missing facts do not change
+legacy hardware display or engine inventory behavior.
+
 Ollama names and LM Studio IDs must be nonempty valid UTF-8, at most 512 UTF-8
 bytes, with no C0 (U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F)
 characters. The shared validator checks raw model tokens before JSON string

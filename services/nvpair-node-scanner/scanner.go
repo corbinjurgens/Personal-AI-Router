@@ -33,12 +33,13 @@ type (
 // NodeInfoResponse is the /v1/node-info body the daemon fetches to enrich a
 // node (see daemon.fetchNodeInfo).
 type NodeInfoResponse struct {
-	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
-	GPUs           []GPUInfo    `json:"GPUs"`
-	CPU            *CPUInfo     `json:"cpu,omitempty"`
-	Memory         *MemoryInfo  `json:"memory,omitempty"`
-	TelemetryValid bool         `json:"telemetryValid"`
-	MSSince        int64        `json:"msSince"`
+	MemoryObservation *noderec.MemoryObservation `json:"memoryObservation,omitempty"`
+	ServiceBuildID    buildinfo.ID               `json:"serviceBuildId,omitempty"`
+	GPUs              []GPUInfo                  `json:"GPUs"`
+	CPU               *CPUInfo                   `json:"cpu,omitempty"`
+	Memory            *MemoryInfo                `json:"memory,omitempty"`
+	TelemetryValid    bool                       `json:"telemetryValid"`
+	MSSince           int64                      `json:"msSince"`
 	// HostUUID is the identity the node itself reports (nvpair-node-info's
 	// hostUuid). It is not enrichment data — it is what lets the liveness probe
 	// tell "this node still answers" from "some other node now answers at this

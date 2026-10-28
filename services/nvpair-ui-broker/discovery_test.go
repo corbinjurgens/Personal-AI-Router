@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,168 @@ import (
 	"nvpair-shared/noderec"
 	"nvpair-ui-broker/relay"
 )
+
+func TestMemoryTelemetryRetiredScannerCallback(t *testing.T) {
+	b := &Broker{telemetry: newTelemetryCache()}
+	old := &scannerProcess{onTelemetry: func(value noderec.NodeTelemetry) { b.ingestTelemetry(sourceScanner, value) }}
+	b.bindScannerSource(old)
+	replacement := &scannerProcess{}
+	b.bindScannerSource(replacement)
+	params, err := json.Marshal(noderec.NodeTelemetry{HostUUID: "peer", Memory: memoryTelemetryFixture()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.handleNotify(noderec.NotifyNodeTelemetry, params)
+	if len(b.telemetry.Snapshot(time.Now())) != 0 {
+		t.Fatal("retired scanner callback reached cache")
+	}
+	old.onExit()
+	if !replacement.current() {
+		t.Fatal("retired scanner exit retired current worker")
+	}
+	replacement.onExit()
+	if replacement.current() {
+		t.Fatal("exited worker remains current")
+	}
+}
+
+func TestMemoryTelemetryAdmittedScannerCallbackRetiresBeforeMutation(t *testing.T) {
+	b := newManualTestBroker()
+	b.telemetry.clock = func() (uint64, error) { return 1000000000, nil }
+	source := &scannerProcess{onTelemetry: func(value noderec.NodeTelemetry) { b.ingestTelemetry(sourceScanner, value) }}
+	b.bindScannerSource(source)
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	current := source.current
+	source.current = func() bool {
+		admitted := current()
+		close(entered)
+		<-release
+		return admitted
+	}
+	params, err := json.Marshal(noderec.NodeTelemetry{HostUUID: "peer", Memory: memoryTelemetryFixture(), MemoryHop: &noderec.MemoryHop{ForwarderID: "fixture", BootNS: "1000000000"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { defer close(done); source.handleNotify(noderec.NotifyNodeTelemetry, params) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("callback did not reach admission barrier")
+	}
+	source.onExit()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("callback did not finish")
+	}
+	if len(b.telemetry.Snapshot(time.Now())) != 0 {
+		t.Fatal("admitted retired callback restored scanner telemetry")
+	}
+	replacement := &scannerProcess{}
+	b.bindScannerSource(replacement)
+	liveDone := make(chan struct{})
+	go func() { defer close(liveDone); replacement.handleNotify(noderec.NotifyNodeTelemetry, params) }()
+	select {
+	case <-liveDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("live scanner callback deadlocked during fanout")
+	}
+	view := b.telemetry.Snapshot(time.Now())
+	if len(view) != 1 || view[0].Memory == nil || !view[0].Memory.Domains[0].Free.Valid {
+		t.Fatal("live replacement scanner did not apply memory")
+	}
+}
+
+func TestMemoryTelemetryRetiredManualCallbackCannotRestoreAlias(t *testing.T) {
+	b := newManualTestBroker()
+	b.telemetry.clock = func() (uint64, error) { return 1000000000, nil }
+	callback, retire := b.bindManualNodesSource(&rpcWorker{name: "fixture"})
+	status := manualStatus("alias", "127.0.0.1", "peer")
+	status.MemoryObservation = memoryTelemetryFixture()
+	status.MemoryHop = &noderec.MemoryHop{ForwarderID: "fixture", BootNS: "1000000000"}
+	params, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback("node/discovered", params)
+	if len(b.store.Snapshot()) != 1 || len(b.telemetry.Snapshot(time.Now())) != 1 {
+		t.Fatal("live manual callback did not apply")
+	}
+	b.clearManualNodesState()
+	callback("node/updated", params)
+	if len(b.store.Snapshot()) != 0 || len(b.telemetry.Snapshot(time.Now())) != 0 {
+		t.Fatal("retired manual callback restored node or memory")
+	}
+	b.manualMu.Lock()
+	aliases := len(b.manualNodeKeys)
+	b.manualMu.Unlock()
+	if aliases != 0 {
+		t.Fatal("retired manual callback restored alias")
+	}
+	live, _ := b.bindManualNodesSource(&rpcWorker{name: "replacement"})
+	live("node/discovered", params)
+	retire()
+	view := b.telemetry.Snapshot(time.Now())
+	if len(b.store.Snapshot()) != 1 || len(view) != 1 || view[0].Memory == nil || !view[0].Memory.Domains[0].Free.Valid {
+		t.Fatal("live replacement or retired exit lost current manual state")
+	}
+}
+
+func TestMemoryTelemetryManualRetirementSerializesAdmittedCallback(t *testing.T) {
+	b := newManualTestBroker()
+	b.telemetry.clock = func() (uint64, error) { return 1000000000, nil }
+	callback, retire := b.bindManualNodesSource(&rpcWorker{name: "fixture"})
+	entered, release, notified, retired := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce, notifyOnce sync.Once
+	allow := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(allow)
+	b.store.SetOnChange(func() {
+		// Fanout may consult worker handles without workersMu reentrancy.
+		b.getManualNodes()
+		notifyOnce.Do(func() { close(entered); <-release })
+	})
+	status := manualStatus("alias", "127.0.0.1", "peer")
+	status.MemoryObservation = memoryTelemetryFixture()
+	status.MemoryHop = &noderec.MemoryHop{ForwarderID: "fixture", BootNS: "1000000000"}
+	params, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { defer close(notified); callback("node/discovered", params) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("callback did not reach projection barrier")
+	}
+	if b.manualMu.TryLock() {
+		b.manualMu.Unlock()
+		t.Fatal("source mutation was not serialized with retirement")
+	}
+	go func() { defer close(retired); retire() }()
+	allow()
+	select {
+	case <-notified:
+	case <-time.After(5 * time.Second):
+		t.Fatal("callback did not finish")
+	}
+	select {
+	case <-retired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retirement did not finish")
+	}
+	callback("node/updated", params)
+	if len(b.store.Snapshot()) != 0 || len(b.telemetry.Snapshot(time.Now())) != 0 {
+		t.Fatal("admitted callback survived retirement")
+	}
+	b.manualMu.Lock()
+	aliases := len(b.manualNodeKeys)
+	b.manualMu.Unlock()
+	if aliases != 0 {
+		t.Fatal("admitted callback left a retired alias")
+	}
+}
 
 // Consume the manual worker's existing status fields through its real broker
 // dispatcher, store mutation hook, subscription and ordinary client response.

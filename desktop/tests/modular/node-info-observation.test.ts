@@ -23,6 +23,13 @@ function response(changes: JsonObject = {}): JsonObject {
         GPUs: [{ name: 'GPU', vram_bytes: 1024, vram_used_bytes: 512, utilization_percent: 40 }],
         cpu: { name: 'CPU', cores: 4, utilization_percent: 20 },
         memory: { total_bytes: 4096, used_bytes: 1024 },
+        memoryObservation: {
+            runId: 'fixture',
+            domains: [{ id: 'system', kind: 'shared', deviceIds: ['ioreg:a'],
+                total: { bytes: '4096', source: 'fixture', sampledAt: '2026-10-28T00:00:00Z', ageMs: 0, valid: true },
+                free: { bytes: '0', source: 'fixture', sampledAt: '2026-10-28T00:00:00Z', ageMs: 0, valid: true }
+            }]
+        },
         telemetryValid: true,
         msSince: 0,
         ...changes

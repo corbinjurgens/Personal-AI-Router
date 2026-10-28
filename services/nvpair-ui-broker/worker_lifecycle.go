@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"nvpair-shared/applog"
 	"nvpair-shared/engines"
@@ -32,15 +33,18 @@ func (b *Broker) spawnScanner() (supervisedHandle, error) {
 		return nil, err
 	}
 	args = append(args, b.scannerWaits.args()...)
-	sp, err := startScanner(
+	sp, err := startScannerBound(
 		b.scannerPath,
 		applog.LevelString(),
 		b.store,
 		b.relayDir,
 		b.failWorkloadsForNode,
-		func(telemetry noderec.NodeTelemetry) { b.ingestTelemetry(sourceScanner, telemetry) },
-		func(hostUUID string) { b.removeTelemetry(sourceScanner, hostUUID) },
+		nil,
+		nil,
 		b.dispatchScannerErrorsNotif,
+		func(source *scannerProcess) {
+			b.bindScannerSource(source)
+		},
 		args...,
 	)
 	if err != nil {
@@ -54,6 +58,51 @@ func (b *Broker) spawnScanner() (supervisedHandle, error) {
 	}
 	slog.Info("scanner started", "path", b.scannerPath, "pid", sp.cmd.Process.Pid)
 	return sp, nil
+}
+
+func (b *Broker) bindScannerSource(source *scannerProcess) {
+	b.workersMu.Lock()
+	b.scannerSource = source
+	if b.telemetry != nil {
+		b.telemetry.retireScannerMemory()
+	}
+	b.workersMu.Unlock()
+	source.current = func() bool { b.workersMu.Lock(); defer b.workersMu.Unlock(); return b.scannerSource == source }
+	source.onTelemetry = func(value noderec.NodeTelemetry) {
+		b.workersMu.Lock()
+		if b.scannerSource != source || b.telemetry == nil {
+			b.workersMu.Unlock()
+			return
+		}
+		projected, ok := b.telemetry.Upsert(sourceScanner, value, time.Now())
+		b.workersMu.Unlock()
+		if ok {
+			b.fanTelemetryToScheduler(projected)
+		}
+	}
+	source.onTelemetryRemoved = func(hostUUID string) {
+		b.workersMu.Lock()
+		if b.scannerSource != source || b.telemetry == nil {
+			b.workersMu.Unlock()
+			return
+		}
+		projected, ok := b.telemetry.Remove(hostUUID, sourceScanner, time.Now())
+		b.workersMu.Unlock()
+		if ok {
+			b.fanTelemetryToScheduler(projected)
+		}
+	}
+	source.onExit = func() {
+		b.workersMu.Lock()
+		current := b.scannerSource == source
+		if current {
+			b.scannerSource = nil
+		}
+		if current && b.telemetry != nil {
+			b.telemetry.retireScannerMemory()
+		}
+		b.workersMu.Unlock()
+	}
 }
 
 func (b *Broker) spawnNodeInfo() (supervisedHandle, error) {
@@ -627,13 +676,44 @@ func (b *Broker) notifyEngineSwitchRecoveryReady(ctx context.Context, w *rpcWork
 }
 
 func (b *Broker) spawnManualNodes() (supervisedHandle, error) {
-	w, err := startRPCWorker("manual-nodes", b.manualNodesPath, b.manualNodesArgs(), b.forwardManualNodesNotification)
+	// Bind the callback's source before the read pump can deliver its first
+	// notification. The eventual process handle is published separately.
+	source := &rpcWorker{name: "manual-nodes"}
+	callback, retire := b.bindManualNodesSource(source)
+	w, err := startRPCWorker("manual-nodes", b.manualNodesPath, b.manualNodesArgs(), callback, func(*rpcWorker) { retire() })
 	if err != nil {
+		retire()
 		return nil, err
 	}
-	b.setManualNodes(w)
+	b.manualMu.Lock()
+	if b.manualNodesSource == source {
+		b.setManualNodes(w)
+	}
+	b.manualMu.Unlock()
 	slog.Info("manual-nodes started", "path", b.manualNodesPath, "pid", w.cmd.Process.Pid)
 	return w, nil
+}
+
+func (b *Broker) bindManualNodesSource(source *rpcWorker) (func(string, json.RawMessage), func()) {
+	b.manualMu.Lock()
+	b.manualNodesSource = source
+	b.manualMu.Unlock()
+	callback := func(method string, params json.RawMessage) {
+		b.manualMu.Lock()
+		defer b.manualMu.Unlock()
+		if b.manualNodesSource != source {
+			return
+		}
+		b.forwardManualNodesNotificationLocked(method, params)
+	}
+	retire := func() {
+		b.manualMu.Lock()
+		defer b.manualMu.Unlock()
+		if b.manualNodesSource == source {
+			b.clearManualNodesStateLocked()
+		}
+	}
+	return callback, retire
 }
 
 func (b *Broker) spawnSettings() (supervisedHandle, error) {

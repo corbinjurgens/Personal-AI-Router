@@ -6,8 +6,10 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"math"
+	"nvpair-shared/noderec"
 	"os"
 	"strconv"
 	"strings"
@@ -90,7 +92,7 @@ func startStatsCollector() *statsCollector {
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
-	c.latest.Store(initialMemorySnapshot(readMemoryUsed))
+	c.latest.Store(sampleSystemMemory(statsSnapshot{}, readLinuxMemoryFacts))
 	// Prime the CPU baseline so the first tick produces a real delta rather
 	// than a spurious reading (with no previous sample, util reports 0).
 	c.prevCPU = readCPUTimes()
@@ -129,16 +131,12 @@ func (c *statsCollector) run() {
 // the atomic pointer swap on c.latest is the only publishing step.
 func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	previous := c.Snapshot()
-	snap := &statsSnapshot{}
+	snap := sampleSystemMemory(previous, readLinuxMemoryFacts)
 
 	cur := readCPUTimes()
 	snap.CPUUtilPct = cpuUtilization(c.prevCPU, cur)
 	if cur.valid {
 		c.prevCPU = cur
-	}
-
-	if used, ok := readMemoryUsed(); ok {
-		snap.MemUsedBytes = used
 	}
 
 	gpu := make(map[string]gpuStat)
@@ -150,6 +148,46 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	return snap
 }
 
+func readLinuxMemoryFacts() (uint64, uint64, string, bool) {
+	data, err := os.ReadFile(procMeminfoPath)
+	if err != nil {
+		return 0, 0, "", false
+	}
+	return parseMeminfoFacts(string(data))
+}
+
+func parseMeminfoFacts(s string) (uint64, uint64, string, bool) {
+	values := map[string]uint64{}
+	for _, line := range strings.Split(s, "\n") {
+		f := strings.Fields(line)
+		if len(f) != 3 || f[2] != "kB" {
+			continue
+		}
+		if f[0] != "MemTotal:" && f[0] != "MemAvailable:" && f[0] != "MemFree:" {
+			continue
+		}
+		n, err := strconv.ParseUint(f[1], 10, 64)
+		if err != nil || n > math.MaxUint64/1024 {
+			return 0, 0, "", false
+		}
+		if _, exists := values[f[0]]; exists {
+			return 0, 0, "", false
+		}
+		values[f[0]] = n * 1024
+	}
+	total, ok := values["MemTotal:"]
+	if !ok {
+		return 0, 0, "", false
+	}
+	available, ok := values["MemAvailable:"]
+	source := "proc-meminfo-MemAvailable"
+	if !ok {
+		available, ok = values["MemFree:"]
+		source = "proc-meminfo-MemFree-conservative"
+	}
+	return total, available, source, ok && available <= total
+}
+
 // decodeGPU queries nvidia-smi and folds the per-GPU results into out, keyed
 // by UUID. On the first failure it latches nvidiaUnavailable so subsequent
 // ticks short-circuit silently. Unified-memory usage remains available through
@@ -158,7 +196,9 @@ func (c *statsCollector) decodeGPU(out map[string]gpuStat) bool {
 	if c.nvidiaUnavailable.Load() {
 		return false
 	}
-	csv, err := nvidiaSmiCSV("uuid,utilization.gpu,memory.used")
+	start, clockErr := memoryClock()
+	at := time.Now().UTC()
+	csv, err := nvidiaSmiCSV("uuid,utilization.gpu,memory.used,memory.total,memory.free,pci.bus_id")
 	if err != nil {
 		if c.nvidiaUnavailable.CompareAndSwap(false, true) {
 			slog.Warn("nvidia-smi unavailable; GPU utilization / dedicated VRAM-used will not be reported",
@@ -168,6 +208,19 @@ func (c *statsCollector) decodeGPU(out map[string]gpuStat) bool {
 	}
 	parsed, utilizationSamples := parseNvidiaDynamic(csv)
 	for k, v := range parsed {
+		if clockErr != nil && v.Memory != nil {
+			v.Memory.Total = noderec.MemoryFact{Reason: "clock-unavailable"}
+			v.Memory.Free = noderec.MemoryFact{Reason: "clock-unavailable"}
+		}
+		v.MemoryBoot = start
+		if v.Memory != nil {
+			if v.Memory.Total.Valid {
+				v.Memory.Total.SampledAt = at
+			}
+			if v.Memory.Free.Valid {
+				v.Memory.Free.SampledAt = at
+			}
+		}
 		out[k] = v
 	}
 	return utilizationSamples > 0
@@ -325,7 +378,28 @@ func parseNvidiaDynamic(out string) (map[string]gpuStat, int) {
 		if uuid == "" {
 			continue
 		}
+		if previous, exists := res[uuid]; exists {
+			previous.Memory = nil
+			res[uuid] = previous
+			continue
+		}
 		var stat gpuStat
+		if len(fields) >= 6 && nvidiaPhysicalUUID(uuid) {
+			d := noderec.MemoryDomain{ID: uuid, Kind: "dedicated", DeviceIDs: []string{uuid}, Total: noderec.MemoryFact{Reason: "unavailable"}, Free: noderec.MemoryFact{Reason: "unavailable"}}
+			if pci := canonicalPCI(fields[5]); pci != "" {
+				d.DeviceIDs = append(d.DeviceIDs, pci)
+			}
+			for i, fact := range []*noderec.MemoryFact{&d.Total, &d.Free} {
+				if n, err := strconv.ParseUint(fields[3+i], 10, 64); err == nil && n <= math.MaxUint64/(1024*1024) {
+					*fact = memoryFact(n*1024*1024, "nvidia-smi", time.Now().UTC())
+				}
+			}
+			if !d.Total.Valid {
+				d.Kind = "unknown"
+				d.Free = noderec.MemoryFact{Reason: "unproven-topology"}
+			}
+			stat.Memory = &d
+		}
 		if pct, err := strconv.ParseUint(fields[1], 10, 32); err == nil {
 			if pct > 100 {
 				pct = 100
@@ -339,4 +413,47 @@ func parseNvidiaDynamic(out string) (map[string]gpuStat, int) {
 		res[uuid] = stat
 	}
 	return res, utilizationSamples
+}
+
+func canonicalPCI(s string) string {
+	colon := strings.Split(strings.ToLower(s), ":")
+	if len(colon) != 3 {
+		return ""
+	}
+	tail := strings.Split(colon[2], ".")
+	if len(tail) != 2 {
+		return ""
+	}
+	parts := []string{colon[0], colon[1], tail[0], tail[1]}
+	if (len(parts[0]) != 4 && len(parts[0]) != 8) || len(parts[1]) != 2 || len(parts[2]) != 2 || len(parts[3]) != 1 {
+		return ""
+	}
+	widths := []int{16, 8, 5, 3}
+	values := make([]uint64, 4)
+	for i, p := range parts {
+		n, err := strconv.ParseUint(p, 16, widths[i])
+		if err != nil {
+			return ""
+		}
+		values[i] = n
+	}
+	return fmt.Sprintf("pci:%04x:%02x:%02x.%x", values[0], values[1], values[2], values[3])
+}
+
+func nvidiaPhysicalUUID(s string) bool {
+	if len(s) != 40 || !strings.HasPrefix(s, "GPU-") {
+		return false
+	}
+	for i, c := range s[4:] {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }

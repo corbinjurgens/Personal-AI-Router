@@ -109,7 +109,7 @@ var (
 	procPdhGetFormattedCounterArrayW = modPDH.NewProc("PdhGetFormattedCounterArrayW")
 	procPdhCloseQuery                = modPDH.NewProc("PdhCloseQuery")
 
-	modKernel32             = windows.NewLazySystemDLL("kernel32.dll")
+	modKernel32              = windows.NewLazySystemDLL("kernel32.dll")
 	procGlobalMemoryStatusEx = modKernel32.NewProc("GlobalMemoryStatusEx")
 
 	// Per-counter "unavailable" latches. Set once on first
@@ -210,7 +210,7 @@ func startStatsCollector() *statsCollector {
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
-	c.latest.Store(&statsSnapshot{})
+	c.latest.Store(sampleSystemMemory(statsSnapshot{}, readWindowsMemoryFacts))
 
 	pdhOK := c.open() == nil
 
@@ -319,7 +319,11 @@ func (c *statsCollector) run() {
 // memory sample, which comes from an independent syscall.
 func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	previous := c.Snapshot()
-	snap := &statsSnapshot{}
+	snap := sampleSystemMemory(previous, readWindowsMemoryFacts)
+	gpuStart, clockErr := memoryClock()
+	gpuAt := time.Now().UTC()
+	adapters := detectGPUs()
+	var currentGPU map[string]gpuStat
 
 	if c.query != 0 {
 		if r, _, _ := procPdhCollectQueryData.Call(c.query); r != 0 {
@@ -327,6 +331,7 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 				"status", fmt.Sprintf("0x%08x", uint32(r)))
 		} else {
 			gpu, valid := c.decodeGPU()
+			currentGPU = gpu
 			sampledAt := time.Time{}
 			if valid {
 				sampledAt = time.Now()
@@ -338,9 +343,15 @@ func (c *statsCollector) decodeSnapshot() *statsSnapshot {
 	if snap.GPU == nil {
 		applyGPUStats(previous, snap, nil, time.Time{})
 	}
-
-	if used, ok := readMemoryUsed(); ok {
-		snap.MemUsedBytes = used
+	if snap.GPU == nil {
+		snap.GPU = make(map[string]gpuStat)
+	}
+	for key, stat := range snap.GPU {
+		stat.Memory = nil
+		snap.GPU[key] = stat
+	}
+	if clockErr == nil {
+		applyDedicatedMemoryFacts(snap, adapters, currentGPU, gpuAt, gpuStart)
 	}
 
 	return snap
@@ -362,6 +373,8 @@ func (c *statsCollector) decodeGPU() (map[string]gpuStat, bool) {
 			}
 			s := out[lname]
 			s.VRAMUsed = uint64(v)
+			s.memoryUsedValid = true
+			s.memoryUsed = uint64(v)
 			out[lname] = s
 		}
 	}
@@ -421,17 +434,22 @@ func (c *statsCollector) decodeCPU() uint32 {
 // differentiate "zero used" (an unrealistic but valid reading) from
 // "we don't know" in a future refactor.
 func readMemoryUsed() (uint64, bool) {
+	total, available, _, ok := readWindowsMemoryFacts()
+	return total - available, ok
+}
+
+func readWindowsMemoryFacts() (uint64, uint64, string, bool) {
 	var ms memoryStatusEx
 	ms.Length = uint32(unsafe.Sizeof(ms))
 	r, _, err := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&ms)))
 	if r == 0 {
 		slog.Debug("GlobalMemoryStatusEx failed", "err", err)
-		return 0, false
+		return 0, 0, "", false
 	}
 	if ms.TotalPhys == 0 || ms.AvailPhys > ms.TotalPhys {
-		return 0, false
+		return 0, 0, "", false
 	}
-	return ms.TotalPhys - ms.AvailPhys, true
+	return ms.TotalPhys, ms.AvailPhys, "GlobalMemoryStatusEx", true
 }
 
 // readCounterLarge pulls the PDH_FMT_LARGE payload for each instance of

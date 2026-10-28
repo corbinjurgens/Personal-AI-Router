@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -366,6 +367,8 @@ func (sn storedNode) toAvailable() AvailableNode {
 // subscribe to the promoted daemon and reading its acks — while
 // the scanner's node/* notifications are routed into the discovery store.
 type scannerProcess struct {
+	current  func() bool
+	onExit   func()
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	peer     *Peer
@@ -434,6 +437,10 @@ func startScanner(
 	onErrorsNotif func(method string, params json.RawMessage),
 	extraArgs ...string,
 ) (*scannerProcess, error) {
+	return startScannerBound(binaryPath, logLevel, store, relayDir, onNodeLost, onTelemetry, onTelemetryRemoved, onErrorsNotif, nil, extraArgs...)
+}
+
+func startScannerBound(binaryPath, logLevel string, store *discoveryStore, relayDir *relay.Directory, onNodeLost func(string, string), onTelemetry func(noderec.NodeTelemetry), onTelemetryRemoved func(string), onErrorsNotif func(string, json.RawMessage), bind func(*scannerProcess), extraArgs ...string) (*scannerProcess, error) {
 	cmd := exec.Command(binaryPath, append([]string{"--log-level", logLevel}, extraArgs...)...)
 	configureSubprocess(cmd)
 	cmd.Env = workerEnv()
@@ -467,11 +474,17 @@ func startScanner(
 		done:               make(chan struct{}),
 	}
 	sp.peer = jsonrpc.NewPeerWithWriteInterrupt(NewCodec(readWriter{stdout, stdin}), sp.interruptWrite)
+	if bind != nil {
+		bind(sp)
+	}
 
 	go sp.peer.Serve(nil, sp.handleNotify)
 	go sp.drainNodeActivity()
 	go func() {
 		_ = cmd.Wait()
+		if sp.onExit != nil {
+			sp.onExit()
+		}
 		sp.peer.Close()
 		close(sp.done)
 	}()
@@ -620,6 +633,9 @@ func (s *scannerProcess) pushUnregister(svc noderec.ServiceKey) {
 // is logged. Responses to broker-issued Calls are demuxed by the peer itself and
 // never reach here; any other notification is ignored.
 func (s *scannerProcess) handleNotify(method string, params json.RawMessage) {
+	if s.current != nil && !s.current() {
+		return
+	}
 	switch method {
 	case noderec.NotifyNodeDiscovered, noderec.NotifyNodeUpdated, noderec.NotifyNodeRemoved:
 		var ev noderec.NodeEvent
@@ -635,6 +651,11 @@ func (s *scannerProcess) handleNotify(method string, params json.RawMessage) {
 		}
 		if method == noderec.NotifyNodeRemoved && s.onTelemetryRemoved != nil {
 			s.onTelemetryRemoved(ev.Node.HostUUID)
+		}
+		if method == noderec.NotifyNodeUpdated && s.onTelemetryRemoved != nil {
+			if _, present := ev.Node.Services[noderec.ServiceNodeInfo]; !present {
+				s.onTelemetryRemoved(ev.Node.HostUUID)
+			}
 		}
 		if s.store != nil {
 			if method == noderec.NotifyNodeRemoved {
@@ -663,6 +684,10 @@ func (s *scannerProcess) handleNotify(method string, params json.RawMessage) {
 		if telemetry.HostUUID == "" {
 			slog.Warn("daemon emitted node telemetry without hostUuid")
 			return
+		}
+		if s.cmd != nil && s.cmd.Process != nil && telemetry.MemoryHop != nil && telemetry.MemoryHop.ForwarderID != strconv.Itoa(s.cmd.Process.Pid) {
+			telemetry.Memory = nil
+			telemetry.MemoryHop = nil
 		}
 		if s.onTelemetry != nil {
 			s.onTelemetry(telemetry)

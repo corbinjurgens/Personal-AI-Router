@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/errors"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 )
 
 // Version is stamped at build time via -ldflags "-X main.Version=...".
@@ -73,12 +75,15 @@ type MemoryInfo struct {
 }
 
 type NodeInfoResponse struct {
-	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
-	GPUs           []GPUInfo    `json:"GPUs"`
-	CPU            *CPUInfo     `json:"cpu,omitempty"`
-	Memory         *MemoryInfo  `json:"memory,omitempty"`
-	TelemetryValid bool         `json:"telemetryValid"`
-	MSSince        int64        `json:"msSince"`
+	memoryBoot        uint64
+	memoryClockErr    error
+	MemoryObservation *noderec.MemoryObservation `json:"memoryObservation,omitempty"`
+	ServiceBuildID    buildinfo.ID               `json:"serviceBuildId,omitempty"`
+	GPUs              []GPUInfo                  `json:"GPUs"`
+	CPU               *CPUInfo                   `json:"cpu,omitempty"`
+	Memory            *MemoryInfo                `json:"memory,omitempty"`
+	TelemetryValid    bool                       `json:"telemetryValid"`
+	MSSince           int64                      `json:"msSince"`
 	// HostUUID is the remote node's stable per-host identity, reported by
 	// node-info. We surface it so a manual node is tracked by the same permanent
 	// identity as the rest of the fleet — including deduping with the same
@@ -225,13 +230,17 @@ func manualStringUnicode(raw []byte) bool {
 // 14318 otherwise) so existing UI that displays the port stays
 // correct.
 type ManualNodeStatus struct {
-	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
-	ID             string       `json:"id"`
-	Name           string       `json:"name,omitempty"`
-	Address        string       `json:"address"`
-	OllamaUp       bool         `json:"ollama_up"`
-	OllamaPort     int          `json:"ollama_port"`
-	OllamaModels   []string     `json:"ollama_models,omitzero"`
+	memoryBoot        uint64
+	memoryClockErr    error
+	MemoryObservation *noderec.MemoryObservation `json:"memoryObservation,omitempty"`
+	MemoryHop         *noderec.MemoryHop         `json:"memoryHop,omitempty"`
+	ServiceBuildID    buildinfo.ID               `json:"serviceBuildId,omitempty"`
+	ID                string                     `json:"id"`
+	Name              string                     `json:"name,omitempty"`
+	Address           string                     `json:"address"`
+	OllamaUp          bool                       `json:"ollama_up"`
+	OllamaPort        int                        `json:"ollama_port"`
+	OllamaModels      []string                   `json:"ollama_models,omitzero"`
 	// LM Studio is probed on its default OpenAI-API port the same way Ollama
 	// is on 11434, so a manually-added node running LM Studio can be bridged
 	// into lmstudio-proxy by a supervising broker.
@@ -258,8 +267,9 @@ type ReadyParams struct {
 }
 
 type trackedNode struct {
-	entry  ManualEntry
-	status ManualNodeStatus
+	probeMu sync.Mutex
+	entry   ManualEntry
+	status  ManualNodeStatus
 
 	// consecutiveFails counts back-to-back probes where neither
 	// service answered (OllamaUp && NodeInfoUp both false). Reset
@@ -383,6 +393,8 @@ func (m *Manager) probeAll(ctx context.Context) {
 }
 
 func (m *Manager) probeNode(tn *trackedNode) {
+	tn.probeMu.Lock()
+	defer tn.probeMu.Unlock()
 	entry := tn.entry
 	addr := entry.Address
 	id := nodeID(entry)
@@ -426,26 +438,29 @@ func (m *Manager) probeNode(tn *trackedNode) {
 	}
 
 	newStatus := ManualNodeStatus{
-		ServiceBuildID: info.ServiceBuildID,
-		ID:             id,
-		Name:           entry.Name,
-		Address:        addr,
-		OllamaUp:       ollamaUp,
-		OllamaPort:     m.probePorts.ollama,
-		OllamaModels:   ollamaModels,
-		LMStudioUp:     lmStudioUp,
-		LMStudioPort:   m.probePorts.lmstudio,
-		LMStudioModels: lmStudioModels,
-		NodeInfoUp:     nodeInfoUp,
-		NodeInfoPort:   nodeInfoPort,
-		TLSEnabled:     entry.TLSPort > 0,
-		MTLSRequired:   entry.TLSPort > 0 && entry.MTLS,
-		GPUs:           info.GPUs,
-		CPU:            info.CPU,
-		Memory:         info.Memory,
-		TelemetryValid: info.TelemetryValid,
-		MSSince:        info.MSSince,
-		HostUUID:       info.HostUUID,
+		memoryBoot:        info.memoryBoot,
+		memoryClockErr:    info.memoryClockErr,
+		MemoryObservation: info.MemoryObservation.Clone(),
+		ServiceBuildID:    info.ServiceBuildID,
+		ID:                id,
+		Name:              entry.Name,
+		Address:           addr,
+		OllamaUp:          ollamaUp,
+		OllamaPort:        m.probePorts.ollama,
+		OllamaModels:      ollamaModels,
+		LMStudioUp:        lmStudioUp,
+		LMStudioPort:      m.probePorts.lmstudio,
+		LMStudioModels:    lmStudioModels,
+		NodeInfoUp:        nodeInfoUp,
+		NodeInfoPort:      nodeInfoPort,
+		TLSEnabled:        entry.TLSPort > 0,
+		MTLSRequired:      entry.TLSPort > 0 && entry.MTLS,
+		GPUs:              info.GPUs,
+		CPU:               info.CPU,
+		Memory:            info.Memory,
+		TelemetryValid:    info.TelemetryValid,
+		MSSince:           info.MSSince,
+		HostUUID:          info.HostUUID,
 	}
 
 	reachable := newStatus.OllamaUp || newStatus.LMStudioUp || newStatus.NodeInfoUp
@@ -489,12 +504,16 @@ func (m *Manager) probeNode(tn *trackedNode) {
 		prev.TelemetryValid != newStatus.TelemetryValid ||
 		prev.MSSince != newStatus.MSSince
 
-	if changed {
+	if changed || newStatus.MemoryObservation != nil {
 		slog.Info("manual node state changed",
 			"node_id", id, "addr", addr,
 			"ollama_up", newStatus.OllamaUp, "node_info_up", newStatus.NodeInfoUp,
 			"models", len(newStatus.OllamaModels), "gpus", len(newStatus.GPUs))
-		m.ifCurrent(tn, func() error { return m.codec.Notify("node/updated", newStatus) })
+		m.ifCurrent(tn, func() error {
+			newStatus.MemoryHop = noderec.NewMemoryHop(strconv.Itoa(os.Getpid()), manualMemoryClock)
+			newStatus.MemoryObservation = newStatus.MemoryObservation.Advance(newStatus.memoryBoot, newStatus.memoryClockErr, manualMemoryClock)
+			return m.codec.Notify("node/updated", newStatus)
+		})
 	} else {
 		slog.Debug("manual node probe stable",
 			"node_id", id, "addr", addr,
@@ -698,6 +717,7 @@ func decodeManualModelName(raw json.RawMessage) (string, error) {
 }
 
 func (m *Manager) probeNodeInfo(client *http.Client, scheme, addr string, port int) (bool, NodeInfoResponse) {
+	boot, clockErr := manualMemoryClock()
 	url := scheme + "://" + net.JoinHostPort(addr, strconv.Itoa(port)) + "/v1/node-info"
 	start := time.Now()
 	resp, err := client.Get(url)
@@ -726,6 +746,8 @@ func (m *Manager) probeNodeInfo(client *http.Client, scheme, addr string, port i
 		"addr", addr, "port", port, "scheme", scheme, "gpus", len(result.GPUs),
 		"has_cpu", result.CPU != nil, "has_memory", result.Memory != nil,
 		"duration_ms", time.Since(start).Milliseconds())
+	result.memoryBoot = boot
+	result.memoryClockErr = clockErr
 	return true, result
 }
 
@@ -772,8 +794,12 @@ func (m *Manager) probeAndDiscover(tn *trackedNode) {
 	// A local of its own: assigning the captured status raced the caller's
 	// return of it.
 	probed := tn.status
+	probed.MemoryHop = noderec.NewMemoryHop(strconv.Itoa(os.Getpid()), manualMemoryClock)
+	probed.MemoryObservation = probed.MemoryObservation.Advance(probed.memoryBoot, probed.memoryClockErr, manualMemoryClock)
 	m.codec.Notify("node/discovered", probed)
 }
+
+var manualMemoryClock = noderec.MemoryBootClock
 
 func (m *Manager) removeNode(id string) bool {
 	m.mu.Lock()
@@ -804,7 +830,10 @@ func (m *Manager) listNodes() []ManualNodeStatus {
 	defer m.mu.RUnlock()
 	result := make([]ManualNodeStatus, 0, len(m.nodes))
 	for _, tn := range m.nodes {
-		result = append(result, tn.status)
+		status := tn.status
+		status.MemoryHop = noderec.NewMemoryHop(strconv.Itoa(os.Getpid()), manualMemoryClock)
+		status.MemoryObservation = status.MemoryObservation.Advance(status.memoryBoot, status.memoryClockErr, manualMemoryClock)
+		result = append(result, status)
 	}
 	return result
 }

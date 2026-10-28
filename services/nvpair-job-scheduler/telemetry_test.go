@@ -175,6 +175,7 @@ func TestNodeRemovalDropsTelemetryState(t *testing.T) {
 func TestHandleMessageAppliesTelemetryNotification(t *testing.T) {
 	manager := NewManager(NewCodec(nopRW{}), time.Second)
 	params, err := json.Marshal(noderec.NodeTelemetry{
+		Memory:            &noderec.MemoryObservation{RunID: "fixture", Domains: []noderec.MemoryDomain{}},
 		HostUUID:          "node-a",
 		GPUUtilizationPct: 90,
 		TelemetryValid:    true,

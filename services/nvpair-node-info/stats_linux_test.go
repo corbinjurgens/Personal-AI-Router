@@ -10,6 +10,36 @@ import (
 	"testing"
 )
 
+func TestMemoryTelemetryLinuxAccounting(t *testing.T) {
+	total, free, source, ok := parseMeminfoFacts("MemTotal: 10 kB\nMemAvailable: 0 kB\n")
+	if !ok || total != 10240 || free != 0 || source != "proc-meminfo-MemAvailable" {
+		t.Fatalf("known zero: %d %d %q %v", total, free, source, ok)
+	}
+	_, _, source, ok = parseMeminfoFacts("MemTotal: 10 kB\nMemFree: 1 kB\n")
+	if !ok || source != "proc-meminfo-MemFree-conservative" {
+		t.Fatal("fallback source lost")
+	}
+	if _, _, _, ok := parseMeminfoFacts("MemTotal: 18446744073709551615 kB\nMemAvailable: 0 kB\n"); ok {
+		t.Fatal("overflow accepted")
+	}
+}
+
+func TestMemoryTelemetryNvidiaPhysicalFacts(t *testing.T) {
+	uuid := "GPU-12345678-1234-1234-1234-123456789abc"
+	stats, _ := parseNvidiaDynamic(uuid + ", 0, 10, 20, 0, 00000000:01:00.0")
+	d := stats[uuid].Memory
+	if d == nil || d.Free.Bytes != "0" || !d.Free.Valid || d.DeviceIDs[1] != "pci:0000:01:00.0" {
+		t.Fatalf("physical facts: %+v", d)
+	}
+	stats, _ = parseNvidiaDynamic(uuid + ", 0, [N/A], [N/A], [N/A], 00000000:01:00.0")
+	if stats[uuid].Memory.Kind != "unknown" || stats[uuid].Memory.Free.Valid {
+		t.Fatal("N/A became usable UMA")
+	}
+	if canonicalPCI("0000::01:00.0") != "" || nvidiaPhysicalUUID("GPU-0") {
+		t.Fatal("malformed identity accepted")
+	}
+}
+
 // TestParseProcStat pins the /proc/stat aggregate-line parse. The collector
 // derives CPU % from the delta of two of these samples, so a regression here
 // (e.g. picking up a per-core "cpuN" line, or miscounting idle) would make

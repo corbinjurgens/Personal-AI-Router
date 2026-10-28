@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -254,6 +255,8 @@ func (d *daemon) refreshNodeTelemetry(ctx context.Context, hostUUID, ip string, 
 // failover attempt asks several addresses at once, so the time belongs to the
 // answer rather than to the sweep.
 type telemetrySample struct {
+	boot      uint64
+	clockErr  error
 	info      NodeInfoResponse
 	startedAt time.Time
 }
@@ -279,6 +282,7 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 		d.dir.mu.RUnlock()
 	}
 	ask := func(host string) (telemetrySample, bool) {
+		boot, clockErr := telemetryClock()
 		startedAt := time.Now()
 		candidate, ok := d.fetchPeerNodeInfoWithin(ctx, hostUUID, "", host, niPort)
 		if !ok {
@@ -289,7 +293,7 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 				"expected_host_uuid", hostUUID, "reported_host_uuid", candidate.HostUUID, "ip", host)
 			return telemetrySample{}, false
 		}
-		return telemetrySample{info: candidate, startedAt: startedAt}, true
+		return telemetrySample{info: candidate, startedAt: startedAt, boot: boot, clockErr: clockErr}, true
 	}
 	key := hostKey{hostUUID: hostUUID, service: noderec.ServiceNodeInfo}
 	_, sample, ok := askRemembered(&d.enrichHosts, key, hosts, ask)
@@ -297,6 +301,7 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 		return false
 	}
 	info, startedAt := sample.info, sample.startedAt
+	memoryCurrent := false
 	if buildTargetCurrent {
 		d.peerServicesMu.Lock()
 		// Claim replacement/retirement shares peerServicesMu with this apply.
@@ -312,6 +317,7 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 		if authorityCurrent {
 			node, changed, current := d.dir.applyServiceBuild(hostUUID, generation, info.ServiceBuildID)
 			if current {
+				memoryCurrent = true
 				d.infoMu.Lock()
 				if cached, present := d.lastInfo[hostUUID]; present {
 					cached.ServiceBuildID = info.ServiceBuildID
@@ -345,7 +351,31 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 			utilization = info.GPUs[i].UtilizationPercent
 		}
 	}
+	hop := noderec.NewMemoryHop(strconv.Itoa(os.Getpid()), telemetryClock)
+	if d.dir != nil {
+		d.peerServicesMu.Lock()
+		defer d.peerServicesMu.Unlock()
+		d.dir.mu.RLock()
+		claim, authenticated := d.dir.peerServices[hostUUID]
+		d.dir.mu.RUnlock()
+		if authenticated {
+			incarnation, admitted := d.mesh.PeerServiceIncarnation(hostUUID)
+			memoryCurrent = memoryCurrent && admitted && incarnation == claim.Incarnation && peerServicesFresh(claim, time.Now())
+		}
+		d.dir.mu.RLock()
+		defer d.dir.mu.RUnlock()
+		node, exists := d.dir.nodes[hostUUID]
+		ni, advertised := node.Services[noderec.ServiceNodeInfo]
+		memoryCurrent = memoryCurrent && exists && advertised && d.dir.generations[hostUUID] == generation && ni.Port == niPort
+	}
 	d.emitTelemetry(noderec.NodeTelemetry{
+		Memory: func() *noderec.MemoryObservation {
+			if !memoryCurrent {
+				return nil
+			}
+			return info.MemoryObservation.Advance(sample.boot, sample.clockErr, telemetryClock)
+		}(),
+		MemoryHop:         hop,
 		HostUUID:          hostUUID,
 		GPUUtilizationPct: utilization,
 		TelemetryValid:    info.TelemetryValid,
@@ -353,3 +383,5 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 	})
 	return true
 }
+
+var telemetryClock = noderec.MemoryBootClock

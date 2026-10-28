@@ -294,6 +294,7 @@ type Broker struct {
 	// goroutine. See proxyBringUpContext.
 	serveCtx            context.Context
 	scanner             *scannerProcess
+	scannerSource       *scannerProcess
 	peerServicesMu      sync.Mutex
 	nodeInfo            *nodeInfoProcess
 	workloadMgr         *workloadManagerProcess
@@ -436,7 +437,10 @@ type Broker struct {
 	// alias is reprojected from manualNodeStatuses (its last-seen payload) so the
 	// removed alias's address/models don't linger (the survivor's own periodic
 	// probe emits no update while its status is unchanged).
+	// Serialize source admission and synchronous projection with retirement.
+	// This lock never nests inside workersMu.
 	manualMu           sync.Mutex
+	manualNodesSource  *rpcWorker
 	manualNodeKeys     map[string]string
 	manualNodeStatuses map[string]manualNodeStatusEntry
 
@@ -632,6 +636,12 @@ func (b *Broker) unregisterService(svc noderec.ServiceKey) {
 func (b *Broker) setScanner(s *scannerProcess) {
 	b.workersMu.Lock()
 	b.scanner = s
+	if s == nil {
+		b.scannerSource = nil
+		if b.telemetry != nil {
+			b.telemetry.retireScannerMemory()
+		}
+	}
 	b.workersMu.Unlock()
 }
 
@@ -1341,6 +1351,12 @@ func (b *Broker) clearEngineRelaySub() {
 }
 
 func (b *Broker) forwardManualNodesNotification(method string, params json.RawMessage) {
+	b.manualMu.Lock()
+	defer b.manualMu.Unlock()
+	b.forwardManualNodesNotificationLocked(method, params)
+}
+
+func (b *Broker) forwardManualNodesNotificationLocked(method string, params json.RawMessage) {
 	if b.dispatchErrorsNotif("manual-nodes", method, params) {
 		return
 	}
@@ -1358,7 +1374,7 @@ func (b *Broker) forwardManualNodesNotification(method string, params json.RawMe
 			slog.Warn("manual-nodes node payload missing id", "method", method)
 			return
 		}
-		b.upsertManualNode(s)
+		b.upsertManualNodeLocked(s)
 		slog.Debug("manual node event", "event", method, "id", s.ID)
 	case "node/removed":
 		var s manualNodeStatus
@@ -1366,7 +1382,7 @@ func (b *Broker) forwardManualNodesNotification(method string, params json.RawMe
 			slog.Warn("manual-nodes emitted invalid removed payload", "err", err)
 			return
 		}
-		b.removeManualNode(s.ID)
+		b.removeManualNodeLocked(s.ID)
 		slog.Debug("manual node event", "event", method, "id", s.ID)
 	case "ready":
 		slog.Info("manual-nodes reported ready", "params", string(params))
@@ -1387,15 +1403,24 @@ func (b *Broker) forwardManualNodesNotification(method string, params json.RawMe
 // the alias's key changed (node-info revealed its real UUID) the
 // old key is reprojected from a surviving alias or released.
 func (b *Broker) upsertManualNode(s manualNodeStatus) {
+	b.manualMu.Lock()
+	defer b.manualMu.Unlock()
+	b.upsertManualNodeLocked(s)
+}
+
+func (b *Broker) upsertManualNodeLocked(s manualNodeStatus) {
+	s.MemoryObservation = s.MemoryObservation.Clone()
+	if s.MemoryHop != nil {
+		hop := *s.MemoryHop
+		s.MemoryHop = &hop
+	}
 	en := manualToEnriched(s)
 	key := en.storeKey()
 	receivedAt := time.Now()
 
-	b.manualMu.Lock()
 	oldKey, existed := b.manualNodeKeys[s.ID]
 	b.manualNodeKeys[s.ID] = key
 	b.manualNodeStatuses[s.ID] = manualNodeStatusEntry{status: s, receivedAt: receivedAt}
-	b.manualMu.Unlock()
 
 	b.store.Upsert(en, sourceManual)
 	b.ingestTelemetryAt(sourceManual, manualNodeTelemetry(s, key), receivedAt)
@@ -1407,7 +1432,7 @@ func (b *Broker) upsertManualNode(s manualNodeStatus) {
 	if existed && oldKey != key {
 		// This alias moved off oldKey: refresh oldKey from a surviving alias, or
 		// release its store/proxy claim if this was its last owner.
-		b.reprojectOrRelease(oldKey)
+		b.reprojectOrReleaseLocked(oldKey)
 	}
 }
 
@@ -1419,14 +1444,18 @@ func (b *Broker) upsertManualNode(s manualNodeStatus) {
 // store/proxy claim.
 func (b *Broker) removeManualNode(id string) {
 	b.manualMu.Lock()
+	defer b.manualMu.Unlock()
+	b.removeManualNodeLocked(id)
+}
+
+func (b *Broker) removeManualNodeLocked(id string) {
 	key, ok := b.manualNodeKeys[id]
 	delete(b.manualNodeKeys, id)
 	delete(b.manualNodeStatuses, id)
-	b.manualMu.Unlock()
 	if !ok {
 		return
 	}
-	b.reprojectOrRelease(key)
+	b.reprojectOrReleaseLocked(key)
 }
 
 // reprojectOrRelease refreshes or drops a key's manual claim after an alias
@@ -1435,12 +1464,16 @@ func (b *Broker) removeManualNode(id string) {
 // proxy candidate rebridged; otherwise the store and proxy manual claim is
 // released.
 func (b *Broker) reprojectOrRelease(key string) {
+	b.manualMu.Lock()
+	defer b.manualMu.Unlock()
+	b.reprojectOrReleaseLocked(key)
+}
+
+func (b *Broker) reprojectOrReleaseLocked(key string) {
 	if key == "" {
 		return
 	}
-	b.manualMu.Lock()
 	survivor, ok := b.survivingAliasLocked(key)
-	b.manualMu.Unlock()
 	if ok {
 		b.store.Upsert(manualToEnriched(survivor.status), sourceManual)
 		b.bridgeManualNode(survivor.status, key)
@@ -1475,12 +1508,17 @@ func (b *Broker) survivingAliasLocked(key string) (manualNodeStatusEntry, bool) 
 // leaving the old manual nodes in the snapshot would strand stale entries
 // that never age out. Clients re-add manual nodes after a restart.
 func (b *Broker) clearManualNodesState() {
-	b.setManualNodes(nil)
 	b.manualMu.Lock()
+	defer b.manualMu.Unlock()
+	b.clearManualNodesStateLocked()
+}
+
+func (b *Broker) clearManualNodesStateLocked() {
+	b.manualNodesSource = nil
+	b.setManualNodes(nil)
 	keys := b.manualNodeKeys
 	b.manualNodeKeys = make(map[string]string)
 	b.manualNodeStatuses = make(map[string]manualNodeStatusEntry)
-	b.manualMu.Unlock()
 	seen := make(map[string]bool, len(keys))
 	for _, key := range keys {
 		// Aliases can share a key; drop each unique claim once.

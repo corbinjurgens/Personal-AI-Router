@@ -96,6 +96,19 @@ The service no longer advertises itself over mDNS. Its parent (the broker) regis
 - **macOS**: CPU and system-memory usage come from Mach through gopsutil's purego bindings. GPU identity, mapped memory, and utilization come from the built-in, unprivileged `/usr/sbin/ioreg` command's `IOAccelerator` `PerformanceStatistics`; no sudo or private framework binding is required. Apple Silicon is supported directly. Intel/AMD fields are best-effort when their drivers expose the same dedicated-memory counters. The performance keys are undocumented and may change across macOS releases; a missing or changed key leaves only that metric out and does not stop CPU or memory collection.
 - **Other platforms**: GPU names come from `ghw`; VRAM and dynamic stats are not reported.
 
+## Memory observations
+
+Memory telemetry is published as `memoryObservation`, independently of legacy
+display memory and GPU utilization. Each physical pool carries a producer run
+identity and independent total/available decimal-byte facts with source, UTC
+collection-start time, validity, reason and suspend-aware age. Zero is known.
+Linux uses MemAvailable (or explicitly conservative MemFree) and the existing
+bounded NVIDIA query. Windows uses GlobalMemoryStatusEx and refreshed DXGI
+LUID totals minus global PDH dedicated usage. Darwin uses Mach free plus
+inactive pages; AGX aliases share the RAM pool. Missing or unmatched counters
+remain unknown. No process GPU budget or name/ordinal capacity matching is
+used. Native accuracy acceptance is untested by portable fixture tests.
+
 ## Shutdown
 
 The service shuts down on:
