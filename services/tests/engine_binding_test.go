@@ -94,7 +94,7 @@ func newEngineBindingServiceFixture(t *testing.T, s *remoteServiceFixture, confi
 		identities := append([]serviceProcessIdentity(nil), e.identities...)
 		e.mu.Unlock()
 		for _, identity := range identities {
-			assertSwitchProcessIdentityStopped(t, identity)
+			e.assertProcessStopped(t, identity)
 		}
 		for _, port := range []int{e.sourcePort, e.targetPort, e.facadePort, e.targetFacadePort, e.scannerPort} {
 			assertInteropListenerClosed(t, port)
@@ -662,7 +662,7 @@ func testEngineBindingReadyPeer(t *testing.T) {
 			if m.ID == nil || string(*m.ID) != id {
 				t.Fatal("ready-peer history reply changed its request ID")
 			}
-			if m.Error != nil {
+			if m != nil && m.Error != nil {
 				if m.Error.Code == jsonrpc.HistoryBusyCode {
 					return false
 				}
@@ -869,7 +869,12 @@ func testEngineBindingRing(t *testing.T) {
 	manual := settings.SwitchRequest{RequestID: "binding-manual-retained", SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: "e3v1:" + strings.Repeat("0", 64)}
 	m, err := f.client.call(strconv.FormatInt(newRPCID(), 10), settings.SwitchMethod, mustMarshal(t, manual), serviceCallTimeout)
 	if err != nil || m.Error == nil || m.Error.Code != settings.SwitchConfigurationConflictCode {
-		t.Fatalf("manual receipt setup: transport=%v", err)
+		t.Fatalf("manual receipt setup: transport=%v outcome=%s", err, func() string {
+			if m.Error != nil {
+				return fmt.Sprintf("code=%d message=%q", m.Error.Code, m.Error.Message)
+			}
+			return "result present"
+		}())
 	}
 	manualReceipt := f.status(t, manual.RequestID).Receipt
 	if manualReceipt == nil || manualReceipt.Automatic || !manualReceipt.Terminal || manualReceipt.Phase != settings.SwitchRejected {

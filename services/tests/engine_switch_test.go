@@ -125,6 +125,7 @@ type switchProcessFixture struct {
 	starts              map[string][]int32
 	identities          []serviceProcessIdentity
 	engineIdentities    map[string][]serviceProcessIdentity
+	lifetimes           map[serviceProcessIdentity]*fixtureProcessLifetime
 	effectError         error
 	inferences          map[string]int
 	failTarget          bool
@@ -161,6 +162,7 @@ func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 func prepareSwitchProcessFixture(t *testing.T, base string, ports fixtureServicePorts, preparedScanner string) *switchProcessFixture {
 	t.Helper()
 	f := &switchProcessFixture{base: base, ports: ports, sourcePort: freePort(t), targetPort: freePort(t), facadePort: freePort(t), targetFacadePort: freePort(t), release: make(chan struct{}), targetRelease: make(chan struct{}), inflight: make(chan struct{}, 1), starts: make(map[string][]int32), engineIdentities: make(map[string][]serviceProcessIdentity), inferences: make(map[string]int), targetStarting: make(chan struct{}, 1)}
+	f.lifetimes = make(map[serviceProcessIdentity]*fixtureProcessLifetime)
 	f.control = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pid, err := strconv.ParseInt(r.URL.Query().Get("pid"), 10, 32)
 		if err != nil {
@@ -169,20 +171,33 @@ func prepareSwitchProcessFixture(t *testing.T, base string, ports fixtureService
 		}
 		if r.URL.Path == "/started" {
 			identity, identityErr := serviceProcessIdentityAt(r.Context(), int32(pid))
+			var proof *fixtureProcessLifetime
+			if identityErr == nil {
+				// Retain the live process before this registration returns and the
+				// engine can answer its first readiness probe.
+				proof, identityErr = retainFixtureProcessLifetime(identity)
+			}
 			f.mu.Lock()
 			name := r.URL.Query().Get("engine")
 			if identityErr != nil {
-				f.effectError = identityErr
+				f.effectError = errors.Join(f.effectError, identityErr)
 			} else {
+				if previous := f.lifetimes[identity]; previous != nil {
+					if err := proof.close(); err != nil {
+						f.effectError = errors.Join(f.effectError, err)
+					}
+				} else {
+					f.lifetimes[identity] = proof
+				}
 				f.identities = append(f.identities, identity)
 				f.engineIdentities[name] = append(f.engineIdentities[name], identity)
 			}
 			f.starts[name] = append(f.starts[name], int32(pid))
 			if name == "llamacpp" && f.checkSourceExit {
 				for _, source := range f.engineIdentities["ollama"] {
-					stopped, err := switchProcessIdentityStopped(r.Context(), source)
+					stopped, err := f.lifetimes[source].stopped(r.Context())
 					if err != nil {
-						f.effectError = err
+						f.effectError = errors.Join(f.effectError, err)
 					}
 					f.sourceAliveAtTarget = f.sourceAliveAtTarget || !stopped
 				}
@@ -225,6 +240,15 @@ func prepareSwitchProcessFixture(t *testing.T, base string, ports fixtureService
 	}))
 	t.Cleanup(func() { f.unblock(); f.control.Close() })
 	t.Cleanup(func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for identity, proof := range f.lifetimes {
+			if err := proof.close(); err != nil {
+				t.Errorf("close fixture lifetime %+v: %v", identity, err)
+			}
+		}
+	})
+	t.Cleanup(func() {
 		f.unblock()
 		f.mu.Lock()
 		identities := append([]serviceProcessIdentity(nil), f.identities...)
@@ -236,7 +260,7 @@ func prepareSwitchProcessFixture(t *testing.T, base string, ports fixtureService
 		// The engine image is the parent test executable. Never scan by that
 		// path: signal only controller-recorded PID/path/creation identities.
 		for _, identity := range identities {
-			stopped, err := switchProcessIdentityStopped(context.Background(), identity)
+			stopped, err := f.processStopped(context.Background(), identity)
 			if err != nil {
 				t.Errorf("inspect fixture engine: %v", err)
 				continue
@@ -248,7 +272,7 @@ func prepareSwitchProcessFixture(t *testing.T, base string, ports fixtureService
 					continue
 				}
 			}
-			assertSwitchProcessIdentityStopped(t, identity)
+			f.assertProcessStopped(t, identity)
 		}
 	})
 	image, err := os.Executable()
@@ -303,6 +327,35 @@ func (f *switchProcessFixture) unblockTarget() {
 }
 func (f *switchProcessFixture) unblock() { f.unblockSource(); f.unblockTarget() }
 
+func (f *switchProcessFixture) processLifetime(identity serviceProcessIdentity) (*fixtureProcessLifetime, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	proof := f.lifetimes[identity]
+	if proof == nil {
+		return nil, fmt.Errorf("fixture lifetime was not retained: %+v", identity)
+	}
+	return proof, nil
+}
+
+func (f *switchProcessFixture) processStopped(ctx context.Context, identity serviceProcessIdentity) (bool, error) {
+	proof, err := f.processLifetime(identity)
+	if err != nil {
+		return false, err
+	}
+	return proof.stopped(ctx)
+}
+
+func (f *switchProcessFixture) assertProcessStopped(t *testing.T, identity serviceProcessIdentity) {
+	t.Helper()
+	proof, err := f.processLifetime(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped, err := proof.wait(10 * time.Second); err != nil || !stopped {
+		t.Fatalf("inspect engine lifetime %+v: stopped=%t error=%v", identity, stopped, err)
+	}
+}
+
 // A later process may reuse a departed engine's PID, including another fixture
 // engine. Observe the recorded lifetime, just as kill revalidates it before a
 // signal; a reused PID is neither a survivor nor authority to signal its owner.
@@ -322,28 +375,6 @@ func switchProcessIdentityStopped(ctx context.Context, expected serviceProcessId
 		return false, errors.Join(err, exitErr)
 	}
 	return current != expected, nil
-}
-
-func assertSwitchProcessIdentityStopped(t *testing.T, identity serviceProcessIdentity) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	tick := time.NewTicker(25 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		stopped, err := switchProcessIdentityStopped(ctx, identity)
-		if err != nil {
-			t.Fatalf("inspect engine lifetime %+v: %v", identity, err)
-		}
-		if stopped {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("engine lifetime survived: %+v", identity)
-		case <-tick.C:
-		}
-	}
 }
 
 func (f *switchProcessFixture) start(t *testing.T) {
