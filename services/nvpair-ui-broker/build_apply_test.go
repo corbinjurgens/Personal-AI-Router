@@ -179,6 +179,363 @@ func buildApplyImpactFixture(t *testing.T) *Broker {
 	return b
 }
 
+func buildApplyOwnerEvidenceFixture(t *testing.T) buildapply.EngineOwnerEvidence {
+	t.Helper()
+	revision := "sha256:" + strings.Repeat("a", 64)
+	evidence := buildapply.EngineOwnerEvidence{
+		ManagerIncarnation: "native-manager",
+		Intent: buildapply.Known(buildapply.EngineOwnerIntent{Revision: revision,
+			EnabledByEngine: map[string]bool{"fake": false}, OffByEngine: map[string]string{"fake": "local"}}),
+		Locks: buildapply.Known(buildapply.EngineOwnerLocks{Revision: revision, LockedByEngine: map[string]bool{"fake": false}}),
+		Universe: buildapply.Known([]buildapply.EngineOwnerUniverseEntry{{
+			Engine: "fake", Registered: true, Supported: buildapply.Known(true), Installed: buildapply.Known(false),
+			Running: buildapply.Known(false), TerminationVerified: buildapply.Known(true),
+			ModelRoots: buildapply.Known([]string{}), DataRoots: buildapply.Known([]string{}), RootsComplete: true,
+		}}),
+		StopAuthority: buildapply.Known([]buildapply.EngineOwnerStopAuthority{{
+			Engine: "fake", Scoped: buildapply.Known(true), Adopted: buildapply.Known(false),
+			ReclaimPending: buildapply.Known(false), Reason: "no_live_process",
+		}}),
+		Reservations: buildapply.Known(buildapply.EngineOwnerReservations{Revision: revision,
+			BlocksApply: buildapply.Known(false), UnsafeCopiesComplete: true, Operations: []buildapply.EngineOwnerOperation{}}),
+		Reasons: []buildapply.EngineOwnerReason{},
+	}
+	if err := evidence.Finalize(); err != nil {
+		t.Fatalf("finalize manager evidence: %v", err)
+	}
+	return evidence
+}
+
+func buildApplyLocalEvidenceFixture() buildapply.Impact {
+	return buildapply.Impact{
+		Fences: buildapply.Fences{
+			RuntimeGeneration: buildapply.Known("runtime"), PolicyRevision: buildapply.Known("policy"),
+			SettingsRevision: buildapply.Known("settings-revision"), AvailabilityRevision: buildapply.Known("availability"),
+		},
+		Availability: buildapply.Known(nodepolicy.Available), PauseOrigin: buildapply.Known(""),
+		ActiveWork: buildapply.Known(0),
+		Engines: buildapply.Known([]buildapply.EngineFact{{Engine: "fake",
+			Active: buildapply.Known(false), LoadedModels: buildapply.Known([]string{})}}),
+		ModelOperations:     buildapply.Known([]buildapply.ModelOperation{}),
+		SettingsDifferences: buildapply.Known([]buildapply.SettingsDifference{}),
+		Maintenance:         buildapply.MaintenanceState{BuildApplyActive: buildapply.Known(false), ModelSettingsActive: buildapply.Known(false)},
+		ExpectedSettings: buildapply.ExpectedSettings{
+			PolicyDigest: buildapply.Known("policy-digest"), EngineSettingsDigest: buildapply.Known("settings-digest"),
+			StopEngines: buildapply.Known(true), UnloadModels: buildapply.Known(true),
+		},
+		InterruptionPolicy: buildapply.InterruptionPolicy{OnActive: buildapply.Known(nodepolicy.FinishActive), DrainTimeoutSeconds: buildapply.Known(10)},
+	}
+}
+
+func TestBuildApplyOwnerEvidence(t *testing.T) {
+	newCapture := func(t *testing.T) (buildApplyOwnerRead, buildapply.EngineOwnerEvidence, **engineManagerSource) {
+		t.Helper()
+		source := &engineManagerSource{settingsEpoch: "broker-source"}
+		current := source
+		return buildApplyOwnerRead{
+			impact: buildApplyLocalEvidenceFixture(), worker: &rpcWorker{}, source: source, policySource: source,
+			settingsRecords: map[string]bool{"fake": true},
+		}, buildApplyOwnerEvidenceFixture(t), &current
+	}
+	read := func(local buildApplyOwnerRead) func() (buildApplyOwnerRead, bool) {
+		return func() (buildApplyOwnerRead, bool) { return local, true }
+	}
+	current := func(bound **engineManagerSource) func(*rpcWorker, *engineManagerSource) bool {
+		return func(_ *rpcWorker, source *engineManagerSource) bool { return *bound == source }
+	}
+	t.Run("stable manager and local owners", func(t *testing.T) {
+		local, evidence, bound := newCapture(t)
+		calls := 0
+		result, ok := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(_ context.Context, worker *rpcWorker) (buildapply.EngineOwnerEvidence, error) {
+			if worker != local.worker {
+				t.Fatal("read another worker")
+			}
+			calls++
+			return evidence, nil
+		}, current(bound))
+		if !ok || calls != 2 || !result.Impact.Complete || !result.ManagerEvidence.Known ||
+			*result.Impact.Fences.ManagerIncarnation.Value != evidence.ManagerIncarnation ||
+			*result.Impact.Fences.IntentRevision.Value != evidence.Intent.Value.Revision ||
+			!result.Impact.Engines.Known || len(*result.Impact.Engines.Value) != 1 ||
+			!(*result.Impact.Engines.Value)[0].Locked.Known {
+			t.Fatalf("stable owner evidence: available=%v calls=%d result=%+v", ok, calls, result)
+		}
+	})
+	t.Run("complete empty universe", func(t *testing.T) {
+		local, evidence, bound := newCapture(t)
+		local.impact.Engines = buildapply.Known([]buildapply.EngineFact{})
+		evidence.Intent.Value.EnabledByEngine = map[string]bool{}
+		evidence.Intent.Value.OffByEngine = map[string]string{}
+		evidence.Locks.Value.LockedByEngine = map[string]bool{}
+		evidence.Universe = buildapply.Known([]buildapply.EngineOwnerUniverseEntry{})
+		evidence.StopAuthority = buildapply.Known([]buildapply.EngineOwnerStopAuthority{})
+		if err := evidence.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		result, ok := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) { return evidence, nil }, current(bound))
+		if !ok || !result.Impact.Complete || !result.Impact.Engines.Known || len(*result.Impact.Engines.Value) != 0 || !result.Impact.ModelOperations.Known {
+			t.Fatalf("complete empty owner evidence: available=%v result=%+v", ok, result)
+		}
+	})
+	t.Run("retained engine stays present without invented state", func(t *testing.T) {
+		local, evidence, bound := newCapture(t)
+		local.impact.Engines = buildapply.Known([]buildapply.EngineFact{})
+		(*evidence.Universe.Value)[0].Registered = false
+		(*evidence.Universe.Value)[0].Supported = buildapply.Observation[bool]{}
+		evidence.Reasons = append(evidence.Reasons, buildapply.EngineOwnerReason{Section: "universe", Engine: "fake", Code: "unobserved"})
+		if err := evidence.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		result, ok := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) { return evidence, nil }, current(bound))
+		if !ok || result.Impact.Complete || !result.Impact.Engines.Known || len(*result.Impact.Engines.Value) != 1 ||
+			(*result.Impact.Engines.Value)[0].Engine != "fake" || (*result.Impact.Engines.Value)[0].Active.Known ||
+			(*result.Impact.Engines.Value)[0].LoadedModels.Known {
+			t.Fatalf("retained engine projection: %+v", result)
+		}
+	})
+	t.Run("registered engine without settings record refuses", func(t *testing.T) {
+		local, evidence, bound := newCapture(t)
+		delete(local.settingsRecords, "fake")
+		result, ok := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) { return evidence, nil }, current(bound))
+		if !ok || result.Impact.Complete || len(result.Impact.Refusals) != 1 || result.Impact.Refusals[0].Code != "settings_baseline_unavailable" {
+			t.Fatalf("missing settings record accepted: %+v", result)
+		}
+	})
+	t.Run("replacement before first send", func(t *testing.T) {
+		local, evidence, bound := newCapture(t)
+		calls := 0
+		result, ok := captureBuildApplyOwnerEvidence(t.Context(), func() (buildApplyOwnerRead, bool) {
+			*bound = &engineManagerSource{settingsEpoch: "replacement"}
+			return local, true
+		}, func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) {
+			calls++
+			return evidence, nil
+		}, current(bound))
+		if ok || calls != 0 || result.ManagerEvidence.Known {
+			t.Fatalf("retired source sent owner request: available=%v calls=%d", ok, calls)
+		}
+	})
+	t.Run("replacement during first reply", func(t *testing.T) {
+		local, evidence, bound := newCapture(t)
+		sent, release := make(chan struct{}), make(chan struct{})
+		done := make(chan buildapply.ImpactEnvelope, 1)
+		go func() {
+			result, _ := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) {
+				close(sent)
+				<-release
+				return evidence, nil
+			}, current(bound))
+			done <- result
+		}()
+		<-sent
+		*bound = &engineManagerSource{settingsEpoch: "replacement"}
+		close(release)
+		result := <-done
+		if result.ManagerEvidence.Known || result.Impact.Complete || len(result.Impact.Refusals) != 1 || result.Impact.Refusals[0].Code != "changed" {
+			t.Fatalf("late predecessor reply retained: %+v", result)
+		}
+	})
+	t.Run("replacement after final local capture", func(t *testing.T) {
+		local, evidence, bound := newCapture(t)
+		checks := 0
+		pair := func(worker *rpcWorker, source *engineManagerSource) bool {
+			checks++
+			if checks == 4 {
+				*bound = &engineManagerSource{settingsEpoch: "replacement"}
+			}
+			return current(bound)(worker, source)
+		}
+		result, ok := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) { return evidence, nil }, pair)
+		if !ok || checks != 4 || result.ManagerEvidence.Known || result.Impact.Complete {
+			t.Fatalf("post-capture replacement retained: available=%v checks=%d result=%+v", ok, checks, result)
+		}
+	})
+	t.Run("local intent settings lock and reservation fences", func(t *testing.T) {
+		for _, name := range []string{"settings", "maintenance", "policy", "running", "root"} {
+			t.Run(name, func(t *testing.T) {
+				local, evidence, bound := newCapture(t)
+				reads := 0
+				result, ok := captureBuildApplyOwnerEvidence(t.Context(), func() (buildApplyOwnerRead, bool) {
+					reads++
+					changed := local
+					if reads > 1 {
+						switch name {
+						case "settings":
+							changed.settingsDigest = "new-settings"
+						case "maintenance":
+							changed.maintenanceGeneration++
+						case "policy":
+							changed.policyGeneration++
+						case "running":
+							changed.runningGeneration++
+						case "root":
+							changed.policyDigest = "new-root-policy"
+						}
+					}
+					return changed, true
+				}, func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) { return evidence, nil }, current(bound))
+				if !ok || result.ManagerEvidence.Known || result.Impact.Complete || result.Impact.Refusals[0].Code != "changed" {
+					t.Fatalf("local %s drift retained: %+v", name, result)
+				}
+			})
+		}
+	})
+	t.Run("manager intent lock root and reservation changes", func(t *testing.T) {
+		for _, name := range []string{"intent", "lock", "root", "reservation", "incarnation"} {
+			t.Run(name, func(t *testing.T) {
+				local, evidence, bound := newCapture(t)
+				calls := 0
+				result, ok := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) {
+					calls++
+					if calls == 2 {
+						switch name {
+						case "intent":
+							evidence.Intent.Value.Revision = "sha256:" + strings.Repeat("b", 64)
+						case "lock":
+							evidence.Locks.Value.Revision = "sha256:" + strings.Repeat("b", 64)
+						case "root":
+							(*evidence.Universe.Value)[0].ModelRoots = buildapply.Known([]string{filepath.Join(t.TempDir(), "models")})
+						case "reservation":
+							evidence.Reservations.Value.Revision = "sha256:" + strings.Repeat("b", 64)
+						case "incarnation":
+							evidence.ManagerIncarnation = "next-native-manager"
+						}
+						if err := evidence.Finalize(); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return evidence, nil
+				}, current(bound))
+				if !ok || calls != 2 || result.ManagerEvidence.Known || result.Impact.Complete || result.Impact.Refusals[0].Code != "changed" {
+					t.Fatalf("manager %s drift retained: %+v", name, result)
+				}
+			})
+		}
+	})
+	t.Run("unknown roots and reservations refuse", func(t *testing.T) {
+		for _, name := range []string{"roots", "reservations"} {
+			t.Run(name, func(t *testing.T) {
+				local, evidence, bound := newCapture(t)
+				if name == "roots" {
+					(*evidence.Universe.Value)[0].RootsComplete = false
+					(*evidence.Universe.Value)[0].DataRoots = buildapply.Observation[[]string]{}
+					evidence.Reasons = append(evidence.Reasons, buildapply.EngineOwnerReason{Section: "universe", Engine: "fake", Code: "unmodeled_data_roots"})
+				} else {
+					evidence.Reservations.Value.BlocksApply = buildapply.Observation[bool]{}
+					evidence.Reservations.Value.UnsafeCopiesComplete = false
+					evidence.Reasons = append(evidence.Reasons, buildapply.EngineOwnerReason{Section: "reservations", Code: "content_authority_unknown"})
+				}
+				if err := evidence.Finalize(); err != nil {
+					t.Fatal(err)
+				}
+				result, ok := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) { return evidence, nil }, current(bound))
+				if !ok || result.Impact.Complete || !result.ManagerEvidence.Known || result.ManagerEvidence.Value.Complete {
+					t.Fatalf("unknown %s became complete: %+v", name, result)
+				}
+			})
+		}
+	})
+	t.Run("missing manager sections refuse", func(t *testing.T) {
+		for _, section := range []string{"intent", "locks", "universe", "stopAuthority", "reservations"} {
+			t.Run(section, func(t *testing.T) {
+				local, evidence, bound := newCapture(t)
+				switch section {
+				case "intent":
+					evidence.Intent = buildapply.Observation[buildapply.EngineOwnerIntent]{}
+				case "locks":
+					evidence.Locks = buildapply.Observation[buildapply.EngineOwnerLocks]{}
+				case "universe":
+					evidence.Universe = buildapply.Observation[[]buildapply.EngineOwnerUniverseEntry]{}
+					evidence.StopAuthority = buildapply.Observation[[]buildapply.EngineOwnerStopAuthority]{}
+					evidence.Reasons = append(evidence.Reasons, buildapply.EngineOwnerReason{Section: "stopAuthority", Code: "unavailable"})
+				case "stopAuthority":
+					evidence.StopAuthority = buildapply.Observation[[]buildapply.EngineOwnerStopAuthority]{}
+				case "reservations":
+					evidence.Reservations = buildapply.Observation[buildapply.EngineOwnerReservations]{}
+				}
+				evidence.Reasons = append(evidence.Reasons, buildapply.EngineOwnerReason{Section: section, Code: "unavailable"})
+				if err := evidence.Finalize(); err != nil {
+					t.Fatal(err)
+				}
+				result, ok := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) { return evidence, nil }, current(bound))
+				if !ok || !result.ManagerEvidence.Known || result.Impact.Complete || len(result.Impact.Refusals) == 0 {
+					t.Fatalf("missing %s section did not refuse: %+v", section, result)
+				}
+			})
+		}
+	})
+	t.Run("private reservation identity stays out of public impact", func(t *testing.T) {
+		local, evidence, bound := newCapture(t)
+		evidence.Reservations.Value.BlocksApply = buildapply.Known(true)
+		evidence.Reservations.Value.Operations = []buildapply.EngineOwnerOperation{{
+			ID: "private-operation-id", Engine: "fake", Kind: "copy", Phase: "active", SourceIncarnation: buildapply.Known(evidence.ManagerIncarnation),
+		}}
+		if err := evidence.Finalize(); err != nil {
+			t.Fatal(err)
+		}
+		result, ok := captureBuildApplyOwnerEvidence(t.Context(), read(local), func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error) { return evidence, nil }, current(bound))
+		if !ok || result.Impact.Complete || !result.Impact.ModelOperations.Known || len(*result.Impact.ModelOperations.Value) != 1 ||
+			(*result.Impact.ModelOperations.Value)[0].Engine != "fake" || (*result.Impact.ModelOperations.Value)[0].Kind != "copy" {
+			t.Fatalf("blocking copy projection: %+v", result)
+		}
+		public, err := json.Marshal(result.Impact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(public), "private-operation-id") {
+			t.Fatal("private operation identity leaked to public impact")
+		}
+	})
+}
+
+func TestBuildApplyOwnerEvidenceTransport(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		malformed bool
+	}{
+		{name: "strict empty request and typed reply"},
+		{name: "false completeness rejected", malformed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			worker, codec := newTestRPCWorkerPipe(t)
+			evidence := buildApplyOwnerEvidenceFixture(t)
+			data, err := json.Marshal(evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.malformed {
+				data = []byte(strings.Replace(string(data), `"complete":true`, `"complete":false`, 1))
+			}
+			serverResult := make(chan error, 1)
+			go func() {
+				request, err := codec.Read()
+				if err != nil {
+					serverResult <- err
+					return
+				}
+				if request.Method != buildapply.EngineOwnerEvidenceMethod || string(request.Params) != "{}" || request.ID == nil {
+					serverResult <- fmt.Errorf("unexpected owner request: method=%q params=%s", request.Method, request.Params)
+					return
+				}
+				serverResult <- codec.Respond(request.ID, json.RawMessage(data))
+			}()
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			got, callErr := (&Broker{}).callBuildApplyOwnerEvidence(ctx, worker)
+			if err := <-serverResult; err != nil {
+				t.Fatalf("serve owner read: %v", err)
+			}
+			if test.malformed {
+				if callErr == nil {
+					t.Fatal("accepted false manager completeness")
+				}
+			} else if callErr != nil || !got.Complete || got.CaptureToken != evidence.CaptureToken {
+				t.Fatalf("typed owner read = %+v, error=%v", got, callErr)
+			}
+		})
+	}
+}
+
 func TestBuildApplyImpactProjectsOnlyCurrentCachedOwners(t *testing.T) {
 	b := buildApplyImpactFixture(t)
 	impact, ok := b.cachedBuildApplyImpact()

@@ -660,6 +660,7 @@ func DecodeRequest(data []byte, request any) error {
 	case *GUIReadyRequest:
 		valid = token(r.OperationID, false) && validGUI(r.GUI)
 	case *ImpactRequest:
+	case *EngineOwnerEvidenceRequest:
 	case *PrepareRequest:
 		valid = token(r.OperationID, false) && token(r.PreviewID, false) && knownFences(r.Fences)
 	case *FinishRequest:

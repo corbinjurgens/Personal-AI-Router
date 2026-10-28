@@ -160,6 +160,7 @@
 | `engine:logs` | request (we call) | ⚠️ not called |
 | `engine:model-copy-capabilities` | request (we call) | ✅ yes |
 | `engine:models` | request (we call) | ✅ yes |
+| `engine:owner-evidence` | request (we call) | ➖ ignored |
 | `engine:prepare-shutdown` | request (we call) | ➖ ignored |
 | `engine:preview-launch` | request (we call) | ⚠️ not called |
 | `engine:reconcile-resident` | request (we call) | ➖ ignored |

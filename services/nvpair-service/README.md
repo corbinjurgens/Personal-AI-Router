@@ -9,9 +9,23 @@ SPDX-License-Identifier: Apache-2.0
 
 `service/build-apply-preview`, `service/build-apply-start`,
 `service/build-apply-status` and `service/build-apply-gui-ready` are local
-service methods. They currently validate bounded, strict requests and return
-`{available:false,value:null,refusal:{code:"unavailable",detail:...}}`.
-Preview/start perform no filesystem, lifecycle, broker or process-launch work.
+service methods. Preview reads the current broker's private `build:apply-impact`
+envelope with a five-second budget. The envelope carries public impact and
+private manager evidence; only public impact enters the preview. Manager model
+and data roots, including declared install roots, are joined with service
+profile roots before either package is inspected. Missing root coverage or a
+changed manager identity refuses before inspection. A second read checks the
+same manager capture, roots and broker fences after package validation.
+
+The service's production owner-read adapter also works while idle, without a
+preview slot. It retains broker-run binding, cancellation and pending-request
+cleanup, and projects only facts supported by the manager document. It cannot
+claim identity membership, owned worker lifetimes, saved/enforced Pause or
+physical stop. Production start stays refused: a read does not provide the
+atomic `WithLocked` acceptance owner, and those other proofs are still absent.
+Unknown historical copy safety and unrepresented external data roots also
+refuse. Preview performs validation and read-only inspection but never starts
+the candidate or reserves maintenance.
 The registered `service/build-apply-changed` operation notification uses the
 existing service connection and native desktop notification dispatcher.
 
@@ -29,8 +43,8 @@ service, attached running service, measured SHA-256, source revision and dirty
 state. Unknown observations use `{known:false,value:null}`. Saved, enforced and
 physically stopped results are independent. The accepted restore policy finishes
 while paused, preserves intent/locks and newer pauses, requires explicit local
-Resume, and performs no automatic rollback. This registration does not implement
-the preview validator or transaction.
+Resume, and performs no automatic rollback. Preview validation is read-only;
+transaction admission still requires the missing production acceptance owner.
 
 Build identity inspection uses standard `debug/buildinfo.Read` on an already
 opened bounded regular-file `io.SectionReader`, the root-approved equivalent

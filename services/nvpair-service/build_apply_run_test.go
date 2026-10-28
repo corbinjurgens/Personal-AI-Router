@@ -1107,7 +1107,7 @@ func TestBuildApplyTransactionExpiredQueuedOwnerCommandHasZeroTransmission(t *te
 func TestBuildApplyAdmissionProductionEvidenceRemainsUnavailable(t *testing.T) {
 	s := newService(config{})
 	if _, err := s.cfg.buildApplyOwners.Read(context.Background()); err == nil {
-		t.Fatal("production start can bypass the missing manager owner APIs")
+		t.Fatal("production owner read accepted an absent broker")
 	}
 }
 

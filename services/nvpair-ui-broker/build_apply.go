@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	"nvpair-shared/buildapply"
 	"nvpair-shared/engines"
@@ -34,12 +35,14 @@ func (b *Broker) handleBuildApply(msg *Message) {
 		return
 	}
 	if msg.Method == "build:apply-impact" {
-		impact, ok := b.cachedBuildApplyImpact()
-		if !ok {
-			_ = b.codec.Respond(msg.ID, buildapply.Unavailable[buildapply.Impact]())
-			return
-		}
-		_ = b.codec.Respond(msg.ID, buildapply.Result[buildapply.Impact]{Available: true, Value: &impact})
+		go func() {
+			envelope, ok := b.buildApplyOwnerEvidence(context.Background())
+			if !ok {
+				_ = b.codec.Respond(msg.ID, buildapply.Unavailable[buildapply.ImpactEnvelope]())
+				return
+			}
+			_ = b.codec.Respond(msg.ID, buildapply.Result[buildapply.ImpactEnvelope]{Available: true, Value: &envelope})
+		}()
 	} else if prepare, ok := request.(*buildapply.PrepareRequest); ok {
 		go func() { _ = b.codec.Respond(msg.ID, b.prepareBuildApply(*prepare)) }()
 	} else if finish, ok := request.(*buildapply.FinishRequest); ok {
@@ -374,6 +377,243 @@ func (b *Broker) finishBuildApply(request buildapply.FinishRequest) buildapply.R
 	return buildApplyOperationResult(reservation.operation)
 }
 
+// buildApplyOwnerEvidence compares three detached local captures around two
+// reads from the same bound manager. A matching read is evidence, not a pin on
+// either owner after the reply. No broker lock is held during transport I/O.
+func (b *Broker) buildApplyOwnerEvidence(parent context.Context) (buildapply.ImpactEnvelope, bool) {
+	ctx, cancel := context.WithTimeout(parent, 4*time.Second)
+	defer cancel()
+	return captureBuildApplyOwnerEvidence(ctx, b.readCachedBuildApplyOwners, b.callBuildApplyOwnerEvidence, b.buildApplyManagerCurrent)
+}
+
+func (b *Broker) buildApplyManagerCurrent(worker *rpcWorker, source *engineManagerSource) bool {
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	return worker != nil && source != nil && b.engineMgr == worker && b.engineMgrSource == source && !b.engineMgrRecovering
+}
+
+func (b *Broker) callBuildApplyOwnerEvidence(ctx context.Context, worker *rpcWorker) (buildapply.EngineOwnerEvidence, error) {
+	var evidence buildapply.EngineOwnerEvidence
+	result, rpcErr, err := worker.Call(ctx, buildapply.EngineOwnerEvidenceMethod, json.RawMessage(`{}`))
+	if err != nil {
+		return evidence, err
+	}
+	if rpcErr != nil {
+		return evidence, errors.New("manager owner evidence unavailable")
+	}
+	if err := json.Unmarshal(result, &evidence); err != nil {
+		return evidence, err
+	}
+	return evidence, nil
+}
+
+func buildApplyIncomplete(code, detail string) buildapply.ImpactEnvelope {
+	return buildapply.ImpactEnvelope{Impact: buildapply.Impact{
+		RestorePolicy:      buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveIntentAndLocks: true, PreserveNewerPause: true},
+		InterruptionPolicy: buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true},
+		Refusals:           []buildapply.Refusal{{Code: code, Detail: detail}},
+	}}
+}
+
+func buildApplyWorkerReady(read buildApplyOwnerRead, current func(*rpcWorker, *engineManagerSource) bool) bool {
+	if read.worker == nil || read.source == nil || read.recovering || read.policySource != read.source || !current(read.worker, read.source) {
+		return false
+	}
+	select {
+	case <-read.worker.Done():
+		return false
+	default:
+		return true
+	}
+}
+
+func captureBuildApplyOwnerEvidence(ctx context.Context, read func() (buildApplyOwnerRead, bool), call func(context.Context, *rpcWorker) (buildapply.EngineOwnerEvidence, error), current func(*rpcWorker, *engineManagerSource) bool) (buildapply.ImpactEnvelope, bool) {
+	a, ok := read()
+	if !ok || !buildApplyWorkerReady(a, current) || ctx.Err() != nil {
+		return buildapply.ImpactEnvelope{}, false
+	}
+	changed := func() (buildapply.ImpactEnvelope, bool) {
+		return buildApplyIncomplete("changed", "Owner evidence changed during capture; obtain a new preview."), true
+	}
+	m1, err := call(ctx, a.worker)
+	if err != nil || ctx.Err() != nil {
+		return buildApplyIncomplete("owner_evidence_unavailable", "The manager owner evidence read is unavailable."), true
+	}
+	b, ok := read()
+	if !ok || !sameCachedBuildApplyOwners(a, b) || !buildApplyWorkerReady(b, current) {
+		return changed()
+	}
+	var differences []buildapply.SettingsDifference
+	storedOK := true
+	if b.policyPath != "" {
+		differences, storedOK = readBuildApplyStoredPause(b.policyPath, b.policyDigest)
+	}
+	m2, err := call(ctx, a.worker)
+	if err != nil || ctx.Err() != nil {
+		return buildApplyIncomplete("owner_evidence_unavailable", "The manager owner evidence read is unavailable."), true
+	}
+	c, ok := read()
+	if !ok || !sameCachedBuildApplyOwners(a, c) || !sameCachedBuildApplyOwners(b, c) || !buildApplyWorkerReady(c, current) ||
+		m1.ManagerIncarnation != m2.ManagerIncarnation || m1.CaptureToken != m2.CaptureToken {
+		return changed()
+	}
+	envelope := projectBuildApplyOwnerEvidence(b, m2)
+	if b.policyPath != "" {
+		if storedOK {
+			envelope.Impact.SettingsDifferences = buildapply.Known(differences)
+		} else {
+			envelope.Impact.Refusals = append(envelope.Impact.Refusals, buildapply.Refusal{Code: "stored_policy_unavailable", Detail: "The stored policy could not be matched to the decoded policy owner."})
+			envelope.Impact.Complete = false
+		}
+	}
+	if !current(a.worker, a.source) || ctx.Err() != nil {
+		return changed()
+	}
+	if m2.Complete && len(envelope.Impact.Refusals) == 0 && !buildApplyImpactKnowledgeComplete(envelope.Impact) {
+		envelope.Impact.Refusals = append(envelope.Impact.Refusals, buildapply.Refusal{
+			Code: "owner_evidence_unavailable", Detail: "A current local settings, admission or loaded-model observation is unavailable.",
+		})
+	}
+	envelope.Impact.Complete = envelope.ManagerEvidence.Known && envelope.ManagerEvidence.Value.Complete &&
+		buildApplyImpactKnowledgeComplete(envelope.Impact)
+	if _, err := json.Marshal(envelope); err != nil {
+		return buildApplyIncomplete("owner_evidence_unavailable", "The bounded owner evidence response is unavailable."), true
+	}
+	return envelope, true
+}
+
+func projectBuildApplyOwnerEvidence(local buildApplyOwnerRead, manager buildapply.EngineOwnerEvidence) buildapply.ImpactEnvelope {
+	impact := local.impact
+	impact.Complete = false
+	impact.Fences.ManagerIncarnation = buildapply.Known(manager.ManagerIncarnation)
+	impact.Fences.IntentRevision = buildapply.Observation[string]{}
+	impact.Fences.LocksRevision = buildapply.Observation[string]{}
+	impact.ExpectedSettings.IntentDigest = buildapply.Observation[string]{}
+	impact.ExpectedSettings.LocksDigest = buildapply.Observation[string]{}
+	impact.Engines = buildapply.Observation[[]buildapply.EngineFact]{}
+	impact.ModelOperations = buildapply.Observation[[]buildapply.ModelOperation]{}
+	// These refusals describe the older broker cache, which is no longer the
+	// authority for native manager facts in this projection.
+	refusals := make([]buildapply.Refusal, 0, len(impact.Refusals))
+	for _, refusal := range impact.Refusals {
+		if refusal.Code != "manager_unavailable" && refusal.Code != "unscoped_engine" {
+			refusals = append(refusals, refusal)
+		}
+	}
+	impact.Refusals = refusals
+	refuse := func(code, detail string) {
+		impact.Refusals = append(impact.Refusals, buildapply.Refusal{Code: code, Detail: detail})
+	}
+	if manager.Intent.Known && manager.Locks.Known {
+		intent, locks := manager.Intent.Value, manager.Locks.Value
+		impact.Fences.IntentRevision = buildapply.Known(intent.Revision)
+		impact.Fences.LocksRevision = buildapply.Known(locks.Revision)
+		impact.ExpectedSettings.IntentDigest = buildapply.Known(modelSettingsHash(struct {
+			Enabled map[string]bool
+			OffBy   map[string]string
+		}{intent.EnabledByEngine, intent.OffByEngine}))
+		impact.ExpectedSettings.LocksDigest = buildapply.Known(modelSettingsHash(locks.LockedByEngine))
+	}
+	if manager.Universe.Known && manager.StopAuthority.Known {
+		cached := map[string]buildapply.EngineFact{}
+		if local.impact.Engines.Known {
+			for _, fact := range *local.impact.Engines.Value {
+				cached[fact.Engine] = fact
+			}
+		}
+		facts := make([]buildapply.EngineFact, 0, len(*manager.Universe.Value))
+		for i, entry := range *manager.Universe.Value {
+			fact := cached[entry.Engine]
+			delete(cached, entry.Engine)
+			if entry.Registered && entry.Supported.Known && *entry.Supported.Value && !local.settingsRecords[entry.Engine] {
+				refuse("settings_baseline_unavailable", "A current applied settings baseline is missing for a registered engine.")
+			}
+			fact.Engine = entry.Engine
+			fact.Running = entry.Running
+			fact.ScopedStopAuthority = (*manager.StopAuthority.Value)[i].Scoped
+			if !fact.ScopedStopAuthority.Known || !*fact.ScopedStopAuthority.Value {
+				refuse("unscoped_engine", "The manager cannot verify scoped stop authority for an engine.")
+			}
+			fact.DesiredState = buildapply.Observation[string]{}
+			fact.Locked = buildapply.Observation[bool]{}
+			if manager.Intent.Known {
+				if enabled, exists := manager.Intent.Value.EnabledByEngine[entry.Engine]; exists {
+					state := "off"
+					if enabled {
+						state = "on"
+					}
+					fact.DesiredState = buildapply.Known(state)
+				}
+			}
+			if manager.Locks.Known {
+				fact.Locked = buildapply.Known(manager.Locks.Value.LockedByEngine[entry.Engine])
+			}
+			if !entry.Registered || !entry.Supported.Known || !*entry.Supported.Value {
+				// Retained and unsupported names have no settings or model
+				// baseline to invent. Their other known facts still appear.
+				fact.Active = buildapply.Observation[bool]{}
+				fact.LoadedModels = buildapply.Observation[[]string]{}
+			}
+			facts = append(facts, fact)
+		}
+		if len(cached) != 0 {
+			refuse("owner_evidence_unavailable", "A broker engine observation is absent from the current manager universe.")
+		}
+		impact.Engines = buildapply.Known(facts)
+	}
+	if manager.Reservations.Known && manager.Reservations.Value.BlocksApply.Known {
+		operations := []buildapply.ModelOperation{}
+		if local.impact.ModelOperations.Known {
+			operations = append(operations, (*local.impact.ModelOperations.Value)...)
+		}
+		for _, op := range manager.Reservations.Value.Operations {
+			operations = append(operations, buildapply.ModelOperation{Engine: op.Engine, Kind: op.Kind, BlocksApply: true})
+		}
+		sort.Slice(operations, func(i, j int) bool {
+			if operations[i].Engine != operations[j].Engine {
+				return operations[i].Engine < operations[j].Engine
+			}
+			return operations[i].Kind < operations[j].Kind
+		})
+		impact.ModelOperations = buildapply.Known(operations)
+		if *manager.Reservations.Value.BlocksApply.Value {
+			refuse("operation_busy", "The manager has a content reservation blocking apply.")
+		}
+	}
+	if !manager.Complete {
+		refuse("owner_evidence_unavailable", "The manager cannot attest every engine owner section and root.")
+	}
+	if !impact.Engines.Known || !impact.ModelOperations.Known || !impact.Fences.IntentRevision.Known || !impact.Fences.LocksRevision.Known {
+		refuse("owner_evidence_unavailable", "Complete manager intent, locks, universe, stop authority and reservations are required.")
+	}
+	return buildapply.ImpactEnvelope{Impact: impact, ManagerEvidence: buildapply.Known(manager)}
+}
+
+func buildApplyImpactKnowledgeComplete(i buildapply.Impact) bool {
+	if len(i.Refusals) != 0 || !i.Fences.RuntimeGeneration.Known || !i.Fences.ManagerIncarnation.Known ||
+		!i.Fences.PolicyRevision.Known || !i.Fences.SettingsRevision.Known || !i.Fences.IntentRevision.Known ||
+		!i.Fences.LocksRevision.Known || !i.Fences.AvailabilityRevision.Known || !i.Availability.Known ||
+		!i.PauseOrigin.Known || !i.ActiveWork.Known || !i.Engines.Known || !i.ModelOperations.Known ||
+		!i.SettingsDifferences.Known || !i.Maintenance.BuildApplyActive.Known ||
+		!i.Maintenance.ModelSettingsActive.Known || !i.InterruptionPolicy.OnActive.Known ||
+		!i.InterruptionPolicy.DrainTimeoutSeconds.Known || !i.ExpectedSettings.StopEngines.Known ||
+		!i.ExpectedSettings.UnloadModels.Known {
+		return false
+	}
+	for _, digest := range []buildapply.Observation[string]{i.ExpectedSettings.PolicyDigest, i.ExpectedSettings.EngineSettingsDigest, i.ExpectedSettings.IntentDigest, i.ExpectedSettings.LocksDigest} {
+		if !digest.Known {
+			return false
+		}
+	}
+	for _, engine := range *i.Engines.Value {
+		if !engine.Active.Known || !engine.Running.Known || !engine.LoadedModels.Known ||
+			!engine.DesiredState.Known || !engine.Locked.Known || !engine.ScopedStopAuthority.Known {
+			return false
+		}
+	}
+	return true
+}
+
 // cachedBuildApplyImpact never initializes an owner, loads a journal, asks a
 // worker for engine status, or schedules a policy push. Repeat all local owner
 // fences, including those not representable on the public wire.
@@ -423,6 +663,7 @@ type buildApplyOwnerRead struct {
 	maintenanceGeneration                                                    uint64
 	recovering                                                               bool
 	pendingInstalls                                                          []buildApplyInstallRead
+	settingsRecords                                                          map[string]bool
 }
 
 type buildApplyInstallRead struct {
@@ -442,7 +683,7 @@ func sameCachedBuildApplyOwners(a, b buildApplyOwnerRead) bool {
 			return false
 		}
 	}
-	return reflect.DeepEqual(a.impact, b.impact)
+	return reflect.DeepEqual(a.impact, b.impact) && reflect.DeepEqual(a.settingsRecords, b.settingsRecords)
 }
 
 func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
@@ -460,11 +701,13 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 	}
 	settingsKnown := b.engineSettingsLoaded && b.engineSettingsError == nil && b.engineSettingsEpoch != ""
 	records := make(map[string]*engineSettingsRecord, len(b.engineSettings))
+	capture.settingsRecords = make(map[string]bool, len(b.engineSettings))
 	semanticSettings := map[string]settings.Config{}
 	operations := []buildapply.ModelOperation{}
 	modelSettingsActive := false
 	for engine, record := range b.engineSettings {
 		records[engine] = record.clone()
+		capture.settingsRecords[engine] = record != nil
 		if record == nil {
 			settingsKnown = false
 		} else if canonical, err := record.Snapshot.Settings.Canonical(); err != nil {
@@ -659,16 +902,18 @@ func (b *Broker) readCachedBuildApplyOwners() (buildApplyOwnerRead, bool) {
 		orderedNames = append(orderedNames, name)
 	}
 	sort.Strings(orderedNames)
-	settingsCurrent := settingsKnown && managerCurrent && len(orderedNames) > 0
+	settingsCurrent := settingsKnown && managerCurrent
 	for _, name := range orderedNames {
 		if !engines.ValidID(name) {
 			continue
 		}
 		fact := buildapply.EngineFact{Engine: name}
-		if record := records[name]; record == nil || record.Snapshot.Epoch != settingsEpoch {
-			settingsCurrent = false
-		} else if fingerprint, ok := settingsFingerprint(record.Snapshot); !ok || r.settingsIdentity[name] != fingerprint {
-			settingsCurrent = false
+		if record, exists := records[name]; exists {
+			if record == nil || record.Snapshot.Epoch != settingsEpoch {
+				settingsCurrent = false
+			} else if fingerprint, ok := settingsFingerprint(record.Snapshot); !ok || r.settingsIdentity[name] != fingerprint {
+				settingsCurrent = false
+			}
 		}
 		if managerCurrent {
 			if running, known := r.running[name]; known && r.runningObserved[name] > 0 {

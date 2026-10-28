@@ -24,6 +24,209 @@ import (
 var errOwnerAdmissionCapacity = errors.New("engine owner admission generation exhausted")
 var errOwnerEvidenceBusy = errors.New("engine owner evidence busy")
 
+// These detached captures compose the existing owners. Equality rejects an
+// observed mixed read; it cannot pin mutations after the response is produced.
+type ownerSections struct {
+	Saved        desiredOwnerEvidence
+	SavedKnown   bool
+	Universe     ownerUniverseEvidence
+	Reservations ownerReservationEvidence
+}
+
+func (m *Manager) captureOwnerSections() ownerSections {
+	var c ownerSections
+	if m.exec.desired != nil {
+		var err error
+		c.Saved, err = m.exec.desired.tryOwnerEvidence()
+		c.SavedKnown = err == nil
+		c.Universe = m.ownerUniverse()
+	}
+	c.Reservations = m.ownerReservations()
+	return c
+}
+
+func (m *Manager) engineOwnerEvidence() (buildapply.EngineOwnerEvidence, error) {
+	result := buildapply.EngineOwnerEvidence{Reasons: []buildapply.EngineOwnerReason{}}
+	if m.exec == nil || m.exec.switchIncarnation == "" {
+		return result, errors.New("engine owner evidence unavailable")
+	}
+	result.ManagerIncarnation = m.exec.switchIncarnation
+	a, b := m.captureOwnerSections(), m.captureOwnerSections()
+	reason := func(section, engine, code string) {
+		result.Reasons = append(result.Reasons, buildapply.EngineOwnerReason{Section: section, Engine: engine, Code: code})
+	}
+	if !reflect.DeepEqual(a, b) {
+		for _, section := range []string{"intent", "locks", "universe", "stopAuthority", "reservations"} {
+			reason(section, "", "changed")
+		}
+		err := result.Finalize()
+		return result, err
+	}
+	if a.SavedKnown {
+		enabled, off, locks := map[string]bool{}, map[string]string{}, map[string]bool{}
+		for name, value := range a.Saved.State.Engines {
+			enabled[name] = value
+		}
+		for name, value := range a.Saved.State.OffBy {
+			off[name] = string(value)
+		}
+		for name, value := range a.Saved.State.Locked {
+			locks[name] = value
+		}
+		result.Intent = buildapply.Known(buildapply.EngineOwnerIntent{Revision: a.Saved.IntentRevision, EnabledByEngine: enabled, OffByEngine: off})
+		result.Locks = buildapply.Known(buildapply.EngineOwnerLocks{Revision: a.Saved.LockRevision, LockedByEngine: locks})
+	} else {
+		reason("intent", "", "saved_state_unknown")
+		reason("locks", "", "saved_state_unknown")
+	}
+	if a.Universe.Complete {
+		universe := make([]buildapply.EngineOwnerUniverseEntry, 0, len(a.Universe.Entries))
+		authority := make([]buildapply.EngineOwnerStopAuthority, 0, len(a.Universe.Entries))
+		for _, entry := range a.Universe.Entries {
+			u := buildapply.EngineOwnerUniverseEntry{Engine: entry.Name, Registered: entry.Registered, Installed: entry.Installed,
+				Running: entry.Running, TerminationVerified: entry.PositiveStop, RootsComplete: entry.RootsComplete}
+			if entry.Registered {
+				u.Supported = buildapply.Known(entry.Supported)
+			}
+			if entry.RunID != "" {
+				u.EngineRunID = buildapply.Known(entry.RunID)
+			}
+			if entry.ModelRoot != "" {
+				u.ModelRoots = buildapply.Known([]string{entry.ModelRoot})
+			}
+			// DataRoots contains represented owner paths, including the managed
+			// install root. RootsComplete separately qualifies exhaustive coverage.
+			if entry.InstallRoot != "" {
+				u.DataRoots = buildapply.Known([]string{entry.InstallRoot})
+			}
+			if entry.RootsComplete {
+				if !u.ModelRoots.Known {
+					u.ModelRoots = buildapply.Known([]string{})
+				}
+				if !u.DataRoots.Known {
+					u.DataRoots = buildapply.Known([]string{})
+				}
+			} else {
+				reason("universe", entry.Name, "unmodeled_data_roots")
+			}
+			if !u.Installed.Known || !u.Running.Known || !u.TerminationVerified.Known {
+				reason("universe", entry.Name, "unobserved")
+			}
+			stop := buildapply.EngineOwnerStopAuthority{Engine: entry.Name, Scoped: entry.StopAuthority,
+				ReclaimPending: entry.ReclaimPending, ProcessLifetime: entry.ProcessLifetime, Reason: entry.AuthorityReason}
+			if entry.Running.Known || entry.StopAuthority.Known {
+				stop.Adopted = buildapply.Known(entry.Adopted)
+			}
+			if !stop.Scoped.Known || stop.Scoped.Value != nil && !*stop.Scoped.Value {
+				reason("stopAuthority", entry.Name, entry.AuthorityReason)
+			}
+			universe = append(universe, u)
+			authority = append(authority, stop)
+		}
+		result.Universe, result.StopAuthority = buildapply.Known(universe), buildapply.Known(authority)
+	} else {
+		code := a.Universe.Reason
+		if code == "" {
+			code = "unavailable"
+		}
+		reason("universe", "", code)
+		reason("stopAuthority", "", code)
+	}
+	r := a.Reservations
+	if r.Reason == "busy" {
+		reason("reservations", "", "busy")
+	} else if r.Token.DownloadSource != result.ManagerIncarnation {
+		reason("reservations", "", "source_mismatch")
+	} else {
+		reservations, err := projectOwnerReservations(r, a.Universe.Generation)
+		if err != nil {
+			return result, err
+		}
+		result.Reservations = buildapply.Known(reservations)
+		if !r.Complete {
+			reason("reservations", "", "content_authority_unknown")
+		}
+	}
+	err := result.Finalize()
+	return result, err
+}
+
+func projectOwnerReservations(r ownerReservationEvidence, admission uint64) (buildapply.EngineOwnerReservations, error) {
+	result := buildapply.EngineOwnerReservations{BlocksApply: r.Busy, UnsafeCopiesComplete: r.Complete, Operations: []buildapply.EngineOwnerOperation{}}
+	// Admission and all content/copy authority generations participate even if
+	// the visible operations returned to their prior values between captures.
+	revision, err := switchDigest(struct {
+		Token     ownerReservationToken
+		Admission uint64
+	}{r.Token, admission})
+	if err != nil {
+		return result, err
+	}
+	result.Revision = revision
+	ops := map[string]buildapply.EngineOwnerOperation{}
+	add := func(id, engine, kind, phase, origin string, retained, unsafe bool) error {
+		op := buildapply.EngineOwnerOperation{ID: id, Engine: engine, Kind: kind, Phase: phase, Retained: retained, Unsafe: unsafe}
+		if origin != "" {
+			op.SourceIncarnation = buildapply.Known(origin)
+		}
+		if prior, exists := ops[id]; exists {
+			if prior.Engine != engine || prior.Kind != kind || prior.SourceIncarnation.Known && op.SourceIncarnation.Known && *prior.SourceIncarnation.Value != *op.SourceIncarnation.Value {
+				return errors.New("ambiguous engine owner operation")
+			}
+			// A marker without provenance must remain unknown even if an active
+			// entry happens to carry the same ID in this manager.
+			if !prior.SourceIncarnation.Known || !op.SourceIncarnation.Known {
+				op.SourceIncarnation = buildapply.Observation[string]{}
+			}
+			op.Retained, op.Unsafe = retained || prior.Retained, unsafe || prior.Unsafe
+		}
+		ops[id] = op
+		return nil
+	}
+	for _, v := range r.ActiveDownloads {
+		if err := add(v.Entry.ID, v.Entry.Engine, "download", v.Entry.Phase, v.Incarnation, false, false); err != nil {
+			return result, err
+		}
+	}
+	for _, v := range r.UnsafeDownloads {
+		if err := add(v.Marker.ID, v.Marker.Engine, "download", "unsafe", v.Incarnation, true, true); err != nil {
+			return result, err
+		}
+	}
+	for _, v := range r.Copies {
+		if err := add(v.OpID, v.Engine, "copy", "active", v.Incarnation, false, false); err != nil {
+			return result, err
+		}
+	}
+	for _, v := range r.RetainedCopies {
+		if err := add(v.OpID, v.Engine, "copy", v.Phase, v.ManagerIncarnation, true, true); err != nil {
+			return result, err
+		}
+	}
+	content := func(engine, kind string) error {
+		id, err := switchDigest(struct{ Engine, Kind string }{engine, kind})
+		if err != nil {
+			return err
+		}
+		return add(strings.TrimPrefix(id, "sha256:"), engine, kind, "active", r.Token.Incarnation, false, false)
+	}
+	for engine := range r.Readers {
+		if err := content(engine, "content_reader"); err != nil {
+			return result, err
+		}
+	}
+	for _, engine := range r.Writers {
+		if err := content(engine, "content_writer"); err != nil {
+			return result, err
+		}
+	}
+	for _, op := range ops {
+		result.Operations = append(result.Operations, op)
+	}
+	sort.Slice(result.Operations, func(i, j int) bool { return result.Operations[i].ID < result.Operations[j].ID })
+	return result, nil
+}
+
 // A comparison token for one read, never an admission pin. Percent-only
 // notifications change DownloadRevision without changing ContentGeneration.
 type ownerReservationToken struct {
@@ -265,6 +468,8 @@ type ownerEngineEvidence struct {
 	RootsReason                                     string
 	Adopted, ReclaimFailed                          bool
 	ReclaimPID                                      bool // retained locator only; never signal authority
+	ProcessLifetime                                 buildapply.Observation[buildapply.EngineOwnerProcessLifetime]
+	ReclaimPending                                  buildapply.Observation[bool]
 }
 
 type ownerUniverseEvidence struct {
@@ -520,6 +725,7 @@ func (e *Executor) captureOwnerUniverse(savedRead func() (desiredOwnerEvidence, 
 		if busy {
 			entry.AuthorityReason = "busy"
 		} else {
+			entry.ReclaimPending = buildapply.Known(c.ReclaimFailed || c.ReclaimPID != 0 && !c.Adopted)
 			if k.InstalledKnown && k.InstalledValue == c.Installed && k.InstalledRunID == c.RunID && c.Config != "" && k.InstalledConfig == c.Config {
 				entry.Installed = buildapply.Known(c.Installed)
 			}
@@ -541,6 +747,11 @@ func (e *Executor) captureOwnerUniverse(savedRead func() (desiredOwnerEvidence, 
 				entry.StopAuthority, entry.AuthorityReason = buildapply.Known(true), "no_live_process"
 			case c.Running && !c.Stopping && c.Process != nil && c.RunID != "":
 				entry.StopAuthority, entry.AuthorityReason = buildapply.Known(true), "owned_process_lifetime"
+				lifetime := buildapply.EngineOwnerProcessLifetime{EngineRunID: c.RunID}
+				if c.Process.cmd != nil && c.Process.cmd.Process != nil && c.Process.cmd.Process.Pid > 0 {
+					lifetime.PID = buildapply.Known(c.Process.cmd.Process.Pid)
+				}
+				entry.ProcessLifetime = buildapply.Known(lifetime)
 			default:
 				entry.AuthorityReason = "scoped_lifetime_unknown"
 			}

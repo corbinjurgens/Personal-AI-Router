@@ -5,6 +5,15 @@ SPDX-License-Identifier: Apache-2.0
 
 # Services Capability Status
 
+Build-apply preview consumes the broker's private owner-evidence envelope and
+excludes manager-known model, data and install roots before package inspection.
+Unknown root coverage and changed manager/source evidence refuse. Public impact
+fields remain the desktop contract; private manager evidence and paths are not
+part of preview, status or receipts. Production start remains unavailable until
+atomic maintenance acceptance and the separate identity, worker, saved Pause,
+enforcement and physical-stop proofs are supplied. Existing historical copy
+safety and external data-root unknowns also block eligibility.
+
 Model configuration contract: inspection is connected through the typed bridge,
 existing broker settings relay and pinned engine-control read route. Portable
 load edits, target resolutions, selected policy patches and preview impact are

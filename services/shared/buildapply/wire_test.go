@@ -18,6 +18,37 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestEngineOwnerEvidenceRequestIsEmptyObjectOnly(t *testing.T) {
+	t.Run("empty object", func(t *testing.T) {
+		var request EngineOwnerEvidenceRequest
+		if err := DecodeRequest([]byte(`{}`), &request); err != nil {
+			t.Fatal(err)
+		}
+	})
+	test := func(name, input string) {
+		t.Run(name, func(t *testing.T) {
+			var request EngineOwnerEvidenceRequest
+			if err := DecodeRequest([]byte(input), &request); err == nil {
+				t.Fatal("accepted nonempty owner request")
+			}
+		})
+	}
+	test("null", `null`)
+	test("missing", ``)
+	test("array", `[]`)
+	test("engine selector", `{"engine":"fake"}`)
+	test("engines selector", `{"engines":[]}`)
+	test("node", `{"node":"local"}`)
+	test("node ID", `{"nodeId":"local"}`)
+	test("caller", `{"caller":"local"}`)
+	test("operation", `{"operationId":"op"}`)
+	test("mutation", `{"stop":false}`)
+	test("case variant", `{"Engine":"fake"}`)
+	test("duplicate", `{"engine":"fake","engine":"fake"}`)
+	test("trailing value", `{} {}`)
+	test("overflow", `{}`+strings.Repeat(" ", MaxRequestBytes))
+}
+
 func TestObservationDoesNotInventKnownValues(t *testing.T) {
 	test := func(name, input string, wantKnown bool, wantValue *bool, wantError bool) {
 		t.Helper()
