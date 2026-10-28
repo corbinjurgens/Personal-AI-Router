@@ -175,6 +175,42 @@ func pauseLifecycleCalls(calls []policyCall) []policyCall {
 	return lifecycle
 }
 
+func TestPauseUsesReplacementEngineManagerObservations(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	old := b.activateEngineManagerSource()
+	b.observeEngineRunningFrom(old, "ollama", true)
+	b.observeLoadedFrom(old, map[string][]string{"ollama": {"old-model"}})
+	b.observeIntentFrom(old, map[string]bool{"ollama": true})
+	current := b.activateEngineManagerSource()
+	engine := attachFakeEngine(t, b)
+	b.observeEngineRunningFrom(current, "llamacpp", true)
+	b.observeLoadedFrom(current, map[string][]string{"llamacpp": {"new-model"}})
+	b.observeIntentFrom(current, map[string]bool{"llamacpp": true})
+	b.retireEngineManagerSource(old)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := b.pauseEnginesOn(ctx, b.getEngineMgr()); err != nil {
+		t.Fatalf("pause replacement manager: %v", err)
+	}
+	var slept []string
+	for _, call := range pauseLifecycleCalls(engine.snapshot()) {
+		if call.method != engineSleepMethod {
+			continue
+		}
+		var p struct {
+			Engine string `json:"engine"`
+		}
+		if err := json.Unmarshal(call.params, &p); err != nil {
+			t.Fatalf("decode sleep request: %v", err)
+		}
+		slept = append(slept, p.Engine)
+	}
+	if !reflect.DeepEqual(slept, []string{"llamacpp"}) {
+		t.Fatalf("pause slept engines %v, want replacement engine only", slept)
+	}
+}
+
 func requirePauseManagerCleanup(t *testing.T, b *Broker, names ...string) {
 	t.Helper()
 	worker, source := b.pauseManager()

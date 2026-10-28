@@ -966,9 +966,10 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	r.haveAdmission = true
 	r.admission.Active = 4
 	r.mu.Unlock()
-	b.observeIntent(map[string]bool{"ollama": true, "lmstudio": false})
-	b.observeEngineRunningFrom(b.activateEngineManagerSource(), "ollama", true)
-	b.observeLoaded(map[string][]string{"ollama": {"qwen3:8b"}})
+	source := b.activateEngineManagerSource()
+	b.observeIntentFrom(source, map[string]bool{"ollama": true, "lmstudio": false})
+	b.observeEngineRunningFrom(source, "ollama", true)
+	b.observeLoadedFrom(source, map[string][]string{"ollama": {"qwen3:8b"}})
 
 	waitPushesSettled(t, b)
 	pp, proxy, acks := attachAckingProxy(t, b)

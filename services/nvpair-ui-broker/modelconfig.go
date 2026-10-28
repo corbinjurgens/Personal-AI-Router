@@ -71,6 +71,7 @@ type modelConfigEvidence struct {
 	Identity      nodepolicy.SetModelIdentityParams
 	Intent        map[string]bool
 	Running       map[string]bool
+	RunningKnown  map[string]bool
 	Loaded        map[string][]string
 	LoadedCurrent map[string]map[string]bool
 	Drains        map[string]bool
@@ -139,6 +140,12 @@ func (b *Broker) captureModelConfig() modelConfigEvidence {
 		Active: r.admission.ActiveByEngine, Proxy: pp, Worker: w, Source: source, Run: r.runID}
 	if source != r.engineManagerSource {
 		e.Source = nil
+	}
+	e.RunningKnown = make(map[string]bool, len(r.runningObserved))
+	if e.Source != nil {
+		for engine := range r.runningObserved {
+			e.RunningKnown[engine] = true
+		}
 	}
 	if r.models.loadedSource != source || r.models.loadedProxy != pp {
 		e.Loaded = nil
@@ -263,14 +270,17 @@ func (b *Broker) modelConfigEntry(e modelConfigEvidence, ref nodepolicy.Role) (n
 	block := func(reason nodepolicy.ModelConfigurationReason) {
 		entry.State, entry.Reason = nodepolicy.ModelStateBlocked, reason
 	}
+	enabled, intentKnown := e.Intent[ref.Engine]
 	switch {
 	case e.Live != nodepolicy.Available || e.Paused:
 		block(nodepolicy.ModelReasonPaused)
-	case !e.Intent[ref.Engine]:
+	case intentKnown && !enabled:
 		block(nodepolicy.ModelReasonEngineOff)
 	case e.Drains[ref.Engine]:
 		block(nodepolicy.ModelReasonSwitchBusy)
-	case e.Activation.Activation != activationActive || e.Source == nil || e.Worker == nil:
+	case !intentKnown || e.Activation.Activation != activationActive || e.Source == nil || e.Worker == nil:
+		entry.Reason = nodepolicy.ModelReasonProjectionUnknown
+	case !e.Running[ref.Engine] && !e.RunningKnown[ref.Engine]:
 		entry.Reason = nodepolicy.ModelReasonProjectionUnknown
 	case !e.Running[ref.Engine]:
 		block(nodepolicy.ModelReasonEngineOff)
