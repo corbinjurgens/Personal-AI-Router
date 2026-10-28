@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/modelconfig"
 )
@@ -269,7 +270,10 @@ func TestModelBufferSamplesProcessNoNativeFromInspection(t *testing.T) {
 	networkBefore := requests.Load()
 	effectsBefore := readLiveDurableFile(t, f.effects)
 	for range 3 {
-		response := manager.call(t, "engine:inspect-model", modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "medium-model"})
+		response := manager.call(t, "engine:inspect-model", settings.WorkerRequest[modelconfig.InspectRequest]{Request: modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "medium-model"}})
+		if response.Error != nil {
+			t.Fatalf("engine:inspect-model: code=%d %s", response.Error.Code, response.Error.Message)
+		}
 		value, err := modelconfig.DecodeInspectResult(response.Result)
 		if err != nil {
 			t.Fatal(err)

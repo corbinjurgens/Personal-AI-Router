@@ -442,8 +442,8 @@ func newModelBufferProcessFixture(t *testing.T, configure ...func(*modelSettings
 		env[modelBufferFixtureSelector] = f.image
 		env["NVPAIR_TEST_MODEL_BUFFER_EFFECTS"] = f.effects
 		env["NVPAIR_TEST_MODEL_BUFFER_TOKEN"] = f.token
-		owner["install"] = map[string]any{"run": []string{"fixture-never-run"}, "artifacts": []map[string]string{{"name": "server", "url": "https://fixture.invalid/releases/download/b11146/native", "sha256": strings.Repeat("a", 64)}}}
 	}
+	platform["install"] = map[string]any{"run": []string{"fixture-never-run"}, "artifacts": []map[string]string{{"name": "server", "url": "https://fixture.invalid/releases/download/b11146/native", "sha256": strings.Repeat("a", 64)}}}
 	jointWriteJSON(t, path, manifest)
 	f.start(t)
 	request, _ := f.review(t, f.request(t, "model-buffer-finite", nil))
@@ -456,6 +456,7 @@ func (f *modelBufferProcessFixture) start(t *testing.T) {
 	t.Helper()
 	f.assertNativeRoot(t)
 	f.assertBufferEngineManifests(t)
+	f.assertMergedBufferInstall(t)
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--engine-manager-control-host", "127.0.0.1", "--proxy-path", proxyBin, "--proxy-engines", "ollama,llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
 	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, []string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
 	f.p.ports = append(f.p.ports, f.scannerPort, f.targetPort, f.sourcePort, f.facadePort, f.targetFacadePort, f.ports.engineControl)
@@ -469,6 +470,59 @@ func (f *modelBufferProcessFixture) start(t *testing.T) {
 	waitForMethod(t, f.p.msgs, "app:ready", 30*time.Second)
 	waitProxyReady(t, f.p.in, f.p.msgs, 20*time.Second)
 	waitEngineProxyReady(t, "llamacpp-proxy", f.p.in, f.p.msgs, 20*time.Second)
+}
+
+// The registry is a main package and cannot be imported here. This hermetic
+// preflight mirrors its override merge and platform-default precedence only to
+// check the fetch/artifacts exclusion invariant, not full manifest validity.
+// Checking the override alone misses conflicts with bundled inactive platforms.
+func (f *modelBufferProcessFixture) assertMergedBufferInstall(t *testing.T) {
+	t.Helper()
+	var bundled, override map[string]any
+	data, err := os.ReadFile(filepath.Join("..", "nvpair-engine-manager", "manifests", "llamacpp.json"))
+	if err != nil {
+		t.Fatalf("read bundled llamacpp manifest for isolation preflight: %v", err)
+	}
+	modelSettingsDecode(t, data, &bundled)
+	modelSettingsDecode(t, readLiveDurableFile(t, filepath.Join(jointAppDir(f.base), "engines", "llamacpp.json")), &override)
+	var merge func(map[string]any, map[string]any) map[string]any
+	merge = func(base, overlay map[string]any) map[string]any {
+		result := make(map[string]any, len(base)+len(overlay))
+		for key, value := range base {
+			result[key] = value
+		}
+		for key, value := range overlay {
+			baseObject, baseOK := result[key].(map[string]any)
+			overlayObject, overlayOK := value.(map[string]any)
+			if baseOK && overlayOK {
+				value = merge(baseObject, overlayObject)
+			}
+			result[key] = value
+		}
+		return result
+	}
+	merged := merge(bundled, override)
+	platforms, ok := merged["platforms"].(map[string]any)
+	if !ok || len(platforms) == 0 {
+		t.Fatal("buffer isolation preflight: merged llamacpp manifest lacks platforms")
+	}
+	for name, value := range platforms {
+		platform, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("buffer isolation preflight: invalid platform %s", name)
+		}
+		effective := merge(map[string]any{"install": merged["install"]}, platform)
+		var decoded struct {
+			Install *struct {
+				Fetch     *json.RawMessage  `json:"fetch"`
+				Artifacts []json.RawMessage `json:"artifacts"`
+			} `json:"install"`
+		}
+		modelSettingsDecode(t, mustMarshal(t, effective), &decoded)
+		if decoded.Install != nil && decoded.Install.Fetch != nil && len(decoded.Install.Artifacts) > 0 {
+			t.Fatalf("buffer isolation preflight: llamacpp platform %s has both install.fetch and install.artifacts; refusing to start manager with an override it would ignore", name)
+		}
+	}
 }
 
 // The buffer child has its own selector. Keep the existing fixed-image,
