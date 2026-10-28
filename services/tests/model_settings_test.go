@@ -58,6 +58,7 @@ func TestModelSettingsOffExactAliasAndShardsHaveNoEffects(t *testing.T) {
 
 func TestModelSettingsOffManualCoupledPreservesUnselectedState(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
+	f.seedModelSettingsPolicyBounds(t)
 	baseline := f.metadataBaseline(t)
 	policy := baseline.policy
 	request, preview := f.review(t, f.request(t, "off-coupled", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.75")}}))
@@ -88,6 +89,151 @@ func TestModelSettingsOffManualCoupledPreservesUnselectedState(t *testing.T) {
 	defer f.mu.Unlock()
 	if f.configureCalls != 1 || f.mutations != 0 || f.inferences != 0 {
 		t.Fatalf("Off apply effects configure=%d mutation=%d inference=%d", f.configureCalls, f.mutations, f.inferences)
+	}
+}
+
+func TestModelSettingsPartialEstimateIsAdvisoryAndHasNoEffects(t *testing.T) {
+	f := prepareModelSettingsProcessFixture(t)
+	f.pinned(t)
+	f.startModelSettings(t)
+	f.seedModelSettingsPolicyBounds(t)
+	baseline := f.metadataBaseline(t)
+	params := modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "medium-model"}
+	var local, remote modelconfig.InspectResult
+	modelSettingsDecode(t, f.rpcOK(t, "engine:inspect-model", params), &local)
+	modelSettingsDecode(t, f.peer(t, "inspect", params, http.StatusOK), &remote)
+	for _, result := range []modelconfig.InspectResult{local, remote} {
+		if result.Status != "resolved" || result.ModelID != params.ModelID || result.Estimate.Status != "partial" {
+			t.Fatalf("bounded synthetic inspection lost partial estimate: %+v", result)
+		}
+		assertModelSettingsAdvisoryEstimate(t, result.Estimate)
+		weights := slices.IndexFunc(result.Estimate.Components, func(c modelconfig.EstimateComponent) bool { return c.Name == "weights" })
+		if weights < 0 || result.Estimate.Components[weights].Bytes != "128" || result.Estimate.Components[weights].Status != "estimated" {
+			t.Fatal("partial estimate lost the known synthetic tensor storage")
+		}
+	}
+	request := f.request(t, "partial-estimate-preview", nil)
+	_, preview := f.review(t, request)
+	if preview.Estimate == nil || preview.Estimate.Status != "partial" || preview.Auto != nil {
+		t.Fatal("manual preview did not retain a partial advisory estimate")
+	}
+	assertModelSettingsAdvisoryEstimate(t, *preview.Estimate)
+	assertModelSettingsFinite(t, preview.Settings, f.root)
+	var peerPreview settings.Preview
+	modelSettingsDecode(t, f.peer(t, "preview", request, http.StatusOK), &peerPreview)
+	if len(peerPreview.Errors) != 0 || peerPreview.Estimate == nil || peerPreview.Estimate.Status != "partial" || !peerPreview.Settings.Equal(preview.Settings) {
+		t.Fatal("pinned preview lost target finite settings or partial estimate")
+	}
+	assertModelSettingsAdvisoryEstimate(t, *peerPreview.Estimate)
+	f.noMetadataEffects(t, baseline)
+}
+
+func TestModelSettingsAutoUnavailablePreservesManualConfiguration(t *testing.T) {
+	f := prepareModelSettingsProcessFixture(t)
+	f.pinned(t)
+	f.startModelSettings(t)
+	f.seedModelSettingsPolicyBounds(t)
+	baseline := f.metadataBaseline(t)
+	for _, mode := range []string{"context", "gpu", "context-and-gpu"} {
+		t.Run(mode, func(t *testing.T) {
+			request := f.request(t, "unavailable-auto-"+mode, nil)
+			if mode != "gpu" {
+				request.ModelChange.Load.Set.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 8192}
+			}
+			if mode != "context" {
+				request.ModelChange.Load.Set.GPU = &modelconfig.GPU{Mode: "auto"}
+			}
+			response := f.rpc(t, "engine:preview-settings", request)
+			if response.Error == nil || response.Error.Code != -32602 || !strings.Contains(response.Error.Message, "target memory telemetry unavailable") || len(response.Result) != 0 {
+				t.Fatalf("Auto without a target memory owner did not refuse: %+v", response)
+			}
+			remote := f.peer(t, "preview", request, http.StatusBadRequest)
+			if !strings.Contains(string(remote), "target memory telemetry unavailable") {
+				t.Fatal("pinned refusal lost the missing target memory authority reason")
+			}
+			if response := f.rpc(t, "engine:apply-settings", request); response.Error == nil {
+				t.Fatal("unreviewed unavailable Auto was accepted")
+			}
+			f.noMetadataEffects(t, baseline)
+		})
+	}
+	request, preview := f.review(t, f.request(t, "manual-after-unavailable-auto", nil))
+	f.rpcOK(t, "engine:apply-settings", request)
+	after := f.settled(t, request.RequestID, "succeeded")
+	assertModelSettingsSavedReadback(t, after, preview.Settings)
+	assertModelSettingsFinite(t, after.Settings, f.root)
+	if after.Running || !reflect.DeepEqual(baseline.policy, f.policy(t)) {
+		t.Fatal("manual fallback started the engine or changed unselected policy")
+	}
+}
+
+func TestModelSettingsEstimatorUnavailableManualResolutionRecoversExactly(t *testing.T) {
+	f := prepareModelSettingsProcessFixture(t)
+	// The exact file still exists, but its bounded facts cannot be decoded.
+	// Manual CPU settings do not require an estimator or model execution.
+	modelSettingsWrite(t, filepath.Join(f.root, "medium.gguf"), []byte("synthetic unavailable GGUF metadata"))
+	f.startModelSettings(t)
+	f.seedModelSettingsPolicyBounds(t)
+	baseline := f.metadataBaseline(t)
+	var inspection modelconfig.InspectResult
+	modelSettingsDecode(t, f.rpcOK(t, "engine:inspect-model", modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "medium-model"}), &inspection)
+	if inspection.Estimate.Status != "unknown" {
+		t.Fatalf("unreadable facts returned estimate status %q", inspection.Estimate.Status)
+	}
+	assertModelSettingsAdvisoryEstimate(t, inspection.Estimate)
+	request, preview := f.review(t, f.request(t, "manual-without-estimator", nil))
+	if preview.Estimate == nil || preview.Estimate.Status != "unknown" || preview.Auto != nil {
+		t.Fatal("manual preview without facts did not disclose unavailable estimate")
+	}
+	assertModelSettingsAdvisoryEstimate(t, *preview.Estimate)
+	index := slices.IndexFunc(preview.Settings.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ModelID == "medium-model" })
+	if index < 0 || preview.Settings.ModelLoads[index].Resolved == nil {
+		t.Fatal("manual preview without estimator lost its finite allocation")
+	}
+	resolved := preview.Settings.ModelLoads[index].Resolved
+	if resolved.PerSlotContext != 8192 || resolved.TotalContext != 16384 || resolved.Slots != 2 || resolved.GPU.Mode != "cpu" || resolved.ReviewedInputID == "" || resolved.NativeBuildID == "" || resolved.PresetDigest == "" {
+		t.Fatalf("manual preview without estimator returned incomplete resolution: %+v", resolved)
+	}
+	binding := modelSettingsExpectedBinding(t, f.root, "model", "medium.gguf", []byte("synthetic unavailable GGUF metadata"))
+	assertModelSettingsBindings(t, f.root, resolved.Artifacts, []modelconfig.ArtifactBinding{binding})
+	assertModelSettingsUnselectedLoad(t, preview.Settings, "weak-model", 4096, 1)
+	f.noMetadataEffects(t, baseline)
+	gate := newModelSettingsGate()
+	f.readbackGate = gate
+	f.begin(t, "engine:apply-settings", request)
+	modelSettingsWait(t, gate)
+	if f.disk(t).Model.Stage != "native-applying" {
+		t.Fatal("manual recovery did not reach durable native application")
+	}
+	f.crashBroker(t, gate)
+	f.startModelSettings(t)
+	after := f.settled(t, request.RequestID, "succeeded")
+	assertModelSettingsSavedReadback(t, after, preview.Settings)
+	if after.Running || !reflect.DeepEqual(baseline.policy, f.policy(t)) {
+		t.Fatal("recovery retuned manual settings or changed unselected policy")
+	}
+	var replay struct {
+		Revision uint64 `json:"revision"`
+		Phase    string `json:"phase"`
+	}
+	modelSettingsDecode(t, f.rpcOK(t, "engine:apply-settings", request), &replay)
+	if replay.Revision != after.Revision || replay.Phase != "succeeded" {
+		t.Fatal("manual recovery lost the exact accepted receipt")
+	}
+}
+
+func assertModelSettingsAdvisoryEstimate(t *testing.T, estimate modelconfig.Estimate) {
+	t.Helper()
+	if err := estimate.Validate(); err != nil {
+		t.Fatalf("invalid advisory estimate: %v", err)
+	}
+	if estimate.Source == "" || len(estimate.Unknowns) == 0 || estimate.CapacityFit != "unknown" || estimate.FreeFit != "unknown" {
+		t.Fatalf("incomplete estimate claimed memory fit or lost provenance: %+v", estimate)
+	}
+	for _, domain := range estimate.Domains {
+		if domain.CapacityFit != "unknown" || domain.FreeFit != "unknown" || domain.CapacityBytes != "" || domain.FreeBytes != "" {
+			t.Fatal("estimate manufactured target memory authority")
+		}
 	}
 }
 
@@ -531,6 +677,7 @@ func TestModelSettingsManagerReplacementCannotCompleteFromOldSource(t *testing.T
 
 func TestModelSettingsProgressedReceiptRecoversAcrossBrokerAndManagerRestart(t *testing.T) {
 	f := newModelSettingsProcessFixture(t)
+	f.seedModelSettingsPolicyBounds(t)
 	before := f.policy(t)
 	request, preview := f.review(t, f.request(t, "restart-receipt", &modelconfig.PolicyPatch{Generation: map[string]*json.Number{"temperature": modelSettingsNumber("0.55")}}))
 	gate := newModelSettingsGate()
@@ -545,9 +692,8 @@ func TestModelSettingsProgressedReceiptRecoversAcrossBrokerAndManagerRestart(t *
 	f.crashBroker(t, gate)
 	f.startModelSettings(t)
 	after := f.settled(t, request.RequestID, "succeeded")
-	if !after.Settings.Equal(preview.Settings) || after.Running {
-		t.Fatal("restart changed frozen settings or started an Off engine")
-	}
+	assertModelSettingsSavedReadback(t, after, preview.Settings)
+	assertModelSettingsFinite(t, after.Settings, f.root)
 	assertModelSettingsPolicyPatch(t, before, f.policy(t), "0.55")
 	var retry struct {
 		Revision uint64 `json:"revision"`

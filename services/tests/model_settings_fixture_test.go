@@ -895,6 +895,19 @@ func (f *modelSettingsProcessFixture) setPolicy(t *testing.T, policy nodepolicy.
 	return result.Policy
 }
 
+func (f *modelSettingsProcessFixture) seedModelSettingsPolicyBounds(t *testing.T) {
+	t.Helper()
+	policy := f.policy(t)
+	profile := &policy.Profiles[0]
+	profile.ContextTokens, profile.MaxOutputTokens, profile.MaxConcurrent = 4096, 512, 1
+	profile.MemoryBytes = 1048576
+	profile.RequestOptionsMode = nodepolicy.RequestOptionsEnforced
+	// A saved operator reference, never a fabricated qualification registry
+	// record or memory observation. These declarations must survive estimates.
+	profile.Qualification = &nodepolicy.QualificationRef{ID: "saved-operator-reference", Revision: "7"}
+	f.setPolicy(t, policy)
+}
+
 func (f *modelSettingsProcessFixture) pinned(t *testing.T) {
 	t.Helper()
 	cluster := filepath.Join(f.base, "cluster")
