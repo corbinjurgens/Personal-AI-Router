@@ -36,7 +36,7 @@ func TestOwnerEvidenceReservations(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		store := newModelDownloadStore(dir)
-		if _, _, err := store.save(nil, nil, true); err != nil {
+		if _, _, err := store.save(nil, nil, true, false); err != nil {
 			t.Fatalf("seed complete current-format baseline: %v", err)
 		}
 		d := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
@@ -281,7 +281,7 @@ func TestOwnerEvidenceReservations(t *testing.T) {
 	uncertainCopy("uncertain copy marker addition advances recovery authority", 1)
 	uncertainCopy("uncertain copy marker removal advances recovery authority", 2)
 
-	historical := func(name, document string) {
+	historical := func(name, document string, recovery bool) {
 		t.Run(name, func(t *testing.T) {
 			m, d, _ := setup(t)
 			if document == "" {
@@ -293,10 +293,10 @@ func TestOwnerEvidenceReservations(t *testing.T) {
 			}
 			m.copyJournal = newModelDownloads(d.source, filepath.Dir(d.store.path), map[string]string{"llamacpp": engines.ModelNamingExact})
 			r := m.ownerReservations()
-			if r.Complete || !r.CopyRecoveryRequired {
+			if r.Complete || m.copyJournal.copiesComplete || r.CopyRecoveryRequired != recovery {
 				t.Fatalf("historical state declared complete: %+v", r)
 			}
-			if document != "" && !r.RecoveryRequired {
+			if r.RecoveryRequired != recovery {
 				t.Fatal("unreadable content baseline omitted recovery-required evidence")
 			}
 			requireOwnerUnknown(t, r.Busy)
@@ -309,9 +309,9 @@ func TestOwnerEvidenceReservations(t *testing.T) {
 			release()
 		})
 	}
-	historical("missing historical baseline stays unknown", "")
-	historical("old journal shape requires recovery", `{"version":1,"entries":[]}`)
-	historical("unreadable journal requires recovery", `invalid journal`)
+	historical("missing historical baseline stays unknown", "", false)
+	historical("old journal shape requires recovery", `{"version":1,"entries":[]}`, true)
+	historical("unreadable journal requires recovery", `invalid journal`, true)
 
 	t.Run("reader and writer ABA changes authority without notifications", func(t *testing.T) {
 		m, d, _ := setup(t)
@@ -655,7 +655,7 @@ func requireOwnerBool(t *testing.T, observation buildapply.Observation[bool], wa
 func ownerEvidenceRPCFixture(t *testing.T) (*Manager, *bytes.Buffer) {
 	t.Helper()
 	e, _, _ := ownerEvidenceFixture(t)
-	d := &modelDownloads{source: e.switchIncarnation}
+	d := &modelDownloads{source: e.switchIncarnation, copiesComplete: true}
 	e.downloads = d
 	var out bytes.Buffer
 	return &Manager{exec: e, copyJournal: d, codec: NewCodec(&out)}, &out
@@ -860,7 +860,7 @@ func TestOwnerEvidenceRPC(t *testing.T) {
 		})
 	}
 	unknown("unavailable desired owner", func(m *Manager) { m.exec.desired = &desiredStateStore{} }, "intent")
-	unknown("historical copy baseline", func(m *Manager) { m.copyJournal.copyRecoveryRequired = true }, "reservations")
+	unknown("historical copy baseline", func(m *Manager) { m.copyJournal.copiesComplete = false }, "reservations")
 	unknown("download recovery pending", func(m *Manager) { m.copyJournal.recoveryRequired = true }, "reservations")
 	unknown("exhausted content authority", func(m *Manager) { m.copyJournal.authorityUncertain = true }, "reservations")
 	unknown("admitted mutation", func(m *Manager) { m.exec.ownerAdmissionHeld = 1 }, "stopAuthority")

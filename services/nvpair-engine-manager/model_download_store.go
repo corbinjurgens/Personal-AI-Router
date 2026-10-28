@@ -55,10 +55,11 @@ func downloadKey(engine, model, naming string) (downloadContentKey, error) {
 }
 
 type modelDownloadJournal struct {
-	Version        int                   `json:"version"`
-	Entries        []modelDownloadMarker `json:"entries"`
-	Copies         []modelCopyMarker     `json:"copies"`
-	CopiesComplete bool                  `json:"copiesComplete"`
+	Version              int                   `json:"version"`
+	Entries              []modelDownloadMarker `json:"entries"`
+	Copies               []modelCopyMarker     `json:"copies"`
+	CopiesComplete       bool                  `json:"copiesComplete"`
+	CopyRecoveryRequired bool                  `json:"copyRecoveryRequired"`
 }
 
 // Only unresolved provenance belongs here, never transport or execution state.
@@ -128,7 +129,7 @@ func downloadJournalObject(data []byte, required ...string) error {
 }
 
 func (j *modelDownloadJournal) UnmarshalJSON(data []byte) error {
-	if err := downloadJournalObject(data, "version", "entries", "copies", "copiesComplete"); err != nil {
+	if err := downloadJournalObject(data, "version", "entries", "copies", "copiesComplete", "copyRecoveryRequired"); err != nil {
 		return err
 	}
 	type plain modelDownloadJournal
@@ -159,15 +160,15 @@ func newModelDownloadStore(baseDir string) modelDownloadStore {
 
 // Download-only callers still validate the entire current content document.
 func (s modelDownloadStore) load() (map[downloadContentKey]modelDownloadMarker, error) {
-	markers, _, _, err := s.loadJournal()
+	markers, _, _, _, err := s.loadJournal()
 	return markers, err
 }
 
-func (s modelDownloadStore) loadJournal() (map[downloadContentKey]modelDownloadMarker, map[string]modelCopyMarker, bool, error) {
+func (s modelDownloadStore) loadJournal() (map[downloadContentKey]modelDownloadMarker, map[string]modelCopyMarker, bool, bool, error) {
 	markers := make(map[downloadContentKey]modelDownloadMarker)
 	copies := make(map[string]modelCopyMarker)
 	if s.path == "" {
-		return nil, nil, false, errDownloadPersistence
+		return nil, nil, false, false, errDownloadPersistence
 	}
 	f, err := os.Open(s.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -176,35 +177,38 @@ func (s modelDownloadStore) loadJournal() (map[downloadContentKey]modelDownloadM
 		// download write preserves this explicit lack of copy completeness.
 		info, dirErr := os.Stat(filepath.Dir(s.path))
 		if dirErr == nil && info.IsDir() {
-			return markers, copies, false, nil
+			return markers, copies, false, false, nil
 		}
-		return nil, nil, false, errDownloadPersistence
+		return nil, nil, false, false, errDownloadPersistence
 	}
 	if err != nil {
-		return nil, nil, false, errDownloadPersistence
+		return nil, nil, false, false, errDownloadPersistence
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, modeldownload.MaxJournalBytes+1))
 	if err != nil || len(data) > modeldownload.MaxJournalBytes || !utf8.Valid(data) {
-		return nil, nil, false, errDownloadPersistence
+		return nil, nil, false, false, errDownloadPersistence
 	}
 	var journal modelDownloadJournal
-	if json.Unmarshal(data, &journal) != nil || journal.Version != 1 || journal.Entries == nil || journal.Copies == nil || len(journal.Entries)+len(journal.Copies) > modeldownload.MaxUnsafeEntries {
-		return nil, nil, false, errDownloadPersistence
+	if json.Unmarshal(data, &journal) != nil {
+		return nil, nil, false, false, errDownloadPersistence
+	}
+	if journal.Version != 1 || journal.Entries == nil || journal.Copies == nil || len(journal.Entries)+len(journal.Copies) > modeldownload.MaxUnsafeEntries {
+		return nil, nil, false, false, errDownloadPersistence
 	}
 	ids := make(map[string]bool)
 	for _, marker := range journal.Entries {
 		key, err := downloadKey(marker.Engine, marker.Model, marker.Naming)
 		if err != nil || key.model != marker.ContentKey || ids[marker.ID] {
-			return nil, nil, false, errDownloadPersistence
+			return nil, nil, false, false, errDownloadPersistence
 		}
 		// Reuse the wire validator, including engine and operation-ID syntax.
 		probe := modeldownload.Snapshot{Version: 1, SourceID: marker.ID, Revision: "0", Entries: []modeldownload.Entry{{ID: marker.ID, Engine: marker.Engine, Model: marker.Model, Phase: "unknown", BlocksReadiness: true}}}
 		if probe.Validate() != nil {
-			return nil, nil, false, errDownloadPersistence
+			return nil, nil, false, false, errDownloadPersistence
 		}
 		if _, duplicate := markers[key]; duplicate {
-			return nil, nil, false, errDownloadPersistence
+			return nil, nil, false, false, errDownloadPersistence
 		}
 		markers[key] = marker
 		ids[marker.ID] = true
@@ -213,19 +217,19 @@ func (s modelDownloadStore) loadJournal() (map[downloadContentKey]modelDownloadM
 	for _, marker := range journal.Copies {
 		identity := marker.Role + "\x00" + marker.SourceNodeID + "\x00" + marker.DestinationNodeID + "\x00" + marker.Engine + "\x00" + marker.ContentKey
 		if marker.validate() != nil || ids[marker.OpID] || identities[identity] {
-			return nil, nil, false, errDownloadPersistence
+			return nil, nil, false, false, errDownloadPersistence
 		}
 		ids[marker.OpID], identities[identity] = true, true
 		copies[marker.OpID] = marker
 	}
-	return markers, copies, journal.CopiesComplete, nil
+	return markers, copies, journal.CopiesComplete, journal.CopyRecoveryRequired, nil
 }
 
-func (s modelDownloadStore) save(markers map[downloadContentKey]modelDownloadMarker, copies map[string]modelCopyMarker, copiesComplete bool) (landed, uncertain bool, err error) {
+func (s modelDownloadStore) save(markers map[downloadContentKey]modelDownloadMarker, copies map[string]modelCopyMarker, copiesComplete, copyRecoveryRequired bool) (landed, uncertain bool, err error) {
 	if s.path == "" || len(markers)+len(copies) > modeldownload.MaxUnsafeEntries {
 		return false, false, errDownloadPersistence
 	}
-	journal := modelDownloadJournal{Version: 1, Entries: make([]modelDownloadMarker, 0, len(markers)), Copies: make([]modelCopyMarker, 0, len(copies)), CopiesComplete: copiesComplete}
+	journal := modelDownloadJournal{Version: 1, Entries: make([]modelDownloadMarker, 0, len(markers)), Copies: make([]modelCopyMarker, 0, len(copies)), CopiesComplete: copiesComplete, CopyRecoveryRequired: copyRecoveryRequired}
 	for _, marker := range markers {
 		journal.Entries = append(journal.Entries, marker)
 	}
