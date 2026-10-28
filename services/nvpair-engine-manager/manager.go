@@ -74,6 +74,10 @@ type Manager struct {
 	copyMu       sync.Mutex
 	copies       map[string]*activeCopy
 	copiesClosed bool
+	// Guarded by copyMu. Held steps include each live copy's retirement;
+	// one further step is always left for shutdown closure.
+	copyRevision uint64
+	copyHeld     uint64
 	// Shares the Executor's durable content owner, including on controllers
 	// that never access a destination engine or model store.
 	copyJournal  *modelDownloads

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -22,8 +23,555 @@ import (
 
 	"nvpair-shared/buildapply"
 	"nvpair-shared/durablefile"
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modeldownload"
 )
+
+// Private journal fixtures exercise the actual reservation owners, without
+// peers, listeners, content files, native engines or transfer execution.
+func TestOwnerEvidenceReservations(t *testing.T) {
+	setup := func(t *testing.T) (*Manager, *modelDownloads, copyRequest) {
+		t.Helper()
+		dir := t.TempDir()
+		store := newModelDownloadStore(dir)
+		if _, _, err := store.save(nil, nil, true); err != nil {
+			t.Fatalf("seed complete current-format baseline: %v", err)
+		}
+		d := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
+		reg := &Registry{engines: map[string]*Manifest{"llamacpp": {Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}}}
+		m := &Manager{exec: &Executor{switchIncarnation: d.source}, copyJournal: d, copyRegistry: reg}
+		return m, d, copyRequest{OpID: newOpID(), Engine: "llamacpp", Model: "model", SourceNodeID: "source", DestinationNodeID: "destination"}
+	}
+	reserve := func(t *testing.T, m *Manager, p copyRequest) (context.Context, func()) {
+		t.Helper()
+		ctx, release, err := m.reserveCopy(context.Background(), p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(release)
+		return ctx, release
+	}
+	result := func(p copyRequest) copyModelResult {
+		return copyModelResult{Engine: p.Engine, Model: p.Model, Files: 1, BytesTotal: 10, BytesCopied: 10}
+	}
+	clear := func(t *testing.T, r ownerReservationEvidence) {
+		t.Helper()
+		if !r.Complete {
+			t.Fatalf("expected complete evidence: %+v", r)
+		}
+		requireOwnerBool(t, r.Busy, false)
+	}
+
+	t.Run("clean current-format baseline is complete and read-only", func(t *testing.T) {
+		m, d, _ := setup(t)
+		before, err := os.ReadFile(d.store.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.store.replace.SyncDir = func(string) error { t.Error("evidence wrote journal"); return nil }
+		first, second := m.ownerReservations(), m.ownerReservations()
+		clear(t, first)
+		if !reflect.DeepEqual(first, second) || first.Token.Incarnation != d.source || first.Token.DownloadSource != d.source {
+			t.Fatalf("unstable idle capture: %+v / %+v", first, second)
+		}
+		after, err := os.ReadFile(d.store.path)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("evidence changed journal: %v", err)
+		}
+	})
+
+	t.Run("overlapping copy and download have one capture and token", func(t *testing.T) {
+		m, d, p := setup(t)
+		ctx, release := reserve(t, m, p)
+		entered, proceed := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		defer once.Do(func() { close(proceed) })
+		done := make(chan error, 1)
+		go func() {
+			_, err := m.copyWithEvidence(ctx, p, "destination", func() (copyModelResult, error) {
+				close(entered)
+				<-proceed
+				return result(p), nil
+			})
+			done <- err
+		}()
+		select {
+		case <-entered:
+		case err := <-done:
+			t.Fatalf("copy ended before completion seam: %v", err)
+		}
+		a := reserveModelDownload(t, d, "llamacpp", "other", engines.ModelNamingExact)
+		r := m.ownerReservations()
+		requireOwnerBool(t, r.Busy, true)
+		if !r.Complete || len(r.ActiveDownloads) != 1 || len(r.Copies) != 1 || len(r.RetainedCopies) != 1 || r.Copies[0].Role != "destination" || r.Copies[0].PendingPublication || r.ActiveDownloads[0].Entry.ID != a.entry.ID || r.Token.DownloadRevision != d.revision || r.Token.CopyRevision != m.copyRevision || r.Token.ContentGeneration != d.authorityGeneration {
+			t.Fatalf("joint capture = %+v", r)
+		}
+		if err := d.finish(a, "failed", "interrupted", ""); err != nil {
+			t.Fatal(err)
+		}
+		once.Do(func() { close(proceed) })
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		release()
+		clear(t, m.ownerReservations())
+	})
+
+	t.Run("unknown copy retirement preserves controller evidence", func(t *testing.T) {
+		m, _, p := setup(t)
+		ctx, release := reserve(t, m, p)
+		_, err := m.copyWithEvidence(ctx, p, "controller", func() (copyModelResult, error) {
+			r := m.ownerReservations()
+			if len(r.Copies) != 1 || r.Copies[0].Role != "controller" {
+				t.Errorf("controller role = %+v", r)
+			}
+			return copyModelResult{}, copyUnknown(io.ErrUnexpectedEOF)
+		})
+		if err == nil {
+			t.Fatal("unknown completion accepted")
+		}
+		release()
+		r := m.ownerReservations()
+		requireOwnerBool(t, r.Busy, true)
+		if r.Complete || len(r.Copies) != 0 || len(r.RetainedCopies) != 1 || r.RetainedCopies[0].OpID != p.OpID {
+			t.Fatalf("unknown retirement = %+v", r)
+		}
+	})
+
+	t.Run("active and retained unsafe download share a key without hiding either", func(t *testing.T) {
+		m, d, _ := setup(t)
+		old := reserveModelDownload(t, d, "llamacpp", "model", engines.ModelNamingExact)
+		if _, err := d.changeMarker(old, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.finish(old, "unknown", "interrupted", ""); err != nil {
+			t.Fatal(err)
+		}
+		current := reserveModelDownload(t, d, "llamacpp", "model", engines.ModelNamingExact)
+		r := m.ownerReservations()
+		requireOwnerBool(t, r.Busy, true)
+		if r.Complete || len(r.ActiveDownloads) != 1 || len(r.UnsafeDownloads) != 1 || r.ActiveDownloads[0].Entry.ID != current.entry.ID || r.UnsafeDownloads[0].Marker.ID != old.entry.ID || r.UnsafeDownloads[0].Incarnation != d.source {
+			t.Fatalf("same-key reservations = %+v", r)
+		}
+	})
+
+	t.Run("queued cancellation retires only after completion owner runs", func(t *testing.T) {
+		m, d, _ := setup(t)
+		a := reserveModelDownload(t, d, "llamacpp", "queued", engines.ModelNamingExact)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		observed, proceed := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		defer once.Do(func() { close(proceed) })
+		done := make(chan error, 1)
+		go func() { <-ctx.Done(); close(observed); <-proceed; done <- d.finish(a, "failed", "interrupted", "") }()
+		cancel()
+		<-observed
+		before := m.ownerReservations()
+		requireOwnerBool(t, before.Busy, true)
+		if len(before.ActiveDownloads) != 1 || before.ActiveDownloads[0].Entry.Phase != modeldownload.PhaseQueued {
+			t.Fatalf("cancel prematurely retired queue: %+v", before)
+		}
+		once.Do(func() { close(proceed) })
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		after := m.ownerReservations()
+		clear(t, after)
+		if before.Token.ContentGeneration == after.Token.ContentGeneration {
+			t.Fatal("queued retirement did not advance authority")
+		}
+	})
+
+	uncertain := func(name string, remove bool) {
+		t.Run(name, func(t *testing.T) {
+			m, d, _ := setup(t)
+			a := reserveModelDownload(t, d, "llamacpp", "model", engines.ModelNamingExact)
+			if remove {
+				if _, err := d.changeMarker(a, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := m.ownerReservations()
+			entered, proceed := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			defer once.Do(func() { close(proceed) })
+			d.store.replace.SyncDir = func(string) error {
+				close(entered)
+				<-proceed
+				return errors.New("uncertain directory sync")
+			}
+			done := make(chan error, 1)
+			go func() { _, err := d.changeMarker(a, remove); done <- err }()
+			select {
+			case <-entered:
+			case err := <-done:
+				t.Fatalf("marker publication ended before sync seam: %v", err)
+			}
+			during := m.ownerReservations()
+			requireOwnerBool(t, during.Busy, true)
+			once.Do(func() { close(proceed) })
+			if err := <-done; err == nil {
+				t.Fatal("uncertain publication reported success")
+			}
+			if err := d.finish(a, "unknown", "interrupted", "uncertain"); err != nil {
+				t.Fatal(err)
+			}
+			after := m.ownerReservations()
+			if after.Complete || !after.Uncertain || after.Token.ContentGeneration == before.Token.ContentGeneration || (len(after.UnsafeDownloads) == 0) != remove {
+				t.Fatalf("uncertain publication = %+v", after)
+			}
+			if remove {
+				requireOwnerUnknown(t, after.Busy)
+			} else {
+				requireOwnerBool(t, after.Busy, true)
+			}
+		})
+	}
+	uncertain("uncertain download marker addition is retained and incomplete", false)
+	uncertain("uncertain download marker removal cannot establish clear", true)
+
+	uncertainCopy := func(name string, publication int) {
+		t.Run(name, func(t *testing.T) {
+			m, d, p := setup(t)
+			ctx, release := reserve(t, m, p)
+			before := m.ownerReservations()
+			entered, proceed := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			defer once.Do(func() { close(proceed) })
+			writes := 0
+			d.store.replace.SyncDir = func(string) error {
+				writes++
+				if writes != publication {
+					return nil
+				}
+				close(entered)
+				<-proceed
+				return errors.New("uncertain copy publication")
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := m.copyWithEvidence(ctx, p, "controller", func() (copyModelResult, error) { return result(p), nil })
+				done <- err
+			}()
+			select {
+			case <-entered:
+			case err := <-done:
+				t.Fatalf("copy ended before publication seam: %v", err)
+			}
+			requireOwnerBool(t, m.ownerReservations().Busy, true)
+			once.Do(func() { close(proceed) })
+			if err := <-done; err == nil {
+				t.Fatal("uncertain copy publication succeeded")
+			}
+			release()
+			after := m.ownerReservations()
+			if after.Complete || !after.CopyRecoveryRequired || !after.Uncertain || after.Token.ContentGeneration <= before.Token.ContentGeneration || (len(after.RetainedCopies) == 1) != (publication == 1) {
+				t.Fatalf("uncertain copy evidence = %+v", after)
+			}
+			if publication == 1 {
+				requireOwnerBool(t, after.Busy, true)
+			} else {
+				requireOwnerUnknown(t, after.Busy)
+			}
+		})
+	}
+	uncertainCopy("uncertain copy marker addition advances recovery authority", 1)
+	uncertainCopy("uncertain copy marker removal advances recovery authority", 2)
+
+	historical := func(name, document string) {
+		t.Run(name, func(t *testing.T) {
+			m, d, _ := setup(t)
+			if document == "" {
+				if err := os.Remove(d.store.path); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(d.store.path, []byte(document), 0600); err != nil {
+				t.Fatal(err)
+			}
+			m.copyJournal = newModelDownloads(d.source, filepath.Dir(d.store.path), map[string]string{"llamacpp": engines.ModelNamingExact})
+			r := m.ownerReservations()
+			if r.Complete || !r.CopyRecoveryRequired {
+				t.Fatalf("historical state declared complete: %+v", r)
+			}
+			if document != "" && !r.RecoveryRequired {
+				t.Fatal("unreadable content baseline omitted recovery-required evidence")
+			}
+			requireOwnerUnknown(t, r.Busy)
+			_, release := reserve(t, m, copyRequest{OpID: newOpID(), Engine: "llamacpp"})
+			r = m.ownerReservations()
+			requireOwnerBool(t, r.Busy, true)
+			if r.Complete {
+				t.Fatal("known busy hid unknown historical baseline")
+			}
+			release()
+		})
+	}
+	historical("missing historical baseline stays unknown", "")
+	historical("old journal shape requires recovery", `{"version":1,"entries":[]}`)
+	historical("unreadable journal requires recovery", `invalid journal`)
+
+	t.Run("reader and writer ABA changes authority without notifications", func(t *testing.T) {
+		m, d, _ := setup(t)
+		before := m.ownerReservations()
+		key := downloadContentKey{engine: "llamacpp", model: "model"}
+		read, err := d.acquireRead(key, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		during := m.ownerReservations()
+		requireOwnerBool(t, during.Busy, true)
+		if during.Readers["llamacpp"] != 1 {
+			t.Fatalf("reader missing: %+v", during)
+		}
+		read()
+		read()
+		afterRead := m.ownerReservations()
+		clear(t, afterRead)
+		write, err := d.acquireWrite("llamacpp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		during = m.ownerReservations()
+		requireOwnerBool(t, during.Busy, true)
+		if !reflect.DeepEqual(during.Writers, []string{"llamacpp"}) || len(during.ActiveDownloads) != 0 {
+			t.Fatalf("writer without progress missing: %+v", during)
+		}
+		write()
+		write()
+		afterWrite := m.ownerReservations()
+		clear(t, afterWrite)
+		if before.Token.ContentGeneration+2 != afterRead.Token.ContentGeneration || afterRead.Token.ContentGeneration+2 != afterWrite.Token.ContentGeneration || before.Token.DownloadRevision != afterWrite.Token.DownloadRevision {
+			t.Fatalf("ABA token = %+v / %+v / %+v", before.Token, afterRead.Token, afterWrite.Token)
+		}
+	})
+
+	t.Run("copy identity role and shutdown change authority", func(t *testing.T) {
+		m, _, p := setup(t)
+		p.DestinationNodeID = ""
+		ctx, release := reserve(t, m, p)
+		before := m.ownerReservations()
+		p.DestinationNodeID = "destination"
+		m.copyMu.Lock()
+		err := m.bindCopyAuthorityLocked(m.copies[p.OpID], p, "destination")
+		m.copyMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		after := m.ownerReservations()
+		if before.Token.CopyRevision == after.Token.CopyRevision || after.Copies[0].DestinationNodeID != "destination" || after.Copies[0].Role != "destination" {
+			t.Fatalf("role binding = %+v", after)
+		}
+		m.stopCopies()
+		release()
+		closed := m.ownerReservations()
+		requireOwnerBool(t, closed.Busy, true)
+		if !closed.Shutdown || len(closed.Copies) != 0 || ctx.Err() != context.Canceled || closed.Token.CopyRevision <= after.Token.CopyRevision {
+			t.Fatalf("shutdown = %+v, context = %v", closed, ctx.Err())
+		}
+		m.stopCopies()
+		if m.ownerReservations().Token != closed.Token {
+			t.Fatal("repeated shutdown consumed capacity")
+		}
+	})
+
+	t.Run("download percentages and nested copy progress are detached", func(t *testing.T) {
+		m, d, p := setup(t)
+		_, _ = reserve(t, m, p)
+		a := reserveModelDownload(t, d, "llamacpp", "download", engines.ModelNamingExact)
+		percent := 10
+		if err := d.update(a, modeldownload.PhaseInProgress, &percent); err != nil {
+			t.Fatal(err)
+		}
+		state := d.snapshot()
+		m.copyMu.Lock()
+		m.copies[p.OpID].Progress = &copyProgress{remoteProgress: remoteProgress{Percent: 20, DownloadState: &state, Message: "transport diagnostic"}}
+		m.copyMu.Unlock()
+		before := m.ownerReservations()
+		public := m.activeCopies()
+		if public[0].cancel != nil {
+			t.Fatal("active copies leaked cancellation authority")
+		}
+		public[0].Progress.DownloadState.Entries[0].Model = "changed-public"
+		*public[0].Progress.DownloadState.Entries[0].Percent = 99
+		before.Copies[0].Progress.Percent = 90
+		*before.Copies[0].Progress.DownloadState.Entries[0].Percent = 98
+		*before.ActiveDownloads[0].Entry.Percent = 97
+		after := m.ownerReservations()
+		if after.Copies[0].Progress.Percent != 20 || *after.Copies[0].Progress.DownloadState.Entries[0].Percent != 10 || *after.ActiveDownloads[0].Entry.Percent != 10 || after.Copies[0].Progress.Message != "" {
+			t.Fatalf("capture aliases owner or exposes diagnostics: %+v", after)
+		}
+		percent = 30
+		if err := d.update(a, modeldownload.PhaseInProgress, &percent); err != nil {
+			t.Fatal(err)
+		}
+		progress := m.ownerReservations()
+		if progress.Token.ContentGeneration != after.Token.ContentGeneration || progress.Token.DownloadRevision == after.Token.DownloadRevision {
+			t.Fatal("percentage changed authority or lost notification revision")
+		}
+	})
+
+	t.Run("successor retains predecessor copy and unknown download origin", func(t *testing.T) {
+		m, d, p := setup(t)
+		ctx, release := reserve(t, m, p)
+		if _, err := m.copyWithEvidence(ctx, p, "controller", func() (copyModelResult, error) { return copyModelResult{}, copyUnknown(io.ErrUnexpectedEOF) }); err == nil {
+			t.Fatal("unknown copy accepted")
+		}
+		release()
+		a := reserveModelDownload(t, d, "llamacpp", "old-download", engines.ModelNamingExact)
+		if _, err := d.changeMarker(a, false); err != nil {
+			t.Fatal(err)
+		}
+		newID := newOpID()
+		successor := newModelDownloads(newID, filepath.Dir(d.store.path), map[string]string{"llamacpp": engines.ModelNamingExact})
+		fresh := &Manager{exec: &Executor{switchIncarnation: newID}, copyJournal: successor}
+		r := fresh.ownerReservations()
+		requireOwnerBool(t, r.Busy, true)
+		if r.Complete || len(r.Copies) != 0 || len(r.RetainedCopies) != 1 || r.RetainedCopies[0].ManagerIncarnation != d.source || len(r.UnsafeDownloads) != 1 || r.UnsafeDownloads[0].Incarnation != "" || r.UnsafeDownloads[0].Marker.ID != a.entry.ID || r.Token.Incarnation != newID {
+			t.Fatalf("predecessor provenance = %+v", r)
+		}
+	})
+
+	t.Run("contended subsection keeps known busy independently of completeness", func(t *testing.T) {
+		m, d, p := setup(t)
+		_, _ = reserve(t, m, p)
+		d.mu.Lock()
+		r := m.ownerReservations()
+		d.mu.Unlock()
+		requireOwnerBool(t, r.Busy, true)
+		if r.Complete {
+			t.Fatal("contended content owner declared complete")
+		}
+		m.copyMu.Lock()
+		r = m.ownerReservations()
+		m.copyMu.Unlock()
+		requireOwnerUnknown(t, r.Busy)
+	})
+
+	t.Run("content saturation refuses admissions and preserves download retirement", func(t *testing.T) {
+		m, d, _ := setup(t)
+		d.authorityGeneration = math.MaxUint64 - 5
+		a := reserveModelDownload(t, d, "llamacpp", "model", engines.ModelNamingExact)
+		if _, err := d.reserve("llamacpp", "other", engines.ModelNamingExact); !errors.Is(err, errDownloadCapacity) {
+			t.Fatalf("saturated download admission = %v", err)
+		}
+		if _, err := d.acquireWrite("other"); !errors.Is(err, errDownloadCapacity) {
+			t.Fatalf("writer consumed retirement capacity: %v", err)
+		}
+		if _, err := d.acquireRead(downloadContentKey{engine: "other"}, false); !errors.Is(err, errDownloadCapacity) {
+			t.Fatalf("reader consumed retirement capacity: %v", err)
+		}
+		if err := d.update(a, modeldownload.PhaseInProgress, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.changeMarker(a, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.changeMarker(a, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.finish(a, "complete", "", ""); err != nil {
+			t.Fatal(err)
+		}
+		r := m.ownerReservations()
+		clear(t, r)
+		if r.Token.ContentGeneration != math.MaxUint64 || d.authorityHeld != 0 {
+			t.Fatalf("authority wrapped or leaked capacity: %+v, held %d", r.Token, d.authorityHeld)
+		}
+	})
+
+	gateSaturation := func(name string, writer bool) {
+		t.Run(name, func(t *testing.T) {
+			m, d, _ := setup(t)
+			d.authorityGeneration = math.MaxUint64 - 2
+			var release func()
+			var err error
+			if writer {
+				release, err = d.acquireWrite("llamacpp")
+			} else {
+				release, err = d.acquireRead(downloadContentKey{engine: "llamacpp"}, false)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.acquireRead(downloadContentKey{engine: "other"}, false); !errors.Is(err, errDownloadCapacity) {
+				t.Fatalf("new reader consumed release capacity: %v", err)
+			}
+			release()
+			release()
+			r := m.ownerReservations()
+			clear(t, r)
+			if r.Token.ContentGeneration != math.MaxUint64 || d.authorityHeld != 0 {
+				t.Fatalf("gate release wrapped: %+v", r)
+			}
+		})
+	}
+	gateSaturation("reader release survives saturation", false)
+	gateSaturation("writer release survives saturation", true)
+
+	t.Run("copy marker reserves content and notification retirement before publication", func(t *testing.T) {
+		m, d, p := setup(t)
+		d.authorityGeneration, d.revision = math.MaxUint64-2, math.MaxUint64-2
+		marker := modelCopyMarker{OpID: p.OpID, Engine: p.Engine, Model: p.Model, ContentKey: p.Model, Naming: engines.ModelNamingExact, Role: "controller", OwnerNodeID: "controller", SourceNodeID: p.SourceNodeID, DestinationNodeID: p.DestinationNodeID, ManagerIncarnation: d.source, Phase: "unsafe"}
+		if err := d.changeCopyMarker(marker, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.reserve("llamacpp", "other", engines.ModelNamingExact); !errors.Is(err, errDownloadCapacity) {
+			t.Fatalf("download consumed marker retirement: %v", err)
+		}
+		if err := d.changeCopyMarker(marker, true); err != nil {
+			t.Fatalf("accepted marker lost retirement capacity: %v", err)
+		}
+		r := m.ownerReservations()
+		clear(t, r)
+		if d.authorityHeld != 0 || d.heldRevisions != 0 || r.Token.ContentGeneration != math.MaxUint64 || r.Token.DownloadRevision != math.MaxUint64 {
+			t.Fatalf("marker retirement wrapped or leaked: %+v", r.Token)
+		}
+	})
+
+	t.Run("copy saturation preserves identity publication retirement and shutdown", func(t *testing.T) {
+		m, d, p := setup(t)
+		m.copyRevision = math.MaxUint64 - 6
+		p.DestinationNodeID = ""
+		ctx, release := reserve(t, m, p)
+		if _, _, err := m.reserveCopy(context.Background(), copyRequest{OpID: newOpID()}); !errors.Is(err, errOwnerAdmissionCapacity) {
+			t.Fatalf("copy admission consumed retirement: %v", err)
+		}
+		p.DestinationNodeID = "destination"
+		m.copyMu.Lock()
+		err := m.bindCopyAuthorityLocked(m.copies[p.OpID], p, "")
+		m.copyMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Journal callbacks and completion effects must run outside both locks.
+		unlocked := func() {
+			if !m.copyMu.TryLock() {
+				t.Error("copy lock held across callback")
+			} else {
+				m.copyMu.Unlock()
+			}
+			if !d.mu.TryLock() {
+				t.Error("content lock held across callback")
+			} else {
+				d.mu.Unlock()
+			}
+		}
+		d.store.replace.SyncDir = func(string) error { unlocked(); return nil }
+		if _, err := m.copyWithEvidence(ctx, p, "controller", func() (copyModelResult, error) { unlocked(); return result(p), nil }); err != nil {
+			t.Fatal(err)
+		}
+		release()
+		clear(t, m.ownerReservations())
+		m.stopCopies()
+		r := m.ownerReservations()
+		requireOwnerBool(t, r.Busy, true)
+		if r.Token.CopyRevision != math.MaxUint64 || m.copyHeld != 0 {
+			t.Fatalf("copy shutdown wrapped or leaked: %+v, held %d", r.Token, m.copyHeld)
+		}
+	})
+}
 
 func TestOwnerEvidenceUniverseMembership(t *testing.T) {
 	e := &Executor{reg: &Registry{engines: map[string]*Manifest{"registered": {}}}, engines: map[string]*engineState{}, stopOnly: map[string]*engineState{"cleanup": {}}}
