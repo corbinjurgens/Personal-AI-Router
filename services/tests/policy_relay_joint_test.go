@@ -642,12 +642,53 @@ func jointWriteJSON(t *testing.T, path string, value any) {
 
 func jointCopyExecutable(t *testing.T, source, target string) {
 	t.Helper()
+	existing, readErr := os.ReadFile(target)
 	data, err := os.ReadFile(source)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if readErr == nil && bytes.Equal(existing, data) {
+		return
+	}
 	if err := os.WriteFile(target, data, 0o700); err != nil {
 		t.Fatalf("copy joint executable to %q (a previous process may still be running): %v", target, err)
+	}
+}
+
+func TestJointCopyExecutableSkipsIdentical(t *testing.T) {
+	dir := t.TempDir()
+	source, target := filepath.Join(dir, "source"), filepath.Join(dir, "target")
+	for _, path := range []string{source, target} {
+		if err := os.WriteFile(path, []byte("original"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stamp := time.Unix(946684800, 0)
+	if err := os.Chtimes(target, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jointCopyExecutable(t, source, target)
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("identical executable was rewritten")
+	}
+	if err := os.WriteFile(source, []byte("changed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jointCopyExecutable(t, source, target)
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, []byte("changed")) {
+		t.Fatalf("changed executable was not copied: %q", got)
 	}
 }
 
