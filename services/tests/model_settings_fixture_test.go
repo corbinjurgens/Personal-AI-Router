@@ -5,7 +5,6 @@ package tests
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -1138,53 +1137,10 @@ func (f *modelSettingsProcessFixture) replaceManager(t *testing.T) {
 	if err != nil || len(owned) != 1 {
 		t.Fatalf("private real manager inventory count=%d error=%v", len(owned), err)
 	}
-	var lifetime *os.Process
-	waited := false
-	if runtime.GOOS == "windows" {
-		// FindProcess retains a native process handle on Windows. Holding it
-		// pins this lifetime against PID reuse while the shared identity check
-		// binds the handle's PID to the inventoried image and creation time.
-		lifetime, err = os.FindProcess(int(owned[0].PID))
-		if err != nil {
-			t.Fatalf("retain manager lifetime before replacement: %v", err)
-		}
-		defer func() {
-			if !waited {
-				if err := lifetime.Release(); err != nil {
-					t.Errorf("release retained manager lifetime: %v", err)
-				}
-			}
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		current, err := serviceProcessIdentityAt(ctx, owned[0].PID)
-		if err != nil || current != owned[0] {
-			t.Fatalf("manager identity changed before replacement: current=%+v expected=%+v error=%v", current, owned[0], err)
-		}
+	stopped, err := modelSettingsReplaceProcess(owned[0], func() error {
+		return inventory.kill(owned[0])
+	}, 10*time.Second)
+	if err != nil || !stopped {
+		t.Fatalf("retained manager lifetime did not prove exit: stopped=%t error=%v", stopped, err)
 	}
-	if err := inventory.kill(owned[0]); err != nil {
-		t.Fatal(err)
-	}
-	if lifetime != nil {
-		type exitProof struct {
-			state *os.ProcessState
-			err   error
-		}
-		exited := make(chan exitProof, 1)
-		go func() {
-			state, err := lifetime.Wait()
-			exited <- exitProof{state: state, err: err}
-		}()
-		select {
-		case proof := <-exited:
-			waited = proof.err == nil
-			if proof.err != nil || proof.state == nil || !proof.state.Exited() || proof.state.Pid() != int(owned[0].PID) {
-				t.Fatalf("retained manager lifetime did not prove exit: state=%v error=%v", proof.state, proof.err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("retained manager lifetime did not exit after replacement kill")
-		}
-		return
-	}
-	assertSwitchProcessIdentityStopped(t, owned[0])
 }
