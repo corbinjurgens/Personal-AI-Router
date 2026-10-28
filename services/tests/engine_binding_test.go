@@ -662,7 +662,7 @@ func testEngineBindingReadyPeer(t *testing.T) {
 			if m.ID == nil || string(*m.ID) != id {
 				t.Fatal("ready-peer history reply changed its request ID")
 			}
-			if m != nil && m.Error != nil {
+			if m.Error != nil {
 				if m.Error.Code == jsonrpc.HistoryBusyCode {
 					return false
 				}
@@ -867,10 +867,43 @@ func testEngineBindingRing(t *testing.T) {
 	f.engine.unblockSource()
 	f.call(t, "engine:start", map[string]string{"engine": "ollama"})
 	manual := settings.SwitchRequest{RequestID: "binding-manual-retained", SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: "e3v1:" + strings.Repeat("0", 64)}
-	m, err := f.client.call(strconv.FormatInt(newRPCID(), 10), settings.SwitchMethod, mustMarshal(t, manual), serviceCallTimeout)
+	manualPayload := mustMarshal(t, manual)
+	busyReplies := 0
+	m, err := func() (*jsonrpc.Message, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), serviceCallTimeout)
+		defer cancel()
+		// request has its own write timeout. Close only this fixture connection
+		// at the shared deadline so retries cannot each spend another timeout.
+		stopTimeout := context.AfterFunc(ctx, f.client.closeConnection)
+		defer stopTimeout()
+		deadline, _ := ctx.Deadline()
+		for {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, context.DeadlineExceeded
+			}
+			m, err := f.client.call(strconv.FormatInt(newRPCID(), 10), settings.SwitchMethod, manualPayload, remaining)
+			if err != nil {
+				return m, err
+			}
+			if !time.Now().Before(deadline) {
+				return nil, context.DeadlineExceeded
+			}
+			// The RPC projects SwitchErrorBusy to code/message only. This exact
+			// pre-admission refusal records no receipt; other -32000 errors can.
+			if m.Error == nil || m.Error.Code != settings.SwitchOperationErrorCode || m.Error.Message != "An engine configuration operation is active." {
+				return m, nil
+			}
+			busyReplies++
+			time.Sleep(min(10*time.Millisecond, time.Until(deadline)))
+		}
+	}()
+	if busyReplies != 0 {
+		t.Logf("manual receipt setup busy retries=%d", busyReplies)
+	}
 	if err != nil || m.Error == nil || m.Error.Code != settings.SwitchConfigurationConflictCode {
 		t.Fatalf("manual receipt setup: transport=%v outcome=%s", err, func() string {
-			if m.Error != nil {
+			if m != nil && m.Error != nil {
 				return fmt.Sprintf("code=%d message=%q", m.Error.Code, m.Error.Message)
 			}
 			return "result present"
