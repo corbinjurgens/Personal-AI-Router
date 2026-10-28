@@ -34,9 +34,14 @@ export default function ModelMemoryEstimate({
 }) {
     const domains = estimate?.domains ?? []
     const components = estimate?.components ?? []
-    const missing = ['weights', 'kv', 'state', 'workspace', 'prompt-cache', 'companions'].filter(
-        name => !components.some(component => component.name === name)
-    )
+    const missing = [
+        'weights',
+        'attention-cache',
+        'recurrent-state',
+        'compute-workspace',
+        'prompt-cache',
+        'companions'
+    ].filter(name => !components.some(component => component.name === name))
     const shared = domains.filter(domain => domain.kind === 'shared')
     const independent = shared.length === 0 || (shared.length === 1 && domains.length === 1)
     const complete =

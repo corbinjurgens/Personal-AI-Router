@@ -420,7 +420,13 @@ describe('portable target-previewed copy', () => {
         ],
         components: [
             { name: 'weights', domainId: 'host', status: 'estimated', bytes: '1000000000' },
-            ...['kv', 'state', 'workspace', 'prompt-cache', 'companions'].map(
+            ...[
+                'attention-cache',
+                'recurrent-state',
+                'compute-workspace',
+                'prompt-cache',
+                'companions'
+            ].map(
                 name =>
                     ({ name, status: 'excluded', reason: 'Not present' }) satisfies NonNullable<
                         Estimate['components']
