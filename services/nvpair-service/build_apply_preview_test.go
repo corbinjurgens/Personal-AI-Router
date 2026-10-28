@@ -340,7 +340,7 @@ func TestBuildApplyOwnerEvidenceCoverageAndIdentityRefuseBeforeInspection(t *tes
 		v.Impact.Fences.ManagerIncarnation = buildapply.Known("successor")
 	})
 	test("incomplete root coverage", func(t *testing.T, v *buildapply.ImpactEnvelope) {
-		e := buildApplyPreviewEvidenceWithRoot(t, filepath.Join(t.TempDir(), "configured-models"))
+		e := buildApplyPreviewEvidenceWithRoot(t, filepath.Join(buildApplyTempDir(t), "configured-models"))
 		(*e.Universe.Value)[0].RootsComplete = false
 		if err := e.Finalize(); err != nil {
 			t.Fatal(err)
@@ -351,8 +351,8 @@ func TestBuildApplyOwnerEvidenceCoverageAndIdentityRefuseBeforeInspection(t *tes
 
 func TestBuildApplyOwnerEvidenceRootReplacementRefusesPreview(t *testing.T) {
 	request, reads := buildApplyPreviewFixture(t)
-	first := buildApplyPreviewEvidenceWithRoot(t, filepath.Join(t.TempDir(), "first-models"))
-	last := buildApplyPreviewEvidenceWithRoot(t, filepath.Join(t.TempDir(), "replacement-models"))
+	first := buildApplyPreviewEvidenceWithRoot(t, filepath.Join(buildApplyTempDir(t), "first-models"))
+	last := buildApplyPreviewEvidenceWithRoot(t, filepath.Join(buildApplyTempDir(t), "replacement-models"))
 	calls := 0
 	reads.impact = func(context.Context) (buildapply.ImpactEnvelope, error) {
 		calls++
@@ -377,7 +377,7 @@ func TestBuildApplyOwnerEvidencePrivateChangeRefusesPreview(t *testing.T) {
 	test := func(name string, change func(*buildapply.EngineOwnerEvidence)) {
 		t.Run(name, func(t *testing.T) {
 			request, reads := buildApplyPreviewFixture(t)
-			root := filepath.Join(t.TempDir(), "configured-models")
+			root := filepath.Join(buildApplyTempDir(t), "configured-models")
 			first := buildApplyPreviewEvidenceWithRoot(t, root)
 			last := buildApplyPreviewEvidenceWithRoot(t, root)
 			change(&last)
@@ -414,7 +414,7 @@ func TestBuildApplyOwnerEvidencePrivateChangeRefusesPreview(t *testing.T) {
 
 func TestBuildApplyOwnerEvidencePrivateRootsStayOutOfPreview(t *testing.T) {
 	request, reads := buildApplyPreviewFixture(t)
-	root := filepath.Join(t.TempDir(), "private-manager-models")
+	root := filepath.Join(buildApplyTempDir(t), "private-manager-models")
 	evidence := buildApplyPreviewEvidenceWithRoot(t, root)
 	reads.impact = func(context.Context) (buildapply.ImpactEnvelope, error) {
 		return buildapply.ImpactEnvelope{Impact: buildapply.Impact{Complete: true, Fences: buildapply.Fences{ManagerIncarnation: buildapply.Known("manager")}}, ManagerEvidence: buildapply.Known(evidence)}, nil
