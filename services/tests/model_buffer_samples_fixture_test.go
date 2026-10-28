@@ -670,8 +670,18 @@ func (f *modelBufferProcessFixture) inspect(t *testing.T, model string) modelcon
 func (f *modelBufferProcessFixture) observed(t *testing.T, model, phase string) modelconfig.BufferObservation {
 	t.Helper()
 	var result modelconfig.BufferObservation
+	// Log each distinct observation summary so a timeout names the gate it stopped at.
+	last := ""
 	task1Eventually(t, "real-manager buffer checkpoint "+model+"/"+phase, 90*time.Second, func() bool {
 		value := f.inspect(t, model)
+		summary := "absent"
+		if o := value.LoadObservation; o != nil {
+			summary = fmt.Sprintf("status=%q reason=%q reasons=%q current=%t phase=%q persistence=%q buildAssurance=%q rows=%d", o.Status, o.Reason, o.Reasons, o.Current, o.LoadPhase, o.Persistence, o.BuildAssurance, len(o.Rows))
+		}
+		if summary != last {
+			t.Logf("buffer checkpoint %s/%s observation: %s", model, phase, summary)
+			last = summary
+		}
 		if value.LoadObservation == nil {
 			return false
 		}
