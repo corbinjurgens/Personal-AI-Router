@@ -10,10 +10,56 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
+	"nvpair-shared/noderec"
 )
+
+func TestModelSettingsContractInspectionInjectsOnlyTargetSelfMemory(t *testing.T) {
+	b := &Broker{nodeID: "target", telemetry: newTelemetryCache(), scannerSource: &scannerProcess{}}
+	b.telemetry.clock = func() (uint64, error) { return 1000000000, nil }
+	now := time.Now().UTC()
+	fact := noderec.MemoryFact{Valid: true, Bytes: "8589934592", Source: "synthetic-target", SampledAt: now}
+	sample := func(host, bytes string) noderec.NodeTelemetry {
+		f := fact
+		f.Bytes = bytes
+		return noderec.NodeTelemetry{HostUUID: host, Memory: &noderec.MemoryObservation{RunID: "run-" + host, Domains: []noderec.MemoryDomain{{ID: "ram", Kind: "system", Total: f, Free: f}}}, MemoryHop: noderec.NewMemoryHop("scanner", b.telemetry.clock), MemoryRequest: &noderec.MemoryRequestContext{Generation: "1", RequestBootNS: "1000000000", VerifiedSelfLoopback: true}}
+	}
+	b.telemetry.Upsert(sourceScanner, sample("origin", "999999999999"), now)
+	b.telemetry.Upsert(sourceScanner, sample("target", fact.Bytes), now)
+	worker, codec := newTestRPCWorkerPipe(t)
+	b.setEngineMgr(worker)
+	done := make(chan error, 1)
+	go func() {
+		msg, err := codec.Read()
+		if err != nil {
+			done <- err
+			return
+		}
+		input, err := settings.DecodeWorkerRequest[modelconfig.InspectRequest](msg.Params)
+		if err != nil {
+			done <- err
+			return
+		}
+		if input.Memory == nil || input.Memory.HostID != "target" || input.Memory.Observation.RunID != "run-target" || input.Memory.Observation.Domains[0].Free.Bytes != fact.Bytes || input.Request.NodeID != "" {
+			done <- fmt.Errorf("wrong target-owned evidence: %+v", input)
+			return
+		}
+		done <- codec.Respond(msg.ID, modelconfig.InspectResult{Engine: input.Request.Engine, ModelID: input.Request.ModelID, Status: "unavailable", Estimate: modelconfig.Estimate{Status: "unknown"}})
+	}()
+	result, err := b.inspectModelSettings(context.Background(), modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "fixture/model"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if result.NodeID != "target" {
+		t.Fatalf("target readback=%+v", result)
+	}
+}
 
 func TestModelSettingsContractInspectionDoesNotInitializeJournal(t *testing.T) {
 	b := &Broker{nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}
@@ -26,11 +72,12 @@ func TestModelSettingsContractInspectionDoesNotInitializeJournal(t *testing.T) {
 			done <- err
 			return
 		}
-		p, err := modelconfig.DecodeInspectRequest(msg.Params)
+		envelope, err := settings.DecodeWorkerRequest[modelconfig.InspectRequest](msg.Params)
 		if err != nil {
 			done <- err
 			return
 		}
+		p := envelope.Request
 		if msg.Method != "engine:inspect-model" || p.NodeID != "" || p.ModelID != "fixture/model" {
 			done <- fmt.Errorf("unexpected inspection request: %s %+v", msg.Method, p)
 			return

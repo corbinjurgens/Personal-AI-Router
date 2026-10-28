@@ -163,16 +163,25 @@ func (m *Manager) handleSettingsMessage(ctx context.Context, msg *Message) bool 
 				result, err := m.exec.LaunchSettings(p.Engine, ctx)
 				m.respondOrErr(msg, result, err)
 			case "engine:preview-launch":
-				p, err := decodeModelSettingsLaunch(msg.Params)
+				envelope, err := settings.DecodeWorkerRequest[settings.Request](msg.Params)
 				if err != nil {
-					m.respondOrErr(msg, nil, err)
+					m.respondOrErr(msg, nil, modelSettingsParamsError(err))
 					return
 				}
+				p := envelope.Request
+				if err := p.Validate(); err != nil {
+					m.respondOrErr(msg, nil, modelSettingsParamsError(err))
+					return
+				}
+				ctx = m.exec.modelMemoryContext(ctx, p.Engine, envelope.Memory, envelope.NativeInitAllowed && p.ModelChange != nil && p.ModelChange.Load != nil)
 				if err := m.exec.validateModelSettingsLaunch(ctx, p, false); err != nil {
 					m.respondOrErr(msg, nil, err)
 					return
 				}
 				result, err := m.exec.PreviewLaunch(p, ctx)
+				if err == nil && len(result.Errors) == 0 && result.Conflict == nil && p.ModelChange == nil && envelope.ValidateResources {
+					err = m.exec.validateUnacceptedAutoMemory(ctx, p, envelope.ResourceModel)
+				}
 				if err == nil {
 					if sizeErr := modelconfig.CheckPayloadSize(result); sizeErr != nil {
 						err = modelSettingsParamsError(fmt.Errorf("settings: complete preview exceeds 64 KiB; reduce the settings payload"))

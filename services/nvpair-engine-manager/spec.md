@@ -264,9 +264,10 @@ and bounded conversion/compilation, returning diffs and a review digest without
 persistence or activation. Parent Configure traffic carries frozen reviewed
 native settings and validates them before effects. Selected-patch acceptance,
 policy writes and preservation of ordinary public baseline echoes belong to the
-broker. Worker policy-edit traffic remains refused. Production Auto has no
-trusted-memory producer and returns `target memory telemetry unavailable`,
-without a finite result. Its private owner-injected selector and frozen compiler
+broker. Worker policy-edit traffic remains refused. The broker injects target-local
+memory through a strict private worker envelope. Missing evidence returns
+`target memory telemetry unavailable`; incomplete costs also refuse Auto.
+Its private owner-injected selector and frozen compiler
 are specified below. Missing or changed
 artifacts and unreviewed resolutions remain refusals. Advisory estimation errors
 are data, never an additional manual-preview or Apply refusal.
@@ -374,8 +375,9 @@ memory source/timestamp and `auto/finite-llama/1` review identity. ReviewedInput
 binds model, requested preferences, finite allocation/options, sampled artifacts,
 native build, estimator revision, memory snapshot hash and external conversion
 source. External conversion provenance alone cannot authorize Auto. Every Apply
-validates frozen identity without invoking the resolver, even after telemetry
-disappears. Cold start/recovery compilation revalidates artifact/build/source and
+validates frozen identity without invoking the resolver. Before acceptance, Auto
+also requires fresh sufficient target facts for that same finite allocation.
+Accepted replay does not require telemetry. Cold start/recovery compilation revalidates artifact/build/source and
 preset digests and emits the accepted finite options with fit off. Drift refuses;
 native failure cannot trigger smaller settings or an OOM retry ladder.
 
@@ -387,8 +389,8 @@ The new preview binds the current build. Old Apply/restart still reject build
 drift, and every unselected frozen sibling is checked normally. Copy carries
 portable preferences only. Broker source,
 authority, preview/revision checks retain their existing ownership. Broker
-end-to-end frozen forwarding/recovery remains deferred until the memory producer;
-this engine unit makes no end-to-end Auto Apply claim. Manual compilation and
+retains finite reviews and forwards full settings for frozen validation and recovery.
+This does not establish native or production Auto acceptance. Manual compilation and
 Task 10's advisory-only digest independence remain unchanged.
 
 ### Advisory memory estimate support
@@ -446,12 +448,24 @@ artifacts, effective allocation, revision, native build/support and the complete
 bounded memory snapshot; unavailable telemetry has an explicit identity.
 Neither the cache nor preview handoff alters Task 5 admission/cache/rechecks.
 
-The node-info producer and broker memory cache exist, but production inspection
-and Auto callers do not yet inject their target-local observations and native
-map. Absent input yields Unknown with the exact reason
+Inspection and explicit load preview consume the target broker's existing self
+memory observation. Only these explicit operations may invoke the bounded native
+map helper, subject to target permission, activation, ownership and Pause.
+Apply, recovery and start never enumerate devices or search Auto. Absent input yields Unknown with the reason
 `target memory telemetry unavailable`. Useful component sizing and its independent
 uncertainty are preserved. Real estimator results remain partial even when a
 synthetic caller supplies memory: complete native cost accounting is unresolved.
+
+Reviewed Auto GPU loads share a full UUID, child-only `CUDA_VISIBLE_DEVICES`
+and selector `CUDA0`. Finite settings and ordinary launch assignments persist
+these bytes. NativeBuildID additionally binds the executable, relevant library
+names/content hashes and non-credential effective child environment. Cold replay
+requires library search to remain confined to the selected build root and
+validates that source without reconstructing a private map or requiring a live
+producer run. Source drift refuses activation. Public requests cannot supply the
+worker envelope or replace a target-owned resolution. Manual/conversion GPU
+settings remain launchable without reviewed bindings and keep Unknown comparisons.
+See [MANIFEST](MANIFEST.md) for conditional complete-cost support.
 
 The shared Go comparison owner produces `capacityFit` and `freeFit` as `unknown`,
 `exceeds`, `tight` or `fits`. Each charged domain must equal the checked sum of

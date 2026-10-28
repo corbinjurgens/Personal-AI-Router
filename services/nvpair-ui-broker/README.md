@@ -30,6 +30,24 @@ directory read lock. A changed directory event retires old memory immediately;
 an unchanged generation preserves the observation's original age. This pipeline
 makes no device-map, complete-cost, Fits or Auto claim; native accuracy is untested.
 
+Model inspection and explicit Recalculate inject this target's self observation
+into strict parent-only worker requests. Origin peer-cache facts never become
+target authority. Public requests cannot carry memory or native-map overrides.
+The existing authenticated settings route, grants, CORS and cancellation remain
+the remote path. Production costs remain partial and comparisons remain Unknown;
+see the manager's [conditional support matrix](../nvpair-engine-manager/MANIFEST.md).
+
+The settings owner retains exact finite previews, caller/request/baseline, policy
+identity and worker source in a bounded in-memory table (64 records, 4 MiB,
+ten-minute monotonic expiry). Recalculate supersedes the prior caller/model review.
+Apply authenticates and checks receipts first, then validates full retained
+settings without a portable patch, helper or Auto search. Unaccepted Auto also
+requires fresh sufficient target facts, rechecked before journaling. Manual Apply
+does not require advisory memory. Restart loses unaccepted authority and requires
+Recalculate. Accepted journal recovery replays the exact finite settings without
+requiring current telemetry; grants, Pause, ownership, source drift and durable
+uncertainty fences still apply. No OOM retuning or automatic replacement occurs.
+
 ## Local build maintenance contract
 
 `build:apply-impact`, `build:apply-prepare` and `build:apply-finish` are

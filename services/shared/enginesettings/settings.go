@@ -80,6 +80,32 @@ type Request struct {
 	PreserveCORS bool `json:"preserveCORS,omitempty"`
 }
 
+// WorkerRequest is parent-only operation input. Public Request decoding rejects
+// every field in this envelope; none is portable settings or journal material.
+type WorkerRequest[T any] struct {
+	Request           T                         `json:"request"`
+	Memory            *modelconfig.TargetMemory `json:"memory,omitempty"`
+	NativeInitAllowed bool                      `json:"nativeInitAllowed"`
+	ValidateResources bool                      `json:"validateResources,omitempty"`
+	ResourceModel     string                    `json:"resourceModel,omitempty"`
+}
+
+func DecodeWorkerRequest[T any](data []byte) (WorkerRequest[T], error) {
+	var p WorkerRequest[T]
+	if err := modelconfig.DecodeStrict(data, &p); err != nil {
+		return p, err
+	}
+	if len(p.ResourceModel) > 256 || p.ValidateResources != (p.ResourceModel != "") {
+		return p, fmt.Errorf("worker resource validation requires an exact selected model")
+	}
+	if p.Memory != nil {
+		if err := p.Memory.Validate(); err != nil {
+			return p, err
+		}
+	}
+	return p, nil
+}
+
 // ValidateModelChange checks the target baseline and review prerequisites
 // before a caller enters the journal or performs runtime effects.
 func (r Request) ValidateModelChange(baseline Config, applying bool) error {

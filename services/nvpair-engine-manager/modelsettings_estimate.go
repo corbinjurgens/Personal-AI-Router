@@ -1071,10 +1071,14 @@ func modelEstimateDomains(out *modelconfig.Estimate, in modelEstimateInput, now 
 	m := in.Memory
 	observation := m.Target.At(noderec.MemoryBootClock)
 	cpu := in.Allocation != nil && (in.Allocation.GPU.Mode == "cpu" || in.Allocation.GPU.Mode == "layers" && in.Allocation.GPU.Layers != nil && *in.Allocation.GPU.Layers == 0)
-	if observation == nil || !cpu && (m.Map == nil || m.Map.Unknown != "" || m.Map.ObservationID == "" || m.Map.ObservationID != m.Target.MapID) {
+	if observation == nil {
 		out.Unknowns = append(out.Unknowns, "target observation or native map unavailable")
 		*out = modelconfig.CompareEstimate(*out)
 		return
+	}
+	mapKnown := m.Map != nil && m.Map.Unknown == "" && m.Map.ObservationID != "" && m.Map.ObservationID == m.Target.MapID
+	if !cpu && !mapKnown {
+		out.Unknowns = append(out.Unknowns, "native map unavailable; device placement unproved")
 	}
 	// CPU placement needs only the independently identified host/shared pool.
 	// It never needs GPU enumeration, nor charges an empty GPU domain.
@@ -1086,11 +1090,22 @@ func modelEstimateDomains(out *modelconfig.Estimate, in modelEstimateInput, now 
 			}
 		}
 		out.Domains = slices.DeleteFunc(out.Domains, func(d modelconfig.MemoryDomain) bool { return d.Kind == "device" && d.RequiredBytes == "0" })
-	} else {
+	} else if mapKnown {
 		hostPool = m.Map.HostPool
+	} else {
+		// Host observations are independent of the unavailable device map.
+		for _, d := range observation.Domains {
+			if d.Kind == "system" || d.Kind == "shared" {
+				hostPool = d.ID
+			}
+		}
 	}
 	for i := range out.Domains {
 		d := &out.Domains[i]
+		if !cpu && !mapKnown && (d.Kind == "device" || d.ID == "offload-unmapped") {
+			d.Unknowns = append(d.Unknowns, "native map unavailable; device placement unproved")
+			continue
+		}
 		pool := d.ID
 		if d.Kind == "host" {
 			pool = hostPool

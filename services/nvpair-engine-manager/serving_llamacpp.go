@@ -24,7 +24,139 @@ import (
 	"nvpair-shared/engines"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/secretenv"
 )
+
+// Merge before filtering, matching exec's last-assignment semantics while
+// supplying the metadata helper a unique, canonical effective environment.
+func modelEffectiveEnvironment(overrides map[string]string) []string {
+	values := map[string]string{}
+	for _, assignment := range os.Environ() {
+		k, v, ok := strings.Cut(assignment, "=")
+		if ok {
+			values[environmentKey(k)] = v
+		}
+	}
+	for k, v := range overrides {
+		values[environmentKey(k)] = v
+	}
+	return secretenv.Remove(literalAssignments(values))
+}
+
+func modelNativeEnvironment(root string, overrides map[string]string) ([]string, error) {
+	environment := modelEffectiveEnvironment(overrides)
+	for _, assignment := range environment {
+		key, value, _ := strings.Cut(assignment, "=")
+		if key != "LD_LIBRARY_PATH" || value == "" {
+			continue
+		}
+		paths := filepath.SplitList(value)
+		if len(paths) != 1 || paths[0] == "" {
+			return nil, servingError("Reviewed Auto requires native library search confined to its selected build.")
+		}
+		resolved, err := filepath.EvalSymlinks(paths[0])
+		if err != nil || resolved != root {
+			return nil, servingError("Reviewed Auto native library search escapes its selected build.")
+		}
+	}
+	return environment, nil
+}
+
+func modelReviewedUUID(loads []modelconfig.ModelLoad) (string, error) {
+	uuid := ""
+	for _, load := range loads {
+		r := load.Resolved
+		if r == nil || !strings.HasPrefix(r.ResolverRevision, "auto/") || r.GPU.Mode == "cpu" || r.GPU.Layers != nil && *r.GPU.Layers == 0 {
+			continue
+		}
+		if r.DeviceBinding == nil || r.DeviceBinding.Validate() != nil {
+			return "", servingError("Reviewed Auto GPU requires an exact physical binding.")
+		}
+		if uuid != "" && uuid != r.DeviceBinding.DeviceID {
+			return "", servingError("GPU loads must share one reviewed UUID.")
+		}
+		uuid = r.DeviceBinding.DeviceID
+	}
+	if uuid != "" {
+		for _, load := range loads {
+			r := load.Resolved
+			if r == nil || r.GPU.Mode == "cpu" || r.GPU.Layers != nil && *r.GPU.Layers == 0 {
+				continue
+			}
+			if r.DeviceBinding == nil || r.DeviceBinding.Validate() != nil || r.DeviceBinding.DeviceID != uuid {
+				return "", servingError("Every GPU load in the shared process must bind the same full UUID.")
+			}
+		}
+	}
+	return uuid, nil
+}
+
+func modelConstrainCommand(command launchCommand, loads []modelconfig.ModelLoad) (launchCommand, error) {
+	uuid, err := modelReviewedUUID(loads)
+	if err != nil || uuid == "" {
+		return command, err
+	}
+	for _, assignment := range modelEffectiveEnvironment(command.Env) {
+		key, value, _ := strings.Cut(assignment, "=")
+		if environmentKey(key) == "CUDA_VISIBLE_DEVICES" && value != uuid {
+			return command, servingError("CUDA visibility conflicts with the reviewed full UUID.")
+		}
+	}
+	command.Env = maps.Clone(command.Env)
+	if command.Env == nil {
+		command.Env = map[string]string{}
+	}
+	command.Env["CUDA_VISIBLE_DEVICES"] = uuid
+	effective, err := modelDeviceEnvironment(modelEffectiveEnvironment(command.Env), uuid)
+	if err != nil {
+		return command, servingError("Reviewed native environment is unsupported.")
+	}
+	for _, assignment := range effective {
+		key, value, _ := strings.Cut(assignment, "=")
+		if key == "CUDA_MPS_PIPE_DIRECTORY" {
+			command.Env[key] = value
+		}
+	}
+	return command, nil
+}
+
+// File-only source validation, also used during accepted replay and immediately
+// before spawn. It never opens native libraries or enumerates devices.
+func modelReviewedNativeSource(ctx context.Context, st *engineState, command launchCommand) (string, error) {
+	runtime, err := modelDeviceRuntimeSnapshot(ctx, st, modelDevicesBuild)
+	if err != nil {
+		return "", servingError("Reviewed Auto native library source unavailable.")
+	}
+	entries, err := os.ReadDir(runtime.Root)
+	if err != nil {
+		return "", servingError("Reviewed Auto native library source unavailable.")
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if strings.HasPrefix(strings.ToLower(entry.Name()), "libcuda.so") || strings.EqualFold(entry.Name(), "nvcuda.dll") {
+			return "", servingError("Reviewed Auto build root contains an unsupported driver library.")
+		}
+	}
+	executable, err := servingFileBinding(command.Bin)
+	if err != nil {
+		return "", err
+	}
+	env, err := modelNativeEnvironment(runtime.Root, command.Env)
+	if err != nil {
+		return "", err
+	}
+	_, err = modelDeviceEnvironment(env, "")
+	if err != nil {
+		return "", err
+	}
+	return modelDeviceDigest(struct {
+		Executable  *engines.ServingBinding
+		Runtime     modelDeviceRuntime
+		Environment []string
+	}{executable, runtime, env})
+}
 
 // ServingFieldError deliberately contains field/model identifiers, never source
 // paths, native source text or launch environment values.
@@ -917,7 +1049,9 @@ func recheckLlamaServing(launch launchCommand, rt Runtime, prepared *llamaServin
 	return nil
 }
 
-func llamaSnapshotCommand(command launchCommand, snapshot string) launchCommand {
+// The pre-spawn compiler has already validated these exact finite loads and
+// their visibility. Replay the reviewed bytes, never discover another adapter.
+func llamaSnapshotCommand(command launchCommand, snapshot string, finite ...[]modelconfig.ModelLoad) launchCommand {
 	args := []string{}
 	for i := 0; i < len(command.Args); i++ {
 		name, value, attached := strings.Cut(command.Args[i], "=")
@@ -936,6 +1070,16 @@ func llamaSnapshotCommand(command launchCommand, snapshot string) launchCommand 
 	}
 	command.Args = append(args, "--models-preset", snapshot)
 	command.Env = maps.Clone(command.Env)
+	if command.Env == nil {
+		command.Env = map[string]string{}
+	}
+	for _, loads := range finite {
+		for _, load := range loads {
+			if r := load.Resolved; r != nil && strings.HasPrefix(r.ResolverRevision, "auto/") && r.DeviceBinding != nil {
+				command.Env["CUDA_VISIBLE_DEVICES"] = r.DeviceBinding.DeviceID
+			}
+		}
+	}
 	for key := range command.Env {
 		if environmentKey(key) == environmentKey("LLAMA_ARG_MODELS_PRESET") {
 			delete(command.Env, key)

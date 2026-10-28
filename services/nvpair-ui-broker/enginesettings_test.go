@@ -168,8 +168,8 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 			case "engine:configured-ports":
 				_ = codec.Respond(msg.ID, map[string]any{"engines": []any{map[string]any{"engine": "lmstudio", "port": h.otherEnginePort.Load()}}})
 			case "engine:preview-launch":
-				var p settings.Request
-				_ = json.Unmarshal(msg.Params, &p)
+				envelope, _ := settings.DecodeWorkerRequest[settings.Request](msg.Params)
+				p := envelope.Request
 				h.previewPreserveCORS.Store(p.PreserveCORS)
 				if p.Format == "pair-launch-v1" {
 					p.Settings.LaunchText = strings.TrimPrefix(p.Settings.LaunchText, "managed serve ")

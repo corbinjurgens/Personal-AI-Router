@@ -253,11 +253,12 @@ func TestPendingPauseRefusesSettingsAfterDelayedPreview(t *testing.T) {
 				Running: before.Running, Editable: true, Format: "pair-arguments-v1",
 			}, ""
 		case "engine:preview-launch":
-			var request settings.Request
-			if err := json.Unmarshal(params, &request); err != nil {
+			envelope, err := settings.DecodeWorkerRequest[settings.Request](params)
+			if err != nil {
 				t.Errorf("decode delayed preview: %v", err)
 				return nil, "invalid preview request"
 			}
+			request := envelope.Request
 			return settings.Preview{Settings: request.Settings, Restart: true}, holdSuccessReply
 		case "engine:configured-ports", "engine:get-installed":
 			return map[string]any{"engines": []any{}}, ""
@@ -339,11 +340,12 @@ func TestPendingPauseDiscardsSettingsPreparation(t *testing.T) {
 						Running: launch.Running, Editable: true, Format: "pair-arguments-v1",
 					}, holdSuccessReply
 				case "engine:preview-launch":
-					var request settings.Request
-					if err := json.Unmarshal(params, &request); err != nil {
+					envelope, err := settings.DecodeWorkerRequest[settings.Request](params)
+					if err != nil {
 						t.Errorf("decode preparation preview: %v", err)
 						return nil, "invalid preview request"
 					}
+					request := envelope.Request
 					if request.Format == "pair-launch-v1" {
 						request.Settings.LaunchText = launch.Settings.LaunchText
 					}

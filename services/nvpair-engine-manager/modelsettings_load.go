@@ -168,6 +168,27 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 		return nil, err
 	}
 	buildID := modelLoadDigest(buildBytes)
+	manualBuildID := buildID
+	// Accepted/reviewed Auto binds the complete native source and effective
+	// environment. Manual and external-conversion builds retain their semantics.
+	for _, load := range loads {
+		if !modelLoadHasAuto(load.Requested) {
+			continue
+		}
+		if load.Resolved != nil {
+			command, err = modelConstrainCommand(command, loads)
+		} else {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		buildID, err = modelReviewedNativeSource(ctx, st, command)
+		if err != nil {
+			return nil, err
+		}
+		break
+	}
 	store := engineModelStore{engine: st.manifest.Engine, adapter: "llamacpp", root: st.modelsDir}
 	if cache := os.Getenv("LLAMA_CACHE"); cache != "" {
 		store.root = expandPath(cache)
@@ -240,7 +261,25 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 					return nil, modelLoadError(load.ModelID, "auto", "Accepted Auto resolution missing; explicitly Recalculate.")
 				}
 				op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
-				input := modelEstimateInput{Facts: facts, Bindings: modelEstimateBindings(artifacts), Allocation: &modelconfig.ResolvedLoad{Artifacts: artifacts}, BuildID: buildID, Support: modelEstimatorSupport}
+				if op.Memory == nil {
+					return nil, modelSettingsParamsError(fmt.Errorf("target memory telemetry unavailable"))
+				}
+				memory, memoryErr := op.Memory.ModelAutoMemory(ctx)
+				if memoryErr != nil {
+					return nil, memoryErr
+				}
+				op.Memory = modelAutoSnapshotMemory{memory: memory}
+				operation.Memory = op.Memory
+				ctx = context.WithValue(ctx, modelAutoOperationKey{}, op)
+				op.NativeSource = func(candidate *modelconfig.ResolvedLoad) (string, error) {
+					finite := []modelconfig.ModelLoad{{ModelID: load.ModelID, Requested: load.Requested, Resolved: candidate}}
+					constrained, err := modelConstrainCommand(command, finite)
+					if err != nil {
+						return "", err
+					}
+					return modelReviewedNativeSource(ctx, st, constrained)
+				}
+				input := modelEstimateInput{Facts: facts, Bindings: modelEstimateBindings(artifacts), Allocation: &modelconfig.ResolvedLoad{Artifacts: artifacts, Options: modelEffectiveLoadOptions(load.Requested)}, BuildID: buildID, Support: modelEstimatorSupport}
 				var state modelEstimateState
 				estimates := &state
 				if rt.modelLoadOwner != nil {
@@ -256,13 +295,16 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 				options, resolved, err = modelAutoCompileCandidate(load.ModelID, proposal.Resolved, layerCount)
 			}
 		} else {
-			options, resolved, err = typedLlamaModelOptions(load.ModelID, load.Requested, layerCount)
+			options, resolved, err = typedLlamaModelOptions(load.ModelID, modelEffectiveLoadOptions(load.Requested), layerCount)
 			if err == nil {
-				resolved.Artifacts, resolved.NativeBuildID = artifacts, buildID
+				resolved.Artifacts, resolved.NativeBuildID = artifacts, manualBuildID
 			}
 		}
 		if err != nil {
 			return nil, err
+		}
+		if resolved.DeviceBinding != nil && strings.HasPrefix(resolved.ResolverRevision, "auto/") {
+			options["device"] = resolved.DeviceBinding.Selector
 		}
 		maps.Copy(options, paths)
 		if previous := rtLoadResolution(rt.ModelLoads, load.ModelID); previous != nil && !modelLoadHasAuto(load.Requested) {
@@ -292,6 +334,45 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 				allocation.Options.CacheRAM = &mib
 			}
 			estimates[load.ModelID] = modelEstimateInput{Facts: facts, Bindings: modelEstimateBindings(resolved.Artifacts), Allocation: &allocation, BuildID: buildID, Support: modelEstimatorSupport}
+			if operation.Memory != nil && !approved {
+				input := estimates[load.ModelID]
+				input.Memory, err = operation.Memory.ModelAutoMemory(ctx)
+				if err != nil {
+					return nil, err
+				}
+				operation.Memory = modelAutoSnapshotMemory{memory: input.Memory}
+				ctx = context.WithValue(ctx, modelAutoOperationKey{}, operation)
+				estimates[load.ModelID] = input
+			}
+		}
+	}
+	command, err = modelConstrainCommand(command, loads)
+	if err != nil {
+		return nil, err
+	}
+	for i := range loads {
+		load := &loads[i]
+		if !modelLoadHasAuto(load.Requested) {
+			continue
+		}
+		current, sourceErr := modelReviewedNativeSource(ctx, st, command)
+		if sourceErr != nil {
+			return nil, sourceErr
+		}
+		buildID = current
+		if load.Resolved.NativeBuildID != current {
+			if approved || rtLoadResolution(rt.ModelLoads, load.ModelID) != nil && operation.RecalculateModel != load.ModelID {
+				return nil, modelLoadError(load.ModelID, "nativeBuildId", "Reviewed native source changed; explicitly Recalculate.")
+			}
+			conversion, memory, ok := modelAutoReviewParts(load.Resolved.ReviewedInputID)
+			if !ok {
+				return nil, modelLoadError(load.ModelID, "auto", "Invalid reviewed input.")
+			}
+			load.Resolved.NativeBuildID = current
+			load.Resolved.ReviewedInputID, err = modelAutoReviewHash(load.ModelID, load.Requested, load.Resolved, conversion, memory)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	data, err := typedLlamaPreset(sections)
@@ -371,6 +452,19 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 	}
 	if current, err := servingFileBinding(command.Bin); err != nil || *current != *build {
 		return nil, modelLoadError("", "nativeBuildId", "Native executable changed during compilation.")
+	}
+	if _, err := modelConstrainCommand(command, loads); err != nil {
+		return nil, err
+	}
+	for _, load := range loads {
+		if !modelLoadHasAuto(load.Requested) {
+			continue
+		}
+		current, err := modelReviewedNativeSource(ctx, st, command)
+		if err != nil || current != buildID {
+			return nil, modelLoadError("", "nativeBuildId", "Native source changed during compilation.")
+		}
+		break
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -473,6 +567,42 @@ func typedLlamaPreset(sections map[string]map[string]string) ([]byte, error) {
 		return nil, modelLoadError("", "preset", "Generated preset exceeds the bounded size limit.")
 	}
 	return []byte(out.String()), nil
+}
+
+// Typed mode has already rejected overlapping CLI/environment/preset owners.
+// Materialize pinned finite defaults once, leaving automatic flash attention
+// unresolved and thread-dependent scratch explicitly unknown in the estimator.
+func modelEffectiveLoadOptions(requested modelconfig.RequestedLoad) modelconfig.RequestedLoad {
+	r := requested.Clone()
+	batch, ubatch, cache, slots := int32(2048), int32(512), int32(512), int32(1)
+	f16, offload := "f16", true
+	if r.BatchSize == nil {
+		r.BatchSize = &batch
+	}
+	if r.UBatchSize == nil {
+		r.UBatchSize = &ubatch
+	}
+	if r.CacheRAM == nil {
+		r.CacheRAM = &cache
+	}
+	if r.Slots == nil {
+		r.Slots = &slots
+	}
+	if r.CacheTypeK == nil {
+		r.CacheTypeK = &f16
+	}
+	if r.CacheTypeV == nil {
+		value := f16
+		r.CacheTypeV = &value
+	}
+	if r.KVOffload == nil {
+		r.KVOffload = &offload
+	}
+	if r.OpOffload == nil {
+		value := offload
+		r.OpOffload = &value
+	}
+	return r
 }
 
 func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, layers *int32) (map[string]string, *modelconfig.ResolvedLoad, error) {
@@ -706,6 +836,10 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	}
 	result.Settings = baseline.Clone()
 	result.Settings.ModelLoads, result.Settings.Serving = modelconfig.CloneLoads(prepared.ModelLoads), prepared.Config.Clone()
+	command, err = modelConstrainCommand(command, prepared.ModelLoads)
+	if err != nil {
+		return fail(err)
+	}
 	result.Settings.LaunchText, err = command.argumentText(llamaServingBase(rt))
 	if err != nil {
 		return fail(err)
@@ -909,7 +1043,7 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 		if resolved == nil || modelAutoConversionSource(resolved) != conversion.SourceDigest {
 			return nil, modelLoadError(load.ModelID, "conversion", "External router source changed since preview; preview again before applying.")
 		}
-		if resolved == nil || !reflect.DeepEqual(resolved.Artifacts, load.Resolved.Artifacts) || resolved.NativeBuildID != load.Resolved.NativeBuildID {
+		if resolved == nil || !reflect.DeepEqual(resolved.Artifacts, load.Resolved.Artifacts) || !strings.HasPrefix(resolved.ResolverRevision, "auto/") && resolved.NativeBuildID != load.Resolved.NativeBuildID {
 			return nil, modelLoadError(load.ModelID, "conversion", "Accepted conversion must preserve the complete current router artifact set and native build.")
 		}
 	}
@@ -920,6 +1054,19 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 	convertedCommand, err := resolveProcessLaunch(llamaServingBase(converted), command.Bin, vars)
 	if err != nil {
 		return nil, err
+	}
+	convertedCommand, err = modelConstrainCommand(convertedCommand, desired.ModelLoads)
+	if err != nil {
+		return nil, err
+	}
+	for _, load := range desired.ModelLoads {
+		if load.Resolved == nil || !strings.HasPrefix(load.Resolved.ResolverRevision, "auto/") {
+			continue
+		}
+		current, err := modelReviewedNativeSource(ctx, st, convertedCommand)
+		if err != nil || current != load.Resolved.NativeBuildID {
+			return nil, modelLoadError(load.ModelID, "conversion", "Reviewed native library/environment source changed.")
+		}
 	}
 	text, err := convertedCommand.argumentText(llamaServingBase(converted))
 	if err != nil {

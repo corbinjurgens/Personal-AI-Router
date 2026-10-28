@@ -19,7 +19,230 @@ import (
 
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
+	"nvpair-shared/noderec"
 )
+
+func TestModelSettingsContractTargetMemoryFrozenCounterTimeline(t *testing.T) {
+	f, _, _ := autoTestFrozenLaunch(t)
+	candidatePrices := 0
+	f.ex.modelEstimates = modelEstimateState{run: func(ctx context.Context, in modelEstimateInput) modelconfig.Estimate {
+		if in.Allocation != nil && in.Allocation.ResolverRevision == modelAutoRevision && in.Allocation.ReviewedInputID == "" {
+			candidatePrices++
+		}
+		return autoTestEstimate(ctx, in)
+	}}
+	r := autoTestRequest()
+	r.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 4096}
+	request := settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: r}}
+	uuid := autoTestDeviceBinding().DeviceID
+	helpers := 0
+	runner := func(ctx context.Context, _ modelDeviceRuntime, env []string) (modelDeviceReply, error) {
+		helpers++
+		if !slices.Contains(env, "CUDA_VISIBLE_DEVICES="+uuid) {
+			t.Fatal("review helper did not use reviewed full UUID")
+		}
+		return modelDeviceReply{Devices: []modelNativeDevice{{Selector: "CPU", Kind: 0}, {Selector: "CUDA0", Kind: 1, UUID: uuid, PCI: "0000:ab:00.0", LUID: modelDevicesFixtureLUID}}}, ctx.Err()
+	}
+	memory := func(free string) *modelconfig.TargetMemory {
+		fact := noderec.MemoryFact{Valid: true, Bytes: "8589934592", Source: "synthetic-target", SampledAt: time.Now().UTC()}
+		available := fact
+		available.Bytes = free
+		return &modelconfig.TargetMemory{HostID: "synthetic-host", ObservationID: "sample-" + free, Observation: &noderec.MemoryObservation{RunID: "producer", Domains: []noderec.MemoryDomain{{ID: "host", Kind: "system", Total: fact, Free: available}, {ID: "gpu", Kind: "dedicated", DeviceIDs: []string{uuid, "pci:0000:ab:00.0", modelDevicesFixtureLUID}, Total: fact, Free: available}}}, Hop: noderec.NewMemoryHop("broker", noderec.MemoryBootClock)}
+	}
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+	manager := &Manager{exec: f.ex, codec: NewCodec(server)}
+	call := func(envelope settings.WorkerRequest[settings.Request]) Message {
+		t.Helper()
+		raw, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{DeviceRunner: runner})
+		id := json.RawMessage(`1`)
+		manager.handleSettingsMessage(ctx, &Message{JSONRPC: "2.0", ID: &id, Method: "engine:preview-launch", Params: raw})
+		var reply Message
+		if err := json.NewDecoder(client).Decode(&reply); err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	}
+	reply := call(settings.WorkerRequest[settings.Request]{Request: request, Memory: memory("8589934592"), NativeInitAllowed: true})
+	if reply.Error != nil {
+		t.Fatalf("target preview refused: %+v", reply.Error)
+	}
+	var preview settings.Preview
+	if err := modelconfig.DecodeStrict(reply.Result, &preview); err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Errors) != 0 || preview.Auto == nil || preview.Auto.Resolved == nil {
+		t.Fatalf("target preview=%+v", preview)
+	}
+	before := helpers
+	beforePrices := candidatePrices
+	if before == 0 {
+		t.Fatal("explicit review omitted the private metadata helper")
+	}
+	if beforePrices == 0 {
+		t.Fatal("explicit review did not price Auto candidates")
+	}
+	unsupported := memory("8589934592")
+	unsupported.Observation.Domains[1].DeviceIDs = append(unsupported.Observation.Domains[1].DeviceIDs, "MIG-unsupported-alias")
+	fixedGPU := request.Clone()
+	layers := int32(1)
+	fixedGPU.ModelChange.Load.Set.GPU = &modelconfig.GPU{Mode: "layers", Layers: &layers}
+	refused := call(settings.WorkerRequest[settings.Request]{Request: fixedGPU, Memory: unsupported, NativeInitAllowed: true})
+	if refused.Error == nil {
+		var advice settings.Preview
+		if err := modelconfig.DecodeStrict(refused.Result, &advice); err != nil {
+			t.Fatal(err)
+		}
+		if len(advice.Errors) == 0 || advice.Auto != nil && advice.Auto.Resolved != nil {
+			t.Fatal("unsupported physical alias authorized a GPU allocation")
+		}
+	}
+	if helpers != before {
+		t.Fatal("unsupported physical topology initialized native metadata")
+	}
+	finite := request.Clone()
+	finite.ModelChange = nil
+	finite.Settings = preview.Settings.Clone()
+	for _, free := range []string{"7516192768", "1"} {
+		reply = call(settings.WorkerRequest[settings.Request]{Request: finite, Memory: memory(free), ValidateResources: true, ResourceModel: "weak-model"})
+		if (reply.Error != nil) != (free == "1") {
+			t.Fatalf("fresh B free=%s reply=%+v", free, reply)
+		}
+		if free != "1" {
+			var validated settings.Preview
+			if err := modelconfig.DecodeStrict(reply.Result, &validated); err != nil {
+				t.Fatal(err)
+			}
+			if !validated.Settings.Equal(preview.Settings) {
+				t.Fatal("fresh sufficient B replaced reviewed finite A")
+			}
+		}
+		if helpers != before {
+			t.Fatal("frozen validation invoked native helper")
+		}
+		if candidatePrices != beforePrices {
+			t.Fatal("frozen validation searched Auto candidates")
+		}
+	}
+	stale := memory("8589934592")
+	for i := range stale.Observation.Domains {
+		stale.Observation.Domains[i].Total.AgeMS = noderec.MemoryFreshMS + 1
+		stale.Observation.Domains[i].Free.AgeMS = noderec.MemoryFreshMS + 1
+	}
+	if reply := call(settings.WorkerRequest[settings.Request]{Request: finite, Memory: stale, ValidateResources: true, ResourceModel: "weak-model"}); reply.Error == nil {
+		t.Fatal("stale target evidence accepted")
+	}
+	if helpers != before {
+		t.Fatal("stale frozen validation invoked helper")
+	}
+	if candidatePrices != beforePrices {
+		t.Fatal("stale validation searched Auto candidates")
+	}
+	restarted := memory("7516192768")
+	restarted.Observation.RunID = "replacement-producer"
+	if reply := call(settings.WorkerRequest[settings.Request]{Request: finite, Memory: restarted, ValidateResources: true, ResourceModel: "weak-model"}); reply.Error != nil {
+		t.Fatalf("same physical identity producer restart invalidated allocation: %+v", reply.Error)
+	}
+	if candidatePrices != beforePrices {
+		t.Fatal("producer restart triggered Auto search")
+	}
+	reply = call(settings.WorkerRequest[settings.Request]{Request: request, Memory: memory("7516192768"), NativeInitAllowed: true})
+	if reply.Error != nil {
+		t.Fatalf("explicit Recalculate refused: %+v", reply.Error)
+	}
+	var recalculated settings.Preview
+	if err := modelconfig.DecodeStrict(reply.Result, &recalculated); err != nil {
+		t.Fatal(err)
+	}
+	if recalculated.Auto == nil || recalculated.Auto.ReviewedInputID == preview.Auto.ReviewedInputID || helpers <= before {
+		t.Fatal("explicit Recalculate did not replace the reviewed input through the helper")
+	}
+	before = helpers
+	beforePrices = candidatePrices
+	reply = call(settings.WorkerRequest[settings.Request]{Request: finite})
+	if reply.Error != nil {
+		t.Fatalf("accepted finite replay required telemetry: %+v", reply.Error)
+	}
+	if helpers != before {
+		t.Fatal("accepted replay invoked native helper")
+	}
+	if candidatePrices != beforePrices {
+		t.Fatal("accepted replay searched Auto candidates")
+	}
+	// The same trusted worker route must still refuse the actual partial cost
+	// provider. Synthetic complete arithmetic above never enables production.
+	f.ex.modelEstimates = modelEstimateState{}
+	reply = call(settings.WorkerRequest[settings.Request]{Request: request, Memory: memory("8589934592"), NativeInitAllowed: true})
+	if reply.Error == nil {
+		var partial settings.Preview
+		if err := modelconfig.DecodeStrict(reply.Result, &partial); err != nil {
+			t.Fatal(err)
+		}
+		if len(partial.Errors) == 0 || partial.Auto != nil && (partial.Auto.Resolved != nil || partial.Auto.Status == "fits") {
+			t.Fatal("production partial provider authorized Auto through the worker route")
+		}
+		if partial.Estimate != nil && (partial.Estimate.CapacityFit == "fits" || partial.Estimate.FreeFit == "fits") {
+			t.Fatal("production partial provider advertised Fits")
+		}
+	}
+}
+
+func TestModelSettingsContractHostProvenanceSurvivesUnavailableGPUMap(t *testing.T) {
+	test := func(name string, deviceMap *modelDeviceMap) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			in := autoTestInput()
+			layers := int32(1)
+			in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+			in.Allocation.Options.GPU = &in.Allocation.GPU
+			in.Allocation.DeviceBinding = nil
+			fact := noderec.MemoryFact{Valid: true, Bytes: "8589934592", Source: "synthetic-independent-RAM", SampledAt: time.Now().UTC()}
+			available := fact
+			available.Bytes = "0"
+			target := &modelconfig.TargetMemory{HostID: "synthetic-host", ObservationID: "sample", MapID: "unavailable-map", Observation: &noderec.MemoryObservation{RunID: "producer", Domains: []noderec.MemoryDomain{{ID: "host", Kind: "system", Total: fact, Free: available}}}, Hop: noderec.NewMemoryHop("broker", noderec.MemoryBootClock)}
+			owner := modelTargetMemoryOwner{target: target, deviceMap: deviceMap}
+			var err error
+			in.Memory, err = owner.ModelAutoMemory(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state modelEstimateState
+			out := state.estimate(context.Background(), in)
+			if out.CapacityFit != "unknown" || out.FreeFit != "unknown" {
+				t.Fatal("partial costs or unavailable GPU mapping advertised a comparison")
+			}
+			hostSeen, deviceSeen := false, false
+			for _, domain := range out.Domains {
+				if domain.Kind == "host" {
+					hostSeen = true
+					if domain.CapacityBytes != fact.Bytes || domain.FreeBytes != "0" || domain.CapacitySource != fact.Source || domain.FreeSource != fact.Source || domain.CapacityTimestamp != fact.SampledAt.Format(time.RFC3339Nano) || domain.FreeTimestamp != fact.SampledAt.Format(time.RFC3339Nano) || domain.RemainingValidityMS <= 0 || domain.RemainingValidityMS > noderec.MemoryFreshMS || domain.CapacityFit != "unknown" || domain.FreeFit != "unknown" {
+						t.Fatalf("independent host facts disappeared with unavailable GPU map: %+v", domain)
+					}
+				}
+				if domain.Kind == "device" || domain.ID == "offload-unmapped" {
+					deviceSeen = true
+					if domain.CapacityFit != "unknown" || domain.FreeFit != "unknown" || len(domain.Unknowns) == 0 || domain.DeviceID != "" {
+						t.Fatalf("unproved device acquired comparison authority: %+v", domain)
+					}
+				}
+			}
+			if !hostSeen || !deviceSeen {
+				t.Fatal("partial estimate omitted host or unproved device domain")
+			}
+		})
+	}
+	test("missing map", nil)
+	test("unavailable map", &modelDeviceMap{ObservationID: "unavailable-map", HostPool: "untrusted-map-host", Unknown: "unsupported native mapping"})
+	test("mismatched observation", &modelDeviceMap{ObservationID: "other-observation", HostPool: "untrusted-map-host"})
+}
 
 func TestModelSettingsContractInspectRelay(t *testing.T) {
 	inspect := modelconfig.InspectRequest{Engine: "llamacpp", ModelID: "example/model"}
@@ -64,6 +287,10 @@ func TestModelSettingsContractOversizedOrdinaryPreviewRefused(t *testing.T) {
 	}
 	m := &Manager{exec: e, codec: NewCodec(server)}
 	id := json.RawMessage(`1`)
+	raw, err = json.Marshal(settings.WorkerRequest[settings.Request]{Request: p})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !m.handleSettingsMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:preview-launch", Params: raw}) {
 		t.Fatal("preview not handled")
 	}
@@ -230,6 +457,9 @@ func TestModelSettingsContractIncompleteLaunchRPCsHaveNoEffects(t *testing.T) {
 			}
 			m := &Manager{exec: e, codec: NewCodec(server)}
 			id := json.RawMessage(`1`)
+			if method == "engine:preview-launch" {
+				raw = `{"request":` + raw + `}`
+			}
 			if !m.handleSettingsMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: method, Params: json.RawMessage(raw)}) {
 				t.Fatal("launch method was not handled")
 			}
