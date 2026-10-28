@@ -37,6 +37,7 @@ type modelEstimateInput struct {
 	Allocation       *modelconfig.ResolvedLoad
 	BuildID, Support string
 	Memory           *modelEstimateMemory
+	SWAFull          *bool
 }
 
 func modelEstimateBindings(bindings []modelconfig.ArtifactBinding) []modelconfig.ArtifactSummary {
@@ -144,7 +145,8 @@ func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput
 		Allocation                               *modelconfig.ResolvedLoad
 		Revision, Build, Support, MemoryIdentity string
 		Memory                                   *modelEstimateMemory
-	}{in.Bindings, in.Allocation, modelEstimatorRevision, in.BuildID, in.Support, memoryIdentity, in.Memory})
+		SWAFull                                  *bool
+	}{in.Bindings, in.Allocation, modelEstimatorRevision, in.BuildID, in.Support, memoryIdentity, in.Memory, in.SWAFull})
 	if err != nil || len(keyBytes) > 64<<10 {
 		return modelEstimateUnknown("estimator cache identity exceeds budget")
 	}
@@ -697,8 +699,12 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 			kv.Reason = "SWA per-layer pattern unavailable"
 			return kv, recurrent
 		}
-		if a.Options.BatchSize == nil || *a.Options.BatchSize <= 0 || *a.Options.BatchSize > 4096 {
-			kv.Reason = "SWA effective logical batch unavailable"
+		if in.SWAFull == nil {
+			kv.Reason = "effective SWA full-cache mode unavailable"
+			return kv, recurrent
+		}
+		if !*in.SWAFull && (a.Options.UBatchSize == nil || *a.Options.UBatchSize <= 0 || a.Options.BatchSize == nil || *a.Options.BatchSize <= 0 || *a.Options.UBatchSize > *a.Options.BatchSize || *a.Options.BatchSize > 4096) {
+			kv.Reason = "SWA effective microbatch unavailable"
 			return kv, recurrent
 		}
 		if pattern, exists := m.numeric[m.arch+".attention.sliding_window_pattern"]; exists {
@@ -741,13 +747,11 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 		cells := uint64(a.TotalContext)
 		k, v := key, value
 		if window > 0 && i < uint64(len(arch.AttentionSlidingWindowLayers)) && arch.AttentionSlidingWindowLayers[i] {
-			// Library/native SWA contract: window per sequence plus logical batch,
-			// attention-dependent alignment, capped by the full allocated cache.
-			align := uint64(32)
-			if *a.Options.FlashAttention == "on" {
-				align = 256
+			perStream := uint64(a.PerSlotContext)
+			if !*in.SWAFull {
+				perStream = gguf.GGMLPadding(min(perStream, modelEstimateAdd(window, uint64(*a.Options.UBatchSize))), 256)
 			}
-			cells = min(cells, gguf.GGMLPadding(modelEstimateAdd(modelEstimateMul(window, uint64(a.Slots)), uint64(*a.Options.BatchSize)), align))
+			cells = modelEstimateMul(perStream, uint64(a.Slots))
 			k, v = swaKey, swaValue
 		}
 		kb, validK := modelEstimateRow(kt, modelEstimateMul(k, h), cells)
@@ -957,10 +961,24 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 				offloadBlocks = gpuLayers - 1
 			}
 			var h, d uint64
+			var embedding uint64
+			hasOutput := false
+			for _, shard := range in.Facts.Shards {
+				if shard.Role == gguffacts.RoleMain {
+					for _, tensor := range shard.Tensors {
+						if tensor.Name == "output.weight" {
+							hasOutput = true
+						}
+					}
+				}
+			}
 			for _, tensor := range m.file.TensorInfos {
 				bytes, ok := modelEstimateRow(tensor.Type, tensor.Dimensions...)
 				if !ok {
 					continue
+				}
+				if tensor.Name == "token_embd.weight" {
+					embedding = bytes
 				}
 				onGPU := gpuLayers > 0 && (tensor.Name == "output.weight" || tensor.Name == "output_norm.weight")
 				if strings.HasPrefix(tensor.Name, "blk.") {
@@ -976,6 +994,11 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 				} else {
 					h = modelEstimateAdd(h, bytes)
 				}
+			}
+			if gpuLayers > 0 && !hasOutput && (m.arch == "qwen2" || m.arch == "gemma2") && embedding > 0 {
+				d = modelEstimateAdd(d, embedding)
+				c.Reason += "; tied output device copy is a projection; buffer-type selection and fallback unverified"
+				out.Unknowns = append(out.Unknowns, "tied output: device buffer-type selection and fallback unverified")
 			}
 			host = modelEstimateAdd(host, h)
 			device = modelEstimateAdd(device, d)
