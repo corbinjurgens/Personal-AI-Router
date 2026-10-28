@@ -9,22 +9,192 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"nvpair-shared/appdir"
 	"nvpair-shared/buildapply"
 	"nvpair-shared/jsonrpc"
 )
+
+// This selector is compiled only into this package's test image. The parent
+// stages that image at tests/service-bundle-1/nvpair-service.exe, whose existing
+// exact-path firewall rule also covers this private loopback observer.
+var buildApplyOwnerProcessArgs []string
+
+func init() {
+	if image := os.Getenv("NVPAIR_OWNER_SERVICE"); image != "" && image == os.Args[0] {
+		buildApplyOwnerProcessArgs = append([]string(nil), os.Args[1:]...)
+		os.Args = []string{os.Args[0], "-test.run=^TestBuildApplyProcessOwnerChild$", "-test.timeout=18m"}
+	}
+}
+
+var buildApplyOwnerProcessEffects = struct {
+	sync.Mutex
+	counts map[string]int
+}{counts: make(map[string]int)}
+
+// Only disposable go-test overlay inputs call this observer. It observes entry
+// to the real effect functions without substituting their results or authority.
+func buildApplyOwnerProcessEffect(kind string) {
+	buildApplyOwnerProcessEffects.Lock()
+	defer buildApplyOwnerProcessEffects.Unlock()
+	buildApplyOwnerProcessEffects.counts[kind]++
+}
+
+// The disposable overlay binds the instrumentation before Service.Run. The
+// normal package has no production hook or reference to test-only symbols.
+func bindBuildApplyOwnerProcessObserver() {}
+
+type buildApplyOwnerProcessObservation struct {
+	Profile           string                     `json:"profile"`
+	ProductionOwner   bool                       `json:"productionOwner"`
+	Evidence          *buildApplyEvidence        `json:"evidence,omitempty"`
+	Envelope          *buildapply.ImpactEnvelope `json:"envelope,omitempty"`
+	ReadRefused       bool                       `json:"readRefused"`
+	ReadError         string                     `json:"readError"`
+	PreflightRefused  bool                       `json:"preflightRefused"`
+	PreflightError    string                     `json:"preflightError"`
+	PendingOwnerReads int                        `json:"pendingOwnerReads"`
+	PreviewRetained   bool                       `json:"previewRetained"`
+	Effects           map[string]int             `json:"effects"`
+}
+
+func TestBuildApplyProcessOwnerChild(t *testing.T) {
+	if buildApplyOwnerProcessArgs == nil {
+		t.Skip("private service process child, selected only by its fixed-image sentinel")
+	}
+	opts, err := parseRunArgs(buildApplyOwnerProcessArgs, io.Discard)
+	if err != nil || opts.endpoint == "" || !filepath.IsAbs(opts.brokerPath) || hasFlag(opts.brokerArgs, "cluster-dir") {
+		t.Fatalf("private service launch is not explicit/default-profile: %v", err)
+	}
+	profile := buildApplyTempDir(t)
+	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, profile)
+	}
+	data, err := appdir.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := filepath.Join(data, "engine-bin", "model-download-state.json")
+	if err := os.MkdirAll(filepath.Dir(journal), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// An explicitly fresh private baseline, never an amendment of an installed
+	// profile. Both historical completeness and the recovery veto are explicit.
+	if err := os.WriteFile(journal, []byte(`{"version":1,"entries":[],"copies":[],"copiesComplete":true,"copyRecoveryRequired":false}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(os.Getenv("NVPAIR_OWNER_SERVICE_PORT"))
+	if err != nil || port < 1 || port > 65535 {
+		t.Fatal("private service observer port unavailable")
+	}
+	for _, installed := range []int{14318, 14319, 14320, 14321, 14322, 14323, 11434, 1234, 8080} {
+		if port == installed {
+			t.Fatal("private service observer selected an installed port")
+		}
+	}
+	bindBuildApplyOwnerProcessObserver()
+	s := newService(config{
+		endpoint: opts.endpoint, version: Version,
+		spawn: execSpawner(opts.brokerPath, opts.brokerArgs), backoff: defaultBackoff,
+		stopGrace: defaultStopGrace, shutdownRequestTimeout: defaultShutdownRequestTimeout,
+	})
+	if _, ok := s.cfg.buildApplyOwners.(serviceBuildApplyEvidence); !ok {
+		t.Fatal("production evidence owner was replaced")
+	}
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		observation := buildApplyOwnerProcessObservation{Profile: profile, Effects: map[string]int{}}
+		_, observation.ProductionOwner = s.cfg.buildApplyOwners.(serviceBuildApplyEvidence)
+		switch r.URL.Path {
+		case "/read":
+			evidence, err := s.cfg.buildApplyOwners.Read(r.Context())
+			observation.ReadRefused = err != nil
+			if err != nil {
+				observation.ReadError = err.Error()
+			} else {
+				observation.Evidence = &evidence
+			}
+		case "/impact":
+			s.mu.Lock()
+			run := s.broker
+			s.mu.Unlock()
+			envelope, err := s.readBuildApplyImpact(r.Context(), run)
+			observation.ReadRefused = err != nil
+			if err == nil {
+				observation.Envelope = &envelope
+			}
+		case "/preflight":
+			// Call the real capture boundary, without a preview, receipt or any
+			// invented complete facts. Its production owner must refuse before
+			// package inspection, maintenance acceptance, staging or execution.
+			_, err := s.captureBuildApplyPlan(r.Context(), buildApplyAdmissionSnapshot{}, buildapply.StartRequest{})
+			observation.PreflightRefused = err != nil
+			if err != nil {
+				observation.PreflightError = err.Error()
+			}
+		case "/stats":
+		default:
+			http.Error(w, "unknown private observation", http.StatusNotFound)
+			return
+		}
+		s.mu.Lock()
+		for _, pending := range s.pending {
+			if pending.method == "build:apply-impact" {
+				observation.PendingOwnerReads++
+			}
+		}
+		observation.PreviewRetained = s.buildPreview != nil
+		s.mu.Unlock()
+		buildApplyOwnerProcessEffects.Lock()
+		for kind, count := range buildApplyOwnerProcessEffects.counts {
+			observation.Effects[kind] = count
+		}
+		buildApplyOwnerProcessEffects.Unlock()
+		data, err := json.Marshal(observation)
+		if err != nil || len(data) > buildapply.MaxStatusBytes {
+			http.Error(w, "bounded private observation unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write(data); err != nil {
+			return
+		}
+	})
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: time.Second * 10}
+	defer server.Close()
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.Serve(listener) }()
+	if err := s.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != http.ErrServerClosed {
+		t.Fatalf("private observer: %v", err)
+	}
+}
 
 type buildApplyOwnerFrameWriter struct{ frames chan []byte }
 
@@ -35,7 +205,7 @@ func (w buildApplyOwnerFrameWriter) Write(frame []byte) (int, error) {
 func (buildApplyOwnerFrameWriter) Close() error { return nil }
 
 func TestBuildApplyOwnerEvidenceIdleReadUsesCurrentBroker(t *testing.T) {
-	profile := t.TempDir()
+	profile := buildApplyTempDir(t)
 	for _, key := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"} {
 		t.Setenv(key, profile)
 	}
