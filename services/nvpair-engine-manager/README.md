@@ -732,7 +732,7 @@ Endpoints (all under `/v1`):
 | `GET /v1/models/file?engine=&model=&path=` | file bytes | one listed file, with HTTP Range support |
 | `POST /v1/node-policy/get` | JSON | the target broker's peer projection of its policy, as for `engine:remote-policy-get` |
 | `POST /v1/node-policy/set` | JSON `{ policy, expectedPersistedRevision }` | the peer projection after the target broker merges the change; the revision is forwarded unchanged |
-| `POST /v1/node-availability/set` | JSON `{ state, pauseMode? }` | the target broker's `node:set-availability`, answered once the configured state is reached; immediate is refused |
+| `POST /v1/node-availability/set` | JSON `{ state, pauseMode? }` | the target broker's `node:set-availability`, answered once the configured state is reached; peer immediate requests are refused |
 
 The node-policy routes carry the broker's policy, which engine-manager does not
 interpret. Each is gated on the caller's pin like the settings routes, accepts at
@@ -744,9 +744,9 @@ pin, acts, and answers with `policy:reply {id, result, error?, errorCode?}`.
 validation after fresh permission and pause-fence checks. Omission means
 `configured`; `immediate` is target-local only, so an authorized unfenced peer
 receives `-32602`, `Immediate pause must be requested on this node.` No payload
-`nodeId` can impersonate locality. Any mode on Resume is invalid. Valid local
-immediate calls are currently unavailable without effects; the relay exposes
-no immediate dispatch. Timing is never saved. Results preserve actual target
+`nodeId` can impersonate locality. Any mode on Resume is invalid. Local
+immediate calls start cancellation and controlled shutdown without the drain
+wait; this peer relay cannot invoke them. Timing is never saved. Results preserve actual target
 `pausedBy` (`local`/`peer`, unknown empty/omitted, cleared while available),
 without exposing local activation or origin-private routing fields.
 Every error carries a JSON-RPC `errorCode`: `-32602` for invalid parameters,

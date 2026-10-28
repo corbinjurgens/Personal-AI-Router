@@ -32,6 +32,16 @@ install PAIR and send a first request, go to
 
 ## Concepts
 
+On a node card, **Pause node** uses that node's saved active-work and drain
+settings; an authorized managing peer can request it. **Stop local models now**
+is available only on this device and cancels local execution immediately without
+waiting for the drain. Both retain a pause fence until Resume on the target.
+An external engine that PAIR cannot safely stop leaves Pause incomplete. The
+router remains available to send eligible requests elsewhere. Metadata and file
+reads remain available, and accepted file-only transfers can continue. New copy
+admission still respects Pause and peer-mutation gates. An interrupted committed
+response requires a new request.
+
 These terms have specific meanings in PAIR:
 
 - **Node** — one machine running PAIR. Every node runs the same software. There
