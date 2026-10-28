@@ -43,7 +43,8 @@ func estimateFixture(arch string) modelEstimateInput {
 	batch, ubatch, cache := int32(64), int32(32), int32(1)
 	unified, offload, op := false, false, false
 	allocation := &modelconfig.ResolvedLoad{PerSlotContext: 1024, TotalContext: 1024, Slots: 1, KVUnified: &unified, GPU: modelconfig.GPU{Mode: "cpu"}, Options: modelconfig.RequestedLoad{CacheTypeK: &f16, CacheTypeV: &f16, FlashAttention: &fa, BatchSize: &batch, UBatchSize: &ubatch, CacheRAM: &cache, KVOffload: &offload, OpOffload: &op}}
-	return modelEstimateInput{Facts: facts, Bindings: []modelconfig.ArtifactSummary{{Role: "model", Identity: "synthetic-main", Size: "327936"}}, Allocation: allocation, BuildID: "synthetic-native-build", Support: modelEstimatorSupport}
+	swaFull := false
+	return modelEstimateInput{Facts: facts, Bindings: []modelconfig.ArtifactSummary{{Role: "model", Identity: "synthetic-main", Size: "327936"}}, Allocation: allocation, BuildID: "synthetic-native-build", Support: modelEstimatorSupport, SWAFull: &swaFull}
 }
 
 func estimateFixtureResult(t *testing.T, in modelEstimateInput) modelconfig.Estimate {
@@ -225,9 +226,9 @@ func TestModelSettingsEstimateSWA(t *testing.T) {
 	in.Allocation.TotalContext = 4096
 	in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window"] = gguffacts.Numeric{Type: 10, Bits: 256}
 	in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 10, Bits: 2}
-	// One windowed layer has 320 cells, the global layer has 4096.
+	// One windowed layer has 512 padded cells, the global layer has 4096.
 	out := estimateFixtureResult(t, in)
-	assertEstimateBytes(t, out, "attention-cache", "estimated", "1130496")
+	assertEstimateBytes(t, out, "attention-cache", "estimated", "1179648")
 	assertEstimateBytes(t, out, "compute-workspace", "unknown", "")
 	delete(in.Facts.Shards[0].Numeric, "gemma2.attention.sliding_window_pattern")
 	assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "unknown", "")
@@ -286,6 +287,110 @@ func TestModelSettingsEstimateTensorPlacement(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Conditional projections from b11146, not device measurements:
+// https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-model-loader.cpp#L1363-L1385
+func TestModelSettingsEstimateTiedOutputProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name, arch           string
+		untied, cpu          bool
+		wantHost, wantDevice string
+	}{
+		{"Qwen tied different buffer", "qwen2", false, false, "272269312", "272269312"},
+		{"Qwen tied CPU same buffer", "qwen2", false, true, "272269312", "0"},
+		{"Qwen untied", "qwen2", true, false, "272269312", "272269312"},
+		{"Gemma2 tied different buffer", "gemma2", false, false, "272269312", "272269312"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateFixture(tc.arch)
+			// F16 embedding: 2 * 896 * 151936 = 272269312 bytes.
+			embed := gguffacts.Tensor{Name: "token_embd.weight", Type: 1, Dimensions: []uint64{896, 151936}, Bytes: 272269312}
+			in.Facts.Shards[0].Tensors = []gguffacts.Tensor{embed}
+			in.Bindings[0].Size = "272269312"
+			if tc.untied {
+				embed.Name = "output.weight"
+				in.Facts.Shards[0].Tensors = append(in.Facts.Shards[0].Tensors, embed)
+				in.Bindings[0].Size = "544538624"
+			}
+			in.Facts.Shards[0].Numeric[tc.arch+".block_count"] = gguffacts.Numeric{Type: 10, Bits: 24}
+			in.Facts.Shards[0].Numeric[tc.arch+".embedding_length"] = gguffacts.Numeric{Type: 10, Bits: 896}
+			in.Facts.Shards[0].Numeric[tc.arch+".vocab_size"] = gguffacts.Numeric{Type: 10, Bits: 151936}
+			if !tc.cpu {
+				layers := int32(25)
+				in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+			}
+			in.Allocation.Options.CacheRAM = nil
+			in.Allocation.Options.CacheTypeK = nil
+			out := estimateFixtureResult(t, in)
+			if out.HostBytes != tc.wantHost || out.DeviceBytes != tc.wantDevice {
+				t.Fatalf("host/device = %s/%s, want %s/%s", out.HostBytes, out.DeviceBytes, tc.wantHost, tc.wantDevice)
+			}
+		})
+	}
+}
+
+// Normal non-unified iSWA, swa_full=false:
+// https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-kv-cache-iswa.cpp#L69-L80
+func TestModelSettingsEstimateSWAPerStream(t *testing.T) {
+	for _, fa := range []string{"off", "on"} {
+		t.Run("Gemma2 "+fa, func(t *testing.T) {
+			in := estimateFixture("gemma2")
+			for key, value := range map[string]uint64{"block_count": 26, "attention.head_count": 8, "attention.head_count_kv": 4, "attention.key_length": 256, "attention.value_length": 256, "attention.sliding_window": 4096, "attention.sliding_window_pattern": 2} {
+				in.Facts.Shards[0].Numeric["gemma2."+key] = gguffacts.Numeric{Type: 10, Bits: value}
+			}
+			in.Allocation.PerSlotContext, in.Allocation.TotalContext, in.Allocation.Slots = 8192, 16384, 2
+			batch, ubatch := int32(1024), int32(512)
+			in.Allocation.Options.BatchSize, in.Allocation.Options.UBatchSize = &batch, &ubatch
+			in.Allocation.Options.FlashAttention = &fa
+			// 13 * (67108864 full + 37748736 SWA) = 1363148800.
+			assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "estimated", "1363148800")
+		})
+	}
+	t.Run("padding and slots", func(t *testing.T) {
+		in := estimateFixture("gemma2")
+		in.Allocation.Slots, in.Allocation.TotalContext = 2, 2048
+		in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window"] = gguffacts.Numeric{Type: 10, Bits: 257}
+		in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 10, Bits: 2}
+		assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "estimated", "786432")
+	})
+	t.Run("cap before padding", func(t *testing.T) {
+		in := estimateFixture("gemma2")
+		in.Allocation.PerSlotContext, in.Allocation.TotalContext, in.Allocation.Slots = 256, 512, 2
+		in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window"] = gguffacts.Numeric{Type: 10, Bits: 4096}
+		in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 10, Bits: 2}
+		assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "estimated", "262144")
+	})
+	t.Run("missing microbatch remains unknown", func(t *testing.T) {
+		in := estimateFixture("gemma2")
+		in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window"] = gguffacts.Numeric{Type: 10, Bits: 256}
+		in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 10, Bits: 2}
+		in.Allocation.Options.UBatchSize = nil
+		out := estimateFixtureResult(t, in)
+		assertEstimateBytes(t, out, "attention-cache", "unknown", "")
+		if out.Status != "partial" || len(out.Unknowns) == 0 {
+			t.Fatalf("missing microbatch must remain partial: %+v", out)
+		}
+	})
+	t.Run("full and unknown modes have distinct cache identities", func(t *testing.T) {
+		in := estimateFixture("gemma2")
+		in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window"] = gguffacts.Numeric{Type: 10, Bits: 256}
+		in.Facts.Shards[0].Numeric["gemma2.attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 10, Bits: 2}
+		var state modelEstimateState
+		assertEstimateBytes(t, state.estimate(context.Background(), in), "attention-cache", "estimated", "393216")
+		full := true
+		in.SWAFull = &full
+		assertEstimateBytes(t, state.estimate(context.Background(), in), "attention-cache", "estimated", "524288")
+		in.SWAFull = nil
+		out := state.estimate(context.Background(), in)
+		assertEstimateBytes(t, out, "attention-cache", "unknown", "")
+		if out.Status != "partial" || len(out.Unknowns) == 0 {
+			t.Fatalf("unknown SWA mode must remain partial: %+v", out)
+		}
+		in.SWAFull = &full
+		in.Allocation.Options.UBatchSize = nil
+		assertEstimateBytes(t, state.estimate(context.Background(), in), "attention-cache", "estimated", "524288")
+	})
 }
 
 func TestModelSettingsEstimateCompanions(t *testing.T) {
