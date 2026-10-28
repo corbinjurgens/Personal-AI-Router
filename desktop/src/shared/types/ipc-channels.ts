@@ -11,7 +11,8 @@ import type {
     BuildApplyOperation,
     BuildApplyResult,
     BuildApplyStartRequest,
-    BuildApplyStatusRequest
+    BuildApplyStatusRequest,
+    BuildApplyStatusReadResult
 } from './build-apply'
 import type {
     RoutingHistoryConsumed,
@@ -86,7 +87,7 @@ export interface IpcChannelMap {
     }
     'build-apply:status': {
         request: BuildApplyStatusRequest
-        response: BuildApplyResult<BuildApplyOperation>
+        response: BuildApplyStatusReadResult
     }
     'routing-history:pull': { request: RoutingHistoryPull; response: RoutingHistoryTransfer }
     'routing-history:consumed': {

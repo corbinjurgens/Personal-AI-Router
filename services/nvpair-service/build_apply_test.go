@@ -5,12 +5,56 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"nvpair-shared/buildapply"
 	"nvpair-shared/jsonrpc"
 )
+
+func TestBuildApplyStatusStartupAuthority(t *testing.T) {
+	f := newBuildApplyRunFixture(t)
+	failed := buildapply.OutcomeFailed
+	current := f.plan.receipt
+	current.Outcome = &failed
+	closed := f.plan.receipt
+	succeeded := buildapply.OutcomeSucceeded
+	closed.Outcome = &succeeded
+	tests := []struct {
+		name          string
+		state         buildapply.JournalState
+		err           error
+		wantState     buildapply.StatusState
+		wantAvailable bool
+	}{
+		{"idle", buildapply.JournalState{}, nil, buildapply.StatusIdle, true},
+		{"pending", buildapply.JournalState{Current: &f.plan.receipt}, nil, buildapply.StatusPending, true},
+		{"current with outcome", buildapply.JournalState{Current: &current}, nil, buildapply.StatusTerminal, true},
+		{"uncorrelated terminal intent", buildapply.JournalState{TerminalPending: true}, nil, "", false},
+		{"terminal pending", buildapply.JournalState{Current: &current, TerminalPending: true}, nil, buildapply.StatusUnknown, true},
+		{"closed terminal", buildapply.JournalState{LastTerminal: &closed}, nil, buildapply.StatusTerminal, true},
+		{"terminal intent with last terminal", buildapply.JournalState{LastTerminal: &closed, TerminalPending: true}, nil, buildapply.StatusUnknown, true},
+		{"read error", buildapply.JournalState{}, errors.New("unreadable"), "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := readBuildApplyStatus(func() (buildapply.JournalState, error) { return tt.state, tt.err }, "")
+			if result.Available != tt.wantAvailable {
+				t.Fatalf("availability = %+v", result)
+			}
+			if !result.Available {
+				if result.Value != nil {
+					t.Fatalf("unavailable has value: %+v", result)
+				}
+				return
+			}
+			if result.Value == nil || result.Value.State != tt.wantState || result.Value.StartupAllowed != tt.state.StartupAllowed() {
+				t.Fatalf("status = %+v, startup allowed = %v", result, tt.state.StartupAllowed())
+			}
+		})
+	}
+}
 
 func TestBuildApplyLocalAdmission(t *testing.T) {
 	profile := buildApplyTempDir(t)

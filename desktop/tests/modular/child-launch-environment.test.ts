@@ -8,6 +8,7 @@ import { ensureNvpairOnPath } from '@/electron/nvpair-command'
 import { spawnWipeScript } from '@/electron/run-wipe-script'
 import { macPrivilege } from '@/electron/services/mac-privilege-service'
 import { serviceConnectionDeps } from '@/electron/service-bridge/service-connection'
+import { requireBuildApplyStartup } from '@/electron/build-apply/status'
 
 let platform: SupportedPlatform = 'win32'
 const launches: {
@@ -24,6 +25,9 @@ const parentEnv = {
 }
 
 vi.mock('@/shared/utils/platform', () => ({ currentPlatform: () => platform }))
+vi.mock('@/electron/build-apply/status', () => ({
+    requireBuildApplyStartup: vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+}))
 vi.mock('electron', () => ({
     app: { isPackaged: true, getPath: () => '/fake/user-data', getAppPath: () => '/fake/app' }
 }))
@@ -113,8 +117,8 @@ describe('Electron child environment boundaries', () => {
         expect(launches[0]?.args).toEqual(['status'])
     })
 
-    it('retains inherited credentials when production dependencies start the service', () => {
-        serviceConnectionDeps('/fake/nvpair-service', ['--ipc']).startService()
+    it('retains inherited credentials when production dependencies start the service', async () => {
+        await serviceConnectionDeps('/fake/nvpair-service', ['--ipc']).startService()
         expect(launches).toHaveLength(1)
         const launch = launches[0]
         expect(launch?.executable).toBe('/fake/nvpair-service')
@@ -129,5 +133,12 @@ describe('Electron child environment boundaries', () => {
         expect(Object.hasOwn(process.env, 'nvpair_provider_secret_test')).toBe(true)
         expect(process.env.C2_UNRELATED === 'kept').toBe(true)
         expect(unrefs).toBe(1)
+    })
+    it('does not spawn when the status authority refuses startup', async () => {
+        vi.mocked(requireBuildApplyStartup).mockRejectedValueOnce(new Error('pending'))
+        await expect(
+            serviceConnectionDeps('/fake/nvpair-service', []).startService()
+        ).rejects.toThrow('pending')
+        expect(launches).toHaveLength(0)
     })
 })

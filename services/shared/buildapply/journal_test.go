@@ -22,6 +22,28 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestJournalStateStartupAllowed(t *testing.T) {
+	outcome := OutcomeFailed
+	tests := []struct {
+		name  string
+		state JournalState
+		want  bool
+	}{
+		{"empty", JournalState{}, true},
+		{"current pending", JournalState{Current: &Receipt{}}, false},
+		{"current with outcome", JournalState{Current: &Receipt{Outcome: &outcome}}, false},
+		{"terminal pending", JournalState{TerminalPending: true}, false},
+		{"last terminal", JournalState{LastTerminal: &Receipt{Outcome: &outcome}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.state.StartupAllowed(); got != tt.want {
+				t.Fatalf("StartupAllowed() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func journalFixture(t *testing.T) (*Journal, *OperationLock) {
 	t.Helper()
 	j, err := openJournalAt(filepath.Join(packageFixtureTempDir(t), "operation-state"), true)

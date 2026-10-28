@@ -369,22 +369,25 @@ export function parseBuildApplyStatusResult(
     )
         return invalid()
     return result<BuildApplyStatus>(value, entry => {
-        const row = fields(entry, ['state', 'operation'])
+        const row = fields(entry, ['state', 'operation', 'startupAllowed'])
         const state = statusState(row.state)
+        const startupAllowed = flag(row.startupAllowed)
         if (state === 'idle') {
-            if (row.operation !== null || expectedPreviewId !== '') return invalid()
-            return { state: 'idle', operation: null }
+            if (row.operation !== null || expectedPreviewId !== '' || !startupAllowed)
+                return invalid()
+            return { state: 'idle', operation: null, startupAllowed: true }
         }
         const operation = parseBuildApplyOperation(row.operation, expectedPreviewId)
         switch (state) {
             case 'pending':
-                if (operation.outcome !== null) return invalid()
-                return { state: 'pending', operation }
+                if (operation.outcome !== null || startupAllowed) return invalid()
+                return { state: 'pending', operation, startupAllowed: false }
             case 'terminal':
                 if (operation.outcome === null) return invalid()
-                return { state: 'terminal', operation }
+                return { state: 'terminal', operation, startupAllowed }
             case 'unknown':
-                return { state: 'unknown', operation }
+                if (startupAllowed) return invalid()
+                return { state: 'unknown', operation, startupAllowed: false }
         }
     })
 }

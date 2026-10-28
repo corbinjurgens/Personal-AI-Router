@@ -192,6 +192,11 @@ type JournalState struct {
 	TerminalPending bool `json:"-"`
 }
 
+// StartupAllowed applies only to a successfully read and validated journal.
+func (s JournalState) StartupAllowed() bool {
+	return s.Current == nil && !s.TerminalPending
+}
+
 type InventoryEntry struct {
 	Path   string      `json:"path"`
 	Size   int64       `json:"size"`

@@ -192,14 +192,13 @@ export const restartConnector = (): Promise<void> => {
  */
 export const destroyConnector = async (options?: { force?: boolean }): Promise<void> => {
     log.info({ sublevel: 'lifecycle', message: 'Destroying connector' })
-    setStatus('disconnected')
-
     if (options?.force) {
         await getModularSupervisor().stopService()
     } else if (weSpawned) {
         await getModularSupervisor().stop()
     }
 
+    setStatus('disconnected')
     weSpawned = false
     log.info({ sublevel: 'lifecycle', message: 'Connector destroyed' })
 }

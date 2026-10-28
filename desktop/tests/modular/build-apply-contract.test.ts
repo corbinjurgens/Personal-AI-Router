@@ -363,16 +363,29 @@ describe('build apply payloads', () => {
         ).toEqual(value)
     })
     it.each<{ name: string; status: BuildApplyStatus }>([
-        { name: 'idle without a recorded operation', status: { state: 'idle', operation: null } },
-        { name: 'pending', status: { state: 'pending', operation: pendingOperation() } },
-        { name: 'terminal', status: { state: 'terminal', operation: operation() } },
+        {
+            name: 'idle without a recorded operation',
+            status: { state: 'idle', operation: null, startupAllowed: true }
+        },
+        {
+            name: 'pending',
+            status: { state: 'pending', operation: pendingOperation(), startupAllowed: false }
+        },
+        {
+            name: 'terminal',
+            status: { state: 'terminal', operation: operation(), startupAllowed: false }
+        },
+        {
+            name: 'closed terminal',
+            status: { state: 'terminal', operation: operation(), startupAllowed: true }
+        },
         {
             name: 'unknown with a pending receipt',
-            status: { state: 'unknown', operation: pendingOperation() }
+            status: { state: 'unknown', operation: pendingOperation(), startupAllowed: false }
         },
         {
             name: 'unknown with a terminal receipt',
-            status: { state: 'unknown', operation: operation() }
+            status: { state: 'unknown', operation: operation(), startupAllowed: false }
         }
     ])('preserves $name status and preview correlation', ({ status }) => {
         const response = { available: true, value: status, refusal: null }
@@ -388,27 +401,57 @@ describe('build apply payloads', () => {
         { name: 'missing operation', status: { state: 'idle' } },
         {
             name: 'unknown state name',
-            status: { state: 'unreadable', operation: wire(operation()) }
+            status: { state: 'unreadable', operation: wire(operation()), startupAllowed: false }
         },
         {
             name: 'idle carrying an operation',
-            status: { state: 'idle', operation: wire(operation()) }
+            status: { state: 'idle', operation: wire(operation()), startupAllowed: true }
         },
-        { name: 'pending without an operation', status: { state: 'pending', operation: null } },
-        { name: 'terminal without an operation', status: { state: 'terminal', operation: null } },
+        {
+            name: 'pending without an operation',
+            status: { state: 'pending', operation: null, startupAllowed: false }
+        },
+        {
+            name: 'terminal without an operation',
+            status: { state: 'terminal', operation: null, startupAllowed: false }
+        },
         {
             name: 'unknown without trusted correlation',
-            status: { state: 'unknown', operation: null }
+            status: { state: 'unknown', operation: null, startupAllowed: false }
         },
         {
             name: 'pending with an outcome',
-            status: { state: 'pending', operation: wire(operation()) }
+            status: { state: 'pending', operation: wire(operation()), startupAllowed: false }
         },
         {
             name: 'terminal without an outcome',
-            status: { state: 'terminal', operation: wire(pendingOperation()) }
+            status: {
+                state: 'terminal',
+                operation: wire(pendingOperation()),
+                startupAllowed: false
+            }
         },
-        { name: 'extra field', status: { state: 'idle', operation: null, previewId: 'preview_1' } }
+        {
+            name: 'extra field',
+            status: { state: 'idle', operation: null, startupAllowed: true, previewId: 'preview_1' }
+        },
+        { name: 'missing startup permission', status: { state: 'idle', operation: null } },
+        {
+            name: 'null startup permission',
+            status: { state: 'idle', operation: null, startupAllowed: null }
+        },
+        {
+            name: 'idle denies startup',
+            status: { state: 'idle', operation: null, startupAllowed: false }
+        },
+        {
+            name: 'pending permits startup',
+            status: { state: 'pending', operation: wire(pendingOperation()), startupAllowed: true }
+        },
+        {
+            name: 'unknown permits startup',
+            status: { state: 'unknown', operation: wire(pendingOperation()), startupAllowed: true }
+        }
     ])('rejects $name status', ({ status }) => {
         expect(() =>
             parseBuildApplyStatusResult({ available: true, value: status, refusal: null })
@@ -437,7 +480,11 @@ describe('build apply payloads', () => {
             refusal: { code: 'unavailable', detail: 'Receipt is unreadable.' }
         }
         expect(parseBuildApplyStatusResult(wire(unavailable), 'preview_1')).toEqual(unavailable)
-        const idle = { available: true, value: { state: 'idle', operation: null }, refusal: null }
+        const idle = {
+            available: true,
+            value: { state: 'idle', operation: null, startupAllowed: true },
+            refusal: null
+        }
         expect(() => parseBuildApplyStatusResult(wire(idle), 'preview_1')).toThrow()
         expect(() =>
             parseBuildApplyStatusResult(wire({ ...unavailable, value: idle.value }))
@@ -477,7 +524,7 @@ describe('build apply payloads', () => {
         expect(() =>
             parseBuildApplyStatusResult({
                 available: true,
-                value: { state: 'unknown', operation: malformed },
+                value: { state: 'unknown', operation: malformed, startupAllowed: false },
                 refusal: null
             })
         ).toThrow()
@@ -546,7 +593,12 @@ describe('build apply payloads', () => {
             operationId: finish.operationId,
             gui: { pid: 42, executable: '/native/PAIR.exe', buildId: 'embedded-gui' }
         }
-        expect(Object.keys(prepare).sort()).toEqual(['consent', 'fences', 'operationId', 'previewId'])
+        expect(Object.keys(prepare).sort()).toEqual([
+            'consent',
+            'fences',
+            'operationId',
+            'previewId'
+        ])
         expect(Object.keys(ready).sort()).toEqual(['gui', 'operationId'])
     })
     it('rejects missing meaningful fields, inconsistent known values and malformed results', () => {
