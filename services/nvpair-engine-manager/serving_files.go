@@ -109,7 +109,7 @@ func (a servingFileAccess) binding(ctx context.Context, path string) (*engines.S
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve serving artifact")
 	}
-	target, err := filepath.EvalSymlinks(source)
+	target, err := resolveNativeSourcePath(source)
 	if err != nil {
 		return nil, fmt.Errorf("serving artifact is missing or unresolved")
 	}
@@ -156,7 +156,7 @@ func (a servingFileAccess) binding(ctx context.Context, path string) (*engines.S
 	}
 	after, err := f.Stat()
 	current, statErr := os.Stat(source)
-	resolved, resolveErr := filepath.EvalSymlinks(source)
+	resolved, resolveErr := resolveNativeSourcePath(source)
 	if err != nil || statErr != nil || resolveErr != nil || target != resolved ||
 		!os.SameFile(before, after) || !os.SameFile(after, current) ||
 		before.Size() != after.Size() || before.ModTime() != after.ModTime() ||

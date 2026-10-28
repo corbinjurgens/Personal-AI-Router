@@ -26,6 +26,10 @@ import (
 // lookup that hung would wedge StopAll (and the whole app shutdown).
 const portLookupTimeout = 2 * time.Second
 
+func resolveNativeSourcePath(path string) (string, error) {
+	return filepath.EvalSymlinks(path)
+}
+
 func managedInstallPath(binAbs, dirAbs string) bool {
 	// Resolve existing paths together so canonical image aliases cannot turn
 	// a symlink escaping the managed directory into install ownership.

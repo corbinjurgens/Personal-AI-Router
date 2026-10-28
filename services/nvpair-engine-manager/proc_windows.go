@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -22,6 +23,21 @@ import (
 // wedge StopAll (and the whole app shutdown) now that the broker no longer
 // force-kills engine-manager on a timeout.
 const taskkillTimeout = 5 * time.Second
+
+// resolveNativeSourcePath follows junctions as well as symlinks, including
+// reparse points in ancestor directories. Never retain an unresolved spelling.
+func resolveNativeSourcePath(path string) (string, error) {
+	resolved, _, err := windowsFinalPath(path)
+	if err != nil {
+		return "", err
+	}
+	// Keep the DOS/UNC spelling used by existing source bindings. The handle
+	// resolver retains the extended prefix for its process-ownership callers.
+	if strings.HasPrefix(resolved, `\\?\UNC\`) {
+		return `\\` + strings.TrimPrefix(resolved, `\\?\UNC\`), nil
+	}
+	return strings.TrimPrefix(resolved, `\\?\`), nil
+}
 
 func managedInstallPath(binAbs, dirAbs string) bool {
 	binPath, binInfo, err := windowsFinalPath(binAbs)
