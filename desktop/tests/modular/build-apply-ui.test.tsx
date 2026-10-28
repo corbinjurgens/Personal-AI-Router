@@ -254,6 +254,55 @@ afterEach(async () => {
 })
 
 describe('staged application UI', () => {
+    it('retains uncertain offline recovery facts without reporting a successful apply', async () => {
+        const receipt = operation()
+        api.status.mockResolvedValue({
+            available: false,
+            value: null,
+            refusal: {
+                code: 'status_unknown',
+                detail: 'Build status is uncertain. Use explicit recovery.'
+            },
+            uncertainOperation: {
+                ...receipt,
+                failure: {
+                    phase: 'finish',
+                    reason: 'terminal_publication_uncertain',
+                    detail: 'Publication is uncertain.',
+                    bytesChanged: known(true),
+                    settingsChanged: known(false),
+                    runningIdentity: receipt.runningService,
+                    readbackConfidence: 'unknown',
+                    safeNextAction: 'Retain the bundle and recover this operation.'
+                }
+            }
+        })
+        await service('disconnected')
+        expect(document.body.textContent).toContain('Operation operation_1')
+        expect(document.body.textContent).toContain('terminal_publication_uncertain')
+        expect(document.body.textContent).toContain(
+            'nvpair-service apply-build recover operation_1'
+        )
+        expect(document.body.textContent).not.toContain('Build applied; node remains paused')
+        await publish(receipt)
+        expect(document.body.textContent).not.toContain('Build applied; node remains paused')
+    })
+    it('replaces a previously displayed success when status becomes uncertain', async () => {
+        api.status.mockResolvedValue({ available: true, value: operation(), refusal: null })
+        await publish(operation())
+        expect(document.body.textContent).toContain('Build applied; node remains paused')
+        api.status.mockResolvedValue({
+            available: false,
+            value: null,
+            refusal: {
+                code: 'status_unknown',
+                detail: 'Build status is uncertain. Use explicit recovery.'
+            }
+        })
+        await click('Read build status', container)
+        expect(document.body.textContent).toContain('Build status is uncertain.')
+        expect(document.body.textContent).not.toContain('Build applied; node remains paused')
+    })
     it('shows an unavailable preview without leaving the picker busy or offering application', async () => {
         api.choosePreview.mockResolvedValue({
             available: false,
@@ -415,7 +464,12 @@ describe('staged application UI', () => {
         expect(copied).not.toContain('Private detail')
     })
     it('does not describe incomplete success as verified application', async () => {
-        await publish({ ...operation(), remainsPaused: { known: false, value: null } })
+        const incomplete = {
+            ...operation(),
+            remainsPaused: { known: false, value: null }
+        } satisfies BuildApplyOperation
+        api.status.mockResolvedValue({ available: true, value: incomplete, refusal: null })
+        await publish(incomplete)
         expect(document.body.textContent).toContain('Build readback incomplete')
         expect(document.body.textContent).not.toContain('Build applied; node remains paused')
     })
@@ -453,7 +507,7 @@ describe('staged application UI', () => {
 })
 
 describe('reconnect and snapshot ordering', () => {
-    it('keeps a newer pushed terminal result when a status read resolves late', async () => {
+    it('keeps uncertain reconnect authority when a success notification arrives first', async () => {
         let complete: (value: Awaited<ReturnType<IBuildApplyApi['status']>>) => void = () => {
             throw new Error('Missing deferred status')
         }
@@ -462,17 +516,65 @@ describe('reconnect and snapshot ordering', () => {
                 complete = resolve
             })
         )
-        await click('Read build status')
+        await service('reconnecting')
         await publish(operation())
+        expect(document.body.textContent).not.toContain('Build applied; node remains paused')
         await act(async () =>
             complete({
-                available: true,
-                value: { ...operation(), phase: 'prepare', outcome: null },
-                refusal: null
+                available: false,
+                value: null,
+                uncertainOperation: operation(),
+                refusal: { code: 'status_unknown', detail: 'Terminal publication is uncertain.' }
             })
         )
-        expect(document.body.textContent).toContain('Build applied; node remains paused')
-        expect(document.body.textContent).not.toContain('Phase: prepare')
+        expect(document.body.textContent).not.toContain('Build applied; node remains paused')
+        expect(document.body.textContent).toContain('Terminal publication is uncertain.')
+        expect(document.body.textContent).toContain(
+            'nvpair-service apply-build recover operation_1'
+        )
+    })
+    it('does not adopt an unrelated notification during or after a lost start reply', async () => {
+        let complete: (value: Awaited<ReturnType<IBuildApplyApi['start']>>) => void = () => {
+            throw new Error('Missing deferred start')
+        }
+        api.start.mockReturnValueOnce(
+            new Promise(resolve => {
+                complete = resolve
+            })
+        )
+        api.status.mockResolvedValue({
+            available: false,
+            value: null,
+            refusal: { code: 'outcome_unknown', detail: 'Outcome unknown. Check status.' }
+        })
+        await choose()
+        await click('Apply build and restart')
+        const modal = Array.from(document.querySelectorAll('dialog[open]')).at(-1)
+        const checkbox = modal?.querySelector('input[type="checkbox"]')
+        if (!modal || !(checkbox instanceof HTMLInputElement))
+            throw new Error('Missing consent modal')
+        await act(async () => checkbox.click())
+        await click('Apply build and restart', modal)
+        const unrelated = {
+            ...operation(),
+            operationId: 'operation_other',
+            previewId: 'preview_other'
+        }
+        await publish(unrelated)
+        await act(async () =>
+            complete({
+                available: false,
+                value: null,
+                refusal: { code: 'outcome_unknown', detail: 'Outcome unknown. Check status.' }
+            })
+        )
+        await publish(unrelated)
+        expect(document.body.textContent).not.toContain('Operation operation_other')
+        expect(api.status.mock.calls.every(([request]) => request.operationId === '')).toBe(true)
+        api.status.mockResolvedValue({ available: true, value: operation(), refusal: null })
+        await click('Read build status')
+        expect(document.body.textContent).toContain('Operation operation_1')
+        expect(api.start).toHaveBeenCalledOnce()
     })
     it('discards late preview replies after disconnect and deduplicates repeated reconnect status', async () => {
         let complete: (

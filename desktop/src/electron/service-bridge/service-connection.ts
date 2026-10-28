@@ -7,6 +7,7 @@ import { spawn } from 'child_process'
 import type { Duplex } from 'stream'
 import getErrorString from '@/shared/utils/get-error-string'
 import { createStructuredLogger } from '@/shared/utils/log'
+import { requireBuildApplyStartup } from '@/electron/build-apply/status'
 
 const log = createStructuredLogger('service-bridge')
 
@@ -19,7 +20,7 @@ export interface ConnectOrStartDeps {
     /** Open the endpoint. Rejects when nothing answers. */
     connect: (endpoint: string) => Promise<Duplex>
     /** Start the service in the background. Throws when it cannot be launched. */
-    startService: () => void
+    startService: () => void | Promise<void>
     sleep: (ms: number) => Promise<void>
     now: () => number
 }
@@ -49,7 +50,7 @@ export async function connectOrStart(
         /* not running: start it below */
     }
 
-    deps.startService()
+    await deps.startService()
 
     const deadline = deps.now() + timeoutMs
     let lastError: unknown
@@ -115,7 +116,10 @@ export function serviceConnectionDeps(
 ): ConnectOrStartDeps {
     return {
         connect: connectSocket,
-        startService: () => spawnDetached(binaryPath, brokerArgs),
+        startService: async () => {
+            await requireBuildApplyStartup(binaryPath)
+            spawnDetached(binaryPath, brokerArgs)
+        },
         sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
         now: () => Date.now()
     }

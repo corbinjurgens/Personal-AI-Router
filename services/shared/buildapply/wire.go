@@ -280,15 +280,16 @@ const (
 // readable operation's correlation without asserting its current lifecycle.
 // An unreadable receipt has no trustworthy correlation: return an unavailable
 // Result[BuildApplyStatus], never an idle value or a fabricated preview ID.
-// These observations alone do not authorize startup or ownership handoff.
+// StartupAllowed is projected from the same validated journal as the status.
 type BuildApplyStatus struct {
-	State     StatusState          `json:"state"`
-	Operation *BuildApplyOperation `json:"operation"`
+	State          StatusState          `json:"state"`
+	Operation      *BuildApplyOperation `json:"operation"`
+	StartupAllowed bool                 `json:"startupAllowed"`
 }
 
 func (s BuildApplyStatus) validate() error {
 	if s.State == StatusIdle {
-		if s.Operation != nil {
+		if s.Operation != nil || !s.StartupAllowed {
 			return errors.New("idle build apply status carries an operation")
 		}
 		return nil
@@ -301,7 +302,7 @@ func (s BuildApplyStatus) validate() error {
 	}
 	switch s.State {
 	case StatusPending:
-		if s.Operation.Outcome != nil {
+		if s.Operation.Outcome != nil || s.StartupAllowed {
 			return errors.New("pending build apply status carries an outcome")
 		}
 	case StatusTerminal:
@@ -309,6 +310,9 @@ func (s BuildApplyStatus) validate() error {
 			return errors.New("terminal build apply status lacks an outcome")
 		}
 	case StatusUnknown:
+		if s.StartupAllowed {
+			return errors.New("unknown build apply status permits startup")
+		}
 	default:
 		return errors.New("invalid build apply status state")
 	}
@@ -329,7 +333,7 @@ func (s *BuildApplyStatus) UnmarshalJSON(data []byte) error {
 	if len(data) > MaxStatusBytes {
 		return errors.New("build apply status exceeds limit")
 	}
-	if err := decodeResponse(data, &value, "state", "operation"); err != nil {
+	if err := decodeResponse(data, &value, "state", "operation", "startupAllowed"); err != nil {
 		return err
 	}
 	status := BuildApplyStatus(value)

@@ -38,10 +38,12 @@ export default function ApplicationUpdatesCard() {
     const [observedAt, setObservedAt] = useState('')
     const [open, setOpen] = useState(false)
     const [operation, setOperation] = useState<BuildApplyOperation | null>(null)
+    const [uncertain, setUncertain] = useState(false)
     const [busy, setBusy] = useState(false)
     const generation = useRef(0)
     const snapshotSequence = useRef(0)
     const operationId = useRef('')
+    const requiresStatusReadback = useRef(false)
     const inFlight = useRef<Promise<void> | null>(null)
     const choosing = useRef(false)
     const chooseButton = useRef<HTMLButtonElement>(null)
@@ -66,10 +68,22 @@ export default function ApplicationUpdatesCard() {
                 )
                     return
                 if (result.available) {
+                    requiresStatusReadback.current = false
                     operationId.current = result.value.operationId
                     setOperation(result.value)
+                    setUncertain(false)
                     setMessage(null)
-                } else setMessage(result.refusal.detail)
+                } else {
+                    if (['status_unknown', 'outcome_unknown'].includes(result.refusal.code))
+                        requiresStatusReadback.current = true
+                    if (result.refusal.code === 'status_unknown') {
+                        setOperation(
+                            'uncertainOperation' in result ? result.uncertainOperation : null
+                        )
+                        setUncertain(true)
+                    }
+                    setMessage(result.refusal.detail)
+                }
             } catch {
                 if (current === generation.current && sequence === snapshotSequence.current) {
                     setMessage(
@@ -105,13 +119,19 @@ export default function ApplicationUpdatesCard() {
             setStatus(value)
         })
         const unOperation = window.windowApi.buildApply.onChanged(value => {
-            if (operationId.current && operationId.current !== value.operationId) {
+            if (
+                requiresStatusReadback.current ||
+                inFlight.current ||
+                value.outcome === 'succeeded' ||
+                (operationId.current && operationId.current !== value.operationId)
+            ) {
                 void readStatus()
                 return
             }
             snapshotSequence.current++
             operationId.current = value.operationId
             setOperation(value)
+            setUncertain(false)
             setPreview(null)
             setOpen(false)
         })
@@ -120,6 +140,7 @@ export default function ApplicationUpdatesCard() {
             if (value.connectorStatus === connection) return
             connection = value.connectorStatus
             retireReads()
+            requiresStatusReadback.current = true
             choosing.current = false
             setBusy(false)
             setPreview(null)
@@ -171,6 +192,7 @@ export default function ApplicationUpdatesCard() {
         const current = generation.current
         const sequence = ++snapshotSequence.current
         const previewId = preview.previewId
+        requiresStatusReadback.current = true
         operationId.current = ''
         setPreview(null)
         setOpen(false)
@@ -183,6 +205,7 @@ export default function ApplicationUpdatesCard() {
             if (current !== generation.current || sequence !== snapshotSequence.current) return
             if (!result.available) setMessage(result.refusal.detail)
             else {
+                requiresStatusReadback.current = false
                 operationId.current = result.value.operationId
                 setOperation(result.value)
                 setMessage(null)
@@ -290,6 +313,7 @@ export default function ApplicationUpdatesCard() {
                 )}
                 {operation && (
                     <BuildApplyResult
+                        uncertain={uncertain}
                         operation={operation}
                         busy={busy}
                         onRead={() => {

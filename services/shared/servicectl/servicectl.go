@@ -53,7 +53,7 @@ func checkBuildApplyState(state buildapply.JournalState, err error) error {
 	if err != nil {
 		return errors.Join(buildapply.ErrRecoveryNeeded, err)
 	}
-	if state.Current != nil || state.TerminalPending {
+	if !state.StartupAllowed() {
 		return buildapply.ErrRecoveryNeeded
 	}
 	return nil

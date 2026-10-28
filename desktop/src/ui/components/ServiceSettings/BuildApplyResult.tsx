@@ -8,13 +8,16 @@ import { ObservedValue } from './BuildApplyPreview'
 export default function BuildApplyResult({
     operation,
     onRead,
-    busy
+    busy,
+    uncertain = false
 }: {
     operation: BuildApplyOperation
     onRead: () => void
     busy: boolean
+    uncertain?: boolean
 }) {
     const success =
+        !uncertain &&
         operation.outcome === 'succeeded' &&
         operation.phase === 'finish' &&
         operation.failure === null &&
@@ -34,7 +37,8 @@ export default function BuildApplyResult({
         operation.enforced.value &&
         operation.physicalStop.known &&
         operation.physicalStop.value
-    const recovery = operation.outcome !== null && !success && operation.outcome !== 'refused'
+    const recovery =
+        uncertain || (operation.outcome !== null && !success && operation.outcome !== 'refused')
     const command = /^[a-zA-Z0-9_-]{1,128}$/.test(operation.operationId)
         ? `nvpair-service apply-build recover ${operation.operationId}`
         : null
@@ -60,11 +64,13 @@ export default function BuildApplyResult({
             aria-label="Build application result"
         >
             <Text kind="body/semibold/md">
-                {success
-                    ? 'Build applied; node remains paused'
-                    : operation.outcome === 'succeeded'
-                      ? 'Build readback incomplete'
-                      : `Build application: ${operation.outcome ?? 'in progress'}`}
+                {uncertain
+                    ? 'Build status is uncertain'
+                    : success
+                      ? 'Build applied; node remains paused'
+                      : operation.outcome === 'succeeded'
+                        ? 'Build readback incomplete'
+                        : `Build application: ${operation.outcome ?? 'in progress'}`}
             </Text>
             <div>
                 Operation {operation.operationId}. Phase:{' '}

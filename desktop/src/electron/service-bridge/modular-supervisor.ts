@@ -78,6 +78,7 @@ import {
     type ModularLogLevel
 } from '@/shared/constants/modular-runtime'
 import { connectOrStart, serviceConnectionDeps } from './service-connection'
+import { readBuildApplyStatus, requireBuildApplyStartup } from '@/electron/build-apply/status'
 import { defaultServiceEndpointEnvironment, resolveServiceEndpoint } from './service-endpoint'
 import { parseAvailabilityChange, parseAvailabilityResult, parsePolicyChange } from './node-policy'
 import { NodeAvailabilityState, type AvailabilityMenuItem } from './node-availability'
@@ -640,7 +641,12 @@ class ModularSupervisor {
      * data wipe. It never starts a service just to stop it.
      */
     async stopService(): Promise<void> {
+        await requireBuildApplyStartup(this.serviceBinaryPath())
         await this.teardown(client => client.stopService())
+    }
+
+    readBuildApplyStatus() {
+        return readBuildApplyStatus(this.serviceBinaryPath())
     }
 
     private async teardown(close: (client: JsonRpcSocketClient) => Promise<void>): Promise<void> {

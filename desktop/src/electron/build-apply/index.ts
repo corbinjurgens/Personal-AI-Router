@@ -6,22 +6,25 @@ import type {
     BuildApplyPreviewRequest,
     BuildApplyOperation,
     BuildApplyResult,
+    BuildApplyStatus,
     BuildApplyStartRequest,
-    BuildApplyStatusRequest
+    BuildApplyStatusRequest,
+    BuildApplyStatusReadResult
 } from '@/shared/types/build-apply'
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 import {
     parseBuildApplyPreviewResult,
     parseBuildApplyOperationResult,
+    parseBuildApplyStatusResult,
     setBuildApplyOperationObserver
 } from '@/electron/service-bridge/build-apply'
 import { chooseCandidatePath, guiFacts, quitForBuildApply } from './native'
 
 let selected: { preview: BuildApplyPreview; generation: number } | null = null
 let selectionGeneration = 0
-let statusRead: { key: string; promise: Promise<BuildApplyResult<BuildApplyOperation>> } | null =
-    null
+let statusRead: { key: string; promise: Promise<BuildApplyStatusReadResult> } | null = null
 let handoff: { operationId: string; promise: Promise<void> | null } | null = null
+let lostStart: { previewId: string } | null = null
 
 function completeHandoff(operation: BuildApplyOperation, generation: number): Promise<void> {
     const current = handoff
@@ -104,6 +107,15 @@ function validId(value: string, empty = false): boolean {
 }
 export async function chooseBuildApplyPreview(): Promise<BuildApplyResult<BuildApplyPreview>> {
     selected = null
+    if (lostStart)
+        return {
+            available: false,
+            value: null,
+            refusal: {
+                code: 'outcome_unknown',
+                detail: 'The previous application outcome is unknown. Read its status before any further action; do not retry application.'
+            }
+        }
     const selection = ++selectionGeneration
     const supervisor = getModularSupervisor()
     const generation = supervisor.getBuildApplyGeneration()
@@ -188,18 +200,23 @@ export async function startBuildApply(
         }
     }
     let result: BuildApplyResult<BuildApplyOperation>
+    // Correlate concurrent status reads from the moment admission begins, not
+    // only after its reply is lost. A previous receipt is not this initiation.
+    const initiation = { previewId: request.previewId }
+    lostStart = initiation
     try {
         result = parseBuildApplyOperationResult(
             await supervisor.callBuildApply('service/build-apply-start', {
                 previewId: request.previewId,
                 consent: { ...request.consent },
                 gui: { ...gui }
-            })
+            }),
+            request.previewId
         )
+        if (choice.generation !== supervisor.getBuildApplyGeneration()) {
+            throw new Error('Build apply connection changed.')
+        }
     } catch {
-        // The first reply is the only current proof of our operation ID. Latest
-        // status cannot correlate this initiation until the service returns its
-        // admitting preview ID. Never retry or hand off an unknown outcome.
         return {
             available: false,
             value: null,
@@ -209,18 +226,17 @@ export async function startBuildApply(
             }
         }
     }
+    if (lostStart === initiation) lostStart = null
     if (result.available && validId(result.value.operationId)) {
-        handoff = {
-            operationId: result.value.operationId,
-            promise: null
-        }
+        if (handoff?.operationId !== result.value.operationId)
+            handoff = { operationId: result.value.operationId, promise: null }
         await completeHandoff(result.value, choice.generation)
     }
     return result
 }
 export async function getBuildApplyStatus(
     request: BuildApplyStatusRequest
-): Promise<BuildApplyResult<BuildApplyOperation>> {
+): Promise<BuildApplyStatusReadResult> {
     if (
         !request ||
         Object.keys(request).some(key => key !== 'operationId') ||
@@ -232,36 +248,82 @@ export async function getBuildApplyStatus(
     const generation = supervisor.getBuildApplyGeneration()
     const key = `${generation}:${request.operationId}`
     if (statusRead?.key === key) return statusRead.promise
-    const read = async (): Promise<BuildApplyResult<BuildApplyOperation>> => {
-        let result: BuildApplyResult<BuildApplyOperation>
+    const read = async (): Promise<BuildApplyStatusReadResult> => {
+        let status: BuildApplyResult<BuildApplyStatus> | null = null
         try {
-            result = parseBuildApplyOperationResult(
+            status = parseBuildApplyStatusResult(
                 await supervisor.callBuildApply('service/build-apply-status', {
                     operationId: request.operationId
                 })
             )
         } catch {
-            result = {
-                available: false,
-                value: null,
-                refusal: {
-                    code: 'unavailable',
-                    detail: 'Build operation status is not available in this build or connection. Reconnect and read status before any further action.'
-                }
-            }
+            /* The no-start reader also works while the service is off. */
         }
+        if (!status?.available) status = await supervisor.readBuildApplyStatus()
+        const operation = status.available ? status.value.operation : null
         if (
             generation !== supervisor.getBuildApplyGeneration() ||
-            (result.available &&
+            (operation &&
                 request.operationId !== '' &&
-                result.value.operationId !== request.operationId)
+                operation.operationId !== request.operationId)
         ) {
             throw new Error(
                 'Build apply connection changed or operation changed. Read status again.'
             )
         }
-        if (result.available) await completeHandoff(result.value, generation)
-        return result
+        if (lostStart && operation && operation.previewId !== lostStart.previewId)
+            return {
+                available: false,
+                value: null,
+                refusal: {
+                    code: 'outcome_unknown',
+                    detail: 'Build application outcome is unknown. Check status before any further action; do not retry application.'
+                }
+            }
+        if (status.available && status.value.state !== 'unknown' && operation) {
+            if (
+                lostStart &&
+                operation.previewId === lostStart.previewId &&
+                status.value.state === 'terminal' &&
+                status.value.startupAllowed
+            ) {
+                lostStart = null
+            }
+            if (
+                lostStart &&
+                operation.previewId === lostStart.previewId &&
+                operation.ownershipAcknowledged &&
+                operation.outcome === null
+            ) {
+                handoff = { operationId: operation.operationId, promise: null }
+                lostStart = null
+            }
+            await completeHandoff(operation, generation)
+        }
+        if (
+            status.available &&
+            (status.value.state === 'unknown' ||
+                (status.value.state === 'terminal' &&
+                    !status.value.startupAllowed &&
+                    status.value.operation.outcome === 'succeeded'))
+        )
+            return {
+                available: false,
+                value: null,
+                uncertainOperation: status.value.operation,
+                refusal: {
+                    code: 'status_unknown',
+                    detail: 'Build status is uncertain. Retain the operation and use explicit recovery before further action.'
+                }
+            }
+        if (status.available && operation)
+            return { available: true, value: operation, refusal: null }
+        if (!status.available) return status
+        return {
+            available: false,
+            value: null,
+            refusal: { code: 'unavailable', detail: 'No build operation is recorded.' }
+        }
     }
     const promise = read()
     statusRead = { key, promise }

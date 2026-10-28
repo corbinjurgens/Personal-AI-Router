@@ -286,7 +286,10 @@ func readBuildApplyStatus(read func() (buildapply.JournalState, error), id strin
 	if r == nil {
 		r = state.LastTerminal
 	}
-	status := buildapply.BuildApplyStatus{State: buildapply.StatusIdle}
+	if r == nil && !state.StartupAllowed() {
+		return buildapply.Unavailable[buildapply.BuildApplyStatus]()
+	}
+	status := buildapply.BuildApplyStatus{State: buildapply.StatusIdle, StartupAllowed: state.StartupAllowed()}
 	if r != nil {
 		if id != "" && id != r.OperationID {
 			return buildapply.Unavailable[buildapply.BuildApplyStatus]()

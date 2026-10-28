@@ -21,6 +21,7 @@ import {
 import { JsonRpcSocketClient } from '@/electron/service-bridge/json-rpc-client'
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 import * as connection from '@/electron/service-bridge/service-connection'
+import * as statusReader from '@/electron/build-apply/status'
 
 const native = vi.hoisted(() => {
     const order: string[] = []
@@ -30,6 +31,10 @@ vi.mock('electron', () => ({
     app: { isPackaged: false, getAppPath: () => '/inert-pair-fixture', quit: native.quit },
     dialog: { showOpenDialog: vi.fn<typeof dialog.showOpenDialog>() },
     BrowserWindow: { getAllWindows: () => [] }
+}))
+vi.mock('@/electron/build-apply/status', () => ({
+    readBuildApplyStatus: vi.fn<typeof statusReader.readBuildApplyStatus>(),
+    requireBuildApplyStartup: vi.fn<typeof statusReader.requireBuildApplyStartup>()
 }))
 vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn<() => void>() }))
 vi.mock('@/electron/service-bridge/broadcaster', () => ({ emitBridgePush: vi.fn<() => void>() }))
@@ -156,6 +161,12 @@ function currentClient(): JsonRpcSocketClient {
     return client
 }
 beforeEach(() => {
+    vi.mocked(statusReader.requireBuildApplyStartup).mockResolvedValue(undefined)
+    vi.mocked(statusReader.readBuildApplyStatus).mockResolvedValue({
+        available: true,
+        value: { state: 'idle', operation: null, startupAllowed: true },
+        refusal: null
+    })
     vi.stubGlobal('__PAIR_GUI_BUILD_ID__', 'git:' + 'a'.repeat(40))
     native.order.length = 0
     clients.length = 0
@@ -169,6 +180,12 @@ beforeEach(() => {
     vi.spyOn(JsonRpcSocketClient.prototype, 'call').mockImplementation(async method => {
         if (method === 'service/build-apply-preview')
             return wire({ available: true, value: preview(), refusal: null })
+        if (method === 'service/build-apply-status')
+            return wire({
+                available: true,
+                value: { state: 'pending', operation: operation(), startupAllowed: false },
+                refusal: null
+            })
         native.order.push('acknowledged')
         return wire({ available: true, value: operation(), refusal: null })
     })
@@ -196,13 +213,22 @@ afterEach(async () => {
 })
 
 describe('native handoff and fencing', () => {
-    it('keeps ordinary service stop available before the transaction gate ships', async () => {
+    it('requires startup authority before stopping the service', async () => {
         const stop = vi
             .spyOn(JsonRpcSocketClient.prototype, 'stopService')
             .mockResolvedValue(undefined)
         const detach = vi.mocked(JsonRpcSocketClient.prototype.detach)
         await supervisor.stopService()
+        expect(statusReader.requireBuildApplyStartup).toHaveBeenCalledOnce()
         expect(stop).toHaveBeenCalledOnce()
+        expect(detach).not.toHaveBeenCalled()
+    })
+    it('does not detach or stop when startup authority is denied', async () => {
+        vi.mocked(statusReader.requireBuildApplyStartup).mockRejectedValueOnce(new Error('pending'))
+        const stop = vi.spyOn(JsonRpcSocketClient.prototype, 'stopService')
+        const detach = vi.mocked(JsonRpcSocketClient.prototype.detach)
+        await expect(supervisor.stopService()).rejects.toThrow('pending')
+        expect(stop).not.toHaveBeenCalled()
         expect(detach).not.toHaveBeenCalled()
     })
     it('refuses mutation when the native embedded GUI identity is unknown', async () => {
@@ -352,7 +378,66 @@ describe('native handoff and fencing', () => {
             expect(JsonRpcSocketClient.prototype.call).not.toHaveBeenCalled()
         }
     )
-    it('reports an unknown outcome after the first response is lost without retrying or handing off', async () => {
+    it('rejects the previous receipt while start is pending and recovers its lost reply', async () => {
+        await chooseBuildApplyPreview()
+        const detach = vi.spyOn(supervisor, 'stop').mockResolvedValue(undefined)
+        let rejectStart: (reason: Error) => void = () => {
+            throw new Error('Missing start rejection')
+        }
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockReturnValueOnce(
+            new Promise((_resolve, reject) => {
+                rejectStart = reject
+            })
+        )
+        const start = startBuildApply({ previewId: 'preview_1', consent })
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockResolvedValueOnce(
+            wire({
+                available: true,
+                value: {
+                    state: 'terminal',
+                    startupAllowed: true,
+                    operation: {
+                        ...operation(),
+                        operationId: 'operation_other',
+                        previewId: 'preview_other',
+                        outcome: 'refused'
+                    }
+                },
+                refusal: null
+            })
+        )
+        const previous = await getBuildApplyStatus({ operationId: '' })
+        expect(previous).toMatchObject({ available: false, refusal: { code: 'outcome_unknown' } })
+        rejectStart(new Error('Lost start reply'))
+        expect(await start).toMatchObject({
+            available: false,
+            refusal: { code: 'outcome_unknown' }
+        })
+        await getBuildApplyStatus({
+            operationId: previous.available ? previous.value.operationId : ''
+        })
+        expect(detach).toHaveBeenCalledOnce()
+        expect(native.quit).toHaveBeenCalledOnce()
+    })
+    it('hands off once when matching status acknowledges before the start reply arrives', async () => {
+        await chooseBuildApplyPreview()
+        const detach = vi.spyOn(supervisor, 'stop').mockResolvedValue(undefined)
+        let resolveStart: (value: JsonValue) => void = () => {
+            throw new Error('Missing start resolution')
+        }
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockReturnValueOnce(
+            new Promise(resolve => {
+                resolveStart = resolve
+            })
+        )
+        const start = startBuildApply({ previewId: 'preview_1', consent })
+        await getBuildApplyStatus({ operationId: '' })
+        resolveStart(wire({ available: true, value: operation(), refusal: null }))
+        await start
+        expect(detach).toHaveBeenCalledOnce()
+        expect(native.quit).toHaveBeenCalledOnce()
+    })
+    it('does not hand off a lost start when status belongs to another preview', async () => {
         await chooseBuildApplyPreview()
         vi.mocked(JsonRpcSocketClient.prototype.call)
             .mockClear()
@@ -365,8 +450,104 @@ describe('native handoff and fencing', () => {
         expect(
             vi.mocked(JsonRpcSocketClient.prototype.call).mock.calls.map(([method]) => method)
         ).toEqual(['service/build-apply-start'])
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockResolvedValueOnce(
+            wire({
+                available: true,
+                value: {
+                    state: 'pending',
+                    operation: { ...operation(), previewId: 'preview_other' },
+                    startupAllowed: false
+                },
+                refusal: null
+            })
+        )
+        const unrelated = await getBuildApplyStatus({ operationId: '' })
+        expect(unrelated).toMatchObject({ available: false, refusal: { code: 'outcome_unknown' } })
+        expect(native.quit).not.toHaveBeenCalled()
+        expect((await chooseBuildApplyPreview()).available).toBe(false)
+        // Mirror the renderer: only available results replace its requested ID.
+        const nextId = unrelated.available ? unrelated.value.operationId : ''
+        await getBuildApplyStatus({ operationId: nextId })
+        expect(native.quit).toHaveBeenCalledOnce()
+    })
+    it('hands off once when a wholly lost reply is correlated by durable preview ID', async () => {
+        await chooseBuildApplyPreview()
+        const detach = vi.spyOn(supervisor, 'stop').mockResolvedValue(undefined)
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockRejectedValueOnce(new Error('lost'))
+        await startBuildApply({ previewId: 'preview_1', consent })
+        await getBuildApplyStatus({ operationId: '' })
+        await getBuildApplyStatus({ operationId: '' })
+        expect(detach).toHaveBeenCalledOnce()
+        expect(native.quit).toHaveBeenCalledOnce()
+    })
+    it('does not hand off a lost reply from unknown status', async () => {
+        await chooseBuildApplyPreview()
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockRejectedValueOnce(new Error('lost'))
+        await startBuildApply({ previewId: 'preview_1', consent })
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockResolvedValueOnce(
+            wire({
+                available: true,
+                value: { state: 'unknown', operation: operation(), startupAllowed: false },
+                refusal: null
+            })
+        )
         await getBuildApplyStatus({ operationId: '' })
         expect(native.quit).not.toHaveBeenCalled()
+        await getBuildApplyStatus({ operationId: '' })
+    })
+    it('does not report success while terminal publication still blocks startup', async () => {
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockResolvedValueOnce(
+            wire({
+                available: true,
+                value: {
+                    state: 'terminal',
+                    operation: { ...operation(), outcome: 'succeeded' },
+                    startupAllowed: false
+                },
+                refusal: null
+            })
+        )
+        expect(await getBuildApplyStatus({ operationId: '' })).toMatchObject({
+            available: false,
+            refusal: { code: 'status_unknown' },
+            uncertainOperation: { operationId: 'operation_1', outcome: 'succeeded' }
+        })
+        expect(native.quit).not.toHaveBeenCalled()
+    })
+    it('rehydrates a lost reply through the no-start status reader when the service is off', async () => {
+        await chooseBuildApplyPreview()
+        const detach = vi.spyOn(supervisor, 'stop').mockResolvedValue(undefined)
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockRejectedValueOnce(new Error('lost'))
+        await startBuildApply({ previewId: 'preview_1', consent })
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockRejectedValueOnce(new Error('offline'))
+        vi.mocked(statusReader.readBuildApplyStatus).mockResolvedValueOnce({
+            available: true,
+            value: { state: 'pending', operation: operation(), startupAllowed: false },
+            refusal: null
+        })
+        await getBuildApplyStatus({ operationId: '' })
+        expect(statusReader.readBuildApplyStatus).toHaveBeenCalledOnce()
+        expect(detach).toHaveBeenCalledOnce()
+        expect(native.quit).toHaveBeenCalledOnce()
+    })
+    it('resolves a lost reply with a closed matching terminal result without quitting', async () => {
+        await chooseBuildApplyPreview()
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockRejectedValueOnce(new Error('lost'))
+        await startBuildApply({ previewId: 'preview_1', consent })
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockResolvedValueOnce(
+            wire({
+                available: true,
+                value: {
+                    state: 'terminal',
+                    operation: { ...operation(), outcome: 'refused' },
+                    startupAllowed: true
+                },
+                refusal: null
+            })
+        )
+        expect((await getBuildApplyStatus({ operationId: '' })).available).toBe(true)
+        expect(native.quit).not.toHaveBeenCalled()
+        expect((await chooseBuildApplyPreview()).available).toBe(true)
     })
     it('deduplicates concurrent status reads and rejects a late previous-generation result', async () => {
         let complete: (value: JsonValue) => void = () => {
@@ -382,7 +563,13 @@ describe('native handoff and fencing', () => {
         const settled = Promise.allSettled([first, second])
         expect(JsonRpcSocketClient.prototype.call).toHaveBeenCalledOnce()
         currentClient().emit('disconnected')
-        complete(wire({ available: true, value: operation(), refusal: null }))
+        complete(
+            wire({
+                available: true,
+                value: { state: 'pending', operation: operation(), startupAllowed: false },
+                refusal: null
+            })
+        )
         expect((await settled).map(result => result.status)).toEqual(['rejected', 'rejected'])
     })
     it('rejects a late preview reply after connection replacement', async () => {
@@ -422,6 +609,46 @@ describe('native handoff and fencing', () => {
             }
         )
         expect(connection.connectOrStart).not.toHaveBeenCalled()
+    })
+    it('rejects stale status for a lost reply before accepting fresh correlation', async () => {
+        await chooseBuildApplyPreview()
+        const detach = vi.spyOn(supervisor, 'stop').mockResolvedValue(undefined)
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockRejectedValueOnce(new Error('lost'))
+        await startBuildApply({ previewId: 'preview_1', consent })
+        let complete: (value: JsonValue) => void = () => {
+            throw new Error('missing deferred result')
+        }
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockReturnValueOnce(
+            new Promise(resolve => {
+                complete = resolve
+            })
+        )
+        const read = getBuildApplyStatus({ operationId: '' })
+        const settled = Promise.allSettled([read])
+        currentClient().emit('disconnected')
+        complete(
+            wire({
+                available: true,
+                value: { state: 'pending', operation: operation(), startupAllowed: false },
+                refusal: null
+            })
+        )
+        expect((await settled)[0].status).toBe('rejected')
+        expect(detach).not.toHaveBeenCalled()
+        expect(native.quit).not.toHaveBeenCalled()
+        await getBuildApplyStatus({ operationId: '' })
+        expect(detach).toHaveBeenCalledOnce()
+        expect(native.quit).toHaveBeenCalledOnce()
+    })
+    it('hands off a lost reply from a fresh correlated status after reconnect', async () => {
+        await chooseBuildApplyPreview()
+        const detach = vi.spyOn(supervisor, 'stop').mockResolvedValue(undefined)
+        vi.mocked(JsonRpcSocketClient.prototype.call).mockRejectedValueOnce(new Error('lost'))
+        await startBuildApply({ previewId: 'preview_1', consent })
+        currentClient().emit('disconnected')
+        await getBuildApplyStatus({ operationId: '' })
+        expect(detach).toHaveBeenCalledOnce()
+        expect(native.quit).toHaveBeenCalledOnce()
     })
 })
 

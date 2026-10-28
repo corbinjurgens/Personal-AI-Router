@@ -33,10 +33,14 @@ func TestBuildApplyStartupGateRetainsUnresolvedOutcomes(t *testing.T) {
 			if wantError && !errors.Is(err, buildapply.ErrRecoveryNeeded) {
 				t.Fatalf("missing recovery category: %v", err)
 			}
+			if readErr == nil && (err == nil) != state.StartupAllowed() {
+				t.Fatalf("gate %v disagrees with journal predicate", err)
+			}
 		})
 	}
 	test("idle", buildapply.JournalState{}, nil, false)
 	test("pending", buildapply.JournalState{Current: &buildapply.Receipt{}}, nil, true)
+	test("terminal intent alone", buildapply.JournalState{TerminalPending: true}, nil, true)
 	failed := buildapply.OutcomeFailed
 	test("failed remains current", buildapply.JournalState{Current: &buildapply.Receipt{Outcome: &failed}}, nil, true)
 	uncertain := buildapply.OutcomeUncertain

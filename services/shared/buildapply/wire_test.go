@@ -5,6 +5,7 @@ package buildapply
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -199,7 +200,7 @@ func TestBuildApplyStatusRoundtripPreservesStateAndCorrelation(t *testing.T) {
 			if err := json.Unmarshal(value["state"], &state); err != nil {
 				t.Fatalf("decode status state: %v", err)
 			}
-			if len(value) != 2 || state != status.State {
+			if len(value) != 3 || state != status.State || string(value["startupAllowed"]) != fmt.Sprint(status.StartupAllowed) {
 				t.Fatalf("status structure = %v", value)
 			}
 			if status.Operation == nil {
@@ -227,9 +228,10 @@ func TestBuildApplyStatusRoundtripPreservesStateAndCorrelation(t *testing.T) {
 			}
 		})
 	}
-	test("idle without recorded operation", BuildApplyStatus{State: StatusIdle})
+	test("idle without recorded operation", BuildApplyStatus{State: StatusIdle, StartupAllowed: true})
 	test("pending", BuildApplyStatus{State: StatusPending, Operation: &pending})
 	test("terminal", BuildApplyStatus{State: StatusTerminal, Operation: &terminal})
+	test("closed terminal", BuildApplyStatus{State: StatusTerminal, Operation: &terminal, StartupAllowed: true})
 	test("unknown with pending receipt", BuildApplyStatus{State: StatusUnknown, Operation: &pending})
 	test("unknown with terminal receipt", BuildApplyStatus{State: StatusUnknown, Operation: &terminal})
 }
@@ -240,7 +242,7 @@ func TestBuildApplyStatusRejectsMalformedPayloads(t *testing.T) {
 		t.Fatalf("encode operation fixture: %v", err)
 	}
 	status := func(state, operation string) string {
-		return `{"available":true,"value":{"state":"` + state + `","operation":` + operation + `},"refusal":null}`
+		return `{"available":true,"value":{"state":"` + state + `","operation":` + operation + `,"startupAllowed":false},"refusal":null}`
 	}
 	test := func(name, input string) {
 		t.Helper()
@@ -269,6 +271,8 @@ func TestBuildApplyStatusRejectsMalformedPayloads(t *testing.T) {
 	}
 	test("missing state", `{"available":true,"value":{"operation":null},"refusal":null}`)
 	test("missing operation", `{"available":true,"value":{"state":"idle"},"refusal":null}`)
+	test("missing startup permission", `{"available":true,"value":{"state":"idle","operation":null},"refusal":null}`)
+	test("null startup permission", `{"available":true,"value":{"state":"idle","operation":null,"startupAllowed":null},"refusal":null}`)
 	test("unknown state name", status("unreadable", string(operation)))
 	test("idle carries operation", status("idle", string(operation)))
 	test("pending lacks operation", status("pending", "null"))
@@ -362,6 +366,9 @@ func TestBuildApplyStatusRejectsContradictoryOutput(t *testing.T) {
 	test("terminal lacks outcome", BuildApplyStatus{State: StatusTerminal, Operation: &pending})
 	test("unknown lacks correlation", BuildApplyStatus{State: StatusUnknown})
 	test("invalid state", BuildApplyStatus{State: "unreadable", Operation: &pending})
+	test("idle refuses startup", BuildApplyStatus{State: StatusIdle})
+	test("pending permits startup", BuildApplyStatus{State: StatusPending, Operation: &pending, StartupAllowed: true})
+	test("unknown permits startup", BuildApplyStatus{State: StatusUnknown, Operation: &pending, StartupAllowed: true})
 }
 
 func TestBuildApplyStatusEncodingBoundsCompleteOutput(t *testing.T) {
@@ -415,7 +422,7 @@ func TestBuildApplyStatusRequiresExactPreviewMatch(t *testing.T) {
 	if _, err := DecodeStatusResult(raw, "../preview"); err == nil {
 		t.Fatal("accepted invalid expected preview")
 	}
-	idle := BuildApplyStatus{State: StatusIdle}
+	idle := BuildApplyStatus{State: StatusIdle, StartupAllowed: true}
 	raw, err = EncodeStatusResult(Result[BuildApplyStatus]{Available: true, Value: &idle})
 	if err != nil {
 		t.Fatalf("encode idle fixture: %v", err)
@@ -599,7 +606,8 @@ func TestTypeScriptBuildApplyFieldParity(t *testing.T) {
 	status := reflect.TypeOf(BuildApplyStatus{})
 	stateField, stateOK := status.FieldByName("State")
 	operationField, operationOK := status.FieldByName("Operation")
-	if !stateOK || !operationOK || status.NumField() != 2 || stateField.Type != reflect.TypeOf(StatusState("")) || operationField.Type != reflect.TypeOf((*BuildApplyOperation)(nil)) {
+	startupField, startupOK := status.FieldByName("StartupAllowed")
+	if !stateOK || !operationOK || !startupOK || status.NumField() != 3 || startupField.Type.Kind() != reflect.Bool || stateField.Type != reflect.TypeOf(StatusState("")) || operationField.Type != reflect.TypeOf((*BuildApplyOperation)(nil)) {
 		t.Fatal("unexpected Go status structure")
 	}
 	match := regexp.MustCompile(`(?s)export type BuildApplyStatus =\s*(.*?)(?:export|$)`).FindStringSubmatch(string(data))
@@ -607,7 +615,7 @@ func TestTypeScriptBuildApplyFieldParity(t *testing.T) {
 		t.Fatal("missing TS status union")
 	}
 	branches := map[string]string{}
-	pattern := `\{\s*` + stateField.Tag.Get("json") + `: '([^']+)'; ` + operationField.Tag.Get("json") + `: ([^}]+)\}`
+	pattern := `\{\s*` + stateField.Tag.Get("json") + `: '([^']+)'; ` + operationField.Tag.Get("json") + `: ([^;]+); ` + startupField.Tag.Get("json") + `: (?:true|false|boolean)\s*\}`
 	for _, branch := range regexp.MustCompile(pattern).FindAllStringSubmatch(match[1], -1) {
 		branches[branch[1]] = strings.TrimSpace(branch[2])
 	}

@@ -65,6 +65,7 @@ import {
     getConnectorStatus,
     initializeConnector
 } from '@/electron/connector'
+import { restartConnector } from '@/electron/connector'
 
 describe('service startup failure handling', () => {
     beforeEach(async () => {
@@ -125,5 +126,15 @@ describe('service startup failure handling', () => {
 
         await destroyConnector({ force: true })
         expect(mocks.supervisor.stopService).toHaveBeenCalledOnce()
+    })
+    it('retains the attached service when a restart is gated', async () => {
+        await initializeConnector()
+        mocks.supervisor.start.mockClear()
+        mocks.supervisor.stop.mockClear()
+        mocks.supervisor.stopService.mockRejectedValueOnce(new Error('build apply pending'))
+        await expect(restartConnector()).rejects.toThrow('build apply pending')
+        expect(mocks.supervisor.stop).not.toHaveBeenCalled()
+        expect(mocks.supervisor.start).not.toHaveBeenCalled()
+        expect(getConnectorStatus()).toBe('connected')
     })
 })
