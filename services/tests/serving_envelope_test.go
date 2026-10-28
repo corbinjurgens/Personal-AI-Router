@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -305,6 +306,7 @@ type neServingFixture struct {
 	enginePort, facadePort, scannerPort, inertPort int
 	ports                                          fixtureServicePorts
 	client                                         *http.Client
+	inert                                          *httptest.Server
 	p                                              *interopProcess
 	fake                                           *os.Process
 	residentRetryInterval                          time.Duration
@@ -362,6 +364,7 @@ func newNEServingFixture(t *testing.T) *neServingFixture {
 	f.scannerPort = reservations[2].Addr().(*net.TCPAddr).Port
 	inert := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	t.Cleanup(inert.Close)
+	f.inert = inert
 	f.inertPort = inert.Listener.Addr().(*net.TCPAddr).Port
 	f.ports = reserveFixtureServicePorts(t)
 	jointIsolateEngines(t, f.root, f.inertPort)

@@ -2141,6 +2141,9 @@ func TestServedResidentProcessVeto(t *testing.T) {
 		f := newSRProcessFixture(t)
 		before := f.control(t, "")
 		starts := len(f.starts(t))
+		// The other engines are absent; release their owned probe endpoint so
+		// Pause can verify refusal while it stops the real managed runtime.
+		f.inert.Close()
 		f.call(t, "node:set-availability", map[string]string{"state": "paused"}, nil)
 		assertSwitchProcessStopped(t, int32(before.Base.PID))
 		f.resident(t, neModel)

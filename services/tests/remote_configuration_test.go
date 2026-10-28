@@ -579,8 +579,10 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 		draft := xaPeerDraft(t, j.want)
 		draft.Tiers["weak"][0].Model = "different-local"
 		m := j.originCall(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision})
-		if m.Error == nil || m.Error.Code != -32602 || m.Error.Message != "remote node policy: HTTP 400: a paired node cannot change the tiers" || len(m.Result) != 0 {
-			t.Fatalf("protected tier refusal mismatch: error_present=%t result_bytes=%d", m.Error != nil, len(m.Result))
+		// Invalid parameters preserve the target's diagnostic, without adding
+		// a transport prefix (policyrelay.go postPolicy).
+		if m.Error == nil || m.Error.Code != -32602 || m.Error.Message != "a paired node cannot change the tiers" || len(m.Result) != 0 {
+			t.Fatalf("protected tier refusal mismatch: error=%+v result_bytes=%d", m.Error, len(m.Result))
 		}
 		j.assertPolicy(t)
 	})
@@ -667,8 +669,8 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 				t.Fatal("rejected draft lost its joint-local resident declaration")
 			}
 			m := j.originCall(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision})
-			if m.Error == nil || m.Error.Code != -32602 || m.Error.Message != "remote node policy: HTTP 400: residentModels must be a subset of servedModels" || len(m.Result) != 0 {
-				t.Fatalf("resident subset refusal mismatch: error_present=%t result_bytes=%d", m.Error != nil, len(m.Result))
+			if m.Error == nil || m.Error.Code != -32602 || m.Error.Message != "residentModels must be a subset of servedModels" || len(m.Result) != 0 {
+				t.Fatalf("resident subset refusal mismatch: error=%+v result_bytes=%d", m.Error, len(m.Result))
 			}
 			j.assertPolicy(t)
 		}) {
