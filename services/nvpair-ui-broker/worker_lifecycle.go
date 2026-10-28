@@ -521,12 +521,6 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	b.engineConfigMu.Lock()
 	source := b.activateEngineManagerSource()
 	b.invalidatePendingModelSettingsRunningLocked()
-	r := b.nodePolicyRuntime()
-	r.mu.Lock()
-	r.loaded = map[string][]string{}
-	r.intent = map[string]bool{}
-	r.running = map[string]bool{}
-	r.mu.Unlock()
 	b.engineConfigMu.Unlock()
 	w, err := startRPCWorker("engine-manager", b.engineMgrPath, args, func(method string, params json.RawMessage) {
 		b.forwardEngineNotificationFrom(source, method, params)

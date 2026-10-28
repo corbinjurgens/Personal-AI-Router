@@ -2604,6 +2604,96 @@ func TestModelConfigStoppedStatusKeepsEngineOff(t *testing.T) {
 	}
 }
 
+func TestModelConfigSourceEvidence(t *testing.T) {
+	activate := func(f *modelConfigFixture) {
+		f.source = f.b.activateEngineManagerSource()
+		f.b.workersMu.Lock()
+		worker := f.b.engineMgr
+		f.b.workersMu.Unlock()
+		f.b.bindEngineMgr(worker, f.source)
+	}
+	assertStatus := func(t *testing.T, f *modelConfigFixture, state nodepolicy.ModelConfigurationState, reason nodepolicy.ModelConfigurationReason) {
+		t.Helper()
+		status := f.b.modelConfiguration(f.b.captureModelConfig())
+		if len(status.Models) != 1 || status.Models[0].State != state || status.Models[0].Reason != reason {
+			t.Fatalf("model configuration = %+v, want state %s reason %s", status, state, reason)
+		}
+	}
+
+	t.Run("retired source withdraws intent and running evidence", func(t *testing.T) {
+		f := newModelConfigFixture(t)
+		f.b.retireEngineManagerSource(f.source)
+		assertStatus(t, f, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonProjectionUnknown)
+	})
+
+	t.Run("new source before any snapshot reply", func(t *testing.T) {
+		f := newModelConfigFixture(t)
+		activate(f)
+		assertStatus(t, f, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonProjectionUnknown)
+	})
+
+	t.Run("new source intent reply precedes running snapshot", func(t *testing.T) {
+		f := newModelConfigFixture(t)
+		activate(f)
+		f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			switch method {
+			case engineIntentMethod:
+				return map[string]any{"enabledByEngine": map[string]bool{"llamacpp": true}, "offByEngine": map[string]string{}}, ""
+			case "engine:get-installed":
+				return map[string]any{"engines": []any{map[string]any{"engine": "llamacpp", "running": true}}}, holdSuccessReply
+			case "engine:models":
+				return map[string]any{"models": []string{}, "loadedByEngine": map[string][]string{}}, ""
+			default:
+				return map[string]bool{"ok": true}, ""
+			}
+		})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			f.b.refreshEnginePolicySnapshotFrom(f.b.getEngineMgr(), f.source)
+		}()
+		f.engine.waitFor("installed snapshot after intent reply", func(calls []policyCall) bool {
+			return len(modelConfigCalls(f.engine, "engine:get-installed")) > 0
+		})
+		defer func() { f.engine.releaseHeld(); awaitModelConfigDone(t, done) }()
+		assertStatus(t, f, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonProjectionUnknown)
+	})
+
+	t.Run("known off intent", func(t *testing.T) {
+		f := newModelConfigFixture(t)
+		activate(f)
+		f.b.observeIntentFrom(f.source, map[string]bool{"llamacpp": false})
+		assertStatus(t, f, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOff)
+	})
+
+	t.Run("known on intent without running observation", func(t *testing.T) {
+		f := newModelConfigFixture(t)
+		activate(f)
+		f.b.observeIntentFrom(f.source, map[string]bool{"llamacpp": true})
+		assertStatus(t, f, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonProjectionUnknown)
+	})
+
+	t.Run("known on intent with stopped observation", func(t *testing.T) {
+		f := newModelConfigFixture(t)
+		activate(f)
+		f.b.observeIntentFrom(f.source, map[string]bool{"llamacpp": true})
+		if !f.b.observeEngineRunningFrom(f.source, "llamacpp", false) {
+			t.Fatal("current source stopped observation rejected")
+		}
+		assertStatus(t, f, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOff)
+	})
+
+	t.Run("pause precedes missing source evidence", func(t *testing.T) {
+		f := newModelConfigFixture(t)
+		r := f.b.nodePolicyRuntime()
+		r.mu.Lock()
+		r.localPauseRequested = true
+		r.mu.Unlock()
+		f.b.retireEngineManagerSource(f.source)
+		assertStatus(t, f, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonPaused)
+	})
+}
+
 func TestModelConfigInternalClientMethodsDenied(t *testing.T) {
 	for _, method := range []string{nodepolicy.MethodReconcileResident, residentDispatchRequestMethod, residentDispatchReplyMethod} {
 		t.Run(method, func(t *testing.T) {
@@ -3587,7 +3677,22 @@ func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
 	r.mu.Lock()
 	r.engineIdentity = identity
 	r.mu.Unlock()
-	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.engine.mu.Lock()
+	answer := f.engine.answer
+	f.engine.mu.Unlock()
+	f.engine.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		switch method {
+		case engineIntentMethod:
+			return map[string]any{"enabledByEngine": map[string]bool{"llamacpp": true}, "offByEngine": map[string]string{}}, ""
+		case "engine:get-installed":
+			return map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "running": true}}}, ""
+		case "engine:models":
+			return map[string]any{"loadedByEngine": map[string][]string{"llamacpp": {"resident"}}}, ""
+		default:
+			return answer(method, params)
+		}
+	})
+	f.b.refreshEnginePolicySnapshotFrom(f.b.getEngineMgr(), f.source)
 	readback := residentLaunchReadback(f.b.captureModelConfig())
 	f.engine.setAnswer(modelConfigNotDispatched(&readback))
 	assertBarrier := func(stage string, want nodepolicy.ModelConfigurationState) {

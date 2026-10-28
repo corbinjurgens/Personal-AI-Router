@@ -49,6 +49,7 @@ func (b *Broker) activateEngineManagerSource() *engineManagerSource {
 	r.mu.Lock()
 	r.engineManagerSource = source
 	r.engineIdentity = nil
+	r.clearEngineManagerObservationsLocked()
 	invalidated := r.current.Availability == nodepolicy.Paused && r.live == nodepolicy.Paused
 	if invalidated {
 		r.live = nodepolicy.Draining
@@ -103,8 +104,21 @@ func (b *Broker) acceptModelIdentity(source *engineManagerSource, engines map[st
 	b.identityChanged()
 }
 
-// retireEngineManagerSource withdraws every run identity when engine-manager
-// exits: the processes it reported may stop or be replaced without it.
+// clearEngineManagerObservationsLocked withdraws observations and their idle
+// bookkeeping together with their source. Caller holds the runtime mutex.
+func (r *policyRuntime) clearEngineManagerObservationsLocked() {
+	clear(r.running)
+	clear(r.runningObserved)
+	clear(r.loaded)
+	clear(r.intent)
+	clear(r.runningSince)
+	clear(r.residencyAt)
+	clear(r.idleUnloadedAt)
+	clear(r.idleSleptAt)
+}
+
+// retireEngineManagerSource withdraws observations when engine-manager exits:
+// the processes it reported may stop or be replaced without it.
 func (b *Broker) retireEngineManagerSource(source *engineManagerSource) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
@@ -114,6 +128,7 @@ func (b *Broker) retireEngineManagerSource(source *engineManagerSource) {
 	}
 	r.engineManagerSource = nil
 	r.engineIdentity = nil
+	r.clearEngineManagerObservationsLocked()
 	invalidated := r.current.Availability == nodepolicy.Paused && r.live == nodepolicy.Paused
 	if invalidated {
 		r.live = nodepolicy.Draining

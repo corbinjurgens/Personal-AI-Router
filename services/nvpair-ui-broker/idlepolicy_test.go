@@ -95,6 +95,87 @@ func TestResidentProtectionIdleSleepPlanning(t *testing.T) {
 	}
 }
 
+func TestIdlePlanningWithdrawsEngineManagerSourceState(t *testing.T) {
+	test := func(name string, transition func(*Broker, *engineManagerSource) *engineManagerSource) {
+		t.Run(name, func(t *testing.T) {
+			b, _ := newPolicyBroker(t)
+			r := b.nodePolicyRuntime()
+			now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+			r.mu.Lock()
+			r.now = func() time.Time { return now }
+			r.current.Idle.StopEngineAfterMinutes = 1
+			r.mu.Unlock()
+			old := b.activateEngineManagerSource()
+			b.observeEngineRunningFrom(old, "ollama", true)
+			b.observeLoadedFrom(old, map[string][]string{"ollama": {"model"}})
+			b.observeIntentFrom(old, map[string]bool{"ollama": true})
+			r.mu.Lock()
+			r.runningSince["ollama"] = now.Add(-2 * time.Minute)
+			r.residencyAt["ollama"] = now.Add(-2 * time.Minute)
+			r.idleUnloadedAt["ollama"] = now.Add(-2 * time.Minute)
+			r.idleSleptAt["ollama"] = now.Add(-3 * time.Minute)
+			r.mu.Unlock()
+
+			current := transition(b, old)
+			// A late callback from the retired source must not restore its state.
+			b.observeEngineRunningFrom(old, "ollama", true)
+			b.observeLoadedFrom(old, map[string][]string{"ollama": {"model"}})
+			b.observeIntentFrom(old, map[string]bool{"ollama": true})
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // Allow planning but prevent any worker RPC.
+			b.idleTick(ctx)
+			r.mu.Lock()
+			planned := r.idleSleptAt["ollama"]
+			_, running := r.running["ollama"]
+			_, loaded := r.loaded["ollama"]
+			_, intent := r.intent["ollama"]
+			_, observed := r.runningObserved["ollama"]
+			_, runningSince := r.runningSince["ollama"]
+			_, residencyAt := r.residencyAt["ollama"]
+			_, unloadedAt := r.idleUnloadedAt["ollama"]
+			r.mu.Unlock()
+			if !planned.IsZero() {
+				t.Errorf("idle policy planned sleep for retired source's engine at %v", planned)
+			}
+			if running || loaded || intent {
+				t.Errorf("retired source state remains: running=%v loaded=%v intent=%v", running, loaded, intent)
+			}
+			if observed || runningSince || residencyAt || unloadedAt {
+				t.Errorf("retired source bookkeeping remains: observed=%v runningSince=%v residencyAt=%v unloadedAt=%v", observed, runningSince, residencyAt, unloadedAt)
+			}
+			if got := b.runningSnapshot(); len(got) != 0 {
+				t.Errorf("pause running snapshot retains retired engines: %v", got)
+			}
+			if got := b.loadedSnapshot(); len(got) != 0 {
+				t.Errorf("pause loaded snapshot retains retired engines: %v", got)
+			}
+
+			if current == nil {
+				current = b.activateEngineManagerSource()
+			}
+			b.observeEngineRunningFrom(current, "llamacpp", true)
+			b.observeLoadedFrom(current, map[string][]string{"llamacpp": {"new-model"}})
+			b.observeIntentFrom(current, map[string]bool{"llamacpp": true})
+			b.retireEngineManagerSource(old)
+			r.mu.Lock()
+			newRunning := r.running["llamacpp"]
+			newLoaded := append([]string(nil), r.loaded["llamacpp"]...)
+			newIntent := r.intent["llamacpp"]
+			r.mu.Unlock()
+			if !newRunning || !newIntent || !reflect.DeepEqual(newLoaded, []string{"new-model"}) {
+				t.Errorf("replacement state lost after old retirement: running=%v loaded=%v intent=%v", newRunning, newLoaded, newIntent)
+			}
+		})
+	}
+	test("retirement before replacement", func(b *Broker, old *engineManagerSource) *engineManagerSource {
+		b.retireEngineManagerSource(old)
+		return nil
+	})
+	test("activation replaces a live source", func(b *Broker, _ *engineManagerSource) *engineManagerSource {
+		return b.activateEngineManagerSource()
+	})
+}
+
 func TestResidentProtectionRechecksQueuedIdleSleep(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	worker := attachFakeEngine(t, b)
