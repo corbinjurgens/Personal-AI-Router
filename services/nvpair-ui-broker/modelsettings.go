@@ -14,12 +14,14 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"time"
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/engineintent"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 )
 
 type settingsWorkerError struct {
@@ -372,16 +374,26 @@ func (b *Broker) modelWorkerCurrent(worker *rpcWorker, source *engineManagerSour
 }
 
 // Preview reads native facts outside owner locks, then validates the captured
-// journal/policy/source again. Apply performs this same read and compares the
-// entire review digest; it cannot silently substitute a new resolution.
+// journal/policy/source again. Apply validates the retained finite settings;
+// it never repeats the portable patch or substitutes a new resolution.
 type modelSettingsReviewSource struct {
-	Launch settings.LaunchState
-	Worker *rpcWorker
-	Source *engineManagerSource
+	Launch     settings.LaunchState
+	Worker     *rpcWorker
+	Source     *engineManagerSource
+	Memory     *modelconfig.TargetMemory
+	Policy     string
+	ReviewedAt time.Time
 }
 
 func (b *Broker) previewModelSettings(ctx context.Context, input settings.Request, caller string) (settings.Preview, error) {
-	return b.reviewModelSettings(ctx, input, caller, nil)
+	var source modelSettingsReviewSource
+	preview, err := b.reviewModelSettings(ctx, input, caller, &source)
+	if err == nil && len(preview.Errors) == 0 && preview.Conflict == nil {
+		b.engineConfigMu.Lock()
+		err = b.retainModelReviewLocked(modelSettingsRequest(input, caller), caller, preview, source)
+		b.engineConfigMu.Unlock()
+	}
+	return preview, err
 }
 
 func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request, caller string, capture *modelSettingsReviewSource) (settings.Preview, error) {
@@ -420,8 +432,21 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 		change.Policy, change.PreviewDigest = nil, ""
 		// During local supersession, the native store may differ from desired.
 		request.Settings = settings.ConfigFromLaunch(launch, p.Settings.ProxyPort)
-		if err := modelSettingsCall(ctx, worker, "engine:preview-launch", request, &preview); err != nil {
+		envelope := modelWorkerRequest(b, request, caller, true)
+		started, clockErr := noderec.MemoryBootClock()
+		if err := modelSettingsCall(ctx, worker, "engine:preview-launch", envelope, &preview); err != nil {
 			return preview, err
+		}
+		elapsed := modelWorkerElapsed(started, clockErr)
+		if envelope.Memory != nil && !modelReviewMemoryCurrent(envelope.Memory, b.modelTargetMemory(), preview.Settings.ModelLoads, p.ModelChange.ModelID) {
+			if preview.Auto != nil && preview.Auto.Resolved != nil {
+				return settings.Preview{}, modelSettingsConflict("target evidence changed during preview; explicitly Recalculate")
+			}
+			elapsed = -1
+		}
+		modelAgeAdvice(preview.Estimate, elapsed)
+		if preview.Auto != nil {
+			modelAgeAdvice(&preview.Auto.Estimate, elapsed)
 		}
 		if len(preview.Errors) > 0 || preview.Conflict != nil {
 			return preview, nil
@@ -485,11 +510,12 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 	review := preview.Clone()
 	review.Estimate = nil
 	preview.PreviewDigest = modelSettingsHash(struct {
+		Target                 string
 		Caller                 string
 		Request                settings.Request
 		Policy, Native, Source string
 		Preview                settings.Preview
-	}{caller, request, modelPolicyFingerprint(policy), nativeDigest, source.settingsEpoch, review})
+	}{b.nodeID, caller, request, modelPolicyFingerprint(policy), nativeDigest, source.settingsEpoch, review})
 	if err := modelconfig.CheckPayloadSize(preview); err != nil {
 		preview.Estimate = nil
 		if err := modelconfig.CheckPayloadSize(preview); err != nil {
@@ -497,7 +523,7 @@ func (b *Broker) reviewModelSettings(ctx context.Context, input settings.Request
 		}
 	}
 	if capture != nil {
-		*capture = modelSettingsReviewSource{Launch: launch, Worker: worker, Source: source}
+		*capture = modelSettingsReviewSource{Launch: launch, Worker: worker, Source: source, Policy: modelPolicyFingerprint(policy)}
 	}
 	return preview, nil
 }
@@ -662,7 +688,7 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 		return settingsReceipt{}, err
 	}
 	var source modelSettingsReviewSource
-	preview, err := b.reviewModelSettings(ctx, p, caller, &source)
+	preview, source, err := b.retainedModelReview(ctx, p, caller)
 	if err != nil {
 		return settingsReceipt{}, err
 	}
@@ -685,6 +711,9 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 	record, policy, err := b.modelSettingsBaselineLocked(p, caller, launch)
 	if err != nil {
 		return settingsReceipt{}, err
+	}
+	if modelPolicyFingerprint(policy) != source.Policy {
+		return settingsReceipt{}, modelSettingsConflict("policy contents changed since review; explicitly Recalculate")
 	}
 	if !b.modelWorkerCurrent(worker, source.Source) || ctx.Err() != nil {
 		return settingsReceipt{}, modelSettingsConflict("engine source changed before acceptance")
@@ -711,6 +740,18 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 	if err := checkExpectedRevision(r.current, p.ModelChange.ExpectedPolicyRevision); err != nil {
 		r.mu.Unlock()
 		return settingsReceipt{}, err
+	}
+	if time.Since(source.ReviewedAt) >= modelReviewTTL {
+		r.mu.Unlock()
+		return settingsReceipt{}, modelSettingsConflict("review expired before acceptance; explicitly Recalculate")
+	}
+	if !b.modelReviewRetainedLocked(p, caller, source.ReviewedAt) {
+		r.mu.Unlock()
+		return settingsReceipt{}, modelSettingsConflict("review superseded or evicted during validation; explicitly Recalculate")
+	}
+	if source.Memory != nil && !modelReviewMemoryCurrent(source.Memory, b.modelTargetMemory(), preview.Settings.ModelLoads, p.ModelChange.ModelID) {
+		r.mu.Unlock()
+		return settingsReceipt{}, modelSettingsConflict("target memory source or age changed before acceptance; explicitly Recalculate")
 	}
 	previous := b.engineSettings[p.Engine]
 	if previous != nil && previous.Model != nil && previous.Model.Stage != "completed" {
@@ -771,6 +812,7 @@ func (b *Broker) applyModelSettings(ctx context.Context, input settings.Request,
 		r.mu.Unlock()
 		return settingsReceipt{}, fmt.Errorf("model settings acceptance could not be confirmed; no native or policy effects were made: %w", err)
 	}
+	b.releaseAcceptedModelReviewLocked(p, caller)
 	if record.Model.Change.Load != nil {
 		r.drains[p.Engine] = true
 		delete(r.settingsIdentity, p.Engine)
@@ -965,7 +1007,7 @@ func (b *Broker) runModelSettingsOperationLocked(ctx context.Context, engine str
 		if err == nil {
 			// Full frozen settings revalidation checks bindings/build without
 			// running the portable patch or selecting a fresh Auto result.
-			err = modelSettingsCall(ctx, worker, "engine:preview-launch", settings.Request{Engine: engine, Settings: record.Snapshot.Settings.Clone()}, &validated)
+			err = modelSettingsCall(ctx, worker, "engine:preview-launch", settings.WorkerRequest[settings.Request]{Request: settings.Request{Engine: engine, Settings: record.Snapshot.Settings.Clone()}}, &validated)
 		}
 		if err == nil {
 			var rechecked settings.LaunchState
@@ -1174,6 +1216,10 @@ func (b *Broker) inspectModelSettings(ctx context.Context, p modelconfig.Inspect
 	}
 	ctx, cancel := context.WithTimeout(ctx, settings.CallBudget)
 	defer cancel()
+	lease, leaseErr := b.reserveBuildApplySettings()
+	if lease != nil {
+		defer lease.Release()
+	}
 	b.engineConfigMu.Lock()
 	err := b.authorizeSettingsCallerLocked(caller)
 	b.engineConfigMu.Unlock()
@@ -1182,13 +1228,20 @@ func (b *Broker) inspectModelSettings(ctx context.Context, p modelconfig.Inspect
 	}
 	p.NodeID = ""
 	var raw json.RawMessage
-	if err := b.settingsWorkerCall(ctx, "engine:inspect-model", p, &raw); err != nil {
+	envelope := modelWorkerRequest(b, p, caller, leaseErr == nil)
+	started, clockErr := noderec.MemoryBootClock()
+	if err := b.settingsWorkerCall(ctx, "engine:inspect-model", envelope, &raw); err != nil {
 		return modelconfig.InspectResult{}, err
 	}
 	result, err := modelconfig.DecodeInspectResult(raw)
 	if err != nil {
 		return modelconfig.InspectResult{}, err
 	}
+	elapsed := modelWorkerElapsed(started, clockErr)
+	if envelope.Memory != nil && !modelReviewMemoryCurrent(envelope.Memory, b.modelTargetMemory(), nil, "") {
+		elapsed = -1
+	}
+	modelAgeAdvice(&result.Estimate, elapsed)
 	if result.Engine != p.Engine || result.ModelID != p.ModelID {
 		return modelconfig.InspectResult{}, fmt.Errorf("model inspection: worker reply identity mismatch")
 	}
@@ -1211,13 +1264,20 @@ func (b *Broker) handleModelInspection(msg *Message) {
 			_ = b.codec.RespondError(msg.ID, -32000, "engine manager unavailable")
 			return
 		}
+		started, clockErr := noderec.MemoryBootClock()
 		err = worker.RelayRequest("engine:remote-inspect-model", msg.Params, func(result json.RawMessage, rpcErr *RPCError, err error) {
 			if err != nil {
 				_ = b.codec.RespondError(msg.ID, -32000, err.Error())
 			} else if rpcErr != nil {
 				_ = b.codec.RespondError(msg.ID, rpcErr.Code, rpcErr.Message)
 			} else {
-				_ = b.codec.Respond(msg.ID, result)
+				inspection, decodeErr := modelconfig.DecodeInspectResult(result)
+				if decodeErr != nil {
+					_ = b.codec.RespondError(msg.ID, -32000, decodeErr.Error())
+					return
+				}
+				modelAgeAdvice(&inspection.Estimate, modelWorkerElapsed(started, clockErr))
+				_ = b.codec.Respond(msg.ID, inspection)
 			}
 		})
 		if err != nil {

@@ -21,10 +21,16 @@ const modelAutoRevision = "auto/finite-llama/1"
 const modelAutoBudget = 128
 const modelAutoReserve = "Advisory uncalibrated heuristic: reserve 10 percent of capacity (rounded up) plus 512 MiB per independent pool; compare against snapshot free bytes. No qualification or admission guarantee."
 
-// Only a target owner may supply capacity. There is deliberately no production
-// implementation or RPC input: node-info utilization is not memory telemetry.
+// Only a target owner may supply capacity. The broker's private worker envelope
+// supplies its self observation; public requests never supply this owner.
 type modelAutoMemoryOwner interface {
 	ModelAutoMemory(context.Context) (*modelEstimateMemory, error)
+}
+
+type modelAutoSnapshotMemory struct{ memory *modelEstimateMemory }
+
+func (s modelAutoSnapshotMemory) ModelAutoMemory(ctx context.Context) (*modelEstimateMemory, error) {
+	return s.memory, ctx.Err()
 }
 
 // A cost owner may prove the narrow dense transfer optimization by deriving a
@@ -37,6 +43,8 @@ type modelAutoLayerCostOwner interface {
 
 // Private operation dependencies, never serialized or retained in Runtime.
 type modelAutoOperation struct {
+	DeviceRunner     modelDeviceRunner
+	NativeSource     func(*modelconfig.ResolvedLoad) (string, error)
 	Memory           modelAutoMemoryOwner
 	LayerCosts       modelAutoLayerCostOwner
 	ConversionSource string
@@ -320,13 +328,14 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 			out.Status = "budget-exhausted"
 			return false, false, 0, fmt.Errorf("budget-exhausted: unsearched context %d..%d, GPU layers 0..%d (128 evaluations)", floor, tokens, maxLayers)
 		}
-		candidate := requested.Clone()
+		candidate := in.Allocation.Options.Clone()
 		candidate.Context, candidate.GPU = &modelconfig.Context{Mode: "fixed", Tokens: tokens}, &gpu
 		options, allocation, err := typedLlamaModelOptions(model, candidate, facts.LayerCount)
 		if err != nil {
 			return false, false, 0, err
 		}
 		allocation.Artifacts, allocation.NativeBuildID = slices.Clone(in.Allocation.Artifacts), in.BuildID
+		allocation.ResolverRevision = modelAutoRevision
 		if allocation.GPU.Mode == "layers" && allocation.GPU.Layers != nil && *allocation.GPU.Layers > 0 {
 			if memory.Map == nil || memory.Map.Unknown != "" || memory.Map.ObservationID == "" || memory.Map.Binding == nil {
 				unknown = true
@@ -350,6 +359,15 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 			effective.Options.CacheRAM = &n
 		}
 		candidateInput := in
+		if op.NativeSource != nil {
+			build, sourceErr := op.NativeSource(allocation)
+			if sourceErr != nil {
+				return false, false, 0, sourceErr
+			}
+			allocation.NativeBuildID = build
+			effective.NativeBuildID = build
+			candidateInput.BuildID = build
+		}
 		candidateInput.Allocation = &effective
 		evaluations++
 		out.Estimate = estimates.estimate(ctx, candidateInput)
@@ -454,7 +472,7 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 		return fail(out.Status + ": no complete fitting candidate in the searched range")
 	}
 	selected.ResolverRevision = modelAutoRevision
-	selected.ReviewedInputID, err = modelAutoReviewedID(model, requested, selected, op.ConversionSource, memory)
+	selected.ReviewedInputID, err = modelAutoReviewedID(model, requested, selected, op.ConversionSource, memory, in.Allocation.Options)
 	if err != nil {
 		return fail(err.Error())
 	}
@@ -471,8 +489,11 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 // Compact review envelope: conversion source, memory snapshot hash, and a hash
 // binding both to intent, finite options, sampled artifacts and native build.
 // Telemetry itself is not needed to compile an accepted resolution again.
-func modelAutoReviewedID(model string, requested modelconfig.RequestedLoad, resolved *modelconfig.ResolvedLoad, conversion string, memory *modelEstimateMemory) (string, error) {
-	data, err := json.Marshal(memory)
+func modelAutoReviewedID(model string, requested modelconfig.RequestedLoad, resolved *modelconfig.ResolvedLoad, conversion string, memory *modelEstimateMemory, baseline ...modelconfig.RequestedLoad) (string, error) {
+	data, err := json.Marshal(struct {
+		Memory   *modelEstimateMemory
+		Baseline []modelconfig.RequestedLoad
+	}{memory, baseline})
 	if err != nil {
 		return "", err
 	}

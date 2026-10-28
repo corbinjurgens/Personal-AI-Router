@@ -182,7 +182,7 @@ func TestServingNumericErrorsThroughPreviewRPC(t *testing.T) {
 				}
 				manager := NewManager(NewCodec(writer), e, nil, "")
 				id := json.RawMessage("1")
-				manager.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:preview-launch", Params: json.RawMessage(raw)})
+				manager.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:preview-launch", Params: json.RawMessage(`{"request":` + raw + `}`)})
 				var reply Message
 				if err := json.NewDecoder(reader).Decode(&reply); err != nil {
 					t.Fatal(err)

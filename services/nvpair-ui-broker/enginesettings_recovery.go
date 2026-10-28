@@ -42,9 +42,9 @@ func (b *Broker) prepareSettingsArgumentsLocked(ctx context.Context, engine stri
 		return false, nil
 	}
 	var preview settings.Preview
-	if err := b.settingsWorkerCall(ctx, "engine:preview-launch", settings.Request{
+	if err := b.settingsWorkerCall(ctx, "engine:preview-launch", settings.WorkerRequest[settings.Request]{Request: settings.Request{
 		Engine: engine, Settings: record.Snapshot.Settings.Clone(), Format: "pair-launch-v1",
-	}, &preview); err != nil {
+	}}, &preview); err != nil {
 		return false, err
 	}
 	if len(preview.Errors) != 0 || preview.Conflict != nil {

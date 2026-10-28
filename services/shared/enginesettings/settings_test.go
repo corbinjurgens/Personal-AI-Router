@@ -34,6 +34,31 @@ func TestConfigCloneAndLaunchReconstruction(t *testing.T) {
 	}
 }
 
+func TestWorkerRequestAuthorityIsPrivateAndStrict(t *testing.T) {
+	request := Request{Engine: "llamacpp", Settings: Config{ServerPort: 8080, ProxyPort: 8081}}
+	raw, err := json.Marshal(WorkerRequest[Request]{Request: request, NativeInitAllowed: true, ValidateResources: true, ResourceModel: "exact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeWorkerRequest[Request](raw)
+	if err != nil || !decoded.NativeInitAllowed || !decoded.ValidateResources || !decoded.Request.Settings.Equal(request.Settings) {
+		t.Fatalf("worker request=%+v err=%v", decoded, err)
+	}
+	if _, err := DecodeRequest(raw); err == nil {
+		t.Fatal("public decoder accepted worker authority")
+	}
+	for _, raw := range []string{
+		`{"request":{"engine":"llamacpp"},"Request":{"engine":"llamacpp"}}`,
+		`{"request":{"engine":"llamacpp"},"nativeInitAllowed":true,"nativeInitAllowed":false}`,
+		`{"request":{"engine":"llamacpp","memory":{}}}`,
+		`{"engine":"llamacpp"}`,
+	} {
+		if _, err := DecodeWorkerRequest[Request]([]byte(raw)); err == nil {
+			t.Fatalf("accepted malformed private envelope: %s", raw)
+		}
+	}
+}
+
 func TestConfigPreservesModelLoads(t *testing.T) {
 	slots := int32(2)
 	launch := LaunchState{ModelLoads: []modelconfig.ModelLoad{{ModelID: "z", Requested: modelconfig.RequestedLoad{Slots: &slots}}, {ModelID: "a"}}}

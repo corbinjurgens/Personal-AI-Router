@@ -182,6 +182,7 @@ type Broker struct {
 	// before engineConfigMu, never the reverse.
 	settingsApplyMu sync.Mutex
 	engineConfigMu  sync.Mutex
+	modelReviews    []modelSettingsRetainedReview // guarded by engineConfigMu
 	// Build maintenance uses the settings journal lock for admission only;
 	// its reservation survives unlocked drain/stop and client disconnect.
 	buildApplyMaintenance buildApplyMaintenance

@@ -481,6 +481,17 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 		}
 		result.Settings.Serving = prepared.Config.Clone()
 		result.Settings.ModelLoads = modelconfig.CloneLoads(prepared.ModelLoads)
+		command, err = modelConstrainCommand(command, prepared.ModelLoads)
+		if err != nil {
+			return fail(err.Error())
+		}
+		if uuid, _ := modelReviewedUUID(prepared.ModelLoads); uuid != "" {
+			result.Env = literalAssignments(command.Env)
+			result.Settings.LaunchText, err = command.argumentText(rt)
+			if err != nil {
+				return fail(err.Error())
+			}
+		}
 		result.Serving = preparedServingReadback(st, prepared)
 	}
 	if prepare != nil {

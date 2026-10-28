@@ -916,5 +916,5 @@ func preparedSnapshotCommand(st *engineState, command launchCommand, snapshot st
 			command.Args = append(slices.Clone(command.Args), "--models-max", "1")
 		}
 	}
-	return llamaSnapshotCommand(command, snapshot)
+	return llamaSnapshotCommand(command, snapshot, st.plat.Runtime.ModelLoads)
 }

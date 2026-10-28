@@ -212,10 +212,10 @@ Previews disclose whole-router scope, affected configured models, the broker's
 60-second drain bound and possible interruption after timeout. Loaded-model
 observations remain an explicit unknown for the broker to resolve. Off, Pause,
 engine locks and adopted-process ownership keep their existing behavior.
-Apply-build must add model-settings apply to its maintenance exclusion when
-implemented; no exclusion symbol exists yet. Production Auto's target-memory
-and native-map caller wiring remains unavailable and refuses with
-`target memory telemetry unavailable`. Native
+Build maintenance uses the broker's existing settings-entry exclusion.
+Target-owned memory and native-map
+inputs travel only on the broker's strict worker envelope. Production Auto still
+refuses incomplete cost accounting. Native
 configuration does not create qualification or establish strict readiness.
 
 Advisory memory estimates use the private MIT `gguf-parser-go` v0.27.0 pin
@@ -233,13 +233,15 @@ dense/GQA, LFM2 recurrence, Qwen variants, SWA, mixed cache precision and tensor
 placement. Unsupported components stay independently Unknown. Companions have
 separate known storage and unsized runtime costs. Totals remain partial and
 uncalibrated, with no Fits claim. CPU and unmapped offload byte projections are
-not native device allocation readback. The existing node-info telemetry and
-broker cache are not yet connected to production inspection or Auto callers.
-Missing input leaves comparisons Unknown with reason
-`target memory telemetry unavailable`.
+not native device allocation readback. Inspection and explicit Recalculate use
+the target broker's existing self telemetry cache, including source retirement
+and suspend-aware aging. Missing input leaves comparisons Unknown with reason
+`target memory telemetry unavailable`. Current partial costs also remain Unknown.
 The engine's private owner-injected Auto selector implements bounded comparison
 and freezing with synthetic fixtures; it does not establish runtime telemetry support.
-Useful component estimates remain available. Simultaneous residents are unsized
+Useful component estimates remain available. Supported complete-cost eligibility
+is specified by [MANIFEST](MANIFEST.md); synthetic costs do not enable production.
+Simultaneous residents are unsized
 and no release credit is assumed. Auto's no-facts helper remains Unknown.
 
 Go owns advisory `capacityFit` and `freeFit` comparisons per physical pool.

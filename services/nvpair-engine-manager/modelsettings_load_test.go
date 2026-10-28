@@ -31,6 +31,12 @@ import (
 // Registered before TestMain's normal builds. The existing fixed package
 // executable is the child; no new executable path needs firewall registration.
 func runModelLoadChild() bool {
+	if os.Getenv("PAIR_TYPED_LOAD_CHILD") == "uuid" {
+		if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"uuid": os.Getenv("CUDA_VISIBLE_DEVICES"), "mps": os.Getenv("CUDA_MPS_PIPE_DIRECTORY")}); err != nil {
+			os.Exit(2)
+		}
+		return true
+	}
 	if os.Getenv("PAIR_TYPED_LOAD_CHILD") != "1" {
 		return false
 	}
@@ -1276,6 +1282,9 @@ func TestModelSettingsLoadWorkerConversionPreviewAndApply(t *testing.T) {
 	}
 	call := func(method string, params any) Message {
 		t.Helper()
+		if method == "engine:preview-launch" {
+			params = settings.WorkerRequest[any]{Request: params}
+		}
 		raw, err := json.Marshal(params)
 		if err != nil {
 			t.Fatal(err)
@@ -1427,6 +1436,87 @@ func TestModelSettingsLoadAutoFrozenRestartCompilation(t *testing.T) {
 	assertNoSettingsOverride(t, f.ex)
 }
 
+func TestModelSettingsLoadAutoPersistedManagerRestartKeepsUUID(t *testing.T) {
+	f, frozen, owner := autoTestFrozenLaunch(t)
+	if err := f.ex.desired.set("fake", false, intentPeer); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: frozen.Settings}, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	manifest := *f.st.manifest
+	platform := *f.st.plat
+	platform.ModelsDir = f.root
+	manifest.Platforms = map[string]Platform{runtime.GOOS + "/" + runtime.GOARCH: platform}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry()
+	registry.bundledRaw["fake"] = data
+	if err := registry.LoadOverrideDir(f.ex.overrideDir); err != nil {
+		t.Fatal(err)
+	}
+	recovered := NewExecutor(registry, NewReporter(nil), func(string, any) {}, t.TempDir())
+	recovered.overrideDir = f.ex.overrideDir
+	recovered.modelEstimates.run = func(context.Context, modelEstimateInput) modelconfig.Estimate {
+		t.Fatal("restart consulted cost provider")
+		return modelconfig.Estimate{}
+	}
+	st, err := recovered.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Recreate the fixture's selected installed root, never its operation/map.
+	st.installDir = f.root
+	st.binPath = f.st.binPath
+	st.modelsDir = f.root
+	command, err := launchForState(st, st.plat.Runtime.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.calls = 0
+	owner.memory = nil
+	prepared, err := compileTypedLlamaInputs(context.Background(), st, command, st.plat.Runtime, true)
+	if err != nil {
+		t.Fatal("persisted restart failed without ephemeral state", err)
+	}
+	if !modelconfig.EqualLoads(prepared.ModelLoads, frozen.Settings.ModelLoads) || owner.calls != 0 {
+		t.Fatal("restart changed reviewed finite settings")
+	}
+	child := preparedSnapshotCommand(st, command, "private-test-snapshot")
+	if child.Env["CUDA_VISIBLE_DEVICES"] != autoTestDeviceBinding().DeviceID {
+		t.Fatal("persisted child lost reviewed full UUID")
+	}
+	writeTestFile(t, filepath.Join(f.root, "libggml-base.dylib"), []byte("replaced after manager restart"))
+	if _, err := compileTypedLlamaInputs(context.Background(), st, command, st.plat.Runtime, true); err == nil {
+		t.Fatal("persisted replay accepted native library replacement")
+	}
+}
+
+func TestModelSettingsLoadAutoFrozenRejectsBuildRootDriverLibrary(t *testing.T) {
+	for _, name := range []string{"libcuda.so", "LIBCUDA.SO.1", "nvcuda.dll", "NVCUDA.DLL"} {
+		t.Run(name, func(t *testing.T) {
+			f, request, owner := autoTestFrozenLaunch(t)
+			rt := f.st.plat.Runtime
+			rt.ModelLoads = modelconfig.CloneLoads(request.Settings.ModelLoads)
+			command := typedFixtureCommand(t, f, rt)
+			if _, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, true); err != nil {
+				t.Fatal("unchanged frozen compilation failed", err)
+			}
+			owner.calls = 0
+			writeTestFile(t, filepath.Join(f.root, name), []byte("synthetic driver file, never loaded"))
+			if _, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, true); err == nil {
+				t.Fatal("frozen compilation accepted build-root driver library")
+			}
+			if owner.calls != 0 || f.st.running || f.st.proc != nil {
+				t.Fatal("driver source refusal resolved or activated an engine")
+			}
+			assertNoSettingsOverride(t, f.ex)
+		})
+	}
+}
+
 func TestModelSettingsLoadAutoFrozenIdentityDriftRefuses(t *testing.T) {
 	test := func(name string, mutate func(*testing.T, modelLoadFixture, *Runtime, *launchCommand)) {
 		t.Run(name, func(t *testing.T) {
@@ -1461,6 +1551,9 @@ func TestModelSettingsLoadAutoFrozenIdentityDriftRefuses(t *testing.T) {
 
 func TestModelSettingsLoadAutoConversionSourceRemainsBound(t *testing.T) {
 	f := newModelLoadFixture(t)
+	autoTestNativeSource(t, &f)
+	f.rt.Bin = f.st.binPath
+	f.command.Bin = f.st.binPath
 	now := time.Now()
 	owner := &autoTestMemoryOwner{memory: autoTestMemory(now)}
 	f.ex.modelEstimates = modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
@@ -1476,6 +1569,9 @@ func TestModelSettingsLoadAutoConversionSourceRemainsBound(t *testing.T) {
 	recheck, err := f.ex.validateTypedLlamaConversion(ctx, f.st, f.rt, preview.Settings)
 	if err != nil || recheck == nil {
 		t.Fatalf("Auto conversion was not accepted against exact source: %v", err)
+	}
+	if err := f.ex.validateUnacceptedAutoMemory(ctx, settings.Request{Engine: "fake", Settings: preview.Settings}, "weak-model"); err != nil {
+		t.Fatal("frozen conversion resource validation failed", err)
 	}
 	data, err := os.ReadFile(f.source)
 	if err != nil {

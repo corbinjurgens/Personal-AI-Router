@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/durablefile"
@@ -69,10 +71,11 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 		launch.ModelLoads = modelconfig.CloneLoads(launch.ModelLoads)
 		return launch, ""
 	case "engine:preview-launch":
-		var p settings.Request
-		if err := json.Unmarshal(raw, &p); err != nil {
+		envelope, err := settings.DecodeWorkerRequest[settings.Request](raw)
+		if err != nil {
 			return nil, err.Error()
 		}
+		p := envelope.Request
 		config := p.Settings.Clone()
 		if p.ModelChange != nil {
 			if p.ModelChange.Policy != nil {
@@ -137,6 +140,186 @@ func (h *modelSettingsHarness) answer(method string, raw json.RawMessage) (any, 
 		return map[string]bool{"ok": true}, ""
 	}
 	return map[string]bool{"ok": true}, ""
+}
+
+func TestModelSettingsApplyRetainedReviewExpiresBeforeWorkerIO(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	p := h.review(t, h.request(t, true), "")
+	h.b.engineConfigMu.Lock()
+	for i := range h.b.modelReviews {
+		h.b.modelReviews[i].Created = time.Now().Add(-modelReviewTTL)
+	}
+	h.b.engineConfigMu.Unlock()
+	before := len(h.engine.snapshot())
+	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err == nil || engineSettingsErrorCode(err) != codePolicyConflict {
+		t.Fatalf("expired review refusal=%v", err)
+	}
+	if len(h.engine.snapshot()) != before || h.calls() != 0 {
+		t.Fatal("expired review reached a worker or native effects")
+	}
+}
+
+func TestModelSettingsApplyUnacceptedReviewRequiresRecalculateAfterRestart(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	p := h.review(t, h.request(t, true), "")
+	restarted := &Broker{nodeID: h.b.nodeID, clusterDir: h.b.clusterDir}
+	if _, err := restarted.applyModelSettings(context.Background(), p, ""); err == nil || engineSettingsErrorCode(err) != codePolicyConflict {
+		t.Fatalf("lost unaccepted review=%v", err)
+	}
+	if h.calls() != 0 {
+		t.Fatal("lost unaccepted review reached native effects")
+	}
+}
+
+func TestModelSettingsApplyReviewRetentionBoundsAndSupersession(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	p := h.review(t, h.request(t, true), "")
+	h.b.engineConfigMu.Lock()
+	seed := h.b.modelReviews[0]
+	for i := 0; i <= modelReviewCount; i++ {
+		next := seed.Request.Clone()
+		next.ModelChange.ModelID = fmt.Sprintf("retained-%d", i)
+		preview := seed.Preview.Clone()
+		preview.PreviewDigest = modelSettingsHash(i)
+		if err := h.b.retainModelReviewLocked(next, "", preview, seed.Source); err != nil {
+			h.b.engineConfigMu.Unlock()
+			t.Fatal(err)
+		}
+	}
+	bytes := 0
+	for _, record := range h.b.modelReviews {
+		bytes += record.Bytes
+	}
+	if len(h.b.modelReviews) > modelReviewCount || bytes > modelReviewBytes {
+		h.b.engineConfigMu.Unlock()
+		t.Fatal("review table exceeded bounds")
+	}
+	next := seed.Request.Clone()
+	preview := seed.Preview.Clone()
+	preview.PreviewDigest = modelSettingsHash("replacement")
+	if err := h.b.retainModelReviewLocked(next, "", preview, seed.Source); err != nil {
+		h.b.engineConfigMu.Unlock()
+		t.Fatal(err)
+	}
+	before := len(h.b.modelReviews)
+	next.Settings.LaunchText = strings.Repeat("x", modelReviewBytes+1)
+	if err := h.b.retainModelReviewLocked(next, "", preview, seed.Source); err == nil {
+		h.b.engineConfigMu.Unlock()
+		t.Fatal("oversized review retained")
+	}
+	if len(h.b.modelReviews) != before {
+		h.b.engineConfigMu.Unlock()
+		t.Fatal("oversized review changed retained authority")
+	}
+	h.b.engineConfigMu.Unlock()
+	if _, _, err := h.b.retainedModelReview(context.Background(), p, ""); err == nil {
+		t.Fatal("evicted/superseded review remained applicable")
+	}
+}
+
+func TestModelSettingsApplyRecalculateDuringValidationSupersedesOldReview(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	p := h.review(t, h.request(t, true), "")
+	entered, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unblock)
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, failure := h.answer(method, raw)
+		if method == "engine:preview-launch" {
+			envelope, err := settings.DecodeWorkerRequest[settings.Request](raw)
+			if err != nil {
+				return nil, err.Error()
+			}
+			if envelope.Request.ModelChange == nil {
+				close(entered)
+				<-release
+			}
+		}
+		return result, failure
+	})
+	done := make(chan error, 1)
+	go func() { _, err := h.b.applyEngineSettings(context.Background(), p, ""); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("frozen validation did not reach worker")
+	}
+	h.b.engineConfigMu.Lock()
+	seed := h.b.modelReviews[0]
+	next := seed.Request.Clone()
+	next.ModelChange.Load.Set.Context = &modelconfig.Context{Mode: "fixed", Tokens: 4096}
+	preview := seed.Preview.Clone()
+	preview.PreviewDigest = modelSettingsHash("explicit replacement")
+	err := h.b.retainModelReviewLocked(next, "", preview, seed.Source)
+	h.b.engineConfigMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unblock()
+	if err := <-done; err == nil || engineSettingsErrorCode(err) != codePolicyConflict {
+		t.Fatalf("superseded Apply=%v", err)
+	}
+	if h.calls() != 0 {
+		t.Fatal("superseded review reached native effects")
+	}
+}
+
+func TestModelSettingsApplyValidatesFiniteSettingsWithoutPortablePatch(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	p := h.review(t, h.request(t, true), "")
+	before := len(h.engine.snapshot())
+	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil {
+		t.Fatal(err)
+	}
+	validated := false
+	for _, call := range h.engine.snapshot()[before:] {
+		if call.method != "engine:preview-launch" {
+			continue
+		}
+		envelope, err := settings.DecodeWorkerRequest[settings.Request](call.params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Request.ModelChange != nil {
+			t.Fatal("Apply re-resolved the portable patch")
+		}
+		validated = true
+	}
+	if !validated {
+		t.Fatal("Apply omitted frozen native validation")
+	}
+	h.b.engineConfigMu.Lock()
+	h.b.modelReviews = nil
+	h.b.engineConfigMu.Unlock()
+	before = len(h.engine.snapshot())
+	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil {
+		t.Fatal("accepted receipt required ephemeral review", err)
+	}
+	if len(h.engine.snapshot()) != before {
+		t.Fatal("accepted receipt revalidated or resolved settings")
+	}
+}
+
+func TestModelSettingsApplyManualDoesNotRevalidateAcceptedAutoMemory(t *testing.T) {
+	h := newModelSettingsHarness(t)
+	h.launch.ModelLoads = []modelconfig.ModelLoad{{ModelID: "saved-auto", Requested: modelconfig.RequestedLoad{Context: &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 8192}}, Resolved: &modelconfig.ResolvedLoad{PerSlotContext: 8192, TotalContext: 8192, Slots: 1, GPU: modelconfig.GPU{Mode: "cpu"}, NativeBuildID: h.build, SourceInputDigest: strings.Repeat("a", 64), PresetDigest: strings.Repeat("b", 64), ResolverRevision: "auto/finite-llama/1", ReviewedInputID: "accepted-synthetic-review", Artifacts: []modelconfig.ArtifactBinding{{Role: "model", Path: "saved.gguf", ResolvedTarget: "saved.gguf", Size: "256", MtimeNS: "1", SampleSHA256: strings.Repeat("c", 64)}}}}}
+	p := h.review(t, h.request(t, true), "")
+	before := len(h.engine.snapshot())
+	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil {
+		t.Fatal("manual Apply required unavailable telemetry for an accepted sibling", err)
+	}
+	for _, call := range h.engine.snapshot()[before:] {
+		if call.method != "engine:preview-launch" {
+			continue
+		}
+		envelope, err := settings.DecodeWorkerRequest[settings.Request](call.params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if envelope.ValidateResources || envelope.ResourceModel != "" {
+			t.Fatal("manual Apply revalidated accepted Auto capacity")
+		}
+	}
 }
 
 func (h *modelSettingsHarness) request(t *testing.T, coupled bool) settings.Request {

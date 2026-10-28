@@ -440,7 +440,7 @@ func (b *Broker) previewSettingsSnapshotLocked(ctx context.Context, p settings.R
 		return settings.Preview{}, fmt.Errorf("settings changed on this device; reload before applying")
 	}
 	var preview settings.Preview
-	if err := b.settingsWorkerCall(ctx, "engine:preview-launch", p, &preview); err != nil {
+	if err := b.settingsWorkerCall(ctx, "engine:preview-launch", settings.WorkerRequest[settings.Request]{Request: p}, &preview); err != nil {
 		return preview, err
 	}
 	preview.Revision = current.Revision
@@ -802,12 +802,27 @@ func (b *Broker) handleEngineSettings(msg *Message) {
 			_ = b.codec.RespondError(msg.ID, -32000, "engine manager unavailable")
 			return
 		}
+		started, clockErr := noderec.MemoryBootClock()
 		err := worker.RelayRequest(remote, msg.Params, func(result json.RawMessage, rpcErr *RPCError, err error) {
 			if err != nil {
 				_ = b.codec.RespondError(msg.ID, -32000, err.Error())
 			} else if rpcErr != nil {
 				_ = b.codec.RespondError(msg.ID, rpcErr.Code, rpcErr.Message)
 			} else {
+				if msg.Method == "engine:preview-settings" {
+					var preview settings.Preview
+					if err := modelconfig.DecodeStrict(result, &preview); err != nil {
+						_ = b.codec.RespondError(msg.ID, -32000, err.Error())
+						return
+					}
+					elapsed := modelWorkerElapsed(started, clockErr)
+					modelAgeAdvice(preview.Estimate, elapsed)
+					if preview.Auto != nil {
+						modelAgeAdvice(&preview.Auto.Estimate, elapsed)
+					}
+					_ = b.codec.Respond(msg.ID, preview)
+					return
+				}
 				_ = b.codec.Respond(msg.ID, result)
 			}
 		})

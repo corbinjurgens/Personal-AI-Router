@@ -103,7 +103,7 @@ func TestModelSettingsAutoCandidateRequiresValidatedMapBinding(t *testing.T) {
 			requested.GPU = &modelconfig.GPU{Mode: "layers", Layers: &layers}
 			requested.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 4096}
 			state := modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
-			proposal, err := resolveModelSettingsAutoInput(context.Background(), "exact", requested, autoTestInput(), modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
+			proposal, err := autoTestResolveInput(context.Background(), "exact", requested, autoTestInput(), modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
 			if err == nil || proposal.Resolved != nil || proposal.Status == "fits" {
 				t.Fatal("GPU candidate without a validated map binding was accepted")
 			}
@@ -161,6 +161,15 @@ func autoTestRequest() modelconfig.RequestedLoad {
 	return modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "auto"}, KVOffload: &off, OpOffload: &off, CacheTypeK: &f16, CacheTypeV: &f16}
 }
 
+// Supply the compiler-resolved baseline at the operation seam. The resolver
+// receives portable intent separately and must never rebuild this baseline.
+func autoTestResolveInput(ctx context.Context, model string, requested modelconfig.RequestedLoad, in modelEstimateInput, op modelAutoOperation, state *modelEstimateState) (modelconfig.AutoProposal, error) {
+	allocation := in.Allocation.Clone()
+	allocation.Options = modelEffectiveLoadOptions(requested)
+	in.Allocation = &allocation
+	return resolveModelSettingsAutoInput(ctx, model, requested, in, op, state)
+}
+
 func TestModelSettingsAutoContextRange(t *testing.T) {
 	known := int32(32768)
 	test := func(name string, context *modelconfig.Context, cap, floor int32, refusal bool) {
@@ -197,7 +206,7 @@ func TestModelSettingsAutoPreservesExplicitInputs(t *testing.T) {
 	r.Context = &modelconfig.Context{Mode: "fixed", Tokens: 4097}
 	r.Slots, r.Threads, r.BatchSize, r.UBatchSize = &three, &threads, &batch, &ubatch
 	before := r.Clone()
-	p, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, autoTestInput(), modelAutoOperation{Memory: owner}, &state)
+	p, err := autoTestResolveInput(context.Background(), "exact", r, autoTestInput(), modelAutoOperation{Memory: owner}, &state)
 	if err != nil || p.Status != "fits" {
 		t.Fatalf("proposal=%+v err=%v", p, err)
 	}
@@ -298,7 +307,7 @@ func TestModelSettingsAutoFloorOnlyFitWithinBudget(t *testing.T) {
 		}
 		previousHost, previousDevice = host, device
 	}
-	p, err := resolveModelSettingsAutoInput(context.Background(), "exact", autoTestRequest(), in, modelAutoOperation{Memory: owner, LayerCosts: proof}, &state)
+	p, err := autoTestResolveInput(context.Background(), "exact", autoTestRequest(), in, modelAutoOperation{Memory: owner, LayerCosts: proof}, &state)
 	if err != nil || p.Status != "fits" || p.Resolved.PerSlotContext != 4096 || p.Resolved.GPU.Layers == nil || *p.Resolved.GPU.Layers != 81 || calls > modelAutoBudget {
 		t.Fatalf("floor-only search: proposal=%+v calls=%d err=%v", p, calls, err)
 	}
@@ -319,7 +328,7 @@ func TestModelSettingsAutoBudgetAndInsufficientAreDistinct(t *testing.T) {
 				calls++
 				return autoTestEstimate(ctx, in)
 			}}
-			p, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
+			p, err := autoTestResolveInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
 			if err == nil || p.Status != want || p.Resolved != nil || calls > modelAutoBudget {
 				t.Fatalf("status=%s calls=%d err=%v", p.Status, calls, err)
 			}
@@ -367,14 +376,14 @@ func TestModelSettingsAutoUnknownMultiGPUAndCPUDisclosure(t *testing.T) {
 	r.Context = &modelconfig.Context{Mode: "fixed", Tokens: 4096}
 	in := autoTestInput()
 	state := modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
-	p, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
+	p, err := autoTestResolveInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
 	if err != nil || p.Resolved == nil || p.Resolved.GPU.Mode != "cpu" || !slices.Contains(p.Warnings, "CPU-only placement is slower; no GPU capacity is credited.") {
 		t.Fatalf("CPU fallback=%+v err=%v", p, err)
 	}
 	layers := int32(2)
 	r.GPU = &modelconfig.GPU{Mode: "layers", Layers: &layers}
 	r.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 4096}
-	p, err = resolveModelSettingsAutoInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
+	p, err = autoTestResolveInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
 	if err == nil || p.Status != "unavailable" || p.Resolved != nil {
 		t.Fatalf("unmapped multi-GPU passed: %+v %v", p, err)
 	}
@@ -389,7 +398,7 @@ func TestModelSettingsAutoUnsupportedPrecisionIsFieldError(t *testing.T) {
 		t.Fatal("unsupported native control reached estimator")
 		return modelconfig.Estimate{}
 	}}
-	p, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, autoTestInput(), modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}}, &state)
+	p, err := autoTestResolveInput(context.Background(), "exact", r, autoTestInput(), modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}}, &state)
 	if err == nil || !strings.Contains(err.Error(), "precision") || p.Resolved != nil {
 		t.Fatalf("unsupported precision: %+v %v", p, err)
 	}
@@ -401,12 +410,12 @@ func TestModelSettingsAutoRecalculateChangesReviewOnlyExplicitly(t *testing.T) {
 	state := modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
 	r := autoTestRequest()
 	in := autoTestInput()
-	first, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: owner, ConversionSource: strings.Repeat("c", 64)}, &state)
+	first, err := autoTestResolveInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: owner, ConversionSource: strings.Repeat("c", 64)}, &state)
 	if err != nil {
 		t.Fatal(err)
 	}
 	owner.memory.Identity = "new-snapshot"
-	second, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: owner, ConversionSource: strings.Repeat("c", 64)}, &state)
+	second, err := autoTestResolveInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: owner, ConversionSource: strings.Repeat("c", 64)}, &state)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,9 +458,7 @@ func autoTestFrozenLaunch(t *testing.T) (modelLoadFixture, settings.Request, *au
 	f := newModelLoadFixture(t)
 	f.st.plat.Runtime = convertModelLoadFixture(t, f)
 	// A replaceable binding, never an executable launched by this fixture.
-	f.st.plat.Runtime.Bin = filepath.Join(f.root, "synthetic-auto-native")
-	f.st.binPath = f.st.plat.Runtime.Bin
-	writeTestFile(t, f.st.plat.Runtime.Bin, []byte("first synthetic Auto native build"))
+	autoTestNativeSource(t, &f)
 	command, err := launchForState(f.st, f.st.plat.Runtime.Port)
 	if err != nil {
 		t.Fatal(err)
@@ -483,6 +490,73 @@ func autoTestFrozenLaunch(t *testing.T) (modelLoadFixture, settings.Request, *au
 	}
 	assertNoSettingsOverride(t, f.ex)
 	return f, settings.Request{Engine: "fake", Settings: preview.Settings}, owner
+}
+
+func autoTestNativeSource(t *testing.T, f *modelLoadFixture) {
+	t.Helper()
+	f.st.plat.Runtime.Bin = filepath.Join(f.root, "synthetic-auto-native")
+	f.st.binPath = f.st.plat.Runtime.Bin
+	writeTestFile(t, f.st.binPath, []byte("first synthetic Auto native build"))
+	f.st.installDir = f.root
+	f.st.plat.Install = &Install{Run: []string{"fixture-never-run"}, Artifacts: []InstallArtifact{{Name: "server", URL: "https://fixture.invalid/releases/download/b11146/native", SHA256: strings.Repeat("a", 64)}}}
+	writeTestFile(t, filepath.Join(f.root, "libggml-base.dylib"), []byte("synthetic native library, never loaded"))
+}
+
+func TestModelSettingsAutoCandidatesUseEffectiveBaseline(t *testing.T) {
+	now := time.Now()
+	r := autoTestRequest()
+	before := r.Clone()
+	in := autoTestInput()
+	baseline := modelEffectiveLoadOptions(r)
+	threads, batch, ubatch := int32(7), int32(128), int32(64)
+	baseline.Threads, baseline.BatchSize, baseline.UBatchSize = &threads, &batch, &ubatch
+	in.Allocation.Options = baseline.Clone()
+	state := modelEstimateState{now: func() time.Time { return now }, run: func(ctx context.Context, in modelEstimateInput) modelconfig.Estimate {
+		if !reflect.DeepEqual(in.Allocation.Options.Threads, baseline.Threads) || !reflect.DeepEqual(in.Allocation.Options.BatchSize, baseline.BatchSize) || !reflect.DeepEqual(in.Allocation.Options.UBatchSize, baseline.UBatchSize) {
+			t.Fatal("candidate reconstructed inherited options from portable intent")
+		}
+		return autoTestEstimate(ctx, in)
+	}}
+	proposal, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}}, &state)
+	if err != nil || proposal.Resolved == nil {
+		t.Fatalf("proposal=%+v err=%v", proposal, err)
+	}
+	if !reflect.DeepEqual(before, r) || !reflect.DeepEqual(proposal.Requested, before) {
+		t.Fatal("portable intent changed")
+	}
+	if !reflect.DeepEqual(proposal.Resolved.Options.Threads, baseline.Threads) {
+		t.Fatal("review lost inherited threads")
+	}
+}
+
+func TestModelSettingsAutoReplayBindsLibrariesAndEnvironment(t *testing.T) {
+	test := func(name string, mutate func(*testing.T, modelLoadFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f, frozen, owner := autoTestFrozenLaunch(t)
+			rt := f.st.plat.Runtime
+			rt.ModelLoads = modelconfig.CloneLoads(frozen.Settings.ModelLoads)
+			command := typedFixtureCommand(t, f, rt)
+			owner.calls = 0
+			if _, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, true); err != nil {
+				t.Fatal("finite replay without ephemeral memory/map failed", err)
+			}
+			mutate(t, f)
+			if _, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, true); err == nil {
+				t.Fatal("native source drift accepted")
+			}
+			if owner.calls != 0 {
+				t.Fatal("replay consulted telemetry")
+			}
+		})
+	}
+	test("replaced library", func(t *testing.T, f modelLoadFixture) {
+		writeTestFile(t, filepath.Join(f.root, "libggml-base.dylib"), []byte("changed synthetic library"))
+	})
+	test("added relevant library", func(t *testing.T, f modelLoadFixture) {
+		writeTestFile(t, filepath.Join(f.root, "libggml-cuda.dylib"), []byte("new synthetic library"))
+	})
+	test("effective environment", func(t *testing.T, _ modelLoadFixture) { t.Setenv("PAIR_AUTO_SOURCE_FIXTURE", "changed") })
+	test("external native library search", func(t *testing.T, _ modelLoadFixture) { t.Setenv("LD_LIBRARY_PATH", t.TempDir()) })
 }
 
 func TestModelSettingsAutoFrozenApplyValidation(t *testing.T) {
@@ -531,7 +605,7 @@ func TestModelSettingsAutoCurrentEstimatorCannotInventFits(t *testing.T) {
 	r.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 4096}
 	r.GPU = &modelconfig.GPU{Mode: "cpu"}
 	state := modelEstimateState{now: func() time.Time { return now }}
-	p, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, autoTestInput(), modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}}, &state)
+	p, err := autoTestResolveInput(context.Background(), "exact", r, autoTestInput(), modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}}, &state)
 	if err == nil || p.Status != "unavailable" || p.Resolved != nil {
 		t.Fatalf("partial estimate invented Fits: %+v %v", p, err)
 	}
@@ -556,7 +630,7 @@ func TestModelSettingsAutoGreatestFittingOffload(t *testing.T) {
 	capacity := uint64(8589934592)
 	memory.Domains[1].FreeBytes = strconv.FormatUint(capacity/10+1+(512<<20)+limit, 10)
 	state := modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
-	p, err := resolveModelSettingsAutoInput(context.Background(), "exact", autoTestRequest(), in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
+	p, err := autoTestResolveInput(context.Background(), "exact", autoTestRequest(), in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
 	if err != nil || p.Resolved == nil || p.Resolved.PerSlotContext != 8192 || p.Resolved.GPU.Layers == nil || *p.Resolved.GPU.Layers != 2 {
 		t.Fatalf("greatest fitting offload: %+v %v", p, err)
 	}
@@ -570,7 +644,7 @@ func TestModelSettingsAutoManualPlacementRemainsConstraint(t *testing.T) {
 			r.Context = &modelconfig.Context{Mode: "auto", Floor: 2048, Cap: 2048}
 			r.GPU = &gpu
 			state := modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
-			p, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, autoTestInput(), modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}}, &state)
+			p, err := autoTestResolveInput(context.Background(), "exact", r, autoTestInput(), modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}}, &state)
 			if err != nil || p.Resolved == nil || p.Resolved.PerSlotContext != 2048 {
 				t.Fatalf("manual placement: %+v %v", p, err)
 			}
@@ -735,7 +809,7 @@ func TestModelSettingsAutoLayerDependentWorkspaceKeepsCPU(t *testing.T) {
 				}
 				return out
 			}}
-			p, err := resolveModelSettingsAutoInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}, LayerCosts: proof}, &state)
+			p, err := autoTestResolveInput(context.Background(), "exact", r, in, modelAutoOperation{Memory: &autoTestMemoryOwner{memory: autoTestMemory(now)}, LayerCosts: proof}, &state)
 			if err != nil || p.Status != "fits" || p.Resolved == nil || p.Resolved.GPU.Mode != "cpu" || calls > modelAutoBudget {
 				t.Fatalf("layer-dependent workspace skipped CPU: status=%s calls=%d err=%v", p.Status, calls, err)
 			}

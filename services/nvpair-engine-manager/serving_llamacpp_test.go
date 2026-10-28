@@ -27,7 +27,58 @@ import (
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 )
+
+func TestLlamaServingReviewedUUIDReachesActualChild(t *testing.T) {
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	layers := int32(1)
+	load := modelconfig.ModelLoad{ModelID: "exact", Resolved: &modelconfig.ResolvedLoad{ResolverRevision: modelAutoRevision, GPU: modelconfig.GPU{Mode: "layers", Layers: &layers}, DeviceBinding: autoTestDeviceBinding()}}
+	loads := []modelconfig.ModelLoad{load}
+	command := launchCommand{Bin: bin, Env: map[string]string{"PAIR_TYPED_LOAD_CHILD": "uuid"}}
+	constrained, err := modelConstrainCommand(command, loads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := llamaSnapshotCommand(constrained, "unused-private-snapshot", loads)
+	if _, ok := command.Env["CUDA_VISIBLE_DEVICES"]; ok {
+		t.Fatal("command constraint mutated its parent")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, child.Bin, child.Args...)
+	cmd.Env = childEnv(child.Env)
+	data, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed map[string]string
+	if err := json.Unmarshal(data, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if observed["uuid"] != load.Resolved.DeviceBinding.DeviceID {
+		t.Fatalf("child selected another physical device: %+v", observed)
+	}
+	if runtime.GOOS == "linux" && observed["mps"] != "/dev/null" {
+		t.Fatalf("helper/child MPS environment differs: %+v", observed)
+	}
+	other := load
+	r := load.Resolved.Clone()
+	binding := *r.DeviceBinding
+	binding.DeviceID = "GPU-22222222-2222-2222-2222-222222222222"
+	r.DeviceBinding = &binding
+	other.Resolved = &r
+	if _, err := modelConstrainCommand(command, []modelconfig.ModelLoad{load, other}); err == nil {
+		t.Fatal("conflicting reviewed UUIDs accepted")
+	}
+	command.Env["CUDA_VISIBLE_DEVICES"] = "0,1"
+	if _, err := modelConstrainCommand(command, loads); err == nil {
+		t.Fatal("conflicting visibility list accepted")
+	}
+}
 
 type llamaServingFixture struct {
 	ex       *Executor
