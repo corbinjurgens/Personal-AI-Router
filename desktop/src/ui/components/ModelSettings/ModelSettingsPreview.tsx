@@ -4,6 +4,7 @@
 import { Stack, Text } from '@nvidia/foundations-react-core'
 import type { EngineSettingsPreview, EngineSettingsSnapshot } from '@/shared/types/engine-settings'
 import type { ArtifactSummary, InspectModelResult } from '@/shared/types/model-config'
+import ModelMemoryEstimate from './ModelMemoryEstimate'
 
 function artifactLabel(role: string): string {
     switch (role) {
@@ -33,13 +34,18 @@ function Artifacts({ artifacts }: { artifacts?: ArtifactSummary[] }) {
 export default function ModelSettingsPreview({
     inspection,
     preview,
-    snapshot
+    snapshot,
+    reviewed = true,
+    stale = false
 }: {
     inspection?: InspectModelResult
     preview?: EngineSettingsPreview
     snapshot?: EngineSettingsSnapshot
+    reviewed?: boolean
+    stale?: boolean
 }) {
     const impact = preview?.impact
+    const estimate = preview ? (preview.auto?.estimate ?? preview.estimate) : inspection?.estimate
     const desired = snapshot?.settings.modelLoads?.find(
         load => load.modelId === inspection?.modelId
     )
@@ -54,10 +60,38 @@ export default function ModelSettingsPreview({
                 Artifact: {inspection?.status ?? 'Unknown'} · Source:{' '}
                 {inspection?.source ?? 'Unknown'} · Assurance: {inspection?.assurance ?? 'Unknown'}
             </Text>
+            <ModelMemoryEstimate estimate={estimate} stale={stale} />
+            {preview?.auto && (
+                <>
+                    <Text kind="body/regular/sm">
+                        Auto proposal: {preview.auto.status} · Requested context:{' '}
+                        {JSON.stringify(preview.auto.requested.context ?? 'Inherited')} · Requested
+                        constraints: {JSON.stringify(preview.auto.requested)}
+                    </Text>
+                    {preview.auto.resolved ? (
+                        <Text kind="body/regular/sm">
+                            Feasible context: {preview.auto.resolved.perSlotContext} tokens per
+                            request · Total: {preview.auto.resolved.totalContext} · Slots:{' '}
+                            {preview.auto.resolved.slots} · Placement:{' '}
+                            {JSON.stringify(preview.auto.resolved.gpu)}. CPU placement can be
+                            slower.
+                        </Text>
+                    ) : (
+                        <Text kind="body/regular/sm">
+                            Auto resolution unavailable. Manual settings remain usable.
+                        </Text>
+                    )}
+                    {preview.auto.warnings?.map((warning, index) => (
+                        <Text key={index} kind="body/regular/sm">
+                            {warning}
+                        </Text>
+                    ))}
+                </>
+            )}
             <Artifacts artifacts={preview?.requiredArtifacts ?? inspection?.artifacts} />
             <Text kind="body/regular/sm">
                 Facts: {inspection?.facts?.status ?? 'Unknown'} · Estimate:{' '}
-                {preview?.estimate?.status ?? inspection?.estimate.status ?? 'Unknown'}
+                {estimate?.status ?? 'Unknown'}
             </Text>
             <Text kind="body/regular/sm">
                 Desired settings revision: {snapshot?.revision ?? 'Unknown'} · Applied settings
@@ -93,9 +127,9 @@ export default function ModelSettingsPreview({
             {preview && (
                 <>
                     <Text kind="body/regular/sm">
-                        Reviewed settings revision: {preview.revision} · Policy revision:{' '}
-                        {preview.policyRevision ?? 'Unknown'} · Digest:{' '}
-                        {preview.previewDigest ?? 'Unavailable'}
+                        {reviewed ? 'Reviewed' : 'Advisory, not reviewed'} settings revision:{' '}
+                        {preview.revision} · Policy revision: {preview.policyRevision ?? 'Unknown'}{' '}
+                        · Digest: {preview.previewDigest ?? 'Unavailable'}
                     </Text>
                     {preview.diff?.map((diff, index) => (
                         <Text key={`${diff.field}:${index}`} kind="body/regular/sm">

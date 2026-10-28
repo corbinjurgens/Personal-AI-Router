@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"nvpair-shared/engines"
 	"nvpair-shared/modeldownload"
@@ -15,6 +16,79 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// Credential operations have no peer equivalent. Reject the target before a
+// request (including a queued command) can reach the RPC client.
+func setCredentialRequest(node, engine, credential string) (string, map[string]any, error) {
+	if node != "" {
+		return "", nil, errors.New("credentials can only be edited on this machine")
+	}
+	return engines.SetCredentialMethod, map[string]any{"engine": engine, "credential": credential}, nil
+}
+
+func credentialStateRequest(node, engine string) (string, map[string]any, error) {
+	if node != "" {
+		return "", nil, errors.New("credential state is only available on this machine")
+	}
+	return engines.CredentialStateMethod, map[string]any{"engine": engine}, nil
+}
+
+// credentialRequest owns a single cancellable call. A queued command captures
+// this holder, never the editable key. Once started, only CallGeneration's
+// in-flight parameters retain it; cancellation ends that call's wait. Dropping
+// references is not secure memory erasure.
+type credentialRequest struct {
+	mu     sync.Mutex
+	params map[string]any
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+type credentialMsg struct {
+	request *credentialRequest
+	state   engines.CredentialState
+	failed  bool
+}
+
+func (r *credentialRequest) drop() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.params = nil
+	if r.cancel != nil {
+		r.cancel()
+		r.cancel = nil
+	}
+}
+
+func (r *credentialRequest) cmd(client *rpc.Client, method string) tea.Cmd {
+	generation := clientGeneration(client)
+	return func() tea.Msg {
+		defer r.drop()
+		out := credentialMsg{request: r, failed: true}
+		r.mu.Lock()
+		params := r.params
+		r.params = nil
+		r.mu.Unlock()
+		if r.ctx.Err() != nil || params == nil || client == nil {
+			return out
+		}
+		msg, err := client.CallGeneration(r.ctx, generation, method, params)
+		params = nil
+		if err != nil || r.ctx.Err() != nil || msg == nil || !client.IsCurrent(generation) {
+			return out
+		}
+		// Missing or malformed state is unavailable, never an absent key.
+		var state struct {
+			Supported  *bool `json:"supported"`
+			Configured *bool `json:"configured"`
+		}
+		if json.Unmarshal(msg.Result, &state) == nil && state.Supported != nil && state.Configured != nil {
+			out.state = engines.CredentialState{Supported: *state.Supported, Configured: *state.Configured}
+			out.failed = false
+		}
+		return out
+	}
+}
 
 // engineStatus mirrors nvpair-engine-manager's EngineStatus snapshot, the
 // element of engine:get-installed and the engine:state-changed payload.
