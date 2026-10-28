@@ -895,6 +895,19 @@ func (f *modelSettingsProcessFixture) setPolicy(t *testing.T, policy nodepolicy.
 	return result.Policy
 }
 
+func (f *modelSettingsProcessFixture) seedModelSettingsPolicyBounds(t *testing.T) {
+	t.Helper()
+	policy := f.policy(t)
+	profile := &policy.Profiles[0]
+	profile.ContextTokens, profile.MaxOutputTokens, profile.MaxConcurrent = 4096, 512, 1
+	profile.MemoryBytes = 1048576
+	profile.RequestOptionsMode = nodepolicy.RequestOptionsEnforced
+	// A saved operator reference, never a fabricated qualification registry
+	// record or memory observation. These declarations must survive estimates.
+	profile.Qualification = &nodepolicy.QualificationRef{ID: "saved-operator-reference", Revision: "7"}
+	f.setPolicy(t, policy)
+}
+
 func (f *modelSettingsProcessFixture) pinned(t *testing.T) {
 	t.Helper()
 	cluster := filepath.Join(f.base, "cluster")
@@ -1124,8 +1137,10 @@ func (f *modelSettingsProcessFixture) replaceManager(t *testing.T) {
 	if err != nil || len(owned) != 1 {
 		t.Fatalf("private real manager inventory count=%d error=%v", len(owned), err)
 	}
-	if err := inventory.kill(owned[0]); err != nil {
-		t.Fatal(err)
+	stopped, err := modelSettingsReplaceProcess(owned[0], func() error {
+		return inventory.kill(owned[0])
+	}, 10*time.Second)
+	if err != nil || !stopped {
+		t.Fatalf("retained manager lifetime did not prove exit: stopped=%t error=%v", stopped, err)
 	}
-	assertSwitchProcessIdentityStopped(t, owned[0])
 }
