@@ -59,7 +59,7 @@ func (e *Executor) modelLoadContentRead(engine string) (func(), func() error, er
 
 // Typed presets share the serving generation owner, but do not declare serving
 // bounds or manufacture content hashes, memory assertions or qualification.
-func compileTypedLlama(st *engineState, command launchCommand, rt Runtime, approved bool) (*llamaServingLaunch, error) {
+func compileTypedLlama(st *engineState, command launchCommand, rt Runtime, approved bool, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
 	if st.manifest.FamilyOrDefault() != "llamacpp" || rt.modeOrDefault() != "process" {
 		return nil, modelLoadError("", "engine", "Typed loads require an owned llama.cpp process.")
 	}
@@ -74,7 +74,7 @@ func compileTypedLlama(st *engineState, command launchCommand, rt Runtime, appro
 	defer release()
 	ctx, cancel := context.WithTimeout(context.Background(), modelInspectionBudget)
 	defer cancel()
-	prepared, err := compileTypedLlamaInputs(ctx, st, command, rt, approved)
+	prepared, err := compileTypedLlamaInputs(ctx, st, command, rt, approved, advisory...)
 	if err != nil {
 		return nil, err
 	}
