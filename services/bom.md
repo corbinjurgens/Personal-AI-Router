@@ -17,7 +17,7 @@ The workers are pure Go services with no GUI/native-webview dependencies, so the
 
 The generated repository-root [third-party notice](../THIRD_PARTY_NOTICES.md) is the canonical complete grant inventory. The estimator dependency is private to the engine-manager module; it does not add dependencies to the broker or shared module.
 
-`nvpair-service` likewise links only `go-winio` (its per-user named pipe on Windows) and `golang.org/x/sys`, which it uses directly on Windows for its `HKCU\...\Run` autostart entry.
+`nvpair-service` also links `gopsutil/v4` for process identity during build-apply verification, with its platform-specific collectors. It retains `go-winio` for its per-user Windows named pipe and `golang.org/x/sys` for Windows APIs, including its `HKCU\...\Run` autostart entry.
 
 As of the mDNS dedup, `grandcat/zeroconf`, `miekg/dns`, and `golang.org/x/net` are linked into the mDNS services **through the first-party `nvpair-shared/mdns` (responder) and `nvpair-shared/discovery` (browser) packages** rather than imported directly by each binary; the Used-By lists below reflect the binaries they end up linked into. Advertising uses only `miekg/dns` + `x/net` (a custom responder); browsing additionally uses `zeroconf`.
 
@@ -33,7 +33,7 @@ As of the mDNS dedup, `grandcat/zeroconf`, `miekg/dns`, and `golang.org/x/net` a
 | `github.com/gpustack/gguf-parser-go` | v0.27.0 | nvpair-engine-manager | MIT AND Apache-2.0 | [LICENSE](https://github.com/gpustack/gguf-parser-go/blob/9257743a3c1775b882ba1b58ec7f5a856c2cc385/LICENSE), version-bound incorporated grants in the canonical notice |
 | `github.com/jaypipes/ghw` | v0.24.0 | nvpair-node-info | Apache-2.0 | [COPYING](https://github.com/jaypipes/ghw/blob/main/COPYING) |
 | `github.com/miekg/dns` | v1.1.55 / v1.1.72 | nvpair-proxy, nvpair-node-scanner, nvpair-errors, nvpair-cluster-manager | BSD-3-Clause | [LICENSE](https://github.com/miekg/dns/blob/master/LICENSE) |
-| `github.com/shirou/gopsutil/v4` | v4.26.7 | nvpair-node-info (macOS) | BSD-3-Clause | [LICENSE](https://github.com/shirou/gopsutil/blob/master/LICENSE) |
+| `github.com/shirou/gopsutil/v4` | v4.26.7 | nvpair-node-info (macOS), nvpair-service | BSD-3-Clause | [LICENSE](https://github.com/shirou/gopsutil/blob/master/LICENSE) |
 | `golang.org/x/net` | v0.58.0 | nvpair-proxy, nvpair-node-scanner, nvpair-errors, nvpair-cluster-manager | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/net/+/master:LICENSE) |
 | `golang.org/x/sys` | v0.47.0 | nvpair-node-info, nvpair-cluster-manager, nvpair-engine-manager, nvpair-service | BSD-3-Clause | [LICENSE](https://cs.opensource.google/go/x/sys/+/master:LICENSE) |
 | `howett.net/plist` | v1.0.2-0.20250314 | nvpair-node-info | BSD-2-Clause | [LICENSE](https://github.com/DHowett/go-plist/blob/main/LICENSE) |
