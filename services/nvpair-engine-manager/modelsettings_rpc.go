@@ -121,7 +121,7 @@ func decodeModelSettingsLaunch(raw []byte) (settings.Request, error) {
 }
 
 // The worker accepts frozen native settings from its parent. Coupled policy
-// acceptance belongs to the broker, and Auto remains unavailable here.
+// acceptance belongs to the broker. Apply must never invoke an Auto resolver.
 func (e *Executor) validateModelSettingsLaunch(ctx context.Context, p settings.Request, applying bool) error {
 	if err := p.Validate(); err != nil {
 		return modelSettingsParamsError(err)
@@ -130,12 +130,14 @@ func (e *Executor) validateModelSettingsLaunch(ctx context.Context, p settings.R
 		if applying && p.ModelChange.PreviewDigest == "" {
 			return modelSettingsParamsError(fmt.Errorf("modelChange.previewDigest: reviewed preview required"))
 		}
-		if p.ModelChange.Load != nil {
+		if !applying && p.ModelChange.Load != nil {
 			r := p.ModelChange.Load.Set
-			if r.Context != nil && r.Context.Mode == "auto" || r.GPU != nil && r.GPU.Mode == "auto" {
-				if _, err := resolveModelSettingsAuto(ctx, modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelChange.ModelID}, r); err != nil {
-					return err
-				}
+			// The owner-aware compiler resolves Auto after target baseline and
+			// artifact validation. This guard neither resolves nor reads capacity.
+			// Keep the exact production refusal when no target owner exists.
+			op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+			if modelLoadHasAuto(r) && op.Memory == nil {
+				return modelSettingsParamsError(fmt.Errorf("target memory telemetry unavailable"))
 			}
 		}
 		if !applying && p.ModelChange.Load != nil && p.ModelChange.Policy == nil {
@@ -145,8 +147,13 @@ func (e *Executor) validateModelSettingsLaunch(ctx context.Context, p settings.R
 	}
 	if applying {
 		for _, load := range p.Settings.ModelLoads {
-			if load.Resolved == nil || load.Requested.Context != nil && load.Requested.Context.Mode == "auto" || load.Requested.GPU != nil && load.Requested.GPU.Mode == "auto" {
+			if load.Resolved == nil {
 				return modelSettingsParamsError(fmt.Errorf("settings.modelLoads: reviewed finite resolution required"))
+			}
+			if modelLoadHasAuto(load.Requested) {
+				if err := modelAutoFrozen(load.ModelID, load.Requested, load.Resolved); err != nil {
+					return err
+				}
 			}
 		}
 	}

@@ -118,9 +118,10 @@ and bounded conversion/compilation, returning diffs and a review digest without
 persistence or activation. Parent Configure traffic carries frozen reviewed
 native settings and validates them before effects. Selected-patch acceptance,
 policy writes and preservation of ordinary public baseline echoes belong to the
-broker. Worker policy-edit traffic remains refused. Auto validates preferences
-and returns no resolution, review identity, candidate or default trades.
-Auto remains unavailable until its resolver is implemented. Missing or changed
+broker. Worker policy-edit traffic remains refused. Production Auto has no
+trusted-memory producer and returns `target memory telemetry unavailable`,
+without a finite result. Its private owner-injected selector and frozen compiler
+are specified below. Missing or changed
 artifacts and unreviewed resolutions remain refusals. Advisory estimation errors
 are data, never an additional manual-preview or Apply refusal.
 
@@ -141,7 +142,7 @@ startup loading. Reset removes requested leaves; inherited finite adapter
 defaults are regenerated, never retained in a hidden old source. Explicit CPU
 does not require estimate facts; finite layers/native-default resolution needs
 bounded layer facts. Only f16 KV precision is currently mapped; unmapped
-precision and Auto are field refusals. Batch compatibility is checked against
+precision and unreviewed Auto are field refusals. Batch compatibility is checked against
 the pinned effective native defaults. Metadata context is a fact, not a
 universal training hard cap or permission to add unsupported scaling controls.
 
@@ -170,7 +171,7 @@ changed since preview is refused before stopping. Persisted conversion provenanc
 does not require the removed external preset for subsequent readback or starts,
 and cannot authorize an Auto resolution.
 SetPort uses the same owner for typed settings. Worker RPC accepts frozen native
-settings, while combined-policy requests and Auto remain guarded. Broker
+settings, including validated frozen Auto; combined-policy requests remain guarded. Broker
 acceptance, drain and coupled policy application stay at their existing owner.
 Load previews describe whole-router scope, affected configured models, the
 60-second drain bound, possible interruption and whether the engine stays Off.
@@ -179,6 +180,70 @@ Unchanged typed settings do not restart an owned process. Saving Off, paused or
 locked settings never activates it; adopted processes remain read-only.
 No typed settings create qualification. Apply-build must
 add this mutation to its future maintenance exclusion; no symbol exists today.
+
+### Reviewed Auto engine unit
+
+The private `modelAutoMemoryOwner` supplies a target-owned snapshot through the
+operation context. No production implementation or client telemetry wire exists.
+The selector consumes the compiler's already validated bounded facts and ordered
+artifact bindings; it performs no additional file/parser/network/native reads.
+Capacity alone is insufficient: every runtime component and independent pool
+must be fully priced, fresh and mapped. Task 10's incomplete graph costs remain
+Unknown; synthetic complete costs in tests do not extend its support matrix.
+Public launch validation does not invoke the no-facts resolver for owner-injected
+Auto. The normal PreviewLaunch compiler owns baseline/artifact checks and reads
+the owner snapshot once. Missing-owner validation retains the exact production
+refusal; frozen Apply never reads the owner.
+
+Default Auto context is 8192 cap and 4096 floor, with one slot. Explicit context
+ranges use the valid 256-token grid; a smaller explicit cap can also be its floor.
+Fixed context uses existing native padding and never shrinks. Known model context
+limits Auto without enabling RoPE extension; unknown supported context refuses.
+Slots, manual placement, precision and explicit options are constraints, never
+search dimensions. Candidates are CPU, native-default resolved to finite layers,
+or supported finite layer counts. Search orders highest context then greatest
+offload, with a hard 128-evaluation budget across the entire preview. Exhaustion
+reports `budget-exhausted` and the unsearched context/layer range, independently
+of `insufficient-memory`. Any unpriced searched candidate prevents an insufficient
+memory verdict. CPU-only can use host inputs and discloses slower execution.
+
+Dense llama/qwen2/qwen3 output-first weight transfer with explicit host KV and
+op-offload disabled proves only weight transfer: host weights decrease and device
+weights increase. It does not prove complete total costs. The optional private
+`modelAutoLayerCostOwner` must derive a complete layer-independent non-weight host
+cost from the exact context/options, not from sampled estimates. Each evaluated
+allocation must match that fixed cost and the bounded weight transfer. Only then
+can bisection use the resulting per-pool bounds, never a boolean Fits predicate.
+No production estimator implements this proof. Without it, or if an estimate
+disagrees, discard bisection bounds and enumerate greatest layers through CPU
+under the same budget. Synthetic fixed-cost formulas test total monotonicity
+and the floor-only search; layer-dependent workspace fixtures test fallback.
+Partial costs and unknown mapping
+cannot form bounds or Fits. Independent pools reserve ceiling(capacity/10) plus
+512 MiB each against snapshot free memory; UMA is one pool. This is a disclosed
+uncalibrated heuristic, never admission or qualification authority.
+
+Preview returns requested intent plus finite resolution, estimate assumptions,
+memory source/timestamp and `auto/finite-llama/1` review identity. ReviewedInputID
+binds model, requested preferences, finite allocation/options, sampled artifacts,
+native build, estimator revision, memory snapshot hash and external conversion
+source. External conversion provenance alone cannot authorize Auto. Every Apply
+validates frozen identity without invoking the resolver, even after telemetry
+disappears. Cold start/recovery compilation revalidates artifact/build/source and
+preset digests and emits the accepted finite options with fit off. Drift refuses;
+native failure cannot trigger smaller settings or an OOM retry ladder.
+
+Recalculate explicitly reselects Auto in a fresh selected-patch preview and
+produces a separately reviewable identity. Ordinary manual edits cannot silently
+recalculate saved Auto. Its baseline diff renders the selected model's previously
+reviewed finite options without requiring its old native build to remain present.
+The new preview binds the current build. Old Apply/restart still reject build
+drift, and every unselected frozen sibling is checked normally. Copy carries
+portable preferences only. Broker source,
+authority, preview/revision checks retain their existing ownership. Broker
+end-to-end frozen forwarding/recovery remains deferred until the memory producer;
+this engine unit makes no end-to-end Auto Apply claim. Manual compilation and
+Task 10's advisory-only digest independence remain unchanged.
 
 ### Advisory memory estimate support
 
@@ -234,11 +299,11 @@ bounded memory snapshot; unavailable telemetry has an explicit identity.
 Neither the cache nor preview handoff alters Task 5 admission/cache/rechecks.
 
 Task 10 has no runtime trusted-memory producer, telemetry wire input or native
-device map. Capacity, free-memory and fit comparison are deferred and remain
+device map. Runtime capacity, free-memory and fit comparison remain
 Unknown with the exact reason `target memory telemetry unavailable` when memory
 input is absent. Capacity/free byte fields remain empty; useful component sizing
 and its independent uncertainty are preserved, with no Fits claim. The in-memory
-future memory helpers and their synthetic fixtures are not runtime support.
+memory helpers and their synthetic fixtures are not runtime support.
 A future authenticated broker adapter must supply a nonempty source/identity and a
 timestamp no older than five seconds, not in the future. Invalid byte ranges,
 free greater than capacity and invalid domains are rejected as advisory Unknowns.

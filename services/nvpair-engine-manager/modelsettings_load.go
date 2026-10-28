@@ -149,8 +149,11 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 		return nil, err
 	}
 	requests := modelconfig.CloneLoads(rt.ModelLoads)
+	operation, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
 	for i := range requests {
-		requests[i].Resolved = nil
+		if !modelLoadHasAuto(requests[i].Requested) || !approved && operation.RecalculateModel == requests[i].ModelID {
+			requests[i].Resolved = nil
+		}
 	}
 	loads, err := modelconfig.CanonicalLoads(requests)
 	if err != nil || len(loads) == 0 {
@@ -208,10 +211,8 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 			projected, _ := projectInspectionFacts(facts)
 			layerCount = projected.LayerCount
 		}
-		options, resolved, err := typedLlamaModelOptions(load.ModelID, load.Requested, layerCount)
-		if err != nil {
-			return nil, err
-		}
+		var artifacts []modelconfig.ArtifactBinding
+		paths := map[string]string{}
 		for _, file := range list.Files {
 			if file.Role != "model" && file.Role != "draft" {
 				return nil, modelLoadError(load.ModelID, "artifacts", "Companion artifacts have no typed native mapping.")
@@ -220,19 +221,59 @@ func compileTypedLlamaInputs(ctx context.Context, st *engineState, command launc
 			if err != nil {
 				return nil, modelLoadError(load.ModelID, "artifacts", "Artifact changed during compilation.")
 			}
-			resolved.Artifacts = append(resolved.Artifacts, modelconfig.ArtifactBinding{Role: file.Role, Path: binding.SourcePath, ResolvedTarget: binding.ResolvedTarget, Size: strconv.FormatInt(binding.SizeBytes, 10), MtimeNS: binding.MtimeNS, SampleSHA256: binding.SampleSHA256})
+			artifacts = append(artifacts, modelconfig.ArtifactBinding{Role: file.Role, Path: binding.SourcePath, ResolvedTarget: binding.ResolvedTarget, Size: strconv.FormatInt(binding.SizeBytes, 10), MtimeNS: binding.MtimeNS, SampleSHA256: binding.SampleSHA256})
 			key := "model"
 			if file.Role == "draft" {
 				key = "model-draft"
 			}
-			if options[key] == "" {
-				options[key] = file.configured
+			if paths[key] == "" {
+				paths[key] = file.configured
 			}
 		}
-		resolved.NativeBuildID = buildID
-		if previous := rtLoadResolution(rt.ModelLoads, load.ModelID); previous != nil {
+		var options map[string]string
+		var resolved *modelconfig.ResolvedLoad
+		if modelLoadHasAuto(load.Requested) {
+			if load.Resolved != nil {
+				options, resolved, err = modelAutoCompileFrozen(load.ModelID, load.Requested, load.Resolved, layerCount, artifacts, buildID)
+			} else {
+				if approved {
+					return nil, modelLoadError(load.ModelID, "auto", "Accepted Auto resolution missing; explicitly Recalculate.")
+				}
+				op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+				input := modelEstimateInput{Facts: facts, Bindings: modelEstimateBindings(artifacts), Allocation: &modelconfig.ResolvedLoad{Artifacts: artifacts}, BuildID: buildID, Support: modelEstimatorSupport}
+				var state modelEstimateState
+				estimates := &state
+				if rt.modelLoadOwner != nil {
+					estimates = &rt.modelLoadOwner.modelEstimates
+				}
+				proposal, resolveErr := resolveModelSettingsAutoInput(ctx, load.ModelID, load.Requested, input, op, estimates)
+				if op.Proposals != nil {
+					op.Proposals[load.ModelID] = proposal
+				}
+				if resolveErr != nil {
+					return nil, resolveErr
+				}
+				options, resolved, err = modelAutoCompileCandidate(load.ModelID, proposal.Resolved, layerCount)
+			}
+		} else {
+			options, resolved, err = typedLlamaModelOptions(load.ModelID, load.Requested, layerCount)
+			if err == nil {
+				resolved.Artifacts, resolved.NativeBuildID = artifacts, buildID
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(options, paths)
+		if previous := rtLoadResolution(rt.ModelLoads, load.ModelID); previous != nil && !modelLoadHasAuto(load.Requested) {
 			resolved.ResolverRevision = previous.ResolverRevision
 			resolved.ReviewedInputID = previous.ReviewedInputID
+			if strings.HasPrefix(previous.ResolverRevision, "auto/") {
+				resolved.ResolverRevision, resolved.ReviewedInputID = "", ""
+				if source := modelAutoConversionSource(previous); source != "" {
+					resolved.ResolverRevision, resolved.ReviewedInputID = externalConversionResolver, source
+				}
+			}
 		}
 		sections[load.ModelID], lists[i] = options, list
 		load.Resolved = resolved
@@ -440,7 +481,7 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 	tokens, slots := int32(8192), int32(1)
 	if requested.Context != nil {
 		if requested.Context.Mode == "auto" {
-			return fail("context", "Reviewed Auto is unavailable.")
+			return fail("context", "Auto requires a reviewed finite resolution.")
 		}
 		tokens = requested.Context.Tokens
 	}
@@ -457,7 +498,7 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 	}
 	switch gpu.Mode {
 	case "auto":
-		return fail("gpu", "Reviewed Auto is unavailable.")
+		return fail("gpu", "Auto requires a reviewed finite resolution.")
 	case "native-default":
 		if layers == nil || *layers == math.MaxInt32 {
 			return fail("gpu", "Native default placement requires a bounded model layer count; select explicit CPU or layers.")
@@ -541,6 +582,12 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 			field = typed.Field
 		}
 		result.Errors[field] = err.Error()
+		if p.ModelChange != nil {
+			op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+			if proposal, ok := op.Proposals[p.ModelChange.ModelID]; ok {
+				result.Auto = &proposal
+			}
+		}
 		return result, nil
 	}
 	if err := p.Validate(); err != nil {
@@ -589,7 +636,24 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 		}
 		rt, before, conversionDigest = conversion.Runtime, conversion.Before, conversion.SourceDigest
 	} else if len(rt.ModelLoads) != 0 {
-		prepared, err := compileTypedLlamaInputs(ctx, snapshot.state, snapshot.command, rt, false)
+		beforeRT := rt
+		if modelLoadHasAuto(p.ModelChange.Load.Set) {
+			// Render the selected model's old finite settings for the diff,
+			// without requiring its old native build to remain installed. This
+			// is not a launch or a new recommendation. Artifact bindings and
+			// every sibling's frozen identity still pass the normal compiler.
+			beforeRT.ModelLoads = modelconfig.CloneLoads(rt.ModelLoads)
+			for i := range beforeRT.ModelLoads {
+				load := &beforeRT.ModelLoads[i]
+				if load.ModelID == p.ModelChange.ModelID && modelLoadHasAuto(load.Requested) {
+					if err := modelAutoFrozen(load.ModelID, load.Requested, load.Resolved); err != nil {
+						return fail(err)
+					}
+					load.Requested = load.Resolved.Options.Clone()
+				}
+			}
+		}
+		prepared, err := compileTypedLlamaInputs(ctx, snapshot.state, snapshot.command, beforeRT, false)
 		if err != nil {
 			return fail(err)
 		}
@@ -598,10 +662,23 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 			return fail(err)
 		}
 	}
+	// Every explicit Auto patch is Recalculate, even with identical preferences.
+	// Preserve conversion provenance independently before clearing the old result.
+	conversionSource := modelAutoConversionSource(rtLoadResolution(rt.ModelLoads, p.ModelChange.ModelID))
+	if conversionDigest != "" {
+		conversionSource = conversionDigest
+	}
 	rt.ModelLoads, err = patchModelLoad(rt.ModelLoads, p.ModelChange.ModelID, *p.ModelChange.Load)
 	if err != nil {
 		return fail(err)
 	}
+	op, _ := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation)
+	op.ConversionSource = conversionSource
+	if modelLoadHasAuto(p.ModelChange.Load.Set) {
+		op.RecalculateModel = p.ModelChange.ModelID
+	}
+	op.Proposals = make(map[string]modelconfig.AutoProposal)
+	ctx = context.WithValue(ctx, modelAutoOperationKey{}, op)
 	vars := snapshot.state.pathVars()
 	vars["host"], vars["port"] = effectiveBind(rt.Bind, ""), strconv.Itoa(rt.Port)
 	command, err := resolveProcessLaunch(llamaServingBase(rt), snapshot.command.Bin, vars)
@@ -698,7 +775,13 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	}
 	// All authoritative work is already complete. Estimate failures, panic or
 	// expiration remain advisory, including a reply-size failure after attachment.
-	estimate := e.modelEstimates.estimate(ctx, advisory[p.ModelChange.ModelID])
+	var estimate modelconfig.Estimate
+	if proposal, ok := op.Proposals[p.ModelChange.ModelID]; ok {
+		estimate = proposal.Estimate
+		result.Auto = &proposal
+	} else {
+		estimate = e.modelEstimates.estimate(ctx, advisory[p.ModelChange.ModelID])
+	}
 	result.Estimate = &estimate
 	if err := modelconfig.CheckPayloadSize(result); err != nil {
 		result.Estimate = nil
@@ -819,7 +902,7 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 	}
 	for _, load := range conversion.Runtime.ModelLoads {
 		resolved := rtLoadResolution(desired.ModelLoads, load.ModelID)
-		if resolved == nil || resolved.ResolverRevision != externalConversionResolver || resolved.ReviewedInputID != conversion.SourceDigest {
+		if resolved == nil || modelAutoConversionSource(resolved) != conversion.SourceDigest {
 			return nil, modelLoadError(load.ModelID, "conversion", "External router source changed since preview; preview again before applying.")
 		}
 		if resolved == nil || !reflect.DeepEqual(resolved.Artifacts, load.Resolved.Artifacts) || resolved.NativeBuildID != load.Resolved.NativeBuildID {

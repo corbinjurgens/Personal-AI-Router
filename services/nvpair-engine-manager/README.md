@@ -84,13 +84,13 @@ before emitting `engine:settings-request`. The model ID is not serialized as a
 settings resolution, and no mutation payload travels with the read. Caller
 identity comes from the pinned peer transport; target forwarding is cleared.
 
-`engine:preview-launch` and `engine:configure-launch` reject typed loads/model
-changes before preparation, mutation admission, rebind or persistence. Unknown,
+`engine:preview-launch` accepts load-only model changes; `engine:configure-launch`
+accepts parent-owned frozen settings. Unknown,
 duplicate, incorrectly cased and oversized fields are invalid params (-32602).
 The parent-only launch decoder still permits the broker-owned PreserveCORS
 guard; public settings decoders refuse it. Existing engine counters remain exact
 numeric JSON within the shared safe-integer bound; new policy revisions and byte
-quantities are decimal strings. Auto returns no finite result or trade defaults.
+quantities are decimal strings. Public callers cannot supply resolved authority.
 
 Typed llama presets compile through `compilePreparedServing` from the full
 Runtime, including typed-only configurations with no serving declaration.
@@ -104,6 +104,9 @@ Direct `PreviewLaunch` and launch readback preserve typed records. The worker's
 `engine:preview-launch` accepts load-only `modelChange` edits against a fresh
 target baseline. It returns selected edits or a complete-router conversion,
 per-field/source diffs and a digest, refusing unsupported members without takeover.
+Public preview validation admits owner-injected Auto to that compiler; it does
+not invoke the no-facts resolver or read a capacity snapshot itself. With no
+owner, the exact `target memory telemetry unavailable` refusal remains.
 `persistRuntimeServing` accepts an optional typed collection replacement in the
 same atomic port/launch/serving override write, preserving platform fields and
 opaque numeric precision. These helpers do not activate a stopped engine.
@@ -120,7 +123,8 @@ Previews disclose whole-router scope, affected configured models, the broker's
 observations remain an explicit unknown for the broker to resolve. Off, Pause,
 engine locks and adopted-process ownership keep their existing behavior.
 Apply-build must add model-settings apply to its maintenance exclusion when
-implemented; no exclusion symbol exists yet. Auto remains unavailable, and native
+implemented; no exclusion symbol exists yet. Production Auto has no trusted memory
+producer and refuses with `target memory telemetry unavailable`. Native
 configuration does not create qualification or establish strict readiness.
 
 Advisory memory estimates use the private MIT `gguf-parser-go` v0.27.0 pin
@@ -140,11 +144,41 @@ separate known storage and unsized runtime costs. Totals remain partial and
 uncalibrated, with no Fits claim. CPU and unmapped offload byte projections are
 not native device allocation readback. Task 10 has no runtime trusted-memory
 producer, telemetry wire input or native device map. Capacity, free memory and
-fit comparison remain Unknown with reason `target memory telemetry unavailable`;
-implementing those comparisons is deferred. The in-memory future memory helpers
-have synthetic fixtures only and do not establish runtime telemetry support.
+fit comparison remain Unknown with reason `target memory telemetry unavailable`.
+The engine's private owner-injected Auto selector implements bounded comparison
+and freezing with synthetic fixtures; it does not establish runtime telemetry support.
 Useful component estimates remain available. Simultaneous residents are unsized
 and no release credit is assumed. Auto's no-facts helper remains Unknown.
+
+Auto searches only the existing validated bounded facts, at most 128 candidate
+evaluations: highest context first, then greatest finite GPU offload. Its default
+range is 8192 down to 4096 tokens with one slot; explicit ranges, fixed context,
+slots, precision and other manual choices remain constraints. Context candidates
+use the 256-token grid and known model context, without automatic RoPE extension.
+Dense weight transfer alone does not prove total cost monotonicity. Bisection
+also requires the cost owner's complete layer-independent non-weight host cost
+for the exact context/options, checked against every evaluated allocation.
+No production estimator supplies this proof. Without it, or on a disagreement,
+the selector enumerates from greatest offload through CPU within the same budget.
+Unknown costs, stale telemetry, unknown device maps
+and incomplete allocations cannot fit. Exhausted searches report an unsearched
+range separately from insufficient memory. The disclosed heuristic reserves
+10 percent of each pool's capacity plus 512 MiB. CPU-only results disclose their
+speed cost. Current estimator graph costs remain partial, including CPU scratch,
+so capacity alone cannot create a production Fits result.
+
+Reviewed Auto uses `auto/finite-llama/1`, binding requested preferences, finite
+options, artifact/build identities, memory snapshot hash and any external-router
+conversion source. Apply and cold restart/recovery compilation reuse that exact
+finite result without consulting telemetry or searching. Artifact/build drift
+refuses; native fit remains off, with no OOM retry ladder. Explicitly reselecting
+Auto in a new preview is Recalculate. It can review a replacement native build
+for the selected model; old Apply/restart and frozen siblings still reject drift.
+A manual edit cannot silently retune saved
+Auto. Conversion labels alone never authorize Auto. Manual preview and Task 10
+advisory digest behavior are preserved. Broker end-to-end frozen forwarding and
+recovery integration remain deferred until a trusted memory producer exists;
+engine unit support does not establish end-to-end Auto Apply.
 
 Each executor owns a derived LRU with ceilings of 128 records, 1 MiB retained
 accounting and 30 seconds. Its key includes ordered sampled artifact identities,

@@ -1390,3 +1390,193 @@ func TestModelSettingsLoadContentFenceAndNativeBuildIdentity(t *testing.T) {
 		t.Fatal("native build binding omitted from typed identity")
 	}
 }
+
+func TestModelSettingsLoadAutoFrozenRestartCompilation(t *testing.T) {
+	f, request, owner := autoTestFrozenLaunch(t)
+	rt := f.st.plat.Runtime
+	rt.ModelLoads = modelconfig.CloneLoads(request.Settings.ModelLoads)
+	command := typedFixtureCommand(t, f, rt)
+	before := modelconfig.CloneLoads(rt.ModelLoads)
+	owner.calls = 0
+	owner.memory = nil
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: owner})
+	prepared, err := compileTypedLlamaInputs(ctx, f.st, command, rt, true)
+	if err != nil {
+		t.Fatal("frozen restart/recovery failed without telemetry", err)
+	}
+	if owner.calls != 0 || !modelconfig.EqualLoads(before, prepared.ModelLoads) || prepared.Config != nil {
+		t.Fatal("finite compilation retuned, consulted telemetry or created serving authority")
+	}
+	sections, err := parseLlamaServingPreset(prepared.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sections["weak-model"]["fit"] != "off" || sections["weak-model"]["load-on-startup"] != "false" || sections["weak-model"]["ctx-size"] != "4096" {
+		t.Fatalf("unexpected native result: %v", sections["weak-model"])
+	}
+	// Repeated cold compilation models recovery: only persisted settings survive,
+	// and a fresh estimator must not be called for a saved allocation.
+	f.ex.modelEstimates = modelEstimateState{run: func(context.Context, modelEstimateInput) modelconfig.Estimate {
+		t.Fatal("recovery called estimator")
+		return modelconfig.Estimate{}
+	}}
+	again, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, true)
+	if err != nil || again.Digest != prepared.Digest || !bytes.Equal(again.Snapshot, prepared.Snapshot) {
+		t.Fatalf("cold compilation changed frozen result: %v", err)
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadAutoFrozenIdentityDriftRefuses(t *testing.T) {
+	test := func(name string, mutate func(*testing.T, modelLoadFixture, *Runtime, *launchCommand)) {
+		t.Run(name, func(t *testing.T) {
+			f, request, _ := autoTestFrozenLaunch(t)
+			rt := f.st.plat.Runtime
+			rt.ModelLoads = modelconfig.CloneLoads(request.Settings.ModelLoads)
+			command := typedFixtureCommand(t, f, rt)
+			mutate(t, f, &rt, &command)
+			if _, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, true); err == nil {
+				t.Fatal("frozen identity drift accepted")
+			}
+			assertNoSettingsOverride(t, f.ex)
+			if f.st.running || f.st.proc != nil {
+				t.Fatal("identity refusal activated engine")
+			}
+		})
+	}
+	test("artifact replacement", func(t *testing.T, _ modelLoadFixture, rt *Runtime, _ *launchCommand) {
+		writeInspectionGGUF(t, rt.ModelLoads[1].Resolved.Artifacts[0].Path, "llama", 0.75, 4096)
+	})
+	test("native build replacement", func(t *testing.T, f modelLoadFixture, _ *Runtime, command *launchCommand) {
+		command.Bin = filepath.Join(f.root, "changed-native")
+		writeTestFile(t, command.Bin, []byte("changed native build"))
+	})
+	test("stale source preview digest", func(_ *testing.T, _ modelLoadFixture, rt *Runtime, _ *launchCommand) {
+		rt.ModelLoads[1].Resolved.SourceInputDigest = strings.Repeat("f", 64)
+	})
+	test("stale preset preview digest", func(_ *testing.T, _ modelLoadFixture, rt *Runtime, _ *launchCommand) {
+		rt.ModelLoads[1].Resolved.PresetDigest = strings.Repeat("f", 64)
+	})
+}
+
+func TestModelSettingsLoadAutoConversionSourceRemainsBound(t *testing.T) {
+	f := newModelLoadFixture(t)
+	now := time.Now()
+	owner := &autoTestMemoryOwner{memory: autoTestMemory(now)}
+	f.ex.modelEstimates = modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
+	r := autoTestRequest()
+	r.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 8192}
+	request := settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: r}}
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: owner})
+	preview, err := f.ex.previewModelLoadChange(ctx, f.st, request)
+	if err != nil || len(preview.Errors) != 0 || preview.Auto == nil {
+		t.Fatalf("conversion Auto preview: %+v %v", preview, err)
+	}
+	recheck, err := f.ex.validateTypedLlamaConversion(ctx, f.st, f.rt, preview.Settings)
+	if err != nil || recheck == nil {
+		t.Fatalf("Auto conversion was not accepted against exact source: %v", err)
+	}
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, f.source, append(data, []byte("\n# source drift\n")...))
+	if err := recheck(); err == nil {
+		t.Fatal("source drift did not invalidate Auto conversion")
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadAutoRecalculateAfterNativeBuildDrift(t *testing.T) {
+	f, frozen, owner := autoTestFrozenLaunch(t)
+	f.st.plat.Runtime.ModelLoads = modelconfig.CloneLoads(frozen.Settings.ModelLoads)
+	before := modelconfig.CloneLoads(frozen.Settings.ModelLoads)
+	writeTestFile(t, f.st.plat.Runtime.Bin, []byte("replacement synthetic Auto native build"))
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: owner})
+	owner.calls = 0
+	if _, err := f.ex.ConfigureLaunch(ctx, settings.Configure{Engine: "fake", Settings: frozen.Settings}, func() error { t.Fatal("stale Auto reached rebind"); return nil }); err == nil {
+		t.Fatal("old Apply accepted native build drift")
+	}
+	command := typedFixtureCommand(t, f, f.st.plat.Runtime)
+	if _, err := compileTypedLlamaInputs(ctx, f.st, command, f.st.plat.Runtime, true); err == nil {
+		t.Fatal("old restart accepted native build drift")
+	}
+	if owner.calls != 0 {
+		t.Fatal("Apply/restart consulted capacity after drift")
+	}
+	request := settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: autoTestRequest()}}
+	if err := f.ex.validateModelSettingsLaunch(ctx, request, false); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := f.ex.PreviewLaunch(request, ctx)
+	if err != nil || len(preview.Errors) != 0 || preview.Auto == nil || preview.Auto.Resolved == nil {
+		t.Fatalf("explicit Recalculate could not recover build drift: %+v %v", preview, err)
+	}
+	previous := rtLoadResolution(before, "weak-model")
+	if owner.calls != 1 || preview.Auto.Resolved.NativeBuildID == previous.NativeBuildID || preview.Auto.ReviewedInputID == previous.ReviewedInputID {
+		t.Fatal("Recalculate did not review the new build exactly once")
+	}
+	if modelAutoConversionSource(preview.Auto.Resolved) != modelAutoConversionSource(previous) {
+		t.Fatal("Recalculate lost conversion source")
+	}
+	if !modelconfig.EqualLoads(before, f.st.plat.Runtime.ModelLoads) || f.st.running || f.st.proc != nil {
+		t.Fatal("new preview changed accepted runtime")
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadAutoRecalculateStillChecksFrozenSibling(t *testing.T) {
+	f, frozen, owner := autoTestFrozenLaunch(t)
+	f.st.plat.Runtime.ModelLoads = modelconfig.CloneLoads(frozen.Settings.ModelLoads)
+	ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: owner})
+	request := settingsRequest(t, f.ex)
+	r := autoTestRequest()
+	r.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 8192}
+	request.ModelChange = &modelconfig.ModelChange{ModelID: "medium-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: r}}
+	if err := f.ex.validateModelSettingsLaunch(ctx, request, false); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := f.ex.PreviewLaunch(request, ctx)
+	if err != nil || len(preview.Errors) != 0 || preview.Auto == nil {
+		t.Fatalf("frozen sibling setup: %+v %v", preview, err)
+	}
+	for _, model := range []string{"weak-model", "medium-model"} {
+		found := false
+		for _, load := range preview.Settings.ModelLoads {
+			if load.ModelID == model {
+				found = modelLoadHasAuto(load.Requested) && load.Resolved != nil
+			}
+		}
+		if !found {
+			t.Fatalf("frozen sibling setup did not retain reviewed Auto for %s", model)
+		}
+	}
+	f.st.plat.Runtime.ModelLoads = modelconfig.CloneLoads(preview.Settings.ModelLoads)
+	before := modelconfig.CloneLoads(f.st.plat.Runtime.ModelLoads)
+	writeTestFile(t, f.st.plat.Runtime.Bin, []byte("replacement build shared with frozen sibling"))
+	owner.calls = 0
+	request = settingsRequest(t, f.ex)
+	request.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: autoTestRequest()}}
+	if err := f.ex.validateModelSettingsLaunch(ctx, request, false); err != nil {
+		t.Fatal(err)
+	}
+	refused, err := f.ex.PreviewLaunch(request, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildRefusal := false
+	for _, reason := range refused.Errors {
+		if strings.Contains(reason, "native build changed") {
+			buildRefusal = true
+		}
+	}
+	if !buildRefusal || refused.PreviewDigest != "" || owner.calls != 0 {
+		t.Fatalf("Recalculate bypassed frozen sibling: errors=%v calls=%d", refused.Errors, owner.calls)
+	}
+	if !modelconfig.EqualLoads(before, f.st.plat.Runtime.ModelLoads) {
+		t.Fatal("refused sibling preview changed accepted settings")
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
