@@ -227,8 +227,41 @@ then composes bounded artifact facts, descriptors and an advisory estimate.
 The estimate consumes the same validated facts through a separate read-only
 handoff, without another read, parser or resolver. Inspect has no effective
 allocation and identifies its native launch snapshot as unverified; it can size
-tensor storage while cache/workspace/placement remain Unknown. No lifecycle,
-inventory, download, full model hashing or native helper is invoked.
+tensor storage while cache/workspace/placement remain Unknown. Artifact/estimate
+inspection starts no lifecycle, inventory read, download or full model hashing.
+The explicit parent-authorized operation can invoke the existing bounded
+device-map helper under its Pause, activation, ownership and maintenance fences;
+an observation summary neither authorizes that helper nor adds another call.
+
+`InspectResult.loadObservation` is an optional detached, path-free summary of
+the newest relevant native buffer sample, not a settings Preview field, request
+field or Auto input. Actual-start compilation supplies the frozen
+artifact/options/estimator baseline. The process-output and existing model-sweep
+owners establish child/load lifetime, recognized build and effective context/slots;
+ordinary typed loads need no `ServingConfig`. Inspect projects retained history
+without another props/model-list request or history write. Missing, unsupported,
+stale, ambiguous and incomplete observations remain Unknown/partial. Recovered
+history cannot restore currentness.
+
+The b11146 mapping carries recognized self-reported pin assurance only, not
+proof of an undisclosed clean build. Rows retain reported decimal MiB, precision,
+conservative intervals, phase and coverage; repeated buffers are occurrences,
+and later scheduler reservations are not additive. Compatible comparisons use
+the captured load estimate, never the current draft. Incomplete estimate scope
+and unproved device mapping remain Unknown. Observations cannot become Fits,
+Tight, Exceeds, physical occupancy, qualification, admission or calibration input.
+
+Projection bounds the optional summary to 4 KiB inside the unchanged 64 KiB
+complete reply limit, reserving existing advisory/target space. It reduces
+optional rows with omitted coverage, then uses a compact structured
+`unknown/response-budget` result when possible. If even that cannot fit, only
+`loadObservation` is omitted; original artifact facts and the estimate fallback
+remain available. The bridge maps absence to
+`{status:"unknown",current:false,reason:"observation-omitted"}`. Invalid supplied
+summaries still fail strict decoding. Derived history is separate from settings
+and journals; corrupt history is preserved with writes disabled, and landed
+`ErrReplaced` publication is adopted with uncertainty. See the full
+[buffer-observation contract](../../docs/model-buffer-observations.mdx).
 
 `engine:remote-inspect-model` accepts `{engine,nodeId,modelId}` with a required
 remote target. It uses POST `/v1/engine-settings/inspect`, a `controlRead` route on
@@ -326,13 +359,15 @@ Load previews describe whole-router scope, affected configured models, the
 Unobserved loaded models remain explicit unknowns for broker reconciliation.
 Unchanged typed settings do not restart an owned process. Saving Off, paused or
 locked settings never activates it; adopted processes remain read-only.
-No typed settings create qualification. Apply-build must
-add this mutation to its future maintenance exclusion; no symbol exists today.
+No typed settings create qualification. The broker's existing build-maintenance
+settings-entry exclusion also covers this mutation; it is not a client bypass
+of the independent owner-evidence requirements for production build apply.
 
 ### Reviewed Auto engine unit
 
 The private `modelAutoMemoryOwner` supplies a target-owned snapshot through the
-operation context. No production implementation or client telemetry wire exists.
+operation context, populated from the broker's trusted self evidence on the
+parent-only worker envelope. Public callers cannot upload this authority.
 The selector consumes the compiler's already validated bounded facts and ordered
 artifact bindings; it performs no additional file/parser/network/native reads.
 Capacity alone is insufficient: every runtime component and independent pool
@@ -466,7 +501,9 @@ validates that source without reconstructing a private map or requiring a live
 producer run. Source drift refuses activation. Public requests cannot supply the
 worker envelope or replace a target-owned resolution. Manual/conversion GPU
 settings remain launchable without reviewed bindings and keep Unknown comparisons.
-See [MANIFEST](MANIFEST.md) for conditional complete-cost support.
+The [advisory estimate support contract](#advisory-memory-estimate-support)
+describes the unresolved accounting limits; MANIFEST covers option vocabulary,
+not complete-cost eligibility. Production Fits and Auto remain unavailable.
 
 The shared Go comparison owner produces `capacityFit` and `freeFit` as `unknown`,
 `exceeds`, `tight` or `fits`. Each charged domain must equal the checked sum of
@@ -504,7 +541,9 @@ admission, ME2 input, observation, qualification or automatic retuning.
 
 The compiler emits a separate optional read-only handoff only after its existing
 artifact/build rechecks. Preview consumes it after its ordinary digest and base
-reply-size check. Other compiler callers ignore it. A failing/panicking estimate
+reply-size check. Actual-start compilation also requests this handoff and freezes
+detached per-model estimate inputs for buffer capture. Ordinary validation and
+readback callers do not request it. A failing/panicking estimate
 or oversized advisory attachment leaves manual settings and review/native
 digests unchanged. Sampling recommendation provenance remains descriptor-owned.
 Synthetic `TestModelSettingsEstimate` cases specify arithmetic, support/Unknown

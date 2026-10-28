@@ -64,8 +64,11 @@ transfers can continue, while new copies remain subject to Pause admission.
 
 ## Quick start
 
-To edit a model's generation preferences without changing native load settings,
-see [Configure model generation settings](docs/model-configuration.mdx).
+See [Configure model settings](docs/model-configuration.mdx) for generation
+preferences and reviewed manual llama.cpp load settings. Native buffer reports
+can be compared with the estimate captured for that load; they are rounded
+reports, not physical GPU usage. Automatic memory-fit configuration remains
+unavailable while complete-cost accounting is incomplete.
 
 Download a released build and use the desktop application. That is the path we
 recommend and the one the rest of this guide assumes. Building from source and

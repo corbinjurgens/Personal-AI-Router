@@ -12,6 +12,19 @@ the existing settings relay and pinned `POST /v1/engine-settings/inspect` route.
 It does not initialize a settings journal, start an engine, download content,
 change trust or authorize a load. Artifact inspection reports its bounded source
 assurance separately from advisory estimates and service-owned option descriptors.
+The target supplies its own fresh self-memory evidence through the strict
+parent-only worker envelope; public and peer requests cannot supply capacity or
+native-map authority. Explicit inspection/Recalculate can use the target's
+existing permission-gated helper. Observation projection adds no native action.
+
+Optional `InspectResult.loadObservation` follows the same authenticated read
+path. Shared decoding/cloning and target stamping preserve a bounded selected
+summary and frozen same-load baseline, without raw output or settings authority.
+Unknown/partial/unsupported summaries remain data. The complete 64 KiB reply
+limit still applies, so the optional field can be omitted under response pressure;
+the desktop maps absence to Unknown/`observation-omitted`. Observations never
+enter settings Preview, portable patches, review digests or accepted journals.
+See [native buffer observations](../../docs/model-buffer-observations.mdx).
 
 `settings.modelLoads` is an exact-model-ID ordered collection of `requested`
 portable preferences and optional target-owned finite `resolved` records.
@@ -39,8 +52,15 @@ selected-copy fields. The target merge preserves unrestricted
 Typed Preview performs worker reads without the configuration or policy mutex,
 then rechecks both CAS revisions and the worker source. Its digest binds the
 authenticated caller, selected patch, complete target baseline, policy content,
-native bindings/build, finite resolution, diff and impact. Apply repeats that
-review and refuses a changed result. A running load change discloses a
+native bindings/build, finite resolution, diff and impact. The bounded review
+owner retains that exact result, original request and caller for ten minutes.
+Explicit Recalculate supersedes the caller/model's previous recommendation;
+expired or lost unaccepted reviews require another explicit review. Apply checks
+receipt authentication/idempotency first, then validates retained full finite
+settings against current baseline, source and permissions. It does not repeat
+the portable patch, helper or Auto search. Fresh resource eligibility compares
+the same unaccepted Auto allocation, never selects a replacement. Manual Apply
+and accepted recovery do not require advisory telemetry. A running load change discloses a
 whole-router restart, affected configured/observed models and the 60-second
 drain before Apply. Missing loaded-model readback remains an explicit unknown.
 Off stays Off; Apply never resumes a paused node. Policy-only edits use the
@@ -51,9 +71,17 @@ policy revision and unresolved error. A receipt is never evidence of runtime
 readiness. CAS/pending conflicts use `-32010`, Pause `-32011`, grant denial
 `-32012`, inference lock `-32014`; malformed fields use `-32602`.
 
-There is no build-maintenance exclusion at this source. Apply-build must add
-model-settings apply to its maintenance reservation before those mutation
-implementations are joined. There is no client-supplied bypass.
+The existing build-maintenance settings-entry exclusion rejects conflicting
+model-settings work. It is separate from the remaining owner-evidence conditions
+that keep production apply-build start unavailable; no client bypass exists.
+
+Production memory costs remain partial. Fits and production Auto refuse until
+complete-cost specification and implementation acceptance. Telemetry, native
+reports and synthetic complete fixtures do not remove that prerequisite. Manual
+finite configuration remains available. Copy process families remain pending the
+separate copy fix, and Windows buffer-process acceptance is pending. These are
+limitations, not passing validation claims; native accuracy, occupancy and
+calibration remain unverified.
 
 The existing `engine-settings-operations.json` journal contains the accepted
 model operation as a subrecord, including previous/desired native settings,
