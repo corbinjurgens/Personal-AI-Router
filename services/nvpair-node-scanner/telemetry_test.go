@@ -23,6 +23,133 @@ import (
 
 func init() { telemetryClock = func() (uint64, error) { return 1000000000, nil } }
 
+func TestMemoryTelemetrySelfPreservesConfiguredTLS(t *testing.T) {
+	d := &daemon{dir: newDirectory(), reg: newRegistry("self", "", selfAddrs(loopbackHost))}
+	d.dir.upsert(noderec.DirectoryNode{HostUUID: "self", IP: loopbackHost, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: 14318}}})
+	plainCalls, tlsCalls := 0, 0
+	d.http = &http.Client{Transport: serviceBuildTransport(func(*http.Request) (*http.Response, error) {
+		plainCalls++
+		return nil, fmt.Errorf("HTTPS-only fixture")
+	})}
+	d.tlsHTTP = &http.Client{Transport: serviceBuildTransport(func(r *http.Request) (*http.Response, error) {
+		tlsCalls++
+		if r.URL.Scheme != "https" {
+			return nil, fmt.Errorf("incorrect scheme")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewBufferString(`{"hostUuid":"self","telemetryValid":true,"msSince":0}`)), Header: make(http.Header)}, nil
+	})}
+	if !d.refreshNodeTelemetry(context.Background(), "self", loopbackHost, 14318) {
+		t.Fatal("self telemetry ignored configured TLS client")
+	}
+	if plainCalls != 0 || tlsCalls != 1 {
+		t.Fatalf("transport calls: plain=%d TLS=%d", plainCalls, tlsCalls)
+	}
+}
+
+func TestMemoryTelemetryCodecOnlyEventHasNoGenerationAuthority(t *testing.T) {
+	var output bytes.Buffer
+	d := &daemon{codec: NewCodec(&output)}
+	d.emit(noderec.NotifyNodeUpdated, noderec.DirectoryNode{HostUUID: "self"})
+	var frame Message
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &frame); err != nil {
+		t.Fatal(err)
+	}
+	var event noderec.NodeEvent
+	if err := json.Unmarshal(frame.Params, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.MemoryGeneration != nil {
+		t.Fatal("absent directory invented generation authority")
+	}
+}
+
+func TestMemoryTelemetryDirectoryEventsCarryOwnerGeneration(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		name := "unchanged directory"
+		if changed {
+			name = "changed after request"
+		}
+		t.Run(name, func(t *testing.T) {
+			var output bytes.Buffer
+			d := &daemon{dir: newDirectory(), codec: NewCodec(&output)}
+			node := noderec.DirectoryNode{HostUUID: "peer", IP: loopbackHost, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: 14318}}}
+			d.dir.upsert(node)
+			requestGeneration := d.dir.routeGeneration("peer")
+			if changed {
+				node.Services = map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: 14319}}
+				d.dir.upsert(node)
+			}
+			d.emit(noderec.NotifyNodeUpdated, node)
+			var frame Message
+			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &frame); err != nil {
+				t.Fatal(err)
+			}
+			var event noderec.NodeEvent
+			if err := json.Unmarshal(frame.Params, &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.MemoryGeneration == nil {
+				t.Fatal("node event omitted current directory generation")
+			}
+			generation, err := strconv.ParseUint(*event.MemoryGeneration, 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if generation != d.dir.routeGeneration("peer") || (generation != requestGeneration) != changed {
+				t.Fatalf("event generation=%d, request=%d, changed=%v", generation, requestGeneration, changed)
+			}
+		})
+	}
+}
+
+func TestMemoryTelemetryRequestAuthorityComesFromScanner(t *testing.T) {
+	for _, tc := range []struct {
+		name, registered, host string
+		verified               bool
+	}{
+		{"self loopback", "peer", loopbackHost, true},
+		{"self LAN forged flag", "peer", "192.0.2.1", false},
+		{"other loopback forged flag", "other", loopbackHost, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			d := &daemon{dir: newDirectory(), reg: newRegistry(tc.registered, "", selfAddrs(loopbackHost)), codec: NewCodec(&output)}
+			d.dir.upsert(noderec.DirectoryNode{HostUUID: "peer", IP: tc.host, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: 14318}}})
+			d.http = &http.Client{Transport: serviceBuildTransport(func(*http.Request) (*http.Response, error) {
+				// The producer attempts to forge both direct and nested authority.
+				fact := noderec.MemoryFact{Bytes: "0", Source: "fixture", SampledAt: time.Now().UTC(), Valid: true}
+				payload := struct {
+					NodeInfoResponse
+					VerifiedSelfLoopback bool                         `json:"verifiedSelfLoopback"`
+					MemoryRequest        noderec.MemoryRequestContext `json:"memoryRequest"`
+				}{NodeInfoResponse: NodeInfoResponse{HostUUID: "peer", MemoryObservation: &noderec.MemoryObservation{RunID: "producer", Domains: []noderec.MemoryDomain{{ID: "ram", Kind: "system", Total: fact, Free: fact}}}}, VerifiedSelfLoopback: true, MemoryRequest: noderec.MemoryRequestContext{Generation: "999", RequestBootNS: "0", VerifiedSelfLoopback: true}}
+				body, err := json.Marshal(payload)
+				if err != nil {
+					return nil, err
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
+			})}
+			if !d.refreshNodeTelemetry(context.Background(), "peer", tc.host, 14318) {
+				t.Fatal("fetch failed")
+			}
+			var frame Message
+			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &frame); err != nil {
+				t.Fatal(err)
+			}
+			var got noderec.NodeTelemetry
+			if err := json.Unmarshal(frame.Params, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.MemoryRequest == nil || got.MemoryRequest.Generation != "1" || got.MemoryRequest.VerifiedSelfLoopback != tc.verified {
+				t.Fatalf("request context: %+v", got.MemoryRequest)
+			}
+			if got.Memory == nil || got.Memory.RunID != "producer" || !got.Memory.Domains[0].Free.Valid {
+				t.Fatalf("current request lost memory: %+v", got.Memory)
+			}
+		})
+	}
+}
+
 func TestMemoryTelemetryFetchAgeAndRetiredDirectory(t *testing.T) {
 	for _, retire := range []bool{false, true} {
 		name := "current"
@@ -69,6 +196,9 @@ func TestMemoryTelemetryFetchAgeAndRetiredDirectory(t *testing.T) {
 			}
 			if got.Memory == nil || got.Memory.Domains[0].Free.AgeMS != 6000 || got.MemoryHop == nil || got.MemoryHop.BootNS != "7000000000" {
 				t.Fatalf("forwarded sample: %+v", got)
+			}
+			if got.MemoryRequest == nil || got.MemoryRequest.VerifiedSelfLoopback || got.MemoryRequest.Generation != "1" || got.MemoryRequest.RequestBootNS != "1000000000" {
+				t.Fatalf("missing scanner-owned request context: %+v", got.MemoryRequest)
 			}
 		})
 	}

@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"slices"
 	"strconv"
@@ -272,6 +273,7 @@ type telemetrySample struct {
 func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID string, hosts []string, niPort int) bool {
 	var generation uint64
 	var buildTargetCurrent bool
+	verifiedSelf := d.reg != nil && hostUUID == d.reg.record().HostUUID && slices.Equal(hosts, []string{loopbackHost})
 	if d.dir != nil {
 		self := d.reg != nil && hostUUID == d.reg.record().HostUUID && slices.Equal(hosts, []string{loopbackHost})
 		d.dir.mu.RLock()
@@ -284,7 +286,21 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 	ask := func(host string) (telemetrySample, bool) {
 		boot, clockErr := telemetryClock()
 		startedAt := time.Now()
-		candidate, ok := d.fetchPeerNodeInfoWithin(ctx, hostUUID, "", host, niPort)
+		var candidate NodeInfoResponse
+		var ok bool
+		if verifiedSelf && (d.http != nil || d.tlsHTTP != nil) {
+			// Authority requires this actual loopback request. A redirect must
+			// never turn a producer's remote response into self evidence.
+			selected, scheme := d.http, "http"
+			if d.tlsHTTP != nil {
+				selected, scheme = d.tlsHTTP, "https"
+			}
+			client := *selected
+			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+			candidate, ok = d.readNodeInfoWithin(ctx, &client, scheme, host, niPort, func() bool { return true })
+		} else {
+			candidate, ok = d.fetchPeerNodeInfoWithin(ctx, hostUUID, "", host, niPort)
+		}
 		if !ok {
 			return telemetrySample{}, false
 		}
@@ -369,6 +385,12 @@ func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID st
 		memoryCurrent = memoryCurrent && exists && advertised && d.dir.generations[hostUUID] == generation && ni.Port == niPort
 	}
 	d.emitTelemetry(noderec.NodeTelemetry{
+		MemoryRequest: func() *noderec.MemoryRequestContext {
+			if !memoryCurrent || sample.clockErr != nil {
+				return nil
+			}
+			return &noderec.MemoryRequestContext{Generation: strconv.FormatUint(generation, 10), RequestBootNS: strconv.FormatUint(sample.boot, 10), VerifiedSelfLoopback: verifiedSelf}
+		}(),
 		Memory: func() *noderec.MemoryObservation {
 			if !memoryCurrent {
 				return nil

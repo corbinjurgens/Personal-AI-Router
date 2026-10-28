@@ -367,13 +367,14 @@ func (sn storedNode) toAvailable() AvailableNode {
 // subscribe to the promoted daemon and reading its acks — while
 // the scanner's node/* notifications are routed into the discovery store.
 type scannerProcess struct {
-	current  func() bool
-	onExit   func()
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	peer     *Peer
-	store    *discoveryStore
-	relayDir *relay.Directory
+	memoryGenerations map[string]string // read-pump owned, current directory claims
+	current           func() bool
+	onExit            func()
+	cmd               *exec.Cmd
+	stdin             io.WriteCloser
+	peer              *Peer
+	store             *discoveryStore
+	relayDir          *relay.Directory
 	// onNodeLost, when non-nil, is invoked the moment the daemon evicts a node's
 	// FINAL directory claim (it's truly gone, not just dropped by one of two
 	// sources) — the broker's hook for marking workloads pinned to a departed
@@ -383,6 +384,7 @@ type scannerProcess struct {
 	// because the sweep needs to know *which* node departed.
 	onNodeLost         func(uuid, name string)
 	onTelemetry        func(noderec.NodeTelemetry)
+	onMemoryRetired    func(hostUUID string)
 	onTelemetryRemoved func(hostUUID string)
 	// onErrorsNotif receives the scanner's errors:report / errors:clear
 	// notifications (a paired peer's node-info going quiet, and coming back) so
@@ -643,6 +645,25 @@ func (s *scannerProcess) handleNotify(method string, params json.RawMessage) {
 			slog.Warn("daemon emitted invalid node event", "method", method, "err", err)
 			return
 		}
+		previous, claimed := s.memoryGenerations[ev.Node.HostUUID]
+		generation := ""
+		if ev.MemoryGeneration != nil {
+			generation = *ev.MemoryGeneration
+			if n, err := strconv.ParseUint(generation, 10, 64); err != nil || strconv.FormatUint(n, 10) != generation {
+				generation = ""
+			}
+		}
+		_, hasInfo := ev.Node.Services[noderec.ServiceNodeInfo]
+		if method == noderec.NotifyNodeRemoved || !hasInfo {
+			generation = ""
+		}
+		if s.memoryGenerations == nil {
+			s.memoryGenerations = make(map[string]string)
+		}
+		s.memoryGenerations[ev.Node.HostUUID] = generation
+		if (!claimed || previous != generation) && method != noderec.NotifyNodeRemoved && s.onMemoryRetired != nil {
+			s.onMemoryRetired(ev.Node.HostUUID)
+		}
 		// Fold into the relay directory (internal subscribers: proxies, mesh
 		// services) and the client-facing store (discovery:get-nodes /
 		// nodes-changed, merging manual nodes), carrying the trusted annotation.
@@ -684,6 +705,14 @@ func (s *scannerProcess) handleNotify(method string, params json.RawMessage) {
 		if telemetry.HostUUID == "" {
 			slog.Warn("daemon emitted node telemetry without hostUuid")
 			return
+		}
+		context := telemetry.MemoryRequest
+		if context != nil && s.memoryGenerations[telemetry.HostUUID] != "" && context.Generation != s.memoryGenerations[telemetry.HostUUID] {
+			return
+		}
+		if context == nil || s.memoryGenerations[telemetry.HostUUID] == "" || context.Generation != s.memoryGenerations[telemetry.HostUUID] {
+			telemetry.Memory = nil
+			telemetry.MemoryRequest = nil
 		}
 		if s.cmd != nil && s.cmd.Process != nil && telemetry.MemoryHop != nil && telemetry.MemoryHop.ForwarderID != strconv.Itoa(s.cmd.Process.Pid) {
 			telemetry.Memory = nil

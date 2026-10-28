@@ -622,7 +622,14 @@ func (d *daemon) emit(method string, node noderec.DirectoryNode) {
 	if d.codec == nil {
 		return
 	}
-	if err := d.codec.Notify(method, noderec.NodeEvent{Node: node}); err != nil {
+	event := noderec.NodeEvent{Node: node}
+	if d.dir != nil {
+		d.dir.mu.RLock()
+		defer d.dir.mu.RUnlock()
+		generation := strconv.FormatUint(d.dir.generations[node.HostUUID], 10)
+		event.MemoryGeneration = &generation
+	}
+	if err := d.codec.Notify(method, event); err != nil {
 		slog.Warn("failed to emit node event", "method", method, "err", err)
 	}
 }
