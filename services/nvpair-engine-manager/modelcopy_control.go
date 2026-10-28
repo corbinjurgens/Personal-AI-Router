@@ -73,6 +73,8 @@ type activeCopy struct {
 	copyRequest
 	Progress *copyProgress `json:"progress,omitempty"`
 	cancel   context.CancelFunc
+	// Admission is visible while the durable owner publishes its marker.
+	pendingPublication bool
 }
 
 type copyCapabilities struct {
@@ -246,7 +248,7 @@ func (m *Manager) reserveCopy(parent context.Context, p copyRequest) (context.Co
 		return nil, nil, copyConflict("eight model copies are already active")
 	}
 	ctx, cancel := context.WithCancel(parent)
-	entry := &activeCopy{copyRequest: p, cancel: cancel}
+	entry := &activeCopy{copyRequest: p, cancel: cancel, pendingPublication: true}
 	if m.copies == nil {
 		m.copies = map[string]*activeCopy{}
 	}
@@ -263,8 +265,8 @@ func (m *Manager) reserveCopy(parent context.Context, p copyRequest) (context.Co
 
 func (m *Manager) cancelCopy(opID string) bool {
 	m.copyMu.Lock()
-	defer m.copyMu.Unlock()
 	entry := m.copies[opID]
+	m.copyMu.Unlock()
 	if entry == nil {
 		return false
 	}
@@ -274,12 +276,93 @@ func (m *Manager) cancelCopy(opID string) bool {
 
 func (m *Manager) stopCopies() {
 	m.copyMu.Lock()
-	defer m.copyMu.Unlock()
 	m.copiesClosed = true
+	entries := make([]*activeCopy, 0, len(m.copies))
 	for id, entry := range m.copies {
-		entry.cancel()
+		entries = append(entries, entry)
 		delete(m.copies, id)
 	}
+	m.copyMu.Unlock()
+	for _, entry := range entries {
+		entry.cancel()
+	}
+}
+
+// The callback is the synchronous copy completion owner: it returns only after
+// local finalization or the identity-checked terminal transport has finished.
+// Cancellation, errors and uncertain publication never establish completion.
+func (m *Manager) copyWithEvidence(ctx context.Context, p copyRequest, self string, effect func() (copyModelResult, error)) (copyModelResult, error) {
+	var res copyModelResult
+	d := m.copyJournal
+	if d == nil {
+		return res, errDownloadRecovery
+	}
+	d.mu.Lock()
+	source := d.source
+	d.mu.Unlock()
+	// Naming is owned by the registry, not the caller or remote capability.
+	// Controllers retain this configuration even when they do no artifact I/O.
+	if m.copyRegistry == nil {
+		return res, errDownloadRecovery
+	}
+	manifest, ok := m.copyRegistry.Get(p.Engine)
+	if !ok {
+		return res, errDownloadRecovery
+	}
+	naming := manifest.ModelNamingOrDefault()
+	key, err := downloadKey(p.Engine, p.Model, naming)
+	if err != nil {
+		return res, err
+	}
+	role := "controller"
+	if p.DestinationNodeID == self {
+		role = "destination"
+	}
+	marker := modelCopyMarker{OpID: p.OpID, Engine: p.Engine, Model: p.Model, ContentKey: key.model, Naming: naming, ExpectedExportID: p.ExpectedExportID, Role: role, OwnerNodeID: self, SourceNodeID: p.SourceNodeID, DestinationNodeID: p.DestinationNodeID, ManagerIncarnation: source, Phase: "unsafe"}
+	m.copyMu.Lock()
+	entry := m.copies[p.OpID]
+	live := !m.copiesClosed && entry != nil && entry.copyRequest == p
+	m.copyMu.Unlock()
+	if !live {
+		return res, errDownloadBusy
+	}
+	if err := d.changeCopyMarker(marker, false); err != nil {
+		return res, err
+	}
+	m.copyMu.Lock()
+	live = !m.copiesClosed && m.copies[p.OpID] == entry
+	if live {
+		entry.pendingPublication = false
+	}
+	m.copyMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+	if !live {
+		return res, context.Canceled
+	}
+	res, err = effect()
+	if err != nil {
+		return res, err
+	}
+	if !validCopyResult(res, p.Engine, p.Model) || p.ExpectedExportID != "" && res.ExportID != p.ExpectedExportID {
+		return res, copyUnknown(errors.New("copy completion identity does not match reservation"))
+	}
+	// A positive result after shutdown/cancellation is not this live owner's
+	// permission to retire evidence. A successor cannot complete this marker.
+	m.copyMu.Lock()
+	live = !m.copiesClosed && m.copies[p.OpID] == entry
+	m.copyMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+	if !live {
+		return res, copyUnknown(errors.New("copy owner retired before completion"))
+	}
+	if err := d.changeCopyMarker(marker, true); err != nil {
+		return res, copyUnknown(err)
+	}
+	return res, nil
 }
 
 func (m *Manager) activeCopies() []activeCopy {
@@ -491,6 +574,12 @@ func (m *Manager) executeCopy(parent context.Context, p copyRequest, inbound boo
 			emit(cp)
 		}
 	}
+	return m.copyWithEvidence(ctx, p, self, func() (copyModelResult, error) {
+		return m.copyEffect(ctx, p, self, progress)
+	})
+}
+
+func (m *Manager) performCopy(ctx context.Context, p copyRequest, self string, progress func(copyProgress)) (res copyModelResult, err error) {
 	if p.DestinationNodeID != self {
 		client, err := m.copyClient(ctx, p.DestinationNodeID)
 		if err != nil {
@@ -787,7 +876,7 @@ func (c *remoteClient) copyModel(ctx context.Context, p copyRequest, emit func(c
 			return res, copyUnknown(fmt.Errorf("copy frame exceeds bounds"))
 		}
 		var frame streamFrame
-		if err := json.Unmarshal(data, &frame); err != nil || frame.OpID != p.OpID || frame.Engine != p.Engine || frame.Op != "copy" {
+		if err := json.Unmarshal(data, &frame); err != nil || !utf8.Valid(data) || !copyResponseIdentity(data, "opId", p.OpID) || !copyResponseIdentity(data, "engine", p.Engine) || !copyResponseIdentity(data, "op", "copy") || !copyResponseIdentity(data, "type", frame.Type) {
 			return res, copyUnknown(fmt.Errorf("invalid copy stream"))
 		}
 		switch frame.Type {
@@ -820,7 +909,9 @@ func (c *remoteClient) copyModel(ctx context.Context, p copyRequest, emit func(c
 			}
 			return res, fmt.Errorf("%s", frame.Message)
 		case "result":
-			if err := json.Unmarshal(frame.Result, &res); err != nil || !validCopyResult(res, p.Engine, p.Model) {
+			payload, unambiguous := downloadIdentityField(data, "result")
+			res, err = decodeCopyResult(payload)
+			if err != nil || !unambiguous || !validCopyResult(res, p.Engine, p.Model) {
 				return res, copyUnknown(fmt.Errorf("invalid terminal copy result"))
 			}
 			if p.ExpectedExportID != "" && res.ExportID != p.ExpectedExportID {
@@ -831,6 +922,57 @@ func (c *remoteClient) copyModel(ctx context.Context, p copyRequest, emit func(c
 			return res, copyUnknown(fmt.Errorf("unrecognized copy stream frame"))
 		}
 	}
+}
+
+func copyResponseIdentity(data []byte, field, expected string) bool {
+	raw, ok := downloadIdentityField(data, field)
+	var value string
+	return ok && copyStringUnicode(raw) && json.Unmarshal(raw, &value) == nil && value == expected
+}
+
+// Validate field presence and uniqueness before decoding optional zero values.
+// In particular, a later empty exportId must not erase an earlier identity.
+func decodeCopyResult(data []byte) (copyModelResult, error) {
+	var res copyModelResult
+	invalid := errors.New("invalid terminal copy result")
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') || !utf8.Valid(data) {
+		return res, invalid
+	}
+	seen := make(map[string]bool)
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok || seen[name] {
+			return res, invalid
+		}
+		var raw json.RawMessage
+		if decoder.Decode(&raw) != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return res, invalid
+		}
+		switch name {
+		case "engine", "model", "layout", "exportId", "durability":
+			if !copyStringUnicode(raw) {
+				return res, invalid
+			}
+		case "files", "filesSkipped", "bytesTotal", "bytesCopied", "requiresConfiguration":
+		default:
+			return res, invalid
+		}
+		seen[name] = true
+	}
+	if _, err := decoder.Token(); err != nil || decoder.Decode(new(json.RawMessage)) != io.EOF {
+		return res, invalid
+	}
+	for _, required := range []string{"engine", "model", "files", "filesSkipped", "bytesTotal", "bytesCopied"} {
+		if !seen[required] {
+			return res, invalid
+		}
+	}
+	if json.Unmarshal(data, &res) != nil || seen["exportId"] && !lowerHex(res.ExportID, 64) {
+		return res, invalid
+	}
+	return res, nil
 }
 
 func validCopyResult(res copyModelResult, engine, model string) bool {

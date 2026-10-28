@@ -71,9 +71,15 @@ type setPortParam struct {
 // start, stop, restart, action) run in their own goroutine so the read
 // loop never blocks; the codec serializes the concurrent responses.
 type Manager struct {
-	copyMu           sync.Mutex
-	copies           map[string]*activeCopy
-	copiesClosed     bool
+	copyMu       sync.Mutex
+	copies       map[string]*activeCopy
+	copiesClosed bool
+	// Shares the Executor's durable content owner, including on controllers
+	// that never access a destination engine or model store.
+	copyJournal  *modelDownloads
+	copyRegistry *Registry
+	// Synchronous effects run only inside the durable copy reservation.
+	copyEffect       func(context.Context, copyRequest, string, func(copyProgress)) (copyModelResult, error)
 	switchWatchers   switchWatchers
 	switchRelay      switchRelay
 	settingsRelay    settingsRelay
@@ -104,14 +110,17 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 	// handleMessage is reached before Run() installs the real CancelFunc
 	// (e.g. a unit test calling it directly); Run overwrites it.
 	m := &Manager{
-		codec:   codec,
-		exec:    exec,
-		peers:   newPeerDirectory(),
-		addrs:   reach.NewChooser(),
-		mesh:    mesh,
-		catalog: newCatalogService(),
-		cancel:  func() {},
+		codec:        codec,
+		exec:         exec,
+		copyJournal:  exec.downloads,
+		copyRegistry: exec.reg,
+		peers:        newPeerDirectory(),
+		addrs:        reach.NewChooser(),
+		mesh:         mesh,
+		catalog:      newCatalogService(),
+		cancel:       func() {},
 	}
+	m.copyEffect = m.performCopy
 	m.catalog.familyOf = exec.reg.familyOf
 	baseDir := ""
 	if clusterDir != "" {

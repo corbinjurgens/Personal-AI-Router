@@ -1356,6 +1356,36 @@ can resolve its marker. Successful Delete also requires a fresh same-run
 unmasked absence observation; llama.cpp requires a forced cache rescan. Failed
 cleanup, ordinary list absence and restart cannot clear a marker.
 
+The same file and journal writer retain unresolved controller and destination
+copies. The current version-1 shape requires `entries`, `copies` and
+`copiesComplete`; old shapes fail recovery rather than being interpreted as an
+empty copy history. A missing file preserves ordinary download admission, but
+copy safety remains unknown. Download writes preserve that unknown baseline
+with `copiesComplete:false`. ROOT must coordinate an explicitly quiescent
+current-format baseline or a fresh private profile with an explicit complete
+baseline. Startup does no peer contact, artifact scan, cleanup or expiry to
+manufacture one, and there is no copy recovery API.
+
+Each retained copy binds its operation, engine, exact model and normalized
+content key/naming, expected export identity when supplied, controller or
+destination role, owner/source/destination node identities and original manager
+incarnation. Only unsafe/uncertain provenance is stored, with no URLs,
+credentials or cancellation functions. Downloads and copies share the journal's
+aggregate entry and byte bounds and one serialized capture/save/adopt boundary.
+Their short admission locks are released during durable I/O and transport.
+
+Manager admission exposes pending publication before either role saves its
+unsafe marker. No forwarding, source export/import or destination filesystem
+effect starts until that save is confirmed. A failed save refuses effects; a
+landed but uncertain addition remains unsafe and withdraws copy completeness.
+Release, cancellation and shutdown retire live ownership only. Matching positive
+terminal identity and synchronous local completion can clear the current
+incarnation's exact marker. A verified receipt retry is positive local completion
+even when its receipt durability remains qualified. Unknown outcomes, mismatches,
+cancellation and successor reload retain the marker. A successor preserves the
+original incarnation and cannot certify its predecessor's completion. Retained
+records block build apply even when live operations are empty.
+
 Content writers and Load/export readers have nonblocking admission beside the
 existing content semaphore. An admitted reader makes a writer fail busy before
 withdrawal or effects; an active writer refuses new reads. Load guards cover
