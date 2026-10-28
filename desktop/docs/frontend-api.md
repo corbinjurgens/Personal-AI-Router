@@ -12,12 +12,33 @@ without activating an engine. Unavailable data remains unavailable. Engine
 settings snapshots/previews also carry model loads, coupled state and explicit
 runtime impact, so desired intent is not confused with an applied/observed state.
 The model configuration panel uses the target preview and reviewed Apply for
-selected manual load and policy changes. Auto remains unavailable.
+selected manual load and policy changes. Production Auto/Fits remains unavailable
+until complete-cost accounting is specified, implemented and accepted; connected
+target telemetry and useful partial estimates do not establish completeness.
 Apply retains the target's full settings baseline beside `modelChange`; copy
 submits selected portable preferences for a fresh destination preview. Native
 bindings, conversion provenance and build/source/preset digests remain target
 authority. A receipt records an attempt, while the snapshot reports desired,
 effective, coupled and observed state separately.
+
+Inspection also returns optional service-owned `loadObservation`, describing
+rounded native buffers and the frozen estimate for that captured load.
+`parseInspectModel` strictly validates and detaches supplied summaries; a missing
+wire field becomes `{status:'unknown',current:false,reason:'observation-omitted'}`.
+Unknown/partial/unsupported results preserve ordinary inspection. Malformed
+supplied summaries are refused rather than interpreted as missing. The transport
+and existing `engines:inspect-model` channel remain unchanged.
+
+`ModelSettingsPreview` renders `ModelLoadBufferReport` independently of the draft
+estimate/Auto proposal. Target/model changes and stale inspection cannot assert
+a current load. Authority invalidation, baseline change, disconnect and newer
+Off snapshots withdraw currentness while preserving history. Local edit/discard
+of a draft leaves a valid captured load unchanged. Reinspection uses the existing
+explicit request owner, with no new poller/action. Reports never enter portable
+copy, Apply, qualification or calibration. The
+[buffer contract](../../docs/model-buffer-observations.mdx) describes rounding,
+provenance, privacy and budgets. Windows process and native accuracy acceptance
+remain pending; copy-family acceptance also awaits the separate copy fix.
 
 The supported renderer service API is `window.pairApi`. It is available only in
 Electron and is backed by the preload service bridge.

@@ -149,11 +149,14 @@ pinned direct/reverse peer tests do not establish native store acceptance;
 macOS, Windows and Linux native/session/persistence/prompt checks remain
 untested.
 
-`engine:inspect-model` calls `Executor.InspectModel` for an exact local engine/model.
-It returns bounded target-local artifacts/facts plus service-owned llama.cpp
-option descriptors. Inspection uses the canonical artifact resolver and GGUF
-metadata reader, without engine start, HTTP inventory, download, full hashing,
-native probe or settings writes. Advisory estimates use those same bounded
+`engine:inspect-model` accepts only the parent broker's strict worker envelope,
+with an exact local engine/model in `request`. It calls `Executor.InspectModel`
+and returns bounded target-local artifacts/facts and service-owned descriptors.
+Artifact inspection uses the canonical resolver and GGUF metadata reader,
+without engine start, HTTP inventory, download, full hashing or settings writes.
+The surrounding explicit inspection/Recalculate operation can use the existing
+permission-gated device-map helper; Pause, activation, ownership and maintenance
+vetoes still apply. Advisory estimates use the same bounded
 facts: tensor weights can be sized without an effective allocation; unresolved
 cache, workspace, placement and memory telemetry stay explicit Unknowns.
 `engine:remote-inspect-model` uses the existing pinned POST
@@ -237,10 +240,13 @@ not native device allocation readback. Inspection and explicit Recalculate use
 the target broker's existing self telemetry cache, including source retirement
 and suspend-aware aging. Missing input leaves comparisons Unknown with reason
 `target memory telemetry unavailable`. Current partial costs also remain Unknown.
-The engine's private owner-injected Auto selector implements bounded comparison
-and freezing with synthetic fixtures; it does not establish runtime telemetry support.
-Useful component estimates remain available. Supported complete-cost eligibility
-is specified by [MANIFEST](MANIFEST.md); synthetic costs do not enable production.
+The private owner-injected Auto selector consumes target-owned self evidence
+through the existing worker envelope. Its complete-cost cases remain synthetic;
+connected telemetry does not establish complete accounting.
+Useful component estimates remain available. The
+[estimate support contract](spec.md#advisory-memory-estimate-support) records
+current accounting limits; synthetic costs do not enable production. MANIFEST
+documents native option vocabulary, not complete-cost eligibility.
 Simultaneous residents are unsized
 and no release credit is assumed. Auto's no-facts helper remains Unknown.
 
@@ -279,22 +285,51 @@ so capacity alone cannot create a production Fits result.
 Reviewed Auto uses `auto/finite-llama/1`, binding requested preferences, finite
 options, artifact/build identities, memory snapshot hash and any external-router
 conversion source. Apply and cold restart/recovery compilation reuse that exact
-finite result without consulting telemetry or searching. Artifact/build drift
+finite result without Auto search. Unaccepted Auto additionally checks fresh
+resource eligibility; accepted replay needs no advisory telemetry. Artifact/build drift
 refuses; native fit remains off, with no OOM retry ladder. Explicitly reselecting
 Auto in a new preview is Recalculate. It can review a replacement native build
 for the selected model; old Apply/restart and frozen siblings still reject drift.
 A manual edit cannot silently retune saved
 Auto. Conversion labels alone never authorize Auto. Manual preview and Task 10
-advisory digest behavior are preserved. Broker end-to-end frozen forwarding and
-recovery integration remain deferred until target-memory/map caller wiring and
-complete native cost accounting are implemented;
-engine unit support does not establish end-to-end Auto Apply.
+advisory digest behavior are preserved. The broker now retains a bounded exact
+review and forwards frozen full settings at Apply without another portable
+patch, Auto resolver/search or helper call. Only an unaccepted Auto allocation needs fresh
+complete resource eligibility; manual Apply and accepted recovery do not require
+advisory telemetry. Production Auto and Fits remain unavailable until the
+complete-cost specification and implementation are supplied and accepted.
 
 Each executor owns a derived LRU with ceilings of 128 records, 1 MiB retained
 accounting and 30 seconds. Its key includes ordered sampled artifact identities,
 effective allocation, estimator revision, native build/support and memory
 snapshot identity (including an explicit unavailable identity). This cache is
 separate from artifact inspection's cache and never replaces source rechecks.
+
+Owned llama.cpp loads also support optional `InspectResult.loadObservation`.
+Actual-start compilation freezes the estimate inputs for that load; bounded
+output capture and the existing loaded-model sweep correlate rounded reports
+with child/load, artifact, source and effective-option identity. No serving
+declaration or qualification is required. Inspect reads a detached selected
+summary from retained history, adding no model-list/props request, load,
+inference or initialization beyond the surrounding operation's existing behavior.
+
+The b11146 adapter recognizes a pinned self-reported build tuple, not verified
+clean-source provenance. Two-decimal MiB reports and conservative byte intervals
+are allocation reports, not exact bytes, physical occupancy or a complete-process
+peak. Incomplete role/device/component coverage remains Unknown. The comparison
+uses the frozen captured-load baseline, never a newly edited draft, and cannot
+update estimates, Auto, admission, qualification or margins.
+
+Derived samples use `model-buffer-samples.json`, separate from settings and
+operation journals. Corruption disables history writes; landed `ErrReplaced`
+publication is adopted with durability uncertainty. Recovered history never
+proves a current process. The optional Inspect summary is bounded to 4 KiB within
+the existing complete reply limit; projection reduces rows, returns structured
+Unknown, or omits that field while preserving artifact facts. The desktop maps
+absence to Unknown/`observation-omitted`. See
+[native buffer observations](../../docs/model-buffer-observations.mdx) for
+formats, privacy, retention and coverage limits. Windows process acceptance is
+pending; native accuracy, occupancy and calibration remain unverified.
 
 The broker-only parent request `engine:activate-bound-engine` supplies a
 zero-source bound activation with operation ID, engine/model, accepted policy

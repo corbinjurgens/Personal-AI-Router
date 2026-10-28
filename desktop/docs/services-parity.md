@@ -19,13 +19,28 @@ existing broker settings relay and pinned engine-control read route. Portable
 load edits, target resolutions, selected policy patches and preview impact are
 represented; ordinary settings clients preserve model loads. Bounded inspection
 and reviewed finite llama.cpp load application use the manager and broker's
-coupled recovery path. Advisory estimates and reviewed Auto remain unavailable.
+coupled recovery path. Advisory components are connected and remain partial or
+Unknown when costs, mapping or fresh evidence are missing. Production Fits and
+Auto refuse until complete-cost specification and implementation acceptance;
+synthetic complete fixtures are not production support. Apply forwards the
+retained frozen result without re-resolving Auto.
 Qualification and hardware-fit acceptance are not implied by a settings receipt.
 Load-plus-policy changes reserve raw policy writers through native persistence
 and target policy activation. Pause remains independently available, generation
 locks retain their generation-only scope, and destination copy preserves
 unselected fields. Interrupted bare acceptance requires fresh local review;
 later durable stages recover the frozen resolution.
+
+Inspect also carries optional `loadObservation` through the same authenticated
+local/peer relay. Strict shared and desktop codecs preserve its bounded summary;
+absence maps to Unknown/`observation-omitted`. The panel compares rounded native
+buffers with the frozen load baseline, independently of draft estimates. Reports
+and recovered history grant no qualification, physical-occupancy or complete-cost
+authority. See [native buffer observations](../../docs/model-buffer-observations.mdx).
+Windows buffer-process execution and directory/firewall/survivor/lock closure
+remain pending PC3; native accuracy and calibration remain unverified. Copy
+process families await the separate copy fix, rather than inheriting unrelated
+synthetic passes.
 
 This document records the current integration status between Personal AI Router
 and the `services/` backend. It is a present-state reference, not a release

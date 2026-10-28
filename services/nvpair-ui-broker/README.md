@@ -35,7 +35,8 @@ into strict parent-only worker requests. Origin peer-cache facts never become
 target authority. Public requests cannot carry memory or native-map overrides.
 The existing authenticated settings route, grants, CORS and cancellation remain
 the remote path. Production costs remain partial and comparisons remain Unknown;
-see the manager's [conditional support matrix](../nvpair-engine-manager/MANIFEST.md).
+see the manager's
+[estimate support contract](../nvpair-engine-manager/spec.md#advisory-memory-estimate-support).
 
 The settings owner retains exact finite previews, caller/request/baseline, policy
 identity and worker source in a bounded in-memory table (64 records, 4 MiB,
@@ -86,7 +87,18 @@ beside ordinary settings, separates requested/resolved/readback state, and
 applies selected model patches through reviewed, recoverable settings operations.
 Unresolved native/policy steps retain admission and writer fences until recovery
 or explicit local supersession. See [Engine settings protocol](ENGINE_SETTINGS.md) for transport bounds,
-impact/authorization fields and the pending apply-build maintenance exclusion.
+impact/authorization fields and the existing build-maintenance exclusion.
+
+The authenticated Inspect reply preserves optional `loadObservation`, including
+target stamping and strict reply validation on local and pinned peer paths. It
+reports an already authorized owned load against its frozen estimate baseline.
+Missing/omitted observations remain Unknown; recovered history never proves a
+current process. It adds no subscription, peer capacity override, calibration
+write or inference trigger. See
+[native buffer observations](../../docs/model-buffer-observations.mdx).
+Production Fits/Auto remains blocked by complete-cost accounting. Copy-family
+acceptance awaits the separate copy fix; Windows buffer-process acceptance and
+real native accuracy remain unverified.
 
 Bound engine preparation uses private correlated notifications
 `admission/prepare-bound-engine`, `admission/cancel-bound-engine` and

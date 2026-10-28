@@ -39,6 +39,18 @@ a model, and this editor does not create qualification.
 Main, draft and companion files are labelled separately. A companion such as a
 projector is not presented as another main-model shard.
 
+For an already authorized owned llama.cpp load, inspection can also show
+**Estimated versus native-reported buffers for this load**. This read-only table
+uses the estimate captured for that load's artifacts, native source and effective
+options, separately from your edited draft. Native sizes are rounded allocation
+reports, not physical GPU usage or a complete-process peak. Missing reports,
+unsupported builds, incomplete coverage and unmapped devices remain Unknown.
+Recovered reports are historical; losing currentness preserves the captured
+facts. Inspect never starts a load to obtain a report. See
+[Native buffer observations](model-buffer-observations.mdx) for formats, privacy
+and limitations. Reports never retune estimates, margins, Auto, admission or
+qualification.
+
 Memory advice uses the service's per-pool `capacityFit` and `freeFit` values:
 `unknown`, `exceeds`, `tight` or `fits`. Available memory is distinct from total
 capacity. Each independent pool reserves ten percent of its capacity, rounded
@@ -77,8 +89,11 @@ Apply validates the retained finite settings and never repeats the portable patc
 or Auto search. An unaccepted Auto allocation must still fit fresh complete target
 evidence; otherwise Recalculate is required. Accepted receipt retry and durable
 recovery replay the saved result even if advisory telemetry disappears. Off,
-Pause, grants, ownership and source drift remain effective. Supported accounting
-is conditional on the [manager support matrix](../services/nvpair-engine-manager/MANIFEST.md).
+Pause, grants, ownership and source drift remain effective. The
+[estimate support contract](../services/nvpair-engine-manager/spec.md#advisory-memory-estimate-support)
+describes current accounting limits; the
+[option matrix](../services/nvpair-engine-manager/MANIFEST.md#typed-model-load-contract-and-option-matrix)
+describes the manual native setting vocabulary, not complete-cost eligibility.
 
 Typed manual settings currently cover finite llama.cpp allocation and the
 service's supported batch, thread, KV/Flash Attention and idle/cache controls.
@@ -221,6 +236,15 @@ when chosen; after that flow, inspect and preview the destination again. A
 content-copy receipt is not a settings approval and never triggers automatic
 Apply. Load copy requires the destination to resolve its own content and
 produce a successful preview.
+
+## Validation limits
+
+Manual finite configuration and partial memory advice are implemented. Production
+Auto and Fits still refuse until the complete-cost specification and
+implementation are accepted. The copy process families remain blocked by the
+separate copy fix. Windows process acceptance of native-buffer reporting remains
+pending; source, component and UI checks are not native accuracy, physical
+occupancy or calibration evidence.
 
 Saved, activation pending and activation error are distinct outcomes. Remote
 policy replies provide no activation status. A lost Save reply triggers a
