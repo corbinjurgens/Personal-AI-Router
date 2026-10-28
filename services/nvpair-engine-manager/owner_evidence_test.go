@@ -5,19 +5,482 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"math"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"nvpair-shared/buildapply"
 	"nvpair-shared/durablefile"
 	settings "nvpair-shared/enginesettings"
 )
+
+func TestOwnerEvidenceUniverseMembership(t *testing.T) {
+	e := &Executor{reg: &Registry{engines: map[string]*Manifest{"registered": {}}}, engines: map[string]*engineState{}, stopOnly: map[string]*engineState{"cleanup": {}}}
+	saved := desiredOwnerEvidence{State: desiredStateFile{Engines: map[string]bool{"retained": false}, AllocatedPorts: map[string]int{"port": 0}}}
+	got, ok := e.ownerUniverseMembership(saved)
+	want := []ownerUniverseEntry{{Name: "cleanup", Cleanup: true}, {Name: "port", Cleanup: true}, {Name: "registered", Registered: true}, {Name: "retained"}}
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("membership = %+v, %v; want %+v", got, ok, want)
+	}
+	got[0].Name = "changed"
+	again, ok := e.ownerUniverseMembership(saved)
+	if !ok || !reflect.DeepEqual(again, want) || len(e.engines) != 0 {
+		t.Fatalf("membership changed owner state: %+v, %v", again, ok)
+	}
+	e.mu.Lock()
+	_, ok = e.ownerUniverseMembership(saved)
+	e.mu.Unlock()
+	if ok {
+		t.Fatal("contended membership must be unknown")
+	}
+}
+
+// No constructor, logs, content gate, watcher, engine, file or native owner is
+// initialized by these fixtures. The saved reader is the Task1 detached seam.
+func ownerEvidenceFixture(t *testing.T) (*Executor, *engineState, desiredOwnerEvidence) {
+	t.Helper()
+	root := filepath.Join(os.TempDir(), "pair-owner-evidence-inert")
+	platform := Platform{ModelsDir: filepath.Join(root, "models"), Runtime: Runtime{Port: 0}}
+	manifest := &Manifest{Engine: "fake", Platforms: map[string]Platform{runtime.GOOS + "/" + runtime.GOARCH: platform}}
+	st := &engineState{manifest: manifest, plat: &platform, installDir: filepath.Join(root, "fake"), modelsDir: platform.ModelsDir}
+	e := &Executor{switchIncarnation: "manager-fixture", reg: &Registry{engines: map[string]*Manifest{"fake": manifest}}, engines: map[string]*engineState{"fake": st}, stopOnly: map[string]*engineState{},
+		desired:   newDesiredStateStore(t.TempDir()),
+		processes: func(context.Context) ([]string, error) { panic("evidence invoked process lookup") },
+		client:    &http.Client{Transport: ownerEvidenceRejectHTTP{}}, emit: func(string, any) { panic("evidence notified") },
+		inventory: map[string][]string{"fake": {"must-not-be-read"}},
+	}
+	return e, st, desiredOwnerEvidence{State: desiredStateFile{Engines: map[string]bool{}, OffBy: map[string]intentOrigin{}, Locked: map[string]bool{}}}
+}
+
+type ownerEvidenceRejectHTTP struct{}
+
+func (ownerEvidenceRejectHTTP) RoundTrip(*http.Request) (*http.Response, error) {
+	panic("evidence contacted a native engine")
+}
+
+func readOwnerFixture(e *Executor, saved desiredOwnerEvidence) ownerUniverseEvidence {
+	return e.captureOwnerUniverse(func() (desiredOwnerEvidence, error) { return saved, nil }, func() ([]string, bool) { return nil, true })
+}
+
+func ownerFixtureEntry(t *testing.T, got ownerUniverseEvidence, name string) ownerEngineEvidence {
+	t.Helper()
+	if !got.Complete || got.Incarnation != "manager-fixture" {
+		t.Fatalf("incomplete fixture evidence: %+v", got)
+	}
+	for _, entry := range got.Entries {
+		if entry.Name == name {
+			return entry
+		}
+	}
+	t.Fatalf("engine %q missing from %+v", name, got)
+	return ownerEngineEvidence{}
+}
+
+func requireOwnerUnknown(t *testing.T, observation buildapply.Observation[bool]) {
+	t.Helper()
+	if observation.Known || observation.Value != nil {
+		t.Fatalf("wanted unknown, got %+v", observation)
+	}
+}
+
+func requireOwnerBool(t *testing.T, observation buildapply.Observation[bool], want bool) {
+	t.Helper()
+	if !observation.Known || observation.Value == nil || *observation.Value != want {
+		t.Fatalf("observation = %+v, want known %v", observation, want)
+	}
+}
+
+func TestOwnerEvidenceUniverse(t *testing.T) {
+	t.Run("full union retains unsupported saved and reservation names", func(t *testing.T) {
+		e, st, saved := ownerEvidenceFixture(t)
+		e.reg.engines["unsupported"] = &Manifest{}
+		e.reg.engines["cold"] = e.reg.engines["fake"]
+		e.stopOnly["removed-host"] = &engineState{plat: &Platform{}}
+		saved.State.Engines["saved-off"] = false
+		saved.State.OffBy["origin-only"] = intentPeer
+		saved.State.Locked["saved-unlocked"] = false
+		saved.State.ProcessStops = map[string]processStopEvidence{"unsupported": {PID: 12}, "unregistered-cleanup": {PID: 13}}
+		saved.State.AllocatedPorts = map[string]int{"port-zero": 0}
+		saved.State.PendingSwitch = &settings.SwitchCheckpoint{SwitchPrepareRequest: settings.SwitchPrepareRequest{SourceEngine: "checkpoint-source", TargetEngine: "checkpoint-target"}, Phase: settings.SwitchCheckpointReleased}
+		e.downloads = &modelDownloads{active: map[downloadContentKey]*modelDownloadAttempt{{engine: "download"}: {}}, unsafe: map[downloadContentKey]modelDownloadMarker{{engine: "unsafe"}: {}}, writers: map[string]bool{"writer": true}, readers: map[string]int{"reader": 1}}
+		got := e.captureOwnerUniverse(func() (desiredOwnerEvidence, error) { return saved, nil }, func() ([]string, bool) { return []string{"copy"}, true })
+		want := []string{"checkpoint-source", "checkpoint-target", "cold", "copy", "download", "fake", "origin-only", "port-zero", "reader", "removed-host", "saved-off", "saved-unlocked", "unregistered-cleanup", "unsafe", "unsupported", "writer"}
+		var names []string
+		for _, entry := range got.Entries {
+			names = append(names, entry.Name)
+			requireOwnerUnknown(t, entry.Running)
+			requireOwnerUnknown(t, entry.PositiveStop)
+			requireOwnerUnknown(t, entry.StopAuthority)
+			if entry.RootsComplete || entry.RootsReason != "unmodeled_data_roots" {
+				t.Fatalf("invented root coverage: %+v", entry)
+			}
+		}
+		if !got.Complete || !reflect.DeepEqual(names, want) {
+			t.Fatalf("universe = %+v; names want %v", got, want)
+		}
+		unsupported := ownerFixtureEntry(t, got, "unsupported")
+		if !unsupported.Registered || unsupported.Supported || !unsupported.Cleanup {
+			t.Fatalf("unsupported cleanup lost: %+v", unsupported)
+		}
+		if entry := ownerFixtureEntry(t, got, "unregistered-cleanup"); entry.Registered || !entry.Cleanup {
+			t.Fatalf("retained cleanup lost: %+v", entry)
+		}
+		if len(e.engines) != 1 || st.logs != nil || st.contentMu != nil || st.relaunch != nil || st.healthStop != nil {
+			t.Fatal("evidence initialized runtime owners")
+		}
+		if !reflect.DeepEqual(e.inventory, map[string][]string{"fake": {"must-not-be-read"}}) {
+			t.Fatal("evidence touched model inventory")
+		}
+	})
+
+	t.Run("installed and stopped publications are detached", func(t *testing.T) {
+		e, st, saved := ownerEvidenceFixture(t)
+		st.installed = true
+		st.observeOwnerInstalledLocked()
+		st.observeOwnerPresenceLocked(true)
+		got := readOwnerFixture(e, saved)
+		entry := ownerFixtureEntry(t, got, "fake")
+		requireOwnerBool(t, entry.Installed, true)
+		requireOwnerBool(t, entry.Running, false)
+		requireOwnerBool(t, entry.PositiveStop, true)
+		requireOwnerBool(t, entry.StopAuthority, true)
+		if entry.AuthorityReason != "no_live_process" || entry.InstallRoot != st.installDir || entry.ModelRoot != st.modelsDir {
+			t.Fatalf("stopped roots/authority = %+v", entry)
+		}
+		*entry.Installed.Value = false
+		got.Entries[0].ModelRoot = "changed"
+		again := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+		requireOwnerBool(t, again.Installed, true)
+		if again.ModelRoot != st.modelsDir {
+			t.Fatal("response aliases roots")
+		}
+	})
+
+	t.Run("configuration change invalidates old observations", func(t *testing.T) {
+		e, st, saved := ownerEvidenceFixture(t)
+		st.installed = true
+		st.observeOwnerInstalledLocked()
+		st.observeOwnerPresenceLocked(true)
+		st.modelsDir = filepath.Join(st.installDir, "new-models")
+		entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+		requireOwnerUnknown(t, entry.Installed)
+		requireOwnerUnknown(t, entry.StopAuthority)
+		if entry.ModelRoot != st.modelsDir {
+			t.Fatal("live configuration roots not captured")
+		}
+	})
+
+	t.Run("unresolved roots never become known empty coverage", func(t *testing.T) {
+		e, st, saved := ownerEvidenceFixture(t)
+		st.modelsDir = "${UNRESOLVED}/models"
+		entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+		if entry.ModelRoot != "" || entry.RootsComplete || entry.RootsReason == "" {
+			t.Fatalf("unresolved root = %+v", entry)
+		}
+	})
+
+	t.Run("owner contention returns without waiting", func(t *testing.T) {
+		e, st, saved := ownerEvidenceFixture(t)
+		check := func(t *testing.T) {
+			t.Helper()
+			if got := readOwnerFixture(e, saved); got.Complete || got.Reason != "busy" {
+				t.Fatalf("contended capture = %+v", got)
+			}
+		}
+		e.mu.Lock()
+		check(t)
+		e.mu.Unlock()
+		st.mu.Lock()
+		check(t)
+		st.mu.Unlock()
+		e.switchAdmission.Lock()
+		check(t)
+		e.switchAdmission.Unlock()
+		e.downloads = &modelDownloads{}
+		e.downloads.mu.Lock()
+		check(t)
+		e.downloads.mu.Unlock()
+		e.desired = &desiredStateStore{}
+		e.desired.mu.Lock()
+		if _, err := e.desired.tryOwnerEvidence(); err == nil {
+			t.Fatal("contended desired state reported known")
+		}
+		e.desired.mu.Unlock()
+		manager := &Manager{exec: e}
+		manager.copyMu.Lock()
+		if _, ok := manager.ownerCopyNames(); ok {
+			t.Fatal("contended copy owner reported known")
+		}
+		manager.copyMu.Unlock()
+	})
+
+	t.Run("copy owner contributes names without reading progress or native state", func(t *testing.T) {
+		e, _, _ := ownerEvidenceFixture(t)
+		manager := &Manager{exec: e, copies: map[string]*activeCopy{"one": {copyRequest: copyRequest{Engine: "retained-copy"}}}}
+		names, ok := manager.ownerCopyNames()
+		if !ok || !reflect.DeepEqual(names, []string{"retained-copy"}) {
+			t.Fatalf("copy names = %v, %v", names, ok)
+		}
+		names[0] = "changed"
+		if manager.copies["one"].Engine != "retained-copy" {
+			t.Fatal("copy projection aliases owner")
+		}
+	})
+
+	t.Run("unavailable saved owner does not claim a complete union", func(t *testing.T) {
+		e, _, _ := ownerEvidenceFixture(t)
+		got := e.captureOwnerUniverse(func() (desiredOwnerEvidence, error) { return desiredOwnerEvidence{}, errors.New("unavailable") }, func() ([]string, bool) { return nil, true })
+		if got.Complete || got.Reason != "saved_state_unknown" || got.Incarnation != e.switchIncarnation {
+			t.Fatalf("saved failure = %+v", got)
+		}
+	})
+
+	t.Run("changes between captures invalidate the section", func(t *testing.T) {
+		check := func(name string, change func(*Executor, *engineState, *desiredOwnerEvidence)) {
+			t.Run(name, func(t *testing.T) {
+				e, st, saved := ownerEvidenceFixture(t)
+				reads := 0
+				got := e.captureOwnerUniverse(func() (desiredOwnerEvidence, error) {
+					reads++
+					if reads == 2 {
+						change(e, st, &saved)
+					}
+					return saved, nil
+				}, func() ([]string, bool) { return nil, true })
+				if got.Complete || got.Reason != "busy" {
+					t.Fatalf("changed owner accepted: %+v", got)
+				}
+			})
+		}
+		check("roots", func(_ *Executor, st *engineState, _ *desiredOwnerEvidence) { st.modelsDir += "-replacement" })
+		check("state membership", func(e *Executor, _ *engineState, _ *desiredOwnerEvidence) {
+			e.engines["late"] = &engineState{plat: &Platform{}}
+		})
+		check("run", func(_ *Executor, st *engineState, _ *desiredOwnerEvidence) { st.runID = "next-run" })
+		check("cached state", func(_ *Executor, st *engineState, _ *desiredOwnerEvidence) { st.installed = true })
+		check("saved intent", func(_ *Executor, _ *engineState, saved *desiredOwnerEvidence) {
+			saved.State = desiredStateFile{Engines: map[string]bool{"late": true}}
+		})
+		check("checkpoint", func(_ *Executor, _ *engineState, saved *desiredOwnerEvidence) {
+			saved.State.PendingSwitch = &settings.SwitchCheckpoint{Phase: settings.SwitchCheckpointReserved}
+		})
+	})
+}
+
+func TestOwnerEvidenceStopAuthority(t *testing.T) {
+	owned := func(t *testing.T) (*Executor, *engineState, desiredOwnerEvidence) {
+		t.Helper()
+		e, st, saved := ownerEvidenceFixture(t)
+		st.proc = &managedProc{cmd: &exec.Cmd{Process: &os.Process{Pid: 4321}}, done: make(chan struct{})}
+		st.runID, st.running, st.installed = "run-one", true, true
+		st.observeOwnerInstalledLocked()
+		st.observeOwnerPresenceLocked(false)
+		return e, st, saved
+	}
+	t.Run("owned process retains scoped authority without OS proof", func(t *testing.T) {
+		e, _, saved := owned(t)
+		entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+		requireOwnerBool(t, entry.StopAuthority, true)
+		requireOwnerBool(t, entry.Running, true)
+		requireOwnerBool(t, entry.PositiveStop, false)
+		if entry.AuthorityReason != "owned_process_lifetime" {
+			t.Fatalf("authority = %+v", entry)
+		}
+	})
+	unknown := func(name, reason string, change func(*engineState)) {
+		t.Run(name, func(t *testing.T) {
+			e, st, saved := owned(t)
+			change(st)
+			entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+			requireOwnerUnknown(t, entry.StopAuthority)
+			if entry.AuthorityReason != reason {
+				t.Fatalf("authority = %+v; want %s", entry, reason)
+			}
+		})
+	}
+	unknown("closed process lifetime", "process_lifetime_closed", func(st *engineState) { close(st.proc.done) })
+	unknown("process without lifetime", "process_lifetime_closed", func(st *engineState) { st.proc.done = nil })
+	unknown("same PID replacement process", "unobserved", func(st *engineState) {
+		st.proc = &managedProc{cmd: &exec.Cmd{Process: &os.Process{Pid: 4321}}, done: make(chan struct{})}
+	})
+	unknown("same PID replacement run", "unobserved", func(st *engineState) { st.runID = "run-two" })
+	unknown("empty run", "unobserved", func(st *engineState) { st.runID = "" })
+	unknown("reclaim failure", "reclaim_unknown", func(st *engineState) { st.reclaimFailed = true })
+	unknown("PID only locator", "reclaim_unknown", func(st *engineState) { st.reclaimPID = 4321 })
+	unknown("command without scoped lifetime", "scoped_lifetime_unknown", func(st *engineState) {
+		st.proc = nil
+		st.plat.Runtime.Mode = "command"
+		st.observeOwnerPresenceLocked(false)
+	})
+	unknown("command endpoint stopped without physical process proof", "scoped_lifetime_unknown", func(st *engineState) {
+		st.proc, st.running, st.runID = nil, false, ""
+		st.plat.Runtime.Mode = "command"
+		st.observeOwnerPresenceLocked(false)
+	})
+	t.Run("adopted command is known false even with Stop configured", func(t *testing.T) {
+		e, st, saved := ownerEvidenceFixture(t)
+		st.plat.Runtime.Mode, st.plat.Runtime.Stop = "command", &StopSpec{Cmd: []string{"must-not-run"}}
+		st.running, st.adopted, st.runID = true, true, "external-run"
+		st.observeOwnerPresenceLocked(false)
+		entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+		requireOwnerBool(t, entry.StopAuthority, false)
+		if entry.AuthorityReason != "external_management" {
+			t.Fatalf("adopted authority = %+v", entry)
+		}
+	})
+	t.Run("default false is never positive stopped evidence", func(t *testing.T) {
+		e, _, saved := ownerEvidenceFixture(t)
+		entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+		requireOwnerUnknown(t, entry.Running)
+		requireOwnerUnknown(t, entry.PositiveStop)
+		requireOwnerUnknown(t, entry.StopAuthority)
+	})
+	t.Run("retirement does not republish withdrawn observations", func(t *testing.T) {
+		e, st, saved := owned(t)
+		done, err := e.admitMutation("fake")
+		if err != nil {
+			t.Fatalf("mutation admission: %v", err)
+		}
+		done()
+		entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+		requireOwnerUnknown(t, entry.Installed)
+		requireOwnerUnknown(t, entry.Running)
+		requireOwnerUnknown(t, entry.PositiveStop)
+		requireOwnerUnknown(t, entry.StopAuthority)
+		if !st.running || st.proc == nil || st.runID != "run-one" {
+			t.Fatal("withdrawal changed lifecycle state")
+		}
+	})
+
+	// Hold the actual admission owner while opMu and cached state stay unchanged.
+	// Channels delimit the interval; evidence cannot rely on a lucky scheduling
+	// delay or on seeing a native operation's intermediate state.
+	admitted := func(name string, enter func(*Executor) (func(), error)) {
+		t.Run(name, func(t *testing.T) {
+			e, st, saved := owned(t)
+			entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var entryErr error
+			go func() {
+				defer close(finished)
+				done, err := enter(e)
+				entryErr = err
+				close(entered)
+				if err != nil {
+					return
+				}
+				<-release
+				done()
+			}()
+			<-entered
+			defer func() { close(release); <-finished }()
+			if entryErr != nil {
+				t.Fatalf("admission: %v", entryErr)
+			}
+			// Republish the exact old cache while still admitted. It stays busy.
+			st.mu.Lock()
+			st.observeOwnerInstalledLocked()
+			st.observeOwnerPresenceLocked(false)
+			st.mu.Unlock()
+			entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+			requireOwnerUnknown(t, entry.Installed)
+			requireOwnerUnknown(t, entry.Running)
+			requireOwnerUnknown(t, entry.StopAuthority)
+			if entry.AuthorityReason != "busy" || !st.running || st.runID != "run-one" {
+				t.Fatalf("admitted interval = %+v", entry)
+			}
+		})
+	}
+	track := func(e *Executor) (func(), error) { return e.admitMutation("fake") }
+	admitted("install admitted before native work", track)
+	admitted("start waiting for lifecycle lock", track)
+	admitted("ordinary stop admission", func(e *Executor) (func(), error) { return e.admitStop("fake", intentPeer, "") })
+	admitted("global mutation", func(e *Executor) (func(), error) {
+		e.switchAdmission.Lock()
+		defer e.switchAdmission.Unlock()
+		return e.trackMutationLocked("")
+	})
+	admitted("cold activation", func(e *Executor) (func(), error) {
+		// An absent saved document is the normal cold admission baseline; no
+		// directory/file is created by its existing read owner.
+		return e.admitBoundEngineMutation("fake", "cold-operation")
+	})
+	admitted("checkpoint work", func(e *Executor) (func(), error) { return e.admitOwnerCheckpoint() })
+
+	t.Run("unreleased checkpoint blocks unchanged lifecycle cache", func(t *testing.T) {
+		e, _, saved := owned(t)
+		saved.State.PendingSwitch = &settings.SwitchCheckpoint{SwitchPrepareRequest: settings.SwitchPrepareRequest{SourceEngine: "fake"}, Phase: settings.SwitchCheckpointReserved}
+		entry := ownerFixtureEntry(t, readOwnerFixture(e, saved), "fake")
+		requireOwnerUnknown(t, entry.StopAuthority)
+		if entry.AuthorityReason != "busy" {
+			t.Fatalf("checkpoint authority = %+v", entry)
+		}
+	})
+	t.Run("admission enter exit ABA invalidates otherwise identical captures", func(t *testing.T) {
+		e, _, saved := owned(t)
+		reads := 0
+		got := e.captureOwnerUniverse(func() (desiredOwnerEvidence, error) {
+			reads++
+			if reads == 2 {
+				done, err := e.admitOwnerCheckpoint()
+				if err != nil {
+					t.Fatalf("checkpoint admission: %v", err)
+				}
+				done()
+			}
+			return saved, nil
+		}, func() ([]string, bool) { return nil, true })
+		if got.Complete || e.ownerAdmissionGeneration != 2 || e.ownerAdmissionHeld != 0 {
+			t.Fatalf("ABA accepted: %+v, generation=%d held=%d", got, e.ownerAdmissionGeneration, e.ownerAdmissionHeld)
+		}
+	})
+	t.Run("cold activation retires inside the same generation fence", func(t *testing.T) {
+		e, _, _ := owned(t)
+		done, err := e.admitBoundEngineMutation("fake", "cold-operation")
+		if err != nil {
+			t.Fatalf("cold admission: %v", err)
+		}
+		if e.boundActivation == nil || e.ownerAdmissionGeneration != 1 || e.ownerAdmissionHeld != 1 || e.switchMutations[""] != 1 {
+			t.Fatal("cold entry lacks its reserved generation")
+		}
+		done()
+		if e.boundActivation != nil || e.ownerAdmissionGeneration != 2 || e.ownerAdmissionHeld != 0 || e.switchMutations[""] != 0 || e.switchMutations["fake"] != 0 {
+			t.Fatal("cold retirement escaped generation fence")
+		}
+	})
+	t.Run("admission reserves retirement without wrap or duplicate retirement", func(t *testing.T) {
+		e, _, _ := owned(t)
+		e.ownerAdmissionGeneration = math.MaxUint64 - 3
+		first, err := e.admitOwnerCheckpoint()
+		if err != nil {
+			t.Fatalf("first admission: %v", err)
+		}
+		if done, err := e.admitOwnerCheckpoint(); err == nil || done != nil {
+			t.Fatal("accepted work without retirement capacity")
+		}
+		first()
+		first()
+		if e.ownerAdmissionGeneration != math.MaxUint64-1 || e.ownerAdmissionHeld != 0 {
+			t.Fatalf("retirement = %d, held=%d", e.ownerAdmissionGeneration, e.ownerAdmissionHeld)
+		}
+		if done, err := e.admitBoundEngineMutation("fake", "cold"); err == nil || done != nil || e.boundActivation != nil {
+			t.Fatal("cold activation accepted exhausted generation")
+		}
+		if done, err := e.admitStop("fake", intentLocal, ""); err == nil || done != nil || e.switchMutations["fake"] != 0 {
+			t.Fatal("stop admitted effects without retirement capacity")
+		}
+	})
+}
 
 func TestOwnerEvidenceDesiredState(t *testing.T) {
 	newStore := func(t *testing.T, document string) *desiredStateStore {

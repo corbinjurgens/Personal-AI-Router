@@ -8,12 +8,485 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
+	"nvpair-shared/buildapply"
 	settings "nvpair-shared/enginesettings"
 )
+
+var errOwnerAdmissionCapacity = errors.New("engine owner admission generation exhausted")
+var errOwnerEvidenceBusy = errors.New("engine owner evidence busy")
+
+func (e *Executor) ownerAdmissionCapacityLocked() bool {
+	return math.MaxUint64-e.ownerAdmissionGeneration >= e.ownerAdmissionHeld &&
+		math.MaxUint64-e.ownerAdmissionGeneration-e.ownerAdmissionHeld >= 2
+}
+
+// Caller holds switchAdmission. The returned retirement also requires it.
+func (e *Executor) reserveOwnerAdmissionLocked() (func(), error) {
+	if !e.ownerAdmissionCapacityLocked() {
+		return nil, errOwnerAdmissionCapacity
+	}
+	e.ownerAdmissionGeneration++
+	e.ownerAdmissionHeld++
+	retired := false
+	return func() {
+		if !retired {
+			retired = true
+			e.ownerAdmissionHeld--
+			e.ownerAdmissionGeneration++
+		}
+	}, nil
+}
+
+// Switch checkpoint work has its own existing exclusion policy. This metadata
+// fences its observations without changing that policy or adding a reservation.
+func (e *Executor) admitOwnerCheckpoint() (func(), error) {
+	e.switchAdmission.Lock()
+	retire, err := e.reserveOwnerAdmissionLocked()
+	e.switchAdmission.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return func() { e.switchAdmission.Lock(); retire(); e.switchAdmission.Unlock() }, nil
+}
+
+// All fields are guarded by st.mu. A publication is bound to the actual state
+// configuration and retained process object, never to a PID or an OS lookup.
+type ownerStateKnowledge struct {
+	InstalledKnown             bool
+	InstalledConfig            string
+	InstalledValue             bool
+	InstalledRunID             string
+	PresenceKnown              bool
+	PositiveStop               bool
+	PresenceConfig             string
+	Process                    *managedProc
+	RunID                      string
+	RunningValue, AdoptedValue bool
+}
+
+func (st *engineState) ownerConfigLocked() string {
+	if st.plat == nil {
+		return ""
+	}
+	digest, err := switchDigest(struct {
+		Platform        *Platform
+		Install, Models string
+	}{st.plat, st.installDir, st.modelsDir})
+	if err != nil {
+		return ""
+	}
+	return digest
+}
+
+func (st *engineState) withdrawOwnerKnowledgeLocked() { st.ownerKnowledge = ownerStateKnowledge{} }
+
+func (st *engineState) observeOwnerInstalledLocked() {
+	st.ownerKnowledge.InstalledValue = st.installed
+	st.ownerKnowledge.InstalledRunID = st.runID
+	st.ownerKnowledge.InstalledConfig = st.ownerConfigLocked()
+	st.ownerKnowledge.InstalledKnown = st.ownerKnowledge.InstalledConfig != ""
+}
+
+func (st *engineState) observeOwnerPresenceLocked(positiveStop bool) {
+	k := &st.ownerKnowledge
+	k.PresenceConfig = st.ownerConfigLocked()
+	k.PresenceKnown = k.PresenceConfig != ""
+	k.PositiveStop = positiveStop && !st.running && st.proc == nil && !st.reclaimFailed && st.reclaimPID == 0
+	k.Process, k.RunID = st.proc, st.runID
+	k.RunningValue, k.AdoptedValue = st.running, st.adopted
+}
+
+func (e *Executor) withdrawOwnerKnowledge(engine string) {
+	e.mu.Lock()
+	states := make([]*engineState, 0)
+	for name, st := range e.engines {
+		if engine == "" || name == engine {
+			states = append(states, st)
+		}
+	}
+	for name, st := range e.stopOnly {
+		if engine == "" || name == engine {
+			states = append(states, st)
+		}
+	}
+	e.mu.Unlock()
+	for _, st := range states {
+		st.mu.Lock()
+		st.withdrawOwnerKnowledgeLocked()
+		st.mu.Unlock()
+	}
+}
+
+type ownerEngineEvidence struct {
+	Name                                            string
+	Registered, Supported, Cleanup                  bool
+	Installed, Running, PositiveStop, StopAuthority buildapply.Observation[bool]
+	RunID, RuntimeKind, AuthorityReason             string
+	InstallRoot, ModelRoot                          string
+	RootsComplete                                   bool
+	RootsReason                                     string
+	Adopted, ReclaimFailed                          bool
+	ReclaimPID                                      bool // retained locator only; never signal authority
+}
+
+type ownerUniverseEvidence struct {
+	Incarnation string
+	Generation  uint64
+	Complete    bool
+	Reason      string
+	Entries     []ownerEngineEvidence
+}
+
+type ownerAdmissionCapture struct {
+	Generation, Held uint64
+	Mutations        map[string]int
+	Bound            *boundEngineActivation
+	Shutdown         bool
+}
+
+func (e *Executor) captureOwnerAdmission() (ownerAdmissionCapture, bool) {
+	if !e.switchAdmission.TryLock() {
+		return ownerAdmissionCapture{}, false
+	}
+	defer e.switchAdmission.Unlock()
+	a := ownerAdmissionCapture{Generation: e.ownerAdmissionGeneration, Held: e.ownerAdmissionHeld, Mutations: make(map[string]int), Shutdown: e.shuttingDown.Load()}
+	for name, count := range e.switchMutations {
+		if count != 0 {
+			a.Mutations[name] = count
+		}
+	}
+	if e.boundActivation != nil {
+		copy := *e.boundActivation
+		a.Bound = &copy
+	}
+	return a, true
+}
+
+type ownerStateCapture struct {
+	Relaunch                                                   *engineRelaunch
+	Current, StopOnly                                          *engineState
+	Config                                                     string
+	Knowledge                                                  ownerStateKnowledge
+	Installed, Running, Adopted, Stopping, ReclaimFailed, Done bool
+	ReclaimPID, Port                                           int
+	Process                                                    *managedProc
+	RunID, Kind, Install, Models                               string
+}
+
+// Registry construction is startup-owned. Membership is copied, then released
+// before independently taking each existing state lock in sorted name order.
+func (e *Executor) captureOwnerStates(saved desiredOwnerEvidence, reservations []string) ([]ownerUniverseEntry, map[string]ownerStateCapture, bool) {
+	if !e.mu.TryLock() {
+		return nil, nil, false
+	}
+	members := make(map[string]ownerStateCapture)
+	for name, st := range e.engines {
+		c := members[name]
+		c.Current = st
+		members[name] = c
+	}
+	for name, st := range e.stopOnly {
+		c := members[name]
+		c.StopOnly = st
+		members[name] = c
+	}
+	e.mu.Unlock()
+	entries, ok := e.ownerUniverseMembership(saved)
+	if !ok {
+		return nil, nil, false
+	}
+	byName := make(map[string]ownerUniverseEntry)
+	for _, entry := range entries {
+		byName[entry.Name] = entry
+	}
+	for _, name := range reservations {
+		entry := byName[name]
+		entry.Name = name
+		byName[name] = entry
+	}
+	entries = entries[:0]
+	for _, entry := range byName {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	for _, entry := range entries {
+		c := members[entry.Name]
+		st := c.Current
+		if st == nil {
+			st = c.StopOnly
+		}
+		if st != nil {
+			if !st.mu.TryLock() {
+				return nil, nil, false
+			}
+			c.Config, c.Knowledge = st.ownerConfigLocked(), st.ownerKnowledge
+			c.Installed, c.Running, c.Adopted, c.Stopping = st.installed, st.running, st.adopted, st.stopping
+			c.ReclaimFailed, c.ReclaimPID, c.Port = st.reclaimFailed, st.reclaimPID, st.port
+			c.Process, c.RunID, c.Install, c.Models = st.proc, st.runID, st.installDir, st.modelsDir
+			c.Relaunch = st.relaunch
+			if st.plat != nil {
+				c.Kind = st.plat.Runtime.modeOrDefault()
+			}
+			if c.Process != nil {
+				if c.Process.done == nil {
+					c.Done = true
+				} else {
+					select {
+					case <-c.Process.done:
+						c.Done = true
+					default:
+					}
+				}
+			}
+			st.mu.Unlock()
+		}
+		members[entry.Name] = c
+	}
+	return entries, members, true
+}
+
+// Only existing reservation maps participate. No model inventory is consulted.
+// Manager supplies its existing copy owner through the same capture boundary.
+func (e *Executor) ownerReservationNames() ([]string, bool) {
+	if e.downloads == nil {
+		return nil, true
+	}
+	d := e.downloads
+	if !d.mu.TryLock() {
+		return nil, false
+	}
+	defer d.mu.Unlock()
+	names := map[string]bool{}
+	for k := range d.active {
+		names[k.engine] = true
+	}
+	for k := range d.unsafe {
+		names[k.engine] = true
+	}
+	for k := range d.outcomes {
+		names[k.engine] = true
+	}
+	for name := range d.writers {
+		names[name] = true
+	}
+	for name := range d.readers {
+		names[name] = true
+	}
+	result := make([]string, 0, len(names))
+	for name := range names {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result, true
+}
+
+func (m *Manager) ownerUniverse() ownerUniverseEvidence {
+	return m.exec.captureOwnerUniverse(m.exec.desired.tryOwnerEvidence, m.ownerCopyNames)
+}
+
+func (m *Manager) ownerCopyNames() ([]string, bool) {
+	if !m.copyMu.TryLock() {
+		return nil, false
+	}
+	defer m.copyMu.Unlock()
+	names := make([]string, 0, len(m.copies))
+	for _, copy := range m.copies {
+		names = append(names, copy.Engine)
+	}
+	sort.Strings(names)
+	return names, true
+}
+
+// Two detached captures reject changed owners, including admission enter/exit
+// ABA. This is evidence, not an atomic acceptance pin or physical liveness proof.
+func (e *Executor) captureOwnerUniverse(savedRead func() (desiredOwnerEvidence, error), copyNames func() ([]string, bool)) ownerUniverseEvidence {
+	result := ownerUniverseEvidence{Incarnation: e.switchIncarnation, Reason: "busy"}
+	a, ok := e.captureOwnerAdmission()
+	if !ok {
+		return result
+	}
+	saved, err := savedRead()
+	if err != nil {
+		if !errors.Is(err, errOwnerEvidenceBusy) {
+			result.Reason = "saved_state_unknown"
+		}
+		return result
+	}
+	reservations, ok := e.ownerReservationNames()
+	if !ok {
+		return result
+	}
+	copies, ok := copyNames()
+	if !ok {
+		return result
+	}
+	names, states, ok := e.captureOwnerStates(saved, append(reservations, copies...))
+	if !ok {
+		return result
+	}
+	// Recheck state/config/run before the final admission capture. Sampling done
+	// again also rejects a closed lifetime without consulting the operating system.
+	savedAgain, err := savedRead()
+	if err != nil || !reflect.DeepEqual(savedAgain, saved) {
+		return result
+	}
+	reservationsAgain, ok := e.ownerReservationNames()
+	if !ok || !reflect.DeepEqual(reservations, reservationsAgain) {
+		return result
+	}
+	copiesAgain, ok := copyNames()
+	if !ok || !reflect.DeepEqual(copies, copiesAgain) {
+		return result
+	}
+	namesAgain, statesAgain, ok := e.captureOwnerStates(savedAgain, append(reservationsAgain, copiesAgain...))
+	if !ok || !reflect.DeepEqual(names, namesAgain) || !reflect.DeepEqual(states, statesAgain) {
+		return result
+	}
+	b, ok := e.captureOwnerAdmission()
+	if !ok || !reflect.DeepEqual(a, b) {
+		return result
+	}
+	result.Generation, result.Complete, result.Reason = a.Generation, true, ""
+	for _, name := range names {
+		c := states[name.Name]
+		entry := ownerEngineEvidence{Name: name.Name, Registered: name.Registered, Supported: name.Supported, Cleanup: name.Cleanup,
+			RunID: c.RunID, RuntimeKind: c.Kind, Adopted: c.Adopted, ReclaimFailed: c.ReclaimFailed, ReclaimPID: c.ReclaimPID != 0,
+			InstallRoot: c.Install, ModelRoot: c.Models, RootsReason: "unmodeled_data_roots", AuthorityReason: "unobserved"}
+		// Only represented, resolved paths are usable protection roots. The
+		// manifest has no exhaustive data-root contract, so coverage stays unknown.
+		if c.Current == nil && c.StopOnly == nil && name.Registered && e.reg != nil {
+			if manifest := e.reg.engines[name.Name]; manifest != nil {
+				if platform, supported := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]; supported {
+					entry.RuntimeKind = platform.Runtime.modeOrDefault()
+					if filepath.IsAbs(e.baseDir) {
+						entry.InstallRoot = filepath.Join(e.baseDir, name.Name)
+					}
+					entry.ModelRoot = platform.ModelsDir
+				}
+			}
+		}
+		if !ownerResolvedRoot(entry.InstallRoot) {
+			entry.InstallRoot = ""
+		}
+		if !ownerResolvedRoot(entry.ModelRoot) {
+			entry.ModelRoot = ""
+		}
+		busy := a.Held != 0 || a.Shutdown || a.Mutations[""] != 0 || a.Mutations[name.Name] != 0 || a.Bound != nil || c.Relaunch != nil
+		if cp := saved.State.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (cp.Automatic || cp.SourceEngine == name.Name || cp.TargetEngine == name.Name) {
+			busy = true
+		}
+		k := c.Knowledge
+		if busy {
+			entry.AuthorityReason = "busy"
+		} else {
+			if k.InstalledKnown && k.InstalledValue == c.Installed && k.InstalledRunID == c.RunID && c.Config != "" && k.InstalledConfig == c.Config {
+				entry.Installed = buildapply.Known(c.Installed)
+			}
+			valid := k.PresenceKnown && c.Config != "" && k.PresenceConfig == c.Config && k.Process == c.Process && k.RunID == c.RunID && k.RunningValue == c.Running && k.AdoptedValue == c.Adopted && !c.Done
+			if valid && !c.ReclaimFailed {
+				entry.Running = buildapply.Known(c.Running)
+				entry.PositiveStop = buildapply.Known(k.PositiveStop)
+			}
+			switch {
+			case c.ReclaimFailed || c.ReclaimPID != 0 && !c.Adopted:
+				entry.AuthorityReason = "reclaim_unknown"
+			case !valid:
+				if c.Done {
+					entry.AuthorityReason = "process_lifetime_closed"
+				}
+			case c.Adopted:
+				entry.StopAuthority, entry.AuthorityReason = buildapply.Known(false), "external_management"
+			case k.PositiveStop && !c.Running && c.Process == nil:
+				entry.StopAuthority, entry.AuthorityReason = buildapply.Known(true), "no_live_process"
+			case c.Running && !c.Stopping && c.Process != nil && c.RunID != "":
+				entry.StopAuthority, entry.AuthorityReason = buildapply.Known(true), "owned_process_lifetime"
+			default:
+				entry.AuthorityReason = "scoped_lifetime_unknown"
+			}
+		}
+		result.Entries = append(result.Entries, entry)
+	}
+	return result
+}
+
+func ownerResolvedRoot(path string) bool {
+	return filepath.IsAbs(path) && !strings.ContainsAny(path, "{}$%~")
+}
+
+// ownerUniverseEntry is a detached, deliberately incomplete starting point for
+// the owner projection. Cached booleans do not establish lifecycle knowledge.
+type ownerUniverseEntry struct {
+	Name       string
+	Registered bool
+	Supported  bool
+	Cleanup    bool
+}
+
+// ownerUniverseMembership captures only owners that can be read without
+// creating state. The caller must still fence admission, reservations and
+// lifecycle projections before treating this membership as complete.
+func (e *Executor) ownerUniverseMembership(saved desiredOwnerEvidence) ([]ownerUniverseEntry, bool) {
+	if !e.mu.TryLock() {
+		return nil, false
+	}
+	names := make(map[string]ownerUniverseEntry)
+	if e.reg != nil {
+		for name, manifest := range e.reg.engines {
+			_, supported := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
+			names[name] = ownerUniverseEntry{Name: name, Registered: true, Supported: supported}
+		}
+	}
+	for name := range e.engines {
+		entry := names[name]
+		entry.Name = name
+		names[name] = entry
+	}
+	for name := range e.stopOnly {
+		entry := names[name]
+		entry.Name, entry.Cleanup = name, true
+		names[name] = entry
+	}
+	e.mu.Unlock()
+	add := func(name string, cleanup bool) {
+		entry := names[name]
+		entry.Name = name
+		entry.Cleanup = entry.Cleanup || cleanup
+		names[name] = entry
+	}
+	for name := range saved.State.Engines {
+		add(name, false)
+	}
+	for name := range saved.State.Locked {
+		add(name, false)
+	}
+	for name := range saved.State.OffBy {
+		add(name, false)
+	}
+	for name := range saved.State.ProcessStops {
+		add(name, true)
+	}
+	for name := range saved.State.AllocatedPorts {
+		add(name, true)
+	}
+	if cp := saved.State.PendingSwitch; cp != nil {
+		add(cp.SourceEngine, false)
+		add(cp.TargetEngine, false)
+	}
+	result := make([]ownerUniverseEntry, 0, len(names))
+	for _, entry := range names {
+		result = append(result, entry)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, true
+}
 
 // desiredOwnerEvidence is a detached view of one saved document. Revisions
 // describe readable semantics, not write durability, mutation history or an
@@ -33,6 +506,18 @@ func (s *desiredStateStore) ownerEvidence() (desiredOwnerEvidence, error) {
 func (s *desiredStateStore) captureOwnerEvidence(read func() ([]byte, error)) (desiredOwnerEvidence, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.captureOwnerEvidenceLocked(read)
+}
+
+func (s *desiredStateStore) tryOwnerEvidence() (desiredOwnerEvidence, error) {
+	if !s.mu.TryLock() {
+		return desiredOwnerEvidence{}, errOwnerEvidenceBusy
+	}
+	defer s.mu.Unlock()
+	return s.captureOwnerEvidenceLocked(s.readDocument)
+}
+
+func (s *desiredStateStore) captureOwnerEvidenceLocked(read func() ([]byte, error)) (desiredOwnerEvidence, error) {
 	if s.path == "" {
 		return desiredOwnerEvidence{}, errors.New("no user data directory is available")
 	}

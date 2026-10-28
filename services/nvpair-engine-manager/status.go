@@ -30,10 +30,14 @@ func (e *Executor) Detect(engine string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	st.mu.Lock()
+	st.ownerKnowledge.InstalledKnown = false
+	st.mu.Unlock()
 	binPath := st.detectExecutable()
 	installed := binPath != "" && st.detectRequiredFiles()
 	st.mu.Lock()
 	st.installed = installed
+	st.observeOwnerInstalledLocked()
 	if binPath != "" {
 		st.binPath = binPath
 	}
@@ -218,7 +222,20 @@ func (e *Executor) reconcilePresenceState(ctx context.Context, engine string, st
 	return e.reconcilePresenceStateWithProcessProof(ctx, engine, st, pathInstalled, port, allowWhileStopping, pidOnPort, orphanPIDExited)
 }
 
-func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, engine string, st *engineState, pathInstalled bool, port int, allowWhileStopping bool, owner func(int) (int, string, bool), exited func(int) bool) (presenceResult, bool) {
+func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, engine string, st *engineState, pathInstalled bool, port int, allowWhileStopping bool, owner func(int) (int, string, bool), exited func(int) bool) (result presenceResult, changedState bool) {
+	defer func() {
+		if result.Err != nil || result.Occupied && !result.Identified {
+			st.mu.Lock()
+			st.withdrawOwnerKnowledgeLocked()
+			st.mu.Unlock()
+		}
+	}()
+	// A failed or indeterminate refresh must not leave an older observation
+	// current. Retain installation's independent completed Detect publication.
+	st.mu.Lock()
+	previous := st.ownerKnowledge
+	st.ownerKnowledge.PresenceKnown, st.ownerKnowledge.PositiveStop = false, false
+	st.mu.Unlock()
 	executablePresent := st.detectExecutable() != ""
 	st.mu.Lock()
 	running := st.running
@@ -244,6 +261,13 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 	}
 
 	if port == 0 || ready == nil || proc != nil || (running && !adopted) {
+		st.mu.Lock()
+		// No new native observation occurred here. Restore only an unchanged
+		// prior publication, never turn the default false into stopped evidence.
+		if previous.PresenceKnown && previous.PresenceConfig == st.ownerConfigLocked() && previous.Process == st.proc && previous.RunID == st.runID {
+			st.ownerKnowledge = previous
+		}
+		st.mu.Unlock()
 		return presenceResult{Identified: running, Occupied: running}, false
 	}
 	credential, credentialErr := e.credentialForCandidate(ctx, st, port)
@@ -288,6 +312,8 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 		st.adopted = false
 		st.proc = nil
 		st.reclaimPID = 0
+		st.observeOwnerInstalledLocked()
+		st.observeOwnerPresenceLocked(false)
 		if !executablePresent {
 			// A service-only adoption has no managed image. Never leave a stale
 			// path that orphan reclamation could terminate.
@@ -394,6 +420,8 @@ func (e *Executor) reconcilePresenceStateWithProcessProof(ctx context.Context, e
 		// binPath empty so stop/uninstall can never treat it as our orphan.
 		st.binPath = ""
 	}
+	st.observeOwnerInstalledLocked()
+	st.observeOwnerPresenceLocked(false)
 	st.mu.Unlock()
 	e.nodeProjection.mu.Unlock()
 	return presenceResult{Identified: true, Occupied: true}, changed

@@ -38,27 +38,51 @@ func (e *Executor) admitMutation(engine string) (func(), error) {
 }
 
 func (e *Executor) admitMutationLocked(engine string) (func(), error) {
+	if err := e.mutationAllowedLocked(engine); err != nil {
+		return nil, err
+	}
+	return e.trackMutationLocked(engine)
+}
+
+func (e *Executor) mutationAllowedLocked(engine string) error {
 	if e.switchMutations[""] > 0 {
-		return nil, &switchBusyError{engine}
+		return &switchBusyError{engine}
 	}
 	e.desired.mu.Lock()
 	state, err := e.desired.load()
 	e.desired.mu.Unlock()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (cp.Automatic || cp.SourceEngine == engine || cp.TargetEngine == engine) {
-		return nil, &switchBusyError{engine}
+		return &switchBusyError{engine}
 	}
-	return e.trackMutationLocked(engine), nil
+	return nil
 }
 
-func (e *Executor) trackMutationLocked(engine string) func() {
+func (e *Executor) trackMutationLocked(engine string) (func(), error) {
+	retire, err := e.reserveOwnerAdmissionLocked()
+	if err != nil {
+		return nil, err
+	}
+	return e.trackOwnerMutationLocked(engine, retire), nil
+}
+
+// The stop-veto path reserves this same ticket before persistence/cancellation,
+// then transfers its retirement to the physical operation after desired.mu is
+// released. A failed save still advances the entry/retirement ABA fence.
+func (e *Executor) trackOwnerMutationLocked(engine string, retire func()) func() {
 	if e.switchMutations == nil {
 		e.switchMutations = make(map[string]int)
 	}
 	e.switchMutations[engine]++
-	return func() { e.switchAdmission.Lock(); e.switchMutations[engine]--; e.switchAdmission.Unlock() }
+	e.withdrawOwnerKnowledge(engine)
+	return func() {
+		e.switchAdmission.Lock()
+		e.switchMutations[engine]--
+		retire()
+		e.switchAdmission.Unlock()
+	}
 }
 
 // An explicit local Off is still a veto during a remote reservation. Persist
@@ -71,6 +95,18 @@ func (e *Executor) admitStop(engine string, origin intentOrigin, operationID str
 func (e *Executor) admitStopScoped(engine string, origin intentOrigin, operationID string, boundOnly bool) (func(), error) {
 	e.switchAdmission.Lock()
 	defer e.switchAdmission.Unlock()
+	retire, err := e.reserveOwnerAdmissionLocked()
+	if err != nil {
+		return nil, err
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			retire()
+		}
+	}()
+	e.withdrawOwnerKnowledge(engine)
+	track := func() func() { transferred = true; return e.trackOwnerMutationLocked(engine, retire) }
 	e.desired.mu.Lock()
 	state, err := e.desired.load()
 	if cold := e.boundActivation; err == nil && cold != nil && cold.engine == engine && origin == intentLocal && (operationID == "" || boundOnly && operationID == cold.operationID) {
@@ -82,8 +118,8 @@ func (e *Executor) admitStopScoped(engine string, origin intentOrigin, operation
 			return nil, err
 		}
 		e.emitIntent()
+		done := track()
 		e.switchMutations[""]++ // retain exclusion until physical Stop completes
-		done := e.trackMutationLocked(engine)
 		return func() { e.switchAdmission.Lock(); e.switchMutations[""]--; e.switchAdmission.Unlock(); done() }, nil
 	}
 	if boundOnly {
@@ -118,14 +154,17 @@ func (e *Executor) admitStopScoped(engine string, origin intentOrigin, operation
 				return nil, err
 			}
 			e.emitIntent()
-			return e.trackMutationLocked(engine), nil
+			return track(), nil
 		}
 	}
 	e.desired.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return e.admitMutationLocked(engine)
+	if err := e.mutationAllowedLocked(engine); err != nil {
+		return nil, err
+	}
+	return track(), nil
 }
 
 func switchCode(err error) int {
@@ -239,6 +278,14 @@ func validSwitchEnvelope(p settings.SwitchPrepareRequest) error {
 // SwitchPrepare also supports a read-only configuration snapshot when the
 // operation ID is empty. No reservation is created by that request.
 func (e *Executor) SwitchPrepare(ctx context.Context, p settings.SwitchPrepareRequest) switchExecutorResult {
+	if p.OperationID != "" {
+		done, err := e.admitOwnerCheckpoint()
+		if err != nil {
+			return switchExecutorResult{SwitchPrepareResult: settings.SwitchPrepareResult{Error: switchFailure(-32000, settings.SwitchErrorBusy, err)}}
+		}
+		defer done()
+		e.withdrawOwnerKnowledge("")
+	}
 	if p.OperationID != "" && p.Automatic {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, p.Deadline)
@@ -511,12 +558,23 @@ func (e *Executor) switchPorts(cp *settings.SwitchCheckpoint) *switchCheckpointP
 }
 
 func (e *Executor) SwitchStep(ctx context.Context, p settings.SwitchStepRequest) settings.SwitchStepResult {
+	done, err := e.admitOwnerCheckpoint()
+	if err != nil {
+		return settings.SwitchStepResult{Error: switchFailure(-32000, settings.SwitchErrorBusy, err)}
+	}
+	defer done()
 	e.switchMu.Lock()
 	defer e.switchMu.Unlock()
+	e.withdrawOwnerKnowledge("")
 	return e.switchStepLocked(ctx, p, false, nil)
 }
 
 func (e *Executor) SwitchReconcile(ctx context.Context, p settings.SwitchReconcileRequest) settings.SwitchReconcileResult {
+	done, err := e.admitOwnerCheckpoint()
+	if err != nil {
+		return settings.SwitchReconcileResult{Error: switchFailure(-32000, settings.SwitchErrorBusy, err)}
+	}
+	defer done()
 	if p.Automatic {
 		// The stdio reader supplies the manager's lifetime context. Carry the
 		// broker's bounded cleanup window separately from immutable identity.
@@ -534,6 +592,7 @@ func (e *Executor) SwitchReconcile(ctx context.Context, p settings.SwitchReconci
 	}
 	e.switchMu.Lock()
 	defer e.switchMu.Unlock()
+	e.withdrawOwnerKnowledge("")
 	return e.switchStepLocked(ctx, settings.SwitchStepRequest{SwitchPrepareRequest: p.SwitchPrepareRequest}, true, p.LocalVeto)
 }
 
@@ -622,6 +681,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			if st, err := e.state(pair.name); err == nil {
 				st.mu.Lock()
 				if pair.port > 0 {
+					st.withdrawOwnerKnowledgeLocked()
 					st.port = pair.port
 				}
 				st.mu.Unlock()
@@ -882,6 +942,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 				return fail(settings.SwitchErrorTargetStart, err)
 			}
 			st.mu.Lock()
+			st.withdrawOwnerKnowledgeLocked()
 			st.port = port
 			st.mu.Unlock()
 		}

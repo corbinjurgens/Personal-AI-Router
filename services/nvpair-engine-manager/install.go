@@ -36,7 +36,7 @@ func (e *Executor) InstallWithStart(installCtx, startCtx context.Context, engine
 
 // Install obtains the engine in user mode: download (checksum-verified)
 // then run the declared command. No-op if already detected.
-func (e *Executor) Install(ctx context.Context, engine string) error {
+func (e *Executor) Install(ctx context.Context, engine string) (err error) {
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return err
@@ -48,6 +48,13 @@ func (e *Executor) Install(ctx context.Context, engine string) error {
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
+	defer func() {
+		if err != nil {
+			st.mu.Lock()
+			st.withdrawOwnerKnowledgeLocked()
+			st.mu.Unlock()
+		}
+	}()
 	if ok, _ := e.Detect(engine); ok {
 		e.reporter.clear(installFailedID(engine))
 		e.emitInstallProgress(engine, "already-installed", 100)
@@ -84,6 +91,10 @@ func (e *Executor) Install(ctx context.Context, engine string) error {
 		e.reportInstallFailed(engine, err)
 		return err
 	}
+	// Detection before native installation is not evidence about its outcome.
+	st.mu.Lock()
+	st.withdrawOwnerKnowledgeLocked()
+	st.mu.Unlock()
 	if err := os.MkdirAll(st.installDir, 0o755); err != nil {
 		return fmt.Errorf("create install dir: %w", err)
 	}
@@ -169,7 +180,7 @@ func (e *Executor) Install(ctx context.Context, engine string) error {
 // Uninstall runs the manifest's uninstall command (user-mode), stopping
 // the engine first. No-op only when its executable is absent, independently
 // of whether all mandatory installation files are still present.
-func (e *Executor) Uninstall(ctx context.Context, engine string) error {
+func (e *Executor) Uninstall(ctx context.Context, engine string) (err error) {
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return err
@@ -181,6 +192,13 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) error {
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
+	defer func() {
+		if err != nil {
+			st.mu.Lock()
+			st.withdrawOwnerKnowledgeLocked()
+			st.mu.Unlock()
+		}
+	}()
 	pathInstalled, _ := e.Detect(engine)
 	if st.detectExecutable() == "" {
 		// Already gone — by its own uninstaller, or by hand. Drop our ownership
@@ -246,6 +264,9 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) error {
 	// One attempt is the command followed by the declared removals, so a retry
 	// re-runs the process-stopping command before trying the tree again — which
 	// is what clears the case this retry loop exists for.
+	st.mu.Lock()
+	st.withdrawOwnerKnowledgeLocked()
+	st.mu.Unlock()
 	attemptUninstall := func() error {
 		if len(args) > 0 {
 			if err := e.runCommand(ctx, args); err != nil {

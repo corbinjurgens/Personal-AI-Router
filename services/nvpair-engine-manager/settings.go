@@ -638,6 +638,7 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 	}
 	st.mu.Lock()
 	previousSnapshot := st.plat.Runtime.servingSnapshot
+	st.withdrawOwnerKnowledgeLocked()
 	st.plat.Runtime.Port = preview.Settings.ServerPort
 	st.plat.Runtime.LaunchArgs = &preview.Args
 	st.plat.Runtime.LaunchEnv = &preview.Env

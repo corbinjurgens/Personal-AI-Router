@@ -70,7 +70,7 @@ func (e *Executor) Sleep(engine string) error {
 	return e.sleepWithNativeReadback(engine, e.runCommandOutput)
 }
 
-func (e *Executor) sleepWithNativeReadback(engine string, nativeReadback func(context.Context, []string) (string, error)) error {
+func (e *Executor) sleepWithNativeReadback(engine string, nativeReadback func(context.Context, []string) (string, error)) (err error) {
 	done, err := e.admitMutation(engine)
 	if err != nil {
 		return err
@@ -80,6 +80,13 @@ func (e *Executor) sleepWithNativeReadback(engine string, nativeReadback func(co
 	if err != nil {
 		return e.sleepUnsupported(engine, err)
 	}
+	defer func() {
+		if err != nil {
+			st.mu.Lock()
+			st.withdrawOwnerKnowledgeLocked()
+			st.mu.Unlock()
+		}
+	}()
 	cancelCrashRelaunch(st)
 	// Cancel accepted execution before waiting for its lifecycle lock. The load
 	// fence also catches a registration racing this cancellation sweep.
@@ -331,11 +338,18 @@ func (e *Executor) unsupportedStopState(engine string) (*engineState, error) {
 	return st, nil
 }
 
-func (e *Executor) sleepUnsupported(engine string, platformErr error) error {
+func (e *Executor) sleepUnsupported(engine string, platformErr error) (err error) {
 	st, err := e.unsupportedStopState(engine)
 	if err != nil {
 		return fmt.Errorf("%w: %v", platformErr, err)
 	}
+	defer func() {
+		if err != nil {
+			st.mu.Lock()
+			st.withdrawOwnerKnowledgeLocked()
+			st.mu.Unlock()
+		}
+	}()
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	// The shared reclaim owner checks managed install containment and exact
