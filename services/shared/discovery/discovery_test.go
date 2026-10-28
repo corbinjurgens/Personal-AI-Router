@@ -11,7 +11,185 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/grandcat/zeroconf"
 )
+
+type fakeBrowseResolver struct{}
+
+func (fakeBrowseResolver) Browse(ctx context.Context, _, _ string, entries chan<- *zeroconf.ServiceEntry) error {
+	go func() {
+		<-ctx.Done()
+		close(entries)
+	}()
+	return nil
+}
+
+type fakeDeadlineContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c fakeDeadlineContext) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func TestBrowseReceivesForFullIntervalAfterSupplementalSends(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local")
+	now := time.Unix(0, 0)
+	var scanCtx context.Context
+	var cancel context.CancelFunc
+	var sendFinished time.Time
+
+	b.browseWithDependencies(context.Background(), func() (browseResolver, error) {
+		return fakeBrowseResolver{}, nil
+	}, func(_, _ string) map[string]bool {
+		now = now.Add(time.Second)
+		sendFinished = now
+		if cancel != nil {
+			cancel()
+		}
+		return nil
+	}, context.WithTimeout, func(parent context.Context, duration time.Duration) (context.Context, context.CancelFunc) {
+		var base context.Context
+		base, cancel = context.WithCancel(parent)
+		scanCtx = fakeDeadlineContext{Context: base, deadline: now.Add(duration)}
+		if !sendFinished.IsZero() {
+			cancel()
+		}
+		return scanCtx, cancel
+	})
+
+	deadline, ok := scanCtx.Deadline()
+	if !ok {
+		t.Fatal("browse context has no deadline")
+	}
+	remaining := deadline.Sub(sendFinished)
+	if remaining != b.opt.scanTimeout {
+		t.Fatalf("receive time after supplemental sends = %s, want %s", remaining, b.opt.scanTimeout)
+	}
+}
+
+type errorBrowseResolver struct{}
+
+func (errorBrowseResolver) Browse(_ context.Context, _, _ string, entries chan<- *zeroconf.ServiceEntry) error {
+	close(entries)
+	return errors.New("browse failed")
+}
+
+func TestBrowseErrorClosesCollectorWithoutSending(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local")
+	sent := false
+	got := b.browseWithDependencies(context.Background(), func() (browseResolver, error) {
+		return errorBrowseResolver{}, nil
+	}, func(_, _ string) map[string]bool {
+		sent = true
+		return nil
+	}, context.WithTimeout, context.WithTimeout)
+	if sent || len(got) != 0 {
+		t.Fatalf("browse error: sent=%t, seen=%v", sent, got)
+	}
+}
+
+func TestBrowseCanceledSendHasBoundedOwnership(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	send := func(_, _ string) map[string]bool {
+		calls.Add(1)
+		close(started)
+		<-release
+		return map[string]bool{"late": false}
+	}
+	newResolver := func() (browseResolver, error) { return fakeBrowseResolver{}, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		b.browseWithDependencies(ctx, newResolver, send, context.WithTimeout, context.WithTimeout)
+		close(done)
+	}()
+	<-started
+	cancel()
+	<-done
+
+	// An already-expired receive window exercises a further scan without
+	// waiting for the stalled sender or starting another sender.
+	expired := func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		cancel()
+		return ctx, cancel
+	}
+	if seen := b.browseWithDependencies(context.Background(), newResolver, send, context.WithTimeout, expired); seen != nil {
+		t.Fatal("scan with a prior outstanding sender must be incomplete")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("send calls while first is stalled = %d, want 1", got)
+	}
+	close(release)
+}
+
+func TestBrowseStalledSendAllowanceExpires(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local")
+	release := make(chan struct{})
+	var expire context.CancelFunc
+	budget := func(parent context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		expire = cancel
+		return ctx, cancel
+	}
+	receiving := false
+	seen := b.browseWithDependencies(context.Background(), func() (browseResolver, error) {
+		return fakeBrowseResolver{}, nil
+	}, func(_, _ string) map[string]bool {
+		expire()
+		<-release
+		return nil
+	}, budget, func(parent context.Context, duration time.Duration) (context.Context, context.CancelFunc) {
+		receiving = true
+		return context.WithTimeout(parent, duration)
+	})
+	close(release)
+	if seen != nil || receiving {
+		t.Fatalf("over-budget scan: seen=%v receiving=%t, want incomplete without receive phase", seen, receiving)
+	}
+}
+
+type blockedBrowseResolver struct{ expire context.CancelFunc }
+
+func (r blockedBrowseResolver) Browse(ctx context.Context, _, _ string, entries chan<- *zeroconf.ServiceEntry) error {
+	r.expire()
+	<-ctx.Done()
+	close(entries)
+	return ctx.Err()
+}
+
+func TestBrowseInitialQueryIsCanceledBySendBudget(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local")
+	budgetCtx, expire := context.WithCancel(context.Background())
+	defer expire()
+	sent := false
+	seen := b.browseWithDependencies(context.Background(), func() (browseResolver, error) {
+		return blockedBrowseResolver{expire: expire}, nil
+	}, func(_, _ string) map[string]bool {
+		sent = true
+		return nil
+	}, func(context.Context, time.Duration) (context.Context, context.CancelFunc) {
+		return budgetCtx, expire
+	}, context.WithTimeout)
+	if seen != nil || sent {
+		t.Fatalf("expired initial query: seen=%v sent=%t, want incomplete without supplemental sends", seen, sent)
+	}
+}
+
+func TestIncompleteBrowseDoesNotAgePeers(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local", WithMissThreshold(1))
+	b.Seed(node("peer"))
+	b.browseFunc = func(context.Context) map[string]Node { return nil }
+	b.Poll(context.Background())
+	b.scanEmit(context.Background(), nil)
+	if len(b.Nodes()) != 1 || b.misses["peer"] != 0 {
+		t.Fatalf("incomplete scan aged peer: nodes=%v misses=%v", b.Nodes(), b.misses)
+	}
+}
 
 func node(id string, txt ...string) Node {
 	return Node{ID: id, Host: id + ".local.", Port: 14318, Addresses: []string{"192.168.1.10"}, TXT: txt}
@@ -188,8 +366,8 @@ func TestEmptyScanDoesNotEvictTheWholeFleet(t *testing.T) {
 		t.Fatalf("%d of 3 nodes survived %d empty scans; want all 3", got, emptyScanGrace)
 	}
 	for _, k := range []string{"a", "b", "c"} {
-		if b.misses[k] != 0 {
-			t.Fatalf("node %q took %d misses from empty scans; want 0", k, b.misses[k])
+		if b.misses[k] != emptyScanGrace || b.emptyGrace[k] != emptyScanGrace {
+			t.Fatalf("node %q: misses %d, grace %d; want %d each", k, b.misses[k], b.emptyGrace[k], emptyScanGrace)
 		}
 	}
 }
@@ -213,6 +391,61 @@ func TestSustainedEmptyScansStillEvictEventually(t *testing.T) {
 	}
 }
 
+func TestAbsentPeerMissesAdvanceAcrossEmptyAndSelfOnlyScans(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local")
+	b.reconcile(seenSet(node("self"), node("peer")))
+
+	for scan := 1; scan <= emptyScanGrace+1; scan++ {
+		seen := seenSet()
+		if scan == emptyScanGrace+1 {
+			seen = seenSet(node("self"))
+		}
+		b.reconcile(seen)
+		if got := b.misses["peer"]; got != scan {
+			t.Fatalf("peer misses after scan %d = %d, want %d", scan, got, scan)
+		}
+	}
+}
+
+func TestIntermittentSelfSightingsDoNotPreventPeerEviction(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local")
+	b.reconcile(seenSet(node("self"), node("peer")))
+
+	for scan := 1; scan <= emptyScanGrace+missThresholdDefault; scan++ {
+		seen := seenSet()
+		if scan%2 == 0 {
+			seen = seenSet(node("self"))
+		}
+		for _, event := range b.reconcile(seen) {
+			if event.Type == Removed && event.Node.ID == "peer" {
+				if scan != emptyScanGrace+missThresholdDefault {
+					t.Fatalf("peer removed at scan %d, want %d", scan, emptyScanGrace+missThresholdDefault)
+				}
+				return
+			}
+		}
+	}
+	t.Fatalf("peer survived %d absent scans with intermittent self sightings", emptyScanGrace+missThresholdDefault)
+}
+
+func TestDefaultEmptyScanGraceEvictsAtExactBoundary(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local")
+	if b.opt.interval != 5*time.Second || b.opt.missThreshold != 12 {
+		t.Fatalf("defaults: interval %s, threshold %d; want 5s and 12", b.opt.interval, b.opt.missThreshold)
+	}
+	b.reconcile(seenSet(node("a"), node("b")))
+
+	boundary := emptyScanGrace + missThresholdDefault
+	for scan := 1; scan < boundary; scan++ {
+		if removed := eventsByType(b.reconcile(seenSet()))[Removed]; removed != 0 {
+			t.Fatalf("scan %d removed %d nodes before grace boundary %d", scan, removed, boundary)
+		}
+	}
+	if removed := eventsByType(b.reconcile(seenSet()))[Removed]; removed != 2 {
+		t.Fatalf("scan %d removed %d nodes, want 2", boundary, removed)
+	}
+}
+
 // The suppression is justified by several independent machines going quiet at
 // once, so it does not apply when there is only one node to lose. Losing a lone
 // peer looks identical whether it left or we stopped listening, and delaying that
@@ -228,23 +461,27 @@ func TestALoneNodeIsNotShieldedByTheEmptyScanGuard(t *testing.T) {
 	}
 }
 
-// One node answering proves the receive path works, so the run of excuses ends
-// there — otherwise a browser that alternated one good scan with six empty ones
-// would never evict anything.
-func TestAnySeenNodeResetsTheEmptyRun(t *testing.T) {
+func TestGraceResetsOnlyForRecoveredPeer(t *testing.T) {
 	b := New("_nvpair-test._tcp", "local", WithLivenessProbe(func(Node) bool { return false }))
 	b.reconcile(seenSet(node("a"), node("b")))
 
 	for i := 0; i < emptyScanGrace; i++ {
 		b.reconcile(seenSet())
 	}
-	if b.emptyScans != emptyScanGrace {
-		t.Fatalf("empty run = %d, want %d", b.emptyScans, emptyScanGrace)
-	}
-	// "b" alone answers: partial, but proof the socket is being drained.
 	b.reconcile(seenSet(node("b")))
-	if b.emptyScans != 0 {
-		t.Fatalf("empty run = %d after a node answered; want 0", b.emptyScans)
+	if b.emptyGrace["a"] != emptyScanGrace || b.emptyGrace["b"] != 0 || b.misses["b"] != 0 {
+		t.Fatalf("after b recovered: grace a=%d b=%d, misses b=%d", b.emptyGrace["a"], b.emptyGrace["b"], b.misses["b"])
+	}
+}
+
+func TestLivenessRescueResetsPeerGrace(t *testing.T) {
+	b := New("_nvpair-test._tcp", "local", WithLivenessProbe(func(n Node) bool { return n.ID == "a" }))
+	b.reconcile(seenSet(node("a"), node("b")))
+	for i := 0; i < probeAfterMisses; i++ {
+		b.reconcile(seenSet())
+	}
+	if b.misses["a"] != 0 || b.emptyGrace["a"] != 0 || b.misses["b"] != probeAfterMisses || b.emptyGrace["b"] != probeAfterMisses {
+		t.Fatalf("after probing: misses=%v, grace=%v", b.misses, b.emptyGrace)
 	}
 }
 
@@ -268,8 +505,8 @@ func TestEmptyScanWithNoKnownNodesBanksNothing(t *testing.T) {
 	for i := 0; i < emptyScanGrace*2; i++ {
 		b.reconcile(seenSet())
 	}
-	if b.emptyScans != 0 {
-		t.Fatalf("empty run = %d with no nodes known; want 0", b.emptyScans)
+	if len(b.emptyGrace) != 0 {
+		t.Fatalf("grace with no nodes known = %v, want none", b.emptyGrace)
 	}
 
 	// And the excuses it did not bank are not spent on the nodes that arrive next.
@@ -277,8 +514,8 @@ func TestEmptyScanWithNoKnownNodesBanksNothing(t *testing.T) {
 	if evs := b.reconcile(seenSet()); len(evs) != 0 {
 		t.Fatalf("first empty scan after discovery emitted %v; the grace should start fresh", evs)
 	}
-	if b.emptyScans != 1 {
-		t.Fatalf("empty run = %d after one empty scan; want 1", b.emptyScans)
+	if b.emptyGrace["a"] != 1 || b.emptyGrace["b"] != 1 {
+		t.Fatalf("grace after one empty scan = %v, want one per peer", b.emptyGrace)
 	}
 }
 
