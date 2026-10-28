@@ -5,6 +5,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # Services Backend Integration
 
+Build apply uses a private, bounded `build:apply-impact` envelope from the
+broker to `nvpair-service`. The broker reads `engine:owner-evidence` from its
+current manager source; the service merges the manager's model, data and install
+roots with its profile roots before inspecting candidate or target packages.
+Unknown coverage, source replacement and changed root captures refuse. Only
+the envelope's public impact reaches the desktop's existing build-apply preview
+contract. The desktop bridge and TUI have no new private method or field.
+This read is evidence, not an atomic maintenance reservation: production start
+still requires the `WithLocked` owner and independent identity, worker, Pause
+and physical-stop proofs.
+
 Model inspection is integrated as `engines:inspect-model` to
 `engine:inspect-model`, including the manager's pinned settings read route.
 Requested load preferences, finite resolutions, artifact assurance, option

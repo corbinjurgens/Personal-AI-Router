@@ -51,6 +51,50 @@ Source fixtures under `TestModelSettingsDevices` inject enumeration results or
 use a TestMain sentinel before normal startup. They never load real libraries.
 These fixtures do not establish native acceptance, which remains UNTESTED.
 
+## Build-apply owner evidence (parent only)
+
+`engine:owner-evidence` accepts exactly `{}` on the parent request channel.
+Null, selectors, caller/operation fields, mutation flags, extra fields and
+duplicate or case-variant fields are invalid params. There is no ec/control
+route or notification. The broker consumes the private
+`shared/buildapply.EngineOwnerEvidence` contract; clients must not receive this
+document or its roots and operation provenance.
+
+The exact response sections are `managerIncarnation`, `captureToken`, `intent`,
+`locks`, `universe`, `stopAuthority`, `reservations`, `complete`, `reasons`.
+Incarnation is the Executor's native `switchIncarnation`, including at idle.
+Intent retains all saved keys and effective Off origin; locks retain explicit
+false keys. Revisions describe canonical saved semantics, not durability or
+mutation history. Universe and authority include sorted registered,
+unsupported, instantiated, cleanup, durable and reservation engine names.
+Runtime facts remain unknown until their existing owner observed them. A
+retained owned process lifetime carries its run ID and, when retained, PID;
+external/adopted processes receive no owned stop authority.
+
+The read composes detached existing owner captures without engine initialization,
+detection, process lookup, native contact, model inventory, journal recovery,
+notifications or writes. Contention and observed changes withdraw evidence.
+Download source mismatch withdraws reservations while preserving native manager
+identity. Reservation revision binds copy/download/content authority and
+admission generations; retained historical origin is explicitly unknown when
+the owner has no origin. Historical copy baselines and uncertain outcomes stay
+incomplete and block eligibility.
+
+Known empty arrays differ from unknown observations. `modelRoots` and
+`dataRoots` contain represented owner paths, with managed install roots in
+`dataRoots`; `rootsComplete` qualifies exhaustive coverage. The current manifest
+has no exhaustive data-root declaration, so coverage remains unknown for those
+engines. No arbitrary command or environment path is interpreted as a root.
+Request and response use the existing build-apply byte limits; overflow returns
+fixed unavailable failure, never a truncated list. Reasons are bounded codes.
+
+`captureToken` binds all detached sections, including knowledge state, authority
+revisions and incarnation. `complete` is derived knowledge, including known
+false authority and known blocking work, not permission to apply. Matching reads
+are not an atomic reservation. This RPC supplies no production `WithLocked`
+adapter; build-apply starts remain refused until separately owned atomic
+acceptance and the other transaction proofs exist.
+
 ## Local engine API keys
 
 `engine:set-credential` takes `{engine, credential}`; an empty credential

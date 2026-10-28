@@ -35,16 +35,32 @@ makes no device-map, complete-cost, Fits or Auto claim; native accuracy is untes
 `build:apply-impact`, `build:apply-prepare` and `build:apply-finish` are
 broker-local methods admitted before generic namespace forwarding. Their
 non-renderer consumer is the local `nvpair-service` build-apply owner. They
-currently validate strict bounded requests and return an unavailable result,
-with no settings, availability, engine or process effects. They have no peer
-route, remote caller, node selector, arbitrary command or destination field.
+validate strict bounded requests. The read-only impact method returns an
+internal `{impact, managerEvidence}` envelope. The public impact omits private
+manager operation IDs, source provenance and paths; the service retains the
+typed manager evidence for protected-root and source-fence checks. These
+methods have no peer route, remote caller, node selector, arbitrary command or
+destination field.
 
 `shared/buildapply` defines the maintenance observations and reciprocal
 `maintenance_busy` refusal (`-32015` when returned as a JSON-RPC error).
-This task supplies only that shape/result. Authoritative settings-owner hooks,
-reservation lifetime and both-direction tests belong to Task 3 after the model
-settings owner merges. The local method dispatch is not a maintenance lock and
-does not establish exclusion for internal settings callers.
+The impact read captures local policy, settings, admission and model fences
+around two `engine:owner-evidence {}` reads on one bound manager worker. Both
+manager calls share a four-second deadline. A retired/recovering worker, changed
+local owner, changed native incarnation or capture token, malformed response or
+missing section withdraws dependent facts without using cached intent as a
+fallback. A complete empty manager universe is valid; unobserved engines,
+unrepresented roots and uncertain reservations remain unknown. Manager paths
+and operation identities stay in the private envelope. Matching reads detect
+observed changes; they do not reserve the manager after the reply.
+
+Production prepare remains unavailable because no owner can pin manager
+intent, locks, content reservations and Pause acceptance atomically through
+`WithLocked`. The service also requires independent identity/membership,
+worker-exit, durable-save, enforcement and physical-stop evidence before a
+real start. Finish retains the existing Pause and explicit target-local Resume
+requirements. A separate manager-owned conditional reservation is required
+before production acceptance can be enabled.
 
 Model inspection uses `engine:inspect-model` through the existing settings read
 relay. The shared model configuration contract preserves typed `modelLoads`

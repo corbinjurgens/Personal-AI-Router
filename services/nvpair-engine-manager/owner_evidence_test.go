@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -647,6 +648,265 @@ func requireOwnerBool(t *testing.T, observation buildapply.Observation[bool], wa
 	if !observation.Known || observation.Value == nil || *observation.Value != want {
 		t.Fatalf("observation = %+v, want known %v", observation, want)
 	}
+}
+
+// Inert owners only: no Manager/Executor constructor, engine, listener, native
+// detection, recovery or content mutation is needed to exercise the RPC.
+func ownerEvidenceRPCFixture(t *testing.T) (*Manager, *bytes.Buffer) {
+	t.Helper()
+	e, _, _ := ownerEvidenceFixture(t)
+	d := &modelDownloads{source: e.switchIncarnation}
+	e.downloads = d
+	var out bytes.Buffer
+	return &Manager{exec: e, copyJournal: d, codec: NewCodec(&out)}, &out
+}
+
+func callOwnerEvidenceRPC(t *testing.T, m *Manager, out *bytes.Buffer, params string) Message {
+	t.Helper()
+	out.Reset()
+	id := json.RawMessage(`199`)
+	m.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: buildapply.EngineOwnerEvidenceMethod, Params: json.RawMessage(params)})
+	var reply Message
+	if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
+		t.Fatalf("decode owner RPC: %v", err)
+	}
+	return reply
+}
+
+func decodeOwnerEvidenceRPC(t *testing.T, reply Message) buildapply.EngineOwnerEvidence {
+	t.Helper()
+	if reply.Error != nil {
+		t.Fatalf("owner RPC failed: %+v", reply.Error)
+	}
+	var got buildapply.EngineOwnerEvidence
+	if err := json.Unmarshal(reply.Result, &got); err != nil {
+		t.Fatalf("decode owner evidence: %v", err)
+	}
+	return got
+}
+
+func TestOwnerEvidenceRPC(t *testing.T) {
+	t.Run("idle native identity without initializing engines", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		m.exec.engines = map[string]*engineState{}
+		m.exec.reg.engines = map[string]*Manifest{}
+		before, err := os.ReadDir(filepath.Dir(m.exec.desired.path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		second := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		if first.ManagerIncarnation != m.exec.switchIncarnation || first.CaptureToken == "" || !first.Complete || !reflect.DeepEqual(first, second) {
+			t.Fatalf("unstable idle evidence: %+v / %+v", first, second)
+		}
+		if len(m.exec.engines) != 0 || !first.Universe.Known || first.Universe.Value == nil || *first.Universe.Value == nil || len(*first.Universe.Value) != 0 {
+			t.Fatalf("idle read initialized engines or lost known empty: %+v", first)
+		}
+		after, err := os.ReadDir(filepath.Dir(m.exec.desired.path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, after) {
+			t.Fatal("evidence wrote the owner directory")
+		}
+	})
+
+	t.Run("response has exact private section names", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		reply := callOwnerEvidenceRPC(t, m, out, `{}`)
+		got := decodeOwnerEvidenceRPC(t, reply)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(reply.Result, &fields); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"managerIncarnation", "captureToken", "intent", "locks", "universe", "stopAuthority", "reservations", "complete", "reasons"}
+		if len(fields) != len(want) {
+			t.Fatalf("response fields: %v", fields)
+		}
+		for _, field := range want {
+			if _, exists := fields[field]; !exists {
+				t.Fatalf("missing %s", field)
+			}
+		}
+		entry := (*got.Universe.Value)[0]
+		if got.Complete || !entry.Registered || !entry.Supported.Known || entry.Installed.Known || entry.Running.Known || entry.TerminationVerified.Known || entry.RootsComplete {
+			t.Fatalf("unobserved engine gained knowledge: %+v", got)
+		}
+	})
+
+	t.Run("saved key presence and effective local Off survive", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		document := []byte(`{"engines":{"retained":false},"locked":{"retained":false}}`)
+		if err := os.WriteFile(m.exec.desired.path, document, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		if !got.Intent.Known || !reflect.DeepEqual(got.Intent.Value.EnabledByEngine, map[string]bool{"retained": false}) || !reflect.DeepEqual(got.Intent.Value.OffByEngine, map[string]string{"retained": "local"}) || !reflect.DeepEqual(got.Locks.Value.LockedByEngine, map[string]bool{"retained": false}) {
+			t.Fatalf("saved key semantics changed: %+v", got)
+		}
+		entries := *got.Universe.Value
+		if len(entries) != 2 || entries[1].Engine != "retained" || entries[1].Registered || entries[1].Supported.Known {
+			t.Fatalf("retained key lost: %+v", entries)
+		}
+		after, err := os.ReadFile(m.exec.desired.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(document, after) {
+			t.Fatal("effective provenance was persisted by the read")
+		}
+	})
+
+	t.Run("owned lifetime is bounded and external authority refuses", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		st := m.exec.engines["fake"]
+		st.proc = &managedProc{cmd: &exec.Cmd{Process: &os.Process{Pid: 4321}}, done: make(chan struct{})}
+		st.runID, st.running, st.installed = "run-owned", true, true
+		st.observeOwnerInstalledLocked()
+		st.observeOwnerPresenceLocked(false)
+		owned := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		stop := (*owned.StopAuthority.Value)[0]
+		requireOwnerBool(t, stop.Scoped, true)
+		if !stop.ProcessLifetime.Known || stop.ProcessLifetime.Value.EngineRunID != "run-owned" || !stop.ProcessLifetime.Value.PID.Known || *stop.ProcessLifetime.Value.PID.Value != 4321 {
+			t.Fatalf("lost owner lifetime: %+v", stop)
+		}
+		st.proc, st.adopted = nil, true
+		st.observeOwnerPresenceLocked(false)
+		external := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		stop = (*external.StopAuthority.Value)[0]
+		requireOwnerBool(t, stop.Scoped, false)
+		if stop.ProcessLifetime.Known || stop.Reason != "external_management" || owned.CaptureToken == external.CaptureToken {
+			t.Fatalf("external engine gained owned authority: %+v", stop)
+		}
+	})
+
+	t.Run("download source mismatch withdraws reservation evidence", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		m.copyJournal.source = "different-manager"
+		got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		if got.ManagerIncarnation != m.exec.switchIncarnation || got.Reservations.Known || got.Complete {
+			t.Fatalf("source mismatch trusted: %+v", got)
+		}
+	})
+
+	t.Run("content and admission revisions fence otherwise equal captures", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		first := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		m.copyJournal.authorityGeneration++
+		content := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		m.exec.ownerAdmissionGeneration += 2
+		admission := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		if first.CaptureToken == content.CaptureToken || content.CaptureToken == admission.CaptureToken || first.Reservations.Value.Revision == content.Reservations.Value.Revision || content.Reservations.Value.Revision == admission.Reservations.Value.Revision {
+			t.Fatal("authority generation changes were omitted from capture identity")
+		}
+	})
+
+	t.Run("contended owner withdraws facts without waiting", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		m.copyMu.Lock()
+		defer m.copyMu.Unlock()
+		got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		if got.Universe.Known || got.StopAuthority.Known || got.Reservations.Known || got.Complete || !got.Intent.Known || !got.Locks.Known {
+			t.Fatalf("contended capture fabricated facts: %+v", got)
+		}
+	})
+
+	t.Run("closed owned lifetime withdraws authority", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		st := m.exec.engines["fake"]
+		st.proc = &managedProc{cmd: &exec.Cmd{Process: &os.Process{Pid: 4321}}, done: make(chan struct{})}
+		st.runID, st.running = "owned", true
+		st.observeOwnerPresenceLocked(false)
+		close(st.proc.done)
+		got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		stop := (*got.StopAuthority.Value)[0]
+		if stop.Scoped.Known || stop.ProcessLifetime.Known || stop.Reason != "process_lifetime_closed" {
+			t.Fatalf("closed lifetime retained authority: %+v", stop)
+		}
+	})
+
+	t.Run("retained download origin stays explicitly unknown", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		key := downloadContentKey{engine: "fake", model: "private-model"}
+		m.copyJournal.unsafe = map[downloadContentKey]modelDownloadMarker{key: {ID: "prior-op", Engine: "fake", Model: "private-model"}}
+		got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		if !got.Reservations.Known || got.Reservations.Value.UnsafeCopiesComplete || len(got.Reservations.Value.Operations) != 1 {
+			t.Fatalf("retained operation missing: %+v", got)
+		}
+		op := got.Reservations.Value.Operations[0]
+		if !op.Retained || !op.Unsafe || op.SourceIncarnation.Known {
+			t.Fatalf("invented predecessor origin: %+v", op)
+		}
+		requireOwnerBool(t, got.Reservations.Value.BlocksApply, true)
+	})
+
+	unknown := func(name string, mutate func(*Manager), section string) {
+		t.Run(name, func(t *testing.T) {
+			m, out := ownerEvidenceRPCFixture(t)
+			mutate(m)
+			got := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+			if got.Complete || got.ManagerIncarnation != m.exec.switchIncarnation {
+				t.Fatalf("unknown state became complete: %+v", got)
+			}
+			found := false
+			for _, reason := range got.Reasons {
+				if reason.Section == section {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("unknown section %s lacks bounded reason: %+v", section, got)
+			}
+		})
+	}
+	unknown("unavailable desired owner", func(m *Manager) { m.exec.desired = &desiredStateStore{} }, "intent")
+	unknown("historical copy baseline", func(m *Manager) { m.copyJournal.copyRecoveryRequired = true }, "reservations")
+	unknown("download recovery pending", func(m *Manager) { m.copyJournal.recoveryRequired = true }, "reservations")
+	unknown("exhausted content authority", func(m *Manager) { m.copyJournal.authorityUncertain = true }, "reservations")
+	unknown("admitted mutation", func(m *Manager) { m.exec.ownerAdmissionHeld = 1 }, "stopAuthority")
+	unknown("unrepresented data roots", func(*Manager) {}, "universe")
+
+	testRequest := func(name, params string) {
+		t.Run(name, func(t *testing.T) {
+			m, out := ownerEvidenceRPCFixture(t)
+			reply := callOwnerEvidenceRPC(t, m, out, params)
+			if reply.Error == nil || reply.Error.Code != -32602 || len(reply.Result) != 0 {
+				t.Fatalf("accepted invalid request: %+v", reply)
+			}
+		})
+	}
+	testRequest("reject null", `null`)
+	testRequest("reject omitted params", ``)
+	testRequest("reject engine", `{"engine":"fake"}`)
+	testRequest("reject node", `{"nodeId":"local"}`)
+	testRequest("reject caller", `{"caller":"parent"}`)
+	testRequest("reject operation", `{"operationId":"op"}`)
+	testRequest("reject mutation", `{"stop":true}`)
+	testRequest("reject case variant", `{"Engine":"fake"}`)
+	testRequest("reject duplicate", `{"engine":"fake","engine":"fake"}`)
+	testRequest("reject request overflow", `{}`+strings.Repeat(" ", buildapply.MaxRequestBytes))
+
+	t.Run("response overflow is unavailable without partial authority", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		for i := 0; i < buildapply.MaxStatusBytes/64; i++ {
+			name := fmt.Sprintf("retained-%06d", i)
+			m.exec.reg.engines[name] = &Manifest{}
+		}
+		reply := callOwnerEvidenceRPC(t, m, out, `{}`)
+		if reply.Error == nil || reply.Error.Code != -32000 || len(reply.Result) != 0 {
+			t.Fatalf("overflow emitted partial evidence: %+v", reply)
+		}
+	})
+
+	t.Run("native restart replaces identity even at idle", func(t *testing.T) {
+		m, out := ownerEvidenceRPCFixture(t)
+		first := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		m.exec.switchIncarnation, m.copyJournal.source = "successor-manager", "successor-manager"
+		second := decodeOwnerEvidenceRPC(t, callOwnerEvidenceRPC(t, m, out, `{}`))
+		if second.ManagerIncarnation == first.ManagerIncarnation || second.CaptureToken == first.CaptureToken {
+			t.Fatal("successor retained predecessor identity")
+		}
+	})
 }
 
 func TestOwnerEvidenceUniverse(t *testing.T) {

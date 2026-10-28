@@ -50,6 +50,7 @@ var internalClientMethods = map[string]struct{}{
 	"engine:set-reserved-port":     {},
 	"internal:set-reserved-port":   {},
 	// Broker/engine-manager coordination.
+	"engine:owner-evidence":               {},
 	nodepolicy.MethodModelMutationRequest: {},
 	nodepolicy.MethodModelMutationReply:   {},
 	nodepolicy.MethodReconcileResident:    {},

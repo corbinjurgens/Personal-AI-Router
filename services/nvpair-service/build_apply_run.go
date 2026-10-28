@@ -1001,24 +1001,85 @@ const (
 type buildApplyEvidenceOwner interface {
 	Read(context.Context) (buildApplyEvidence, error)
 }
-type unavailableBuildApplyEvidence struct{}
 
-func (unavailableBuildApplyEvidence) Read(context.Context) (buildApplyEvidence, error) {
-	return buildApplyEvidence{}, errors.New("complete manager intent/lock/inventory/stop/reservation owner facts are unavailable")
+type serviceBuildApplyEvidence struct{ service *Service }
+
+func (owner serviceBuildApplyEvidence) Read(ctx context.Context) (buildApplyEvidence, error) {
+	s := owner.service
+	s.mu.Lock()
+	run := s.broker
+	s.mu.Unlock()
+	envelope, err := s.readBuildApplyImpact(ctx, run)
+	if err != nil {
+		return buildApplyEvidence{}, err
+	}
+	roots, err := buildApplyManagerRoots(envelope)
+	if err != nil {
+		return buildApplyEvidence{}, err
+	}
+	profile, err := buildApplyProtectedRoots()
+	if err != nil {
+		return buildApplyEvidence{}, err
+	}
+	m := *envelope.ManagerEvidence.Value
+	i := envelope.Impact
+	e := buildApplyEvidence{Impact: i, ProtectedRoots: append(profile, roots...), ManagerCaptureToken: m.CaptureToken, ManagerIncarnation: m.ManagerIncarnation}
+	authorityKnown := m.StopAuthority.Known
+	if authorityKnown {
+		for _, entry := range *m.StopAuthority.Value {
+			if !entry.Scoped.Known {
+				authorityKnown = false
+				break
+			}
+		}
+	}
+	e.Facts = buildApplyOwnerCompleteness{
+		IntentProvenance:         m.Intent.Known,
+		LockMap:                  m.Locks.Known,
+		EngineUniverse:           m.Universe.Known,
+		ModelDataRoots:           true,
+		ScopedStopAuthority:      authorityKnown,
+		DownloadCopyReservations: m.Reservations.Known && m.Reservations.Value.BlocksApply.Known && m.Reservations.Value.UnsafeCopiesComplete,
+		ManagerIdleRunID:         m.ManagerIncarnation != "",
+	}
+	if i.ExpectedSettings.PolicyDigest.Known {
+		e.Protected.Policy = *i.ExpectedSettings.PolicyDigest.Value
+	}
+	if i.ExpectedSettings.EngineSettingsDigest.Known {
+		e.Protected.EngineSettings = *i.ExpectedSettings.EngineSettingsDigest.Value
+	}
+	if i.ExpectedSettings.IntentDigest.Known && m.Intent.Known {
+		e.Protected.Intent = *i.ExpectedSettings.IntentDigest.Value
+	}
+	if i.ExpectedSettings.LocksDigest.Known && m.Locks.Known {
+		e.Protected.Locks = *i.ExpectedSettings.LocksDigest.Value
+	}
+	s.mu.Lock()
+	current := s.broker == run && !s.stopping
+	if current {
+		bindBuildApplyImpact(&e.Impact, s.startedAt, s.runs)
+	}
+	s.mu.Unlock()
+	if !current {
+		return buildApplyEvidence{}, errors.New("broker changed during owner projection")
+	}
+	return e, nil
 }
 
 type buildApplyEvidence struct {
-	Facts              buildApplyOwnerCompleteness    `json:"facts"`
-	ProtectedRoots     []string                       `json:"protectedRoots"`
-	Impact             buildapply.Impact              `json:"impact"`
-	Protected          buildapply.ProtectedDigests    `json:"protected"`
-	Pause              buildapply.JournalPauseFence   `json:"pause"`
-	Saved              bool                           `json:"saved"`
-	Enforced           bool                           `json:"enforced"`
-	PhysicalStop       bool                           `json:"physicalStop"`
-	ActivationVerified bool                           `json:"activationVerified"`
-	RecoveryRequired   bool                           `json:"recoveryRequired"`
-	OwnedWorkers       []buildapply.RunnerReservation `json:"ownedWorkers"`
+	Facts               buildApplyOwnerCompleteness    `json:"facts"`
+	ProtectedRoots      []string                       `json:"protectedRoots"`
+	ManagerCaptureToken string                         `json:"managerCaptureToken"`
+	ManagerIncarnation  string                         `json:"managerIncarnation"`
+	Impact              buildapply.Impact              `json:"impact"`
+	Protected           buildapply.ProtectedDigests    `json:"protected"`
+	Pause               buildapply.JournalPauseFence   `json:"pause"`
+	Saved               bool                           `json:"saved"`
+	Enforced            bool                           `json:"enforced"`
+	PhysicalStop        bool                           `json:"physicalStop"`
+	ActivationVerified  bool                           `json:"activationVerified"`
+	RecoveryRequired    bool                           `json:"recoveryRequired"`
+	OwnedWorkers        []buildapply.RunnerReservation `json:"ownedWorkers"`
 }
 
 type buildApplyOwnerCompleteness struct {
@@ -1358,6 +1419,11 @@ func (s *Service) respondBuildApplyNativeRead(c *client, msg *jsonrpc.Message) {
 	s.mu.Unlock()
 	if evidence, err := s.cfg.buildApplyOwners.Read(ctx); err == nil {
 		snapshot.Evidence = &evidence
+		result := buildapply.Result[buildApplyNativeSnapshot]{Available: true, Value: &snapshot}
+		data, encodeErr := json.Marshal(result)
+		if encodeErr != nil || len(data) > buildapply.MaxStatusBytes {
+			snapshot.Evidence = nil
+		}
 	}
 	c.respond(msg.ID, buildapply.Result[buildApplyNativeSnapshot]{Available: true, Value: &snapshot})
 }
@@ -1404,6 +1470,12 @@ func (s *Service) callBuildApplyBrokerCommand(ctx context.Context, method string
 	case reply := <-ch:
 		if reply == nil || reply.Error != nil {
 			return nil, errors.New("broker maintenance request unavailable")
+		}
+		s.mu.Lock()
+		current := s.broker == run && !s.stopping
+		s.mu.Unlock()
+		if !current {
+			return nil, errors.New("broker changed during maintenance request")
 		}
 		return reply.Result, nil
 	}
@@ -1652,15 +1724,26 @@ func (s *Service) captureBuildApplyPlan(ctx context.Context, snapshot buildApply
 	if err != nil {
 		return p, err
 	}
-	var brokerImpact buildapply.Result[buildapply.Impact]
-	if len(brokerData) > buildapply.MaxStatusBytes || json.Unmarshal(brokerData, &brokerImpact) != nil || !brokerImpact.Available || brokerImpact.Value == nil || !brokerImpact.Value.Complete || !reflect.DeepEqual(brokerImpact.Value.Fences, evidence.Impact.Fences) {
+	var brokerImpact buildapply.Result[buildapply.ImpactEnvelope]
+	if len(brokerData) > buildapply.MaxStatusBytes || json.Unmarshal(brokerData, &brokerImpact) != nil || !brokerImpact.Available || brokerImpact.Value == nil || !brokerImpact.Value.Impact.Complete {
 		return p, errors.New("broker owner facts are unavailable or changed")
 	}
-	excluded, err := buildApplyProtectedRoots()
+	s.mu.Lock()
+	bindBuildApplyImpact(&brokerImpact.Value.Impact, s.startedAt, s.runs)
+	s.mu.Unlock()
+	if !reflect.DeepEqual(brokerImpact.Value.Impact.Fences, evidence.Impact.Fences) {
+		return p, errors.New("broker owner fences changed")
+	}
+	managerRoots, err := buildApplyManagerRoots(*brokerImpact.Value)
 	if err != nil {
 		return p, err
 	}
-	excluded = append(excluded, evidence.ProtectedRoots...)
+	if len(evidence.ProtectedRoots) < len(managerRoots) || brokerImpact.Value.ManagerEvidence.Value.CaptureToken != evidence.ManagerCaptureToken ||
+		brokerImpact.Value.ManagerEvidence.Value.ManagerIncarnation != evidence.ManagerIncarnation ||
+		!reflect.DeepEqual(managerRoots, evidence.ProtectedRoots[len(evidence.ProtectedRoots)-len(managerRoots):]) {
+		return p, errors.New("manager root capture changed")
+	}
+	excluded := evidence.ProtectedRoots
 	if err := buildapply.ValidateLocations(snapshot.candidatePath, snapshot.targetPath, excluded); err != nil {
 		return p, err
 	}
@@ -1802,6 +1885,9 @@ func (s *Service) captureBuildApplyPlan(ctx context.Context, snapshot buildApply
 	last, err := s.cfg.buildApplyOwners.Read(ctx)
 	if err != nil || !reflect.DeepEqual(last, evidence) {
 		return p, errors.New("owner facts changed during live admission")
+	}
+	if err = buildapply.ValidateLocations(snapshot.candidatePath, snapshot.targetPath, last.ProtectedRoots); err != nil {
+		return p, err
 	}
 	if err = buildapply.ValidateRuntimeAuthority(p.receipt.Target, p.receipt.Runtime); err != nil {
 		return p, err

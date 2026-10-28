@@ -103,7 +103,7 @@ type buildApplyPreviewReads struct {
 	brokerProcess func() (buildapply.ProcessIdentity, error)
 	executable    func() (string, error)
 	protected     func() ([]string, error)
-	impact        func(context.Context) (buildapply.Impact, error)
+	impact        func(context.Context) (buildapply.ImpactEnvelope, error)
 	revalidate    func(context.Context, *buildapply.Package) error
 	parent        func(*buildapply.RealRoot, int64) error
 	host          func() buildapply.Observation[string]
@@ -145,7 +145,7 @@ func (s *Service) beginBuildApplyPreview(c *client) (*buildApplyPreviewState, co
 	// Keep at most one potentially blocked read writer per Service. A timed
 	// out write is retired, but cannot be interrupted by stopping the broker
 	// from a read-only preview. It retains only this bounded transport owner.
-	if s.buildPreview != nil && s.buildPreview.writing {
+	if s.buildImpactWriting || s.buildPreview != nil && s.buildPreview.writing {
 		s.mu.Unlock()
 		return nil, nil
 	}
@@ -172,7 +172,7 @@ func (s *Service) completeBuildApplyPreview(c *client, request buildapply.Previe
 	reads.revalidate = func(ctx context.Context, p *buildapply.Package) error { return p.Revalidate(ctx) }
 	reads.parent = buildapply.CheckTargetParent
 	reads.host = readBuildApplyHostID
-	reads.impact = func(ctx context.Context) (buildapply.Impact, error) { return s.readBuildApplyImpact(ctx, run) }
+	reads.impact = func(ctx context.Context) (buildapply.ImpactEnvelope, error) { return s.readBuildApplyImpact(ctx, run) }
 	if supplied != nil {
 		reads = *supplied
 	}
@@ -210,13 +210,7 @@ func (s *Service) completeBuildApplyPreview(c *client, request buildapply.Previe
 	state.expires = time.Now().Add(buildapply.PreviewLifetimeSeconds * time.Second)
 	preview.PreviewID = hex.EncodeToString(id[:])
 	preview.ExpiresAt = state.expires.UTC().Format(time.RFC3339Nano)
-	preview.Impact.Fences.ServiceInstance = buildapply.Known(fmt.Sprintf("%d-%d", os.Getpid(), s.startedAt.UnixNano()))
-	preview.Impact.Fences.BrokerGeneration = buildapply.Known(fmt.Sprintf("%d", s.runs))
-	runtimeFence := fmt.Sprintf("%d-%d-%d", os.Getpid(), s.startedAt.UnixNano(), s.runs)
-	if fence := preview.Impact.Fences.RuntimeGeneration; fence.Known {
-		runtimeFence += "-" + *fence.Value
-	}
-	preview.Impact.Fences.RuntimeGeneration = buildapply.Known(runtimeFence)
+	bindBuildApplyImpact(&preview.Impact, s.startedAt, s.runs)
 	state.preview = preview
 	state.candidate = candidate
 	state.target = target
@@ -231,6 +225,16 @@ func (s *Service) completeBuildApplyPreview(c *client, request buildapply.Previe
 	return buildapply.Result[buildapply.BuildApplyPreview]{Available: true, Value: &preview}
 }
 
+func bindBuildApplyImpact(impact *buildapply.Impact, startedAt time.Time, runs int) {
+	impact.Fences.ServiceInstance = buildapply.Known(fmt.Sprintf("%d-%d", os.Getpid(), startedAt.UnixNano()))
+	impact.Fences.BrokerGeneration = buildapply.Known(fmt.Sprintf("%d", runs))
+	runtimeFence := fmt.Sprintf("%d-%d-%d", os.Getpid(), startedAt.UnixNano(), runs)
+	if fence := impact.Fences.RuntimeGeneration; fence.Known && fence.Value != nil {
+		runtimeFence += "-" + *fence.Value
+	}
+	impact.Fences.RuntimeGeneration = buildapply.Known(runtimeFence)
+}
+
 func refusedPreview(code, detail string) buildapply.Result[buildapply.BuildApplyPreview] {
 	// Operational diagnostics only; never surface raw owner payloads or paths
 	// from a parse error. Bound this final public detail independently.
@@ -240,7 +244,7 @@ func refusedPreview(code, detail string) buildapply.Result[buildapply.BuildApply
 	return buildapply.Result[buildapply.BuildApplyPreview]{Refusal: &buildapply.Refusal{Code: code, Detail: detail}}
 }
 
-func (s *Service) readBuildApplyImpact(ctx context.Context, run *brokerRun) (buildapply.Impact, error) {
+func (s *Service) readBuildApplyImpact(ctx context.Context, run *brokerRun) (buildapply.ImpactEnvelope, error) {
 	ctx, cancel := context.WithTimeout(ctx, buildApplyImpactReadBudget)
 	defer cancel()
 	// Unlike callBroker, this owner sends the strict empty request object and
@@ -248,16 +252,19 @@ func (s *Service) readBuildApplyImpact(ctx context.Context, run *brokerRun) (bui
 	ch := make(chan *jsonrpc.Message, 1)
 	written := make(chan struct{})
 	s.mu.Lock()
-	if s.broker != run {
+	if run == nil || s.broker != run || s.stopping {
 		s.mu.Unlock()
-		return buildapply.Impact{}, errors.New("broker changed")
+		return buildapply.ImpactEnvelope{}, errors.New("broker changed")
 	}
 	state := s.buildPreview
-	if state == nil || state.retired || state.writing || ctx.Err() != nil {
+	if s.buildImpactWriting || ctx.Err() != nil || state != nil && state.broker == run && state.retired {
 		s.mu.Unlock()
-		return buildapply.Impact{}, errors.New("preview read is unavailable")
+		return buildapply.ImpactEnvelope{}, errors.New("owner read is unavailable")
 	}
-	state.writing = true
+	s.buildImpactWriting = true
+	if state != nil && state.broker == run {
+		state.writing = true
+	}
 	s.nextID++
 	id := s.nextID
 	s.pending[id] = &pendingRequest{internal: func(m *jsonrpc.Message) {
@@ -273,9 +280,12 @@ func (s *Service) readBuildApplyImpact(ctx context.Context, run *brokerRun) (bui
 	go func() {
 		defer func() {
 			s.mu.Lock()
-			state.writing = false
-			if state.retired && s.buildPreview == state {
-				s.buildPreview = nil
+			s.buildImpactWriting = false
+			if state != nil && state.broker == run {
+				state.writing = false
+				if state.retired && s.buildPreview == state {
+					s.buildPreview = nil
+				}
 			}
 			s.mu.Unlock()
 			close(written)
@@ -283,7 +293,7 @@ func (s *Service) readBuildApplyImpact(ctx context.Context, run *brokerRun) (bui
 		if ctx.Err() != nil {
 			return
 		}
-		if err := run.writeMessage(&jsonrpc.Message{JSONRPC: "2.0", ID: rawID(id), Method: "build:apply-impact", Params: json.RawMessage(`{}`)}); err != nil {
+		if err := run.writeMessageContext(ctx, &jsonrpc.Message{JSONRPC: "2.0", ID: rawID(id), Method: "build:apply-impact", Params: json.RawMessage(`{}`)}); err != nil {
 			select {
 			case ch <- nil:
 			default:
@@ -293,18 +303,49 @@ func (s *Service) readBuildApplyImpact(ctx context.Context, run *brokerRun) (bui
 	select {
 	case <-written:
 	case <-ctx.Done():
-		return buildapply.Impact{}, ctx.Err()
+		return buildapply.ImpactEnvelope{}, ctx.Err()
 	}
 	select {
 	case <-ctx.Done():
-		return buildapply.Impact{}, ctx.Err()
+		return buildapply.ImpactEnvelope{}, ctx.Err()
 	case response := <-ch:
-		var result buildapply.Result[buildapply.Impact]
-		if response == nil || response.Error != nil || len(response.Result) > 2<<20 || json.Unmarshal(response.Result, &result) != nil || !result.Available || result.Value == nil {
-			return buildapply.Impact{}, errors.New("cached local impact unavailable")
+		var result buildapply.Result[buildapply.ImpactEnvelope]
+		if response == nil || response.Error != nil || len(response.Result) > buildapply.MaxStatusBytes || json.Unmarshal(response.Result, &result) != nil || !result.Available || result.Value == nil {
+			return buildapply.ImpactEnvelope{}, errors.New("local owner impact unavailable")
+		}
+		s.mu.Lock()
+		current := s.broker == run && !s.stopping
+		s.mu.Unlock()
+		if !current {
+			return buildapply.ImpactEnvelope{}, errors.New("broker changed during owner read")
 		}
 		return *result.Value, nil
 	}
+}
+
+// Manager roots include owner-known install directories in DataRoots. A
+// missing universe entry or unknown coverage cannot authorize package I/O.
+func buildApplyManagerRoots(envelope buildapply.ImpactEnvelope) ([]string, error) {
+	if !envelope.ManagerEvidence.Known || envelope.ManagerEvidence.Value == nil ||
+		!envelope.Impact.Fences.ManagerIncarnation.Known || envelope.Impact.Fences.ManagerIncarnation.Value == nil {
+		return nil, errors.New("manager root identity is unavailable")
+	}
+	evidence := *envelope.ManagerEvidence.Value
+	if evidence.ManagerIncarnation == "" || evidence.CaptureToken == "" ||
+		evidence.ManagerIncarnation != *envelope.Impact.Fences.ManagerIncarnation.Value ||
+		!evidence.Universe.Known || evidence.Universe.Value == nil {
+		return nil, errors.New("manager root universe is unavailable")
+	}
+	roots := []string{}
+	for _, entry := range *evidence.Universe.Value {
+		if !entry.RootsComplete || !entry.ModelRoots.Known || entry.ModelRoots.Value == nil ||
+			!entry.DataRoots.Known || entry.DataRoots.Value == nil {
+			return nil, errors.New("manager root coverage is unavailable")
+		}
+		roots = append(roots, (*entry.ModelRoots.Value)...)
+		roots = append(roots, (*entry.DataRoots.Value)...)
+	}
+	return roots, nil
 }
 
 func captureBuildApplyPreview(ctx context.Context, request buildapply.PreviewRequest, reads buildApplyPreviewReads) (preview buildapply.BuildApplyPreview, candidate, target *buildapply.Package, gui buildapply.ProcessIdentity, err error) {
@@ -361,13 +402,20 @@ func captureBuildApplyPreview(ctx context.Context, request buildapply.PreviewReq
 		err = readErr
 		return
 	}
-	if err = buildapply.ValidateLocations(request.CandidatePath, root, excluded); err != nil {
-		return
-	}
 	preview.HostID = reads.host()
 	first, impactErr := reads.impact(ctx)
 	if impactErr != nil {
-		first.Refusals = []buildapply.Refusal{{Code: "incomplete", Detail: "Cached local impact is unavailable."}}
+		err = impactErr
+		return
+	}
+	managerRoots, rootErr := buildApplyManagerRoots(first)
+	if rootErr != nil {
+		err = rootErr
+		return
+	}
+	excluded = append(excluded, managerRoots...)
+	if err = buildapply.ValidateLocations(request.CandidatePath, root, excluded); err != nil {
+		return
 	}
 	candidate, err = reads.inspect(ctx, request.CandidatePath, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
@@ -403,9 +451,16 @@ func captureBuildApplyPreview(ctx context.Context, request buildapply.PreviewReq
 		return
 	}
 	last, lastErr := reads.impact(ctx)
-	preview.Impact = last
-	if lastErr != nil || impactErr != nil || !sameBuildApplyImpact(first, last) {
+	preview.Impact = last.Impact
+	lastRoots, lastRootsErr := buildApplyManagerRoots(last)
+	if lastErr != nil || lastRootsErr != nil || !reflect.DeepEqual(managerRoots, lastRoots) ||
+		first.ManagerEvidence.Value.CaptureToken != last.ManagerEvidence.Value.CaptureToken ||
+		first.ManagerEvidence.Value.ManagerIncarnation != last.ManagerEvidence.Value.ManagerIncarnation ||
+		!sameBuildApplyImpact(first.Impact, last.Impact) {
 		preview.Impact = buildapply.Impact{InterruptionPolicy: buildapply.InterruptionPolicy{StopsEngines: true, UnloadsModels: true, CommittedStreamsMayFail: true, IncludesWorkBeforeFence: true}, RestorePolicy: buildapply.RestorePolicy{RemainPaused: true, RequireLocalResume: true, PreserveIntentAndLocks: true, PreserveNewerPause: true}, Refusals: []buildapply.Refusal{{Code: "changed_or_unavailable", Detail: "Local owner evidence changed or became unavailable during capture."}}}
+	}
+	if err = buildapply.ValidateLocations(request.CandidatePath, root, excluded); err != nil {
+		return
 	}
 	after, readErr := reads.process(request.GUI.PID)
 	if readErr != nil || after != gui {

@@ -71,6 +71,86 @@ existing test executable's TestMain sentinel, never real libraries/drivers or a
 new fixture path. Source formatting is not compilation, test or native evidence;
 native acceptance remains UNTESTED.
 
+## Parent-only build-apply owner read
+
+`engine:owner-evidence` is registered only in Manager's parent request path.
+Its sole request is `{}`. Reject null, omitted params, arrays, extra/duplicate
+members, case variants, engine/node selectors, caller, operation ID and mutation
+flags with -32602 and fixed text `Invalid engine owner evidence request.` It
+adds no ec/control handler, ready notification, subscription or mutation.
+
+The shared wire contract is `buildapply.EngineOwnerEvidence`, with exactly:
+
+| Member | Meaning |
+| --- | --- |
+| `managerIncarnation` | Nonempty existing Executor `switchIncarnation`, even with no instantiated engines. |
+| `captureToken` | Canonical digest of incarnation and every detached section, knowledge state, reason and derived completeness. |
+| `intent` | Observation of `{revision,enabledByEngine,offByEngine}`, preserving all explicit saved keys and effective Off provenance. |
+| `locks` | Observation of `{revision,lockedByEngine}`, preserving the complete saved map, including explicit false keys. |
+| `universe` | Observation of the sorted complete engine union. Each entry has `engine`, `registered`, `supported`, `installed`, `running`, `engineRunId`, `terminationVerified`, `modelRoots`, `dataRoots`, `rootsComplete`. |
+| `stopAuthority` | Observation of the same sorted engine keys, each with `engine`, `scoped`, `adopted`, `reclaimPending`, `processLifetime`, `reason`. |
+| `reservations` | Observation of `{revision,blocksApply,unsafeCopiesComplete,operations}` from the joint copy/download/content owner. |
+| `complete` | Derived knowledge/coverage, never an acceptance or mutation permission bit. |
+| `reasons` | Sorted bounded `{section,engine,code}` identifiers; no native errors, commands, credentials or private transport tokens. |
+
+Every potentially unknown fact uses `Observation` (`known`, `value`); unknown
+requires null, known requires a value. Known-empty lists are arrays, never null.
+Registered membership is known from the captured registry; support of an
+unregistered retained key is unknown. Unobserved runtime booleans cannot become
+known false. `terminationVerified` retains positive owner stop knowledge.
+Unsupported engines with retained cleanup evidence remain in the union.
+
+`processLifetime` is an Observation of `{engineRunId,pid}`, where `pid` is an
+Observation retained from the owned process object. Neither that object nor its
+pointer is serialized; saved cleanup PIDs and OS lookups confer no authority.
+Adopted/external engines retain the existing scoped refusal. Closed or replaced
+lifetimes, pending reclaim, changed configuration and admitted mutations withdraw
+the dependent knowledge.
+
+Roots contain only resolved owner-known paths. `modelRoots` represents configured
+model roots; `dataRoots` includes the managed install root. These lists do not
+claim exhaustive coverage unless `rootsComplete` is true. Unresolved paths stay
+unknown. The current manifest does not declare exhaustive data roots, including
+for custom/external engines, so that coverage remains incomplete. Empty complete
+universe/authority lists remain valid. Consumers must refuse unknown root
+coverage before package inspection and merge represented roots with their own
+protected profile roots; no filesystem scan or argument/environment inference
+is allowed.
+
+Each reservation operation has `id`, `engine`, `kind`, `phase`,
+`sourceIncarnation`, `retained`, `unsafe`. Kinds are `copy`, `download`,
+`content_reader`, `content_writer`; phases are bounded owner states. Source is
+an Observation, explicitly unknown for historical downloads without retained
+origin. A live operation and its unsafe marker share one identity. Content gate
+entries receive deterministic opaque IDs. The reservation revision includes
+native/download source, copy and download revisions, content authority generation
+and engine admission generation. Source mismatch withdraws the entire section.
+Missing historical copy baseline, journal recovery, uncertain retention or
+unknown origin never implies safe empty reservations.
+
+The handler repeats detached captures from existing saved-state, universe,
+admission and joint reservation owners. Changed captures withdraw all sections;
+contention leaves affected sections unknown with bounded reasons. It performs
+no state creation, SwitchPrepare, Status/GetInstalled, detection, reclaim,
+adoption, OS lookup, native HTTP, model read, readiness check, recovery or write.
+No new cache, lifecycle owner or polling mechanism is introduced. Saved semantic
+revisions do not certify acknowledged durable writes or absence of ABA edits.
+
+Strict decoding validates exact nested fields, knowledge/value consistency,
+nonempty identities and revisions, unique sorted engine and operation identities,
+universe/authority correspondence, roots coverage and derived completeness.
+Canonical capture validation binds every serialized section. The existing
+`buildapply.MaxRequestBytes` and `MaxStatusBytes` apply. Invalid or oversized
+response evidence produces -32000 with fixed text
+`Engine owner evidence is unavailable.` No authority-bearing array is truncated.
+
+This is evidence only. Matching captures do not pin a remote owner or prove
+physical liveness after the read. Complete evidence may contain scoped false
+authority or blocking work. Production `WithLocked` acceptance remains absent;
+real starts additionally need separately owned identity/membership preservation,
+worker-exit reservations, saved/enforced state and physical-stop proof. Unknown
+evidence refuses, and this method supplies no production start adapter.
+
 ## Host-local credentials
 
 Only broker stdio accepts `engine:set-credential` (`{engine,credential}`) and

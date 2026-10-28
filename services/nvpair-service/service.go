@@ -108,16 +108,17 @@ type Service struct {
 	restarts    int
 	stopping    bool
 
-	stopCh        chan struct{}
-	stopOnce      sync.Once
-	stopped       chan struct{}
-	exitCh        chan struct{}
-	exitOnce      sync.Once
-	brokerDone    chan struct{}
-	history       *serviceHistory
-	buildPreview  *buildApplyPreviewState
-	buildApply    *buildApplyAdmissionState
-	buildGUIReady *buildapply.RunnerReservation
+	stopCh             chan struct{}
+	stopOnce           sync.Once
+	stopped            chan struct{}
+	exitCh             chan struct{}
+	exitOnce           sync.Once
+	brokerDone         chan struct{}
+	history            *serviceHistory
+	buildPreview       *buildApplyPreviewState
+	buildImpactWriting bool
+	buildApply         *buildApplyAdmissionState
+	buildGUIReady      *buildapply.RunnerReservation
 }
 
 // pendingRequest is a request in flight at the broker under a service id.
@@ -132,10 +133,7 @@ type pendingRequest struct {
 }
 
 func newService(cfg config) *Service {
-	if cfg.buildApplyOwners == nil {
-		cfg.buildApplyOwners = unavailableBuildApplyEvidence{}
-	}
-	return &Service{
+	s := &Service{
 		cfg:        cfg,
 		clients:    make(map[*client]struct{}),
 		pending:    make(map[int64]*pendingRequest),
@@ -146,6 +144,10 @@ func newService(cfg config) *Service {
 		exitCh:     make(chan struct{}),
 		brokerDone: make(chan struct{}),
 	}
+	if s.cfg.buildApplyOwners == nil {
+		s.cfg.buildApplyOwners = serviceBuildApplyEvidence{service: s}
+	}
+	return s
 }
 
 // Run claims the endpoint, supervises the broker, and serves clients until ctx

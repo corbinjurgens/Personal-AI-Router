@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/buildapply"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
@@ -267,6 +268,26 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	}
 
 	switch msg.Method {
+	case "engine:owner-evidence":
+		var request buildapply.EngineOwnerEvidenceRequest
+		if err := buildapply.DecodeRequest(msg.Params, &request); err != nil {
+			m.codec.RespondError(msg.ID, -32602, "Invalid engine owner evidence request.")
+			return
+		}
+		evidence, err := m.engineOwnerEvidence()
+		if err != nil {
+			m.codec.RespondError(msg.ID, -32000, "Engine owner evidence is unavailable.")
+			return
+		}
+		// Marshal before writing so overflow/invalid evidence produces one fixed
+		// unavailable response, never a truncated authority-bearing section.
+		data, err := json.Marshal(evidence)
+		if err != nil {
+			m.codec.RespondError(msg.ID, -32000, "Engine owner evidence is unavailable.")
+			return
+		}
+		m.codec.Respond(msg.ID, json.RawMessage(data))
+
 	case nodepolicy.MethodReconcileResident:
 		go m.runResident(ctx, msg)
 
