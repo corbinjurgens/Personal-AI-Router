@@ -39,10 +39,33 @@ a model, and this editor does not create qualification.
 Main, draft and companion files are labelled separately. A companion such as a
 projector is not presented as another main-model shard.
 
+Memory advice uses the service's per-pool `capacityFit` and `freeFit` values:
+`unknown`, `exceeds`, `tight` or `fits`. Available memory is distinct from total
+capacity. Each independent pool reserves ten percent of its capacity, rounded
+up, plus 512 MiB. Required bytes above available bytes exceed the pool; equality
+is tight unless the reserve also fits. UMA represents one shared pool.
+Measurement source, sample identity, measurement timestamps and bounded remaining
+validity accompany comparisons. The estimate timestamp describes computation,
+not a new measurement. Expiry withdraws comparisons while preserving components.
+
+The canonical component names are `weights`, `attention-cache`,
+`recurrent-state`, `compute-workspace`, `prompt-cache` and `companions`.
+Charges crossing independent pools appear as separate component rows. Unsized
+workspace, missing mapping and other incomplete costs keep comparisons Unknown.
+Current production costs remain partial: telemetry does not enable production
+Fits or Auto. Complete synthetic arithmetic fixtures establish comparison
+boundaries only. Worker-only memory envelopes and frozen validation are defined
+separately from public inspection and portable load edits; target caller wiring
+and frozen UUID launch enforcement remain separate integration work.
+Manual GPU settings remain usable without a reviewed physical binding, but their
+unproven GPU-domain comparisons stay Unknown. External conversion never
+substitutes for an Auto review.
+
 The service resolves available local artifacts and reads bounded metadata for
 inspection. Missing, ambiguous or unavailable content remains a reported
 condition. Manual finite llama.cpp load changes require a successful target
-preview; reviewed Auto and advisory estimates remain unavailable. A refused
+preview. Reviewed Auto remains unavailable in production; advisory component
+estimates can report partial costs and Unknown comparisons. A refused
 preview does not enable Apply or produce a success receipt. Generation-only
 policy editing continues through its existing Save path.
 

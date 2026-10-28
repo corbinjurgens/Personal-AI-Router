@@ -49,8 +49,15 @@ function resolvedLoad(): ResolvedLoad {
         nativeBuildId: 'llama-b11146',
         sourceInputDigest: 'b'.repeat(64),
         presetDigest: 'c'.repeat(64),
-        resolverRevision: 'resolver-test-1',
-        reviewedInputId: 'reviewed-target-input'
+        resolverRevision: 'auto/fixture',
+        reviewedInputId: 'reviewed-target-input',
+        deviceBinding: {
+            hostId: 'target',
+            domainId: 'vram',
+            deviceId: 'GPU-11111111-1111-1111-1111-111111111111',
+            selector: 'CUDA0',
+            digest: 'd'.repeat(64)
+        }
     }
 }
 
@@ -66,6 +73,68 @@ function modelLoad(): ModelLoad {
         resolved
     }
 }
+
+it('preserves service comparisons and measurement provenance without numeric conversion', () => {
+    const wire = inspection()
+    const estimate = {
+        ...wire.estimate,
+        capacityFit: 'fits',
+        freeFit: 'tight',
+        domains: [
+            {
+                ...wire.estimate.domains[0],
+                reserveBytes: '9007199254740993',
+                capacityFit: 'fits',
+                freeFit: 'tight',
+                sampleId: 'observation:run',
+                capacitySource: 'system-total',
+                capacityTimestamp: '2026-10-28T00:00:00Z',
+                freeSource: 'system-available',
+                freeTimestamp: '2026-10-28T00:00:01Z',
+                remainingValidityMs: 1500,
+                unknowns: ['synthetic comparison only']
+            }
+        ]
+    }
+    const parsed = parseInspectModel({ ...wire, estimate }).estimate
+    expect(parsed.capacityFit).toBe('fits')
+    expect(parsed.freeFit).toBe('tight')
+    expect(parsed.domains?.[0]).toMatchObject(estimate.domains[0])
+    expect(parsed.timestamp).toBe(wire.estimate.timestamp)
+    for (const invalid of ['ready', 1, null]) {
+        expect(() =>
+            parseInspectModel({ ...wire, estimate: { ...estimate, freeFit: invalid } })
+        ).toThrow()
+    }
+    expect(() =>
+        parseInspectModel({
+            ...wire,
+            estimate: {
+                ...estimate,
+                domains: [{ ...estimate.domains[0], remainingValidityMs: 5001 }]
+            }
+        })
+    ).toThrow()
+})
+
+it('rejects reviewed GPU readback without a physical binding', () => {
+    const wire = snapshot()
+    delete wire.settings.modelLoads[0].resolved?.deviceBinding
+    expect(() => parseEngineSettings(wire)).toThrow()
+})
+
+it('keeps unbound manual GPU settings readable without accepting conversion as Auto', () => {
+    const wire = snapshot()
+    const allocation = resolvedLoad()
+    delete allocation.deviceBinding
+    allocation.resolverRevision = 'external-conversion/llama'
+    wire.settings.modelLoads = [{ modelId: 'manual/model', requested: {}, resolved: allocation }]
+    expect(
+        parseEngineSettings(wire).settings.modelLoads?.[0].resolved?.deviceBinding
+    ).toBeUndefined()
+    wire.settings.modelLoads[0].requested = { gpu: { mode: 'auto' } }
+    expect(() => parseEngineSettings(wire)).toThrow()
+})
 
 it('preserves a larger unified KV pool without changing ordinary slot arithmetic', () => {
     const wire = snapshot()
@@ -205,7 +274,7 @@ function preview() {
             estimate: inspection().estimate,
             memorySource: 'target-memory',
             memoryTimestamp: '2026-10-27T00:00:00Z',
-            resolverRevision: 'resolver-test-1',
+            resolverRevision: 'auto/fixture',
             reviewedInputId: 'reviewed-target-input',
             warnings: ['advisory estimate']
         }

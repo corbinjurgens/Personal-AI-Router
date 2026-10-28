@@ -18,6 +18,7 @@ import (
 	gguf "github.com/gpustack/gguf-parser-go"
 	"nvpair-shared/gguffacts"
 	"nvpair-shared/modelconfig"
+	"nvpair-shared/noderec"
 )
 
 const modelEstimatorRevision = "pair-gguf/1;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385"
@@ -55,6 +56,8 @@ func modelEstimateBindings(bindings []modelconfig.ArtifactBinding) []modelconfig
 // Internal future broker input, never accepted from worker RPC callers. One
 // offload device is representable; array positions do not identify devices.
 type modelEstimateMemory struct {
+	Target           *modelconfig.TargetMemory
+	Map              *modelDeviceMap
 	Identity, Source string
 	At               time.Time
 	Domains          []modelconfig.MemoryDomain
@@ -86,7 +89,7 @@ func (s *modelEstimateState) clock() time.Time {
 }
 
 func modelEstimateUnknown(reason string) modelconfig.Estimate {
-	return modelconfig.Estimate{Status: "unknown", Source: modelEstimatorRevision, Unknowns: []string{reason}}
+	return modelconfig.Estimate{Status: "unknown", Source: modelEstimatorRevision, CapacityFit: "unknown", FreeFit: "unknown", Unknowns: []string{reason}}
 }
 
 // Preferences alone establish neither artifacts nor native allocation. Auto's
@@ -157,13 +160,15 @@ func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput
 			s.remove(i)
 			continue
 		}
-		if entry.key == key && (in.Memory == nil || modelEstimateMemoryFresh(in.Memory, now)) {
+		if entry.key == key {
 			if ctx.Err() != nil {
 				return modelEstimateUnknown("estimator operation budget exhausted")
 			}
 			copy(s.entries[i:], s.entries[i+1:])
 			s.entries[len(s.entries)-1] = entry
-			return entry.value.Clone()
+			cached := entry.value.Clone()
+			modelEstimateDomains(&cached, in, s.clock())
+			return cached
 		}
 		i++
 	}
@@ -176,7 +181,8 @@ func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput
 		return modelEstimateUnknown("estimator operation budget exhausted")
 	}
 	out.Source, out.BuildID, out.Timestamp = modelEstimatorRevision, in.BuildID, now.UTC().Format(time.RFC3339Nano)
-	modelEstimateDomains(&out, in, now)
+	raw := out.Clone()
+	modelEstimateDomains(&out, in, s.clock())
 	if err := out.Validate(); err != nil {
 		return modelEstimateUnknown("estimator result exceeds contract or size budget")
 	}
@@ -202,9 +208,11 @@ func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput
 		if s.entries == nil {
 			s.entries = make([]modelEstimateRecord, 0, modelEstimateRecords)
 		}
-		s.entries = append(s.entries, modelEstimateRecord{key, now, size, modelEstimateDetach(out)})
+		s.entries = append(s.entries, modelEstimateRecord{key, now, size, modelEstimateDetach(raw)})
 		s.bytes += size
 	}
+	out = raw
+	modelEstimateDomains(&out, in, s.clock())
 	return out
 }
 
@@ -492,7 +500,7 @@ func calculateModelEstimate(ctx context.Context, in modelEstimateInput) modelcon
 	} else {
 		out.Components = append(out.Components, unknownEstimateComponent("prompt-cache", "effective native cache-ram unavailable"))
 	}
-	out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "known-exclusions", Status: "excluded", Reason: "driver/runtime, allocator alignment/fragmentation, mmap residency, OS, other processes and simultaneous resident models unsized"})
+	out.Unknowns = append(out.Unknowns, "driver/runtime, allocator alignment/fragmentation, mmap residency and simultaneous resident model costs unsized")
 	modelEstimatePlacement(&out, m, in)
 	for _, c := range out.Components {
 		if c.Status == "unknown" || c.Status == "partial" {
@@ -1003,6 +1011,10 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 			host = modelEstimateAdd(host, h)
 			device = modelEstimateAdd(device, d)
 			c.Reason += "; output-first tensor placement projection; embedding/unclassified tensors on host"
+			c.DomainID, c.Bytes = "host", strconv.FormatUint(h, 10)
+			if d > 0 {
+				out.Components = append(out.Components, modelconfig.EstimateComponent{Name: c.Name, DomainID: "offload-unmapped", Status: c.Status, Bytes: strconv.FormatUint(d, 10), Reason: c.Reason})
+			}
 		} else if c.Name == "attention-cache" || c.Name == "recurrent-state" {
 			if a.Options.KVOffload != nil && !*a.Options.KVOffload {
 				c.DomainID = "host"
@@ -1028,6 +1040,123 @@ func modelEstimateMemoryFresh(m *modelEstimateMemory, now time.Time) bool {
 }
 
 func modelEstimateDomains(out *modelconfig.Estimate, in modelEstimateInput, now time.Time) {
+	// Cached computation is reusable, observation validity is always rechecked.
+	for i := range out.Domains {
+		d := &out.Domains[i]
+		d.CapacityFit, d.FreeFit = "unknown", "unknown"
+		d.RemainingValidityMS = 0
+		d.ReserveBytes = ""
+	}
+	if in.Memory == nil || in.Memory.Target == nil {
+		modelEstimateDomainsLegacy(out, in, now)
+		if in.Memory != nil && modelEstimateMemoryFresh(in.Memory, now) {
+			remaining := max(int64(0), noderec.MemoryFreshMS-int64((now.Sub(in.Memory.At)+time.Millisecond-1)/time.Millisecond))
+			for i := range out.Domains {
+				out.Domains[i].RemainingValidityMS = min(out.Domains[i].RemainingValidityMS, int64(remaining))
+			}
+		}
+		for i := range out.Domains {
+			d := &out.Domains[i]
+			if d.Kind != "device" {
+				continue
+			}
+			if in.Allocation == nil || in.Allocation.DeviceBinding == nil || in.Allocation.DeviceBinding.Validate() != nil || in.Allocation.DeviceBinding.DomainID != d.ID || in.Allocation.DeviceBinding.DeviceID != d.DeviceID {
+				d.RemainingValidityMS = 0
+				d.Unknowns = append(d.Unknowns, "GPU allocation has no matching reviewed physical binding")
+			}
+		}
+		*out = modelconfig.CompareEstimate(*out)
+		return
+	}
+	m := in.Memory
+	observation := m.Target.At(noderec.MemoryBootClock)
+	cpu := in.Allocation != nil && (in.Allocation.GPU.Mode == "cpu" || in.Allocation.GPU.Mode == "layers" && in.Allocation.GPU.Layers != nil && *in.Allocation.GPU.Layers == 0)
+	if observation == nil || !cpu && (m.Map == nil || m.Map.Unknown != "" || m.Map.ObservationID == "" || m.Map.ObservationID != m.Target.MapID) {
+		out.Unknowns = append(out.Unknowns, "target observation or native map unavailable")
+		*out = modelconfig.CompareEstimate(*out)
+		return
+	}
+	// CPU placement needs only the independently identified host/shared pool.
+	// It never needs GPU enumeration, nor charges an empty GPU domain.
+	hostPool := ""
+	if cpu {
+		for _, d := range observation.Domains {
+			if d.Kind == "system" || d.Kind == "shared" {
+				hostPool = d.ID
+			}
+		}
+		out.Domains = slices.DeleteFunc(out.Domains, func(d modelconfig.MemoryDomain) bool { return d.Kind == "device" && d.RequiredBytes == "0" })
+	} else {
+		hostPool = m.Map.HostPool
+	}
+	for i := range out.Domains {
+		d := &out.Domains[i]
+		pool := d.ID
+		if d.Kind == "host" {
+			pool = hostPool
+		}
+		if d.ID == "offload-unmapped" {
+			b := m.Map.Binding
+			if b == nil || in.Allocation == nil || in.Allocation.DeviceBinding == nil {
+				continue
+			}
+			a := in.Allocation.DeviceBinding
+			if a.Validate() != nil || a.HostID != m.Target.HostID || a.Digest != b.Digest || a.DeviceID != b.UUID || a.DomainID != b.Pool || a.HostID != b.Host || a.Selector != b.Selector {
+				continue
+			}
+			pool = b.Pool
+		}
+		for _, fact := range observation.Domains {
+			if fact.ID != pool {
+				continue
+			}
+			if fact.Kind == "unknown" {
+				continue
+			}
+			if d.Kind == "device" && fact.Kind != "dedicated" || d.Kind == "host" && fact.Kind != "system" && fact.Kind != "shared" {
+				continue
+			}
+			if fact.Kind == "dedicated" && (m.Map == nil || m.Map.Binding == nil || !slices.Contains(fact.DeviceIDs, m.Map.Binding.UUID)) {
+				continue
+			}
+			old := d.ID
+			d.ID = pool
+			if fact.Kind == "shared" {
+				d.Kind = "shared"
+				out.HostBytes, out.DeviceBytes = "", ""
+			}
+			if fact.Kind == "dedicated" && m.Map.Binding != nil {
+				d.DeviceID = m.Map.Binding.UUID
+			}
+			for j := range out.Components {
+				if out.Components[j].DomainID == old {
+					out.Components[j].DomainID = pool
+				}
+			}
+			d.Source, d.SampleID = "target-node-info", m.Target.ObservationID+":"+observation.RunID
+			d.CapacityBytes, d.FreeBytes = "", ""
+			remaining := noderec.MemoryFreshMS
+			if fact.Total.Valid {
+				d.CapacityBytes = fact.Total.Bytes
+				d.CapacitySource = fact.Total.Source
+				d.CapacityTimestamp = fact.Total.SampledAt.Format(time.RFC3339Nano)
+				remaining = min(remaining, noderec.MemoryFreshMS-fact.Total.AgeMS)
+			} else {
+				remaining = 0
+			}
+			if fact.Free.Valid {
+				d.FreeBytes = fact.Free.Bytes
+				d.FreeSource = fact.Free.Source
+				d.FreeTimestamp = fact.Free.SampledAt.Format(time.RFC3339Nano)
+				remaining = min(remaining, noderec.MemoryFreshMS-fact.Free.AgeMS)
+			}
+			d.RemainingValidityMS = max(0, remaining)
+		}
+	}
+	*out = modelconfig.CompareEstimate(*out)
+}
+
+func modelEstimateDomainsLegacy(out *modelconfig.Estimate, in modelEstimateInput, now time.Time) {
 	m := in.Memory
 	if m == nil {
 		out.Unknowns = append(out.Unknowns, "target memory telemetry unavailable")

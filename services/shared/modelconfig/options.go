@@ -267,6 +267,19 @@ func (a ArtifactBinding) Validate() error {
 }
 
 func (r ResolvedLoad) Validate() error {
+	if r.DeviceBinding != nil {
+		if r.GPU.Mode != "layers" || r.GPU.Layers == nil || *r.GPU.Layers <= 0 {
+			return fmt.Errorf("resolved.deviceBinding: CPU cannot bind a GPU")
+		}
+		if err := r.DeviceBinding.Validate(); err != nil {
+			return err
+		}
+	}
+	// Existing manual finite placements remain readable. Reviewed Auto GPU
+	// allocations require an exact target-owned physical binding.
+	if strings.HasPrefix(r.ResolverRevision, "auto/") && r.GPU.Mode == "layers" && r.GPU.Layers != nil && *r.GPU.Layers > 0 && r.DeviceBinding == nil {
+		return fmt.Errorf("resolved.deviceBinding: reviewed GPU requires binding")
+	}
 	per, total, err := TotalContext(r.PerSlotContext, r.Slots)
 	unified := r.KVUnified != nil && *r.KVUnified
 	if err != nil || per != r.PerSlotContext || r.TotalContext <= 0 || r.TotalContext%256 != 0 || (!unified && total != r.TotalContext) || (unified && total > r.TotalContext) {

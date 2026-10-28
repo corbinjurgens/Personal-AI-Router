@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"nvpair-shared/engines"
@@ -92,6 +93,7 @@ type ResolvedLoad struct {
 	PresetDigest      string            `json:"presetDigest"`
 	ResolverRevision  string            `json:"resolverRevision,omitempty"`
 	ReviewedInputID   string            `json:"reviewedInputId,omitempty"`
+	DeviceBinding     *DeviceBinding    `json:"deviceBinding,omitempty"`
 }
 
 // ModelLoad is storage/readback, not a caller patch. Full settings requests may
@@ -163,12 +165,23 @@ type Facts struct {
 // host plus GPU. DeviceID is target-mapped identity, never an array ordinal.
 // All byte fields are canonical uint64 decimal strings; absence means unknown.
 type MemoryDomain struct {
-	ID            string `json:"id"`
-	Kind          string `json:"kind"` // host, device or shared
-	DeviceID      string `json:"deviceId,omitempty"`
-	CapacityBytes string `json:"capacityBytes,omitempty"`
-	FreeBytes     string `json:"freeBytes,omitempty"`
-	RequiredBytes string `json:"requiredBytes,omitempty"`
+	ID                  string   `json:"id"`
+	Kind                string   `json:"kind"` // host, device or shared
+	DeviceID            string   `json:"deviceId,omitempty"`
+	CapacityBytes       string   `json:"capacityBytes,omitempty"`
+	FreeBytes           string   `json:"freeBytes,omitempty"`
+	RequiredBytes       string   `json:"requiredBytes,omitempty"`
+	ReserveBytes        string   `json:"reserveBytes,omitempty"`
+	CapacityFit         string   `json:"capacityFit,omitempty"`
+	FreeFit             string   `json:"freeFit,omitempty"`
+	Source              string   `json:"source,omitempty"`
+	SampleID            string   `json:"sampleId,omitempty"`
+	CapacitySource      string   `json:"capacitySource,omitempty"`
+	CapacityTimestamp   string   `json:"capacityTimestamp,omitempty"`
+	FreeSource          string   `json:"freeSource,omitempty"`
+	FreeTimestamp       string   `json:"freeTimestamp,omitempty"`
+	RemainingValidityMS int64    `json:"remainingValidityMs,omitempty"`
+	Unknowns            []string `json:"unknowns,omitempty"`
 }
 type EstimateComponent struct {
 	Name     string `json:"name"`
@@ -186,6 +199,8 @@ type Estimate struct {
 	Timestamp       string              `json:"timestamp,omitempty"`
 	MemorySource    string              `json:"memorySource,omitempty"`
 	MemoryTimestamp string              `json:"memoryTimestamp,omitempty"`
+	CapacityFit     string              `json:"capacityFit,omitempty"`
+	FreeFit         string              `json:"freeFit,omitempty"`
 	HostBytes       string              `json:"hostBytes,omitempty"`
 	DeviceBytes     string              `json:"deviceBytes,omitempty"`
 	Domains         []MemoryDomain      `json:"domains,omitempty"`
@@ -330,6 +345,10 @@ func checkShape(data []byte, t reflect.Type, path string) error {
 	}
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
+	}
+	if t == reflect.TypeOf(time.Time{}) {
+		var value time.Time
+		return json.Unmarshal(data, &value)
 	}
 	if t == reflect.TypeOf(json.RawMessage{}) {
 		return nil
@@ -646,6 +665,7 @@ func CloneLoads(loads []ModelLoad) []ModelLoad {
 	return out
 }
 func (r ResolvedLoad) Clone() ResolvedLoad {
+	r.DeviceBinding = clonePointer(r.DeviceBinding)
 	r.KVUnified = clonePointer(r.KVUnified)
 	r.GPU.Layers = clonePointer(r.GPU.Layers)
 	r.Options = r.Options.Clone()
@@ -697,6 +717,9 @@ func (c ModelChange) Clone() ModelChange {
 }
 func (e Estimate) Clone() Estimate {
 	e.Domains = slices.Clone(e.Domains)
+	for i := range e.Domains {
+		e.Domains[i].Unknowns = slices.Clone(e.Domains[i].Unknowns)
+	}
 	e.Components = slices.Clone(e.Components)
 	e.Assumptions = slices.Clone(e.Assumptions)
 	e.Unknowns = slices.Clone(e.Unknowns)
@@ -820,6 +843,9 @@ func (r InspectResult) Validate() error {
 }
 
 func (e Estimate) Validate() error {
+	if !validMemoryFit(e.CapacityFit) || !validMemoryFit(e.FreeFit) {
+		return fmt.Errorf("estimate: invalid comparison")
+	}
 	if !slices.Contains([]string{"estimated", "partial", "unknown", "unavailable"}, e.Status) {
 		return fmt.Errorf("estimate.status: invalid advisory state")
 	}
@@ -832,18 +858,52 @@ func (e Estimate) Validate() error {
 		return fmt.Errorf("estimate: collection exceeds budget")
 	}
 	seen := map[string]bool{}
+	devices := map[string]bool{}
+	host, shared := false, false
 	for _, d := range e.Domains {
 		if boundedText(d.ID, 256, true) != nil || seen[d.ID] || !slices.Contains([]string{"host", "device", "shared"}, d.Kind) {
 			return fmt.Errorf("estimate.domains: invalid or duplicate domain")
 		}
 		seen[d.ID] = true
-		for _, value := range []string{d.CapacityBytes, d.FreeBytes, d.RequiredBytes} {
+		if d.DeviceID != "" {
+			if devices[d.DeviceID] {
+				return fmt.Errorf("estimate.domains: overlapping physical device")
+			}
+			devices[d.DeviceID] = true
+		}
+		if d.Kind == "host" {
+			if host || shared {
+				return fmt.Errorf("estimate.domains: overlapping host/shared pool")
+			}
+			host = true
+		}
+		if d.Kind == "shared" {
+			if host || shared {
+				return fmt.Errorf("estimate.domains: overlapping host/shared pool")
+			}
+			shared = true
+		}
+		for _, text := range []string{d.Source, d.CapacitySource, d.CapacityTimestamp, d.FreeSource, d.FreeTimestamp} {
+			if boundedText(text, 256, false) != nil {
+				return fmt.Errorf("estimate.domains: invalid provenance")
+			}
+		}
+		if boundedText(d.SampleID, 513, false) != nil {
+			return fmt.Errorf("estimate.domains: invalid sample identity")
+		}
+		if !validMemoryFit(d.CapacityFit) || !validMemoryFit(d.FreeFit) || d.RemainingValidityMS < 0 || d.RemainingValidityMS > 5000 || len(d.Unknowns) > 256 {
+			return fmt.Errorf("estimate.domains: invalid comparison or validity")
+		}
+		for _, value := range []string{d.CapacityBytes, d.FreeBytes, d.RequiredBytes, d.ReserveBytes} {
 			if value != "" && ValidateUnsignedDecimal(value) != nil {
 				return fmt.Errorf("estimate.domains: expected canonical byte strings")
 			}
 		}
 	}
 	for _, c := range e.Components {
+		if !slices.Contains(MemoryComponentNames, c.Name) || c.Status == "excluded" && (c.Reason == "" || c.Bytes != "") {
+			return fmt.Errorf("estimate.components: unsupported category or unsourced exclusion")
+		}
 		if boundedText(c.Name, 256, true) != nil || !slices.Contains([]string{"estimated", "partial", "unknown", "excluded"}, c.Status) || c.DomainID != "" && !seen[c.DomainID] {
 			return fmt.Errorf("estimate.components: invalid component or domain")
 		}

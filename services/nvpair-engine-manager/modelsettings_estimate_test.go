@@ -19,6 +19,7 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/gguffacts"
 	"nvpair-shared/modelconfig"
+	"nvpair-shared/noderec"
 )
 
 func estimateFixture(arch string) modelEstimateInput {
@@ -541,7 +542,7 @@ func TestModelSettingsEstimateCacheIdentityAndTTL(t *testing.T) {
 	calls := 0
 	state := modelEstimateState{now: func() time.Time { return now }, run: func(context.Context, modelEstimateInput) modelconfig.Estimate {
 		calls++
-		return modelconfig.Estimate{Status: "partial", Components: []modelconfig.EstimateComponent{estimateComponent("synthetic", 1, "fixture")}}
+		return modelconfig.Estimate{Status: "partial", Components: []modelconfig.EstimateComponent{estimateComponent("weights", 1, "synthetic fixture")}}
 	}}
 	in := estimateFixture("llama")
 	first := state.estimate(context.Background(), in)
@@ -582,6 +583,107 @@ func TestModelSettingsEstimateCacheIdentityAndTTL(t *testing.T) {
 	state.estimate(context.Background(), estimateFixture("llama"))
 	if calls != before+1 {
 		t.Fatal("expired result was reused")
+	}
+}
+
+func TestModelSettingsEstimateCacheWithdrawsExpiredComparisons(t *testing.T) {
+	now := time.Now()
+	calls := 0
+	in := estimateFixture("llama")
+	in.Memory = autoTestMemory(now)
+	state := modelEstimateState{now: func() time.Time { return now }, run: func(ctx context.Context, in modelEstimateInput) modelconfig.Estimate {
+		calls++
+		return autoTestEstimate(ctx, in)
+	}}
+	fresh := state.estimate(context.Background(), in)
+	if fresh.FreeFit != "fits" {
+		t.Fatalf("synthetic comparison=%+v", fresh)
+	}
+	now = now.Add(6 * time.Second)
+	stale := state.estimate(context.Background(), in)
+	if stale.FreeFit != "unknown" || stale.CapacityFit != "unknown" || calls != 1 || len(stale.Components) != len(fresh.Components) {
+		t.Fatalf("stale comparison=%+v calls=%d", stale, calls)
+	}
+	if fresh.Domains[0].FreeFit != "fits" {
+		t.Fatal("cache return mutated previous result")
+	}
+}
+
+func TestModelSettingsEstimateProductionPartialCannotFit(t *testing.T) {
+	in := estimateFixture("llama")
+	in.Memory = autoTestMemory(time.Now())
+	out := estimateFixtureResult(t, in)
+	if out.Status != "partial" || out.FreeFit != "unknown" || out.CapacityFit != "unknown" {
+		t.Fatalf("partial production estimator became eligible: %+v", out)
+	}
+}
+
+func TestModelSettingsEstimateUnboundManualGPUComparisonIsUnknown(t *testing.T) {
+	in := estimateFixture("llama")
+	layers := int32(1)
+	in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+	in.Allocation.DeviceBinding = nil
+	in.Memory = autoTestMemory(time.Now())
+	// Complete synthetic costs isolate physical-placement eligibility from
+	// production scratch accounting, which remains partial.
+	state := modelEstimateState{run: autoTestEstimate}
+	out := state.estimate(context.Background(), in)
+	if out.FreeFit != "unknown" || out.CapacityFit != "unknown" {
+		t.Fatal("unbound manual GPU acquired a fit verdict")
+	}
+	for _, domain := range out.Domains {
+		if domain.Kind == "device" && (domain.FreeFit != "unknown" || domain.CapacityFit != "unknown") {
+			t.Fatal("unbound GPU pool acquired a fit verdict")
+		}
+	}
+}
+
+func TestModelSettingsEstimateTargetCPUSharedPoolNeedsNoGPUMap(t *testing.T) {
+	in := estimateFixture("llama")
+	fact := noderec.MemoryFact{Bytes: "8589934592", Source: "synthetic-available", SampledAt: time.Now().UTC(), Valid: true}
+	in.Memory = &modelEstimateMemory{Target: &modelconfig.TargetMemory{HostID: "synthetic-host", ObservationID: "synthetic-sample", Hop: noderec.NewMemoryHop("synthetic-broker", noderec.MemoryBootClock), Observation: &noderec.MemoryObservation{RunID: "synthetic-run", Domains: []noderec.MemoryDomain{{ID: "shared", Kind: "shared", Total: fact, Free: fact}}}}}
+	state := modelEstimateState{run: autoTestEstimate}
+	out := state.estimate(context.Background(), in)
+	if out.FreeFit != "fits" || len(out.Domains) != 1 || out.Domains[0].Kind != "shared" || out.Domains[0].CapacityTimestamp != fact.SampledAt.Format(time.RFC3339Nano) {
+		t.Fatalf("synthetic shared comparison=%+v", out)
+	}
+	in.Memory.Target.Hop = nil
+	unknown := state.estimate(context.Background(), in)
+	if unknown.FreeFit != "unknown" || len(unknown.Components) != len(out.Components) {
+		t.Fatalf("invalid hop lost components: %+v", unknown)
+	}
+}
+
+func TestModelSettingsEstimateTargetGPURequiresExactMapAndBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*modelEstimateInput)
+		want   string
+	}{
+		{"synthetic exact binding", func(*modelEstimateInput) {}, "fits"},
+		{"map identity changed", func(in *modelEstimateInput) { in.Memory.Target.MapID = "other-map" }, "unknown"},
+		{"missing binding", func(in *modelEstimateInput) { in.Allocation.DeviceBinding = nil }, "unknown"},
+		{"wrong physical binding", func(in *modelEstimateInput) { in.Allocation.DeviceBinding.DomainID = "other-gpu" }, "unknown"},
+		{"missing observation device identity", func(in *modelEstimateInput) { in.Memory.Target.Observation.Domains[1].DeviceIDs = nil }, "unknown"},
+		{"mismatched observation device identity", func(in *modelEstimateInput) {
+			in.Memory.Target.Observation.Domains[1].DeviceIDs = []string{"GPU-22222222-2222-2222-2222-222222222222"}
+		}, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateFixture("llama")
+			layers := int32(1)
+			in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+			in.Allocation.DeviceBinding = autoTestDeviceBinding()
+			in.Memory = autoTestMemory(time.Now())
+			fact := noderec.MemoryFact{Bytes: "8589934592", Source: "synthetic", SampledAt: time.Now().UTC(), Valid: true}
+			in.Memory.Target = &modelconfig.TargetMemory{HostID: "synthetic-host", ObservationID: "synthetic-observation", MapID: in.Memory.Map.ObservationID, Hop: noderec.NewMemoryHop("synthetic-broker", noderec.MemoryBootClock), Observation: &noderec.MemoryObservation{RunID: "synthetic-run", Domains: []noderec.MemoryDomain{{ID: "host", Kind: "system", Total: fact, Free: fact}, {ID: "gpu", Kind: "dedicated", DeviceIDs: []string{in.Allocation.DeviceBinding.DeviceID}, Total: fact, Free: fact}}}}
+			tc.mutate(&in)
+			state := modelEstimateState{run: autoTestEstimate}
+			out := state.estimate(context.Background(), in)
+			if out.FreeFit != tc.want || len(out.Components) == 0 {
+				t.Fatalf("synthetic mapped comparison=%+v want %s", out, tc.want)
+			}
+		})
 	}
 }
 

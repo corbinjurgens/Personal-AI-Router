@@ -327,6 +327,19 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 			return false, false, 0, err
 		}
 		allocation.Artifacts, allocation.NativeBuildID = slices.Clone(in.Allocation.Artifacts), in.BuildID
+		if allocation.GPU.Mode == "layers" && allocation.GPU.Layers != nil && *allocation.GPU.Layers > 0 {
+			if memory.Map == nil || memory.Map.Unknown != "" || memory.Map.ObservationID == "" || memory.Map.Binding == nil {
+				unknown = true
+				return false, false, 0, nil
+			}
+			mapped := memory.Map.Binding
+			binding := modelconfig.DeviceBinding{HostID: mapped.Host, DomainID: mapped.Pool, DeviceID: mapped.UUID, Selector: mapped.Selector, Digest: mapped.Digest}
+			if binding.Validate() != nil || memory.Target != nil && (memory.Target.MapID != memory.Map.ObservationID || memory.Target.HostID != binding.HostID) {
+				unknown = true
+				return false, false, 0, nil
+			}
+			allocation.DeviceBinding = &binding
+		}
 		effective := allocation.Clone()
 		if effective.GPU.Mode == "layers" && effective.GPU.Layers != nil && *effective.GPU.Layers == 0 {
 			effective.GPU = modelconfig.GPU{Mode: "cpu"}
@@ -348,6 +361,7 @@ func resolveModelSettingsAutoInput(ctx context.Context, model string, requested 
 				proofInput := candidateInput
 				cpu := effective.Clone()
 				cpu.GPU = modelconfig.GPU{Mode: "cpu"}
+				cpu.DeviceBinding = nil
 				cpu.Options.GPU = &cpu.GPU
 				proofInput.Allocation = &cpu
 				fixedHostCost, proofKnown = op.LayerCosts.ModelAutoFixedHostCost(ctx, proofInput)
@@ -549,6 +563,10 @@ func modelAutoCompileFrozen(model string, requested modelconfig.RequestedLoad, p
 	}
 	resolved.Artifacts, resolved.NativeBuildID = artifacts, build
 	resolved.ResolverRevision, resolved.ReviewedInputID = previous.ResolverRevision, previous.ReviewedInputID
+	if previous.DeviceBinding != nil {
+		binding := *previous.DeviceBinding
+		resolved.DeviceBinding = &binding
+	}
 	if !reflect.DeepEqual(resolved.Artifacts, previous.Artifacts) || resolved.NativeBuildID != previous.NativeBuildID {
 		return nil, nil, modelLoadError(model, "auto", "Auto artifact or native build changed; obtain a fresh preview.")
 	}

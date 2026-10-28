@@ -55,16 +55,73 @@ func (o autoTestLayerCosts) ModelAutoFixedHostCost(_ context.Context, in modelEs
 }
 
 func autoTestMemory(now time.Time) *modelEstimateMemory {
-	return &modelEstimateMemory{Identity: "synthetic-snapshot", Source: "synthetic-owner", At: now, NativeDeviceID: "physical-gpu", Domains: []modelconfig.MemoryDomain{
-		{ID: "host", Kind: "host", CapacityBytes: "8589934592", FreeBytes: "8589934592"},
-		{ID: "gpu", Kind: "device", DeviceID: "physical-gpu", CapacityBytes: "8589934592", FreeBytes: "8589934592"},
+	// Synthetic identity/provenance only, never a native validation claim.
+	binding := autoTestDeviceBinding()
+	return &modelEstimateMemory{Identity: "synthetic-snapshot", Source: "synthetic-owner", At: now, NativeDeviceID: binding.DeviceID, Map: &modelDeviceMap{ObservationID: "synthetic-map", HostPool: "host", Binding: &modelDeviceBinding{Host: binding.HostID, Pool: binding.DomainID, UUID: binding.DeviceID, Selector: binding.Selector, Digest: binding.Digest}}, Domains: []modelconfig.MemoryDomain{
+		{ID: "host", Kind: "host", CapacityBytes: "8589934592", FreeBytes: "8589934592", SampleID: "synthetic-sample", CapacitySource: "synthetic", CapacityTimestamp: now.UTC().Format(time.RFC3339Nano), FreeSource: "synthetic", FreeTimestamp: now.UTC().Format(time.RFC3339Nano), RemainingValidityMS: 5000},
+		{ID: "gpu", Kind: "device", DeviceID: binding.DeviceID, CapacityBytes: "8589934592", FreeBytes: "8589934592", SampleID: "synthetic-sample", CapacitySource: "synthetic", CapacityTimestamp: now.UTC().Format(time.RFC3339Nano), FreeSource: "synthetic", FreeTimestamp: now.UTC().Format(time.RFC3339Nano), RemainingValidityMS: 5000},
 	}}
+}
+
+func autoTestDeviceBinding() *modelconfig.DeviceBinding {
+	return &modelconfig.DeviceBinding{HostID: "synthetic-host", DomainID: "gpu", DeviceID: "GPU-11111111-1111-1111-1111-111111111111", Selector: "CUDA0", Digest: strings.Repeat("d", 64)}
+}
+
+func TestModelSettingsAutoReviewedGPURequiresDeviceBinding(t *testing.T) {
+	in := autoTestInput()
+	r := in.Allocation.Clone()
+	layers := int32(1)
+	r.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+	r.NativeBuildID = "synthetic-build"
+	r.SourceInputDigest, r.PresetDigest = strings.Repeat("a", 64), strings.Repeat("b", 64)
+	r.ResolverRevision, r.ReviewedInputID = "auto/test", "synthetic-historical-observation"
+	if err := r.Validate(); err == nil {
+		t.Fatal("unbound reviewed GPU accepted")
+	}
+	r.DeviceBinding = autoTestDeviceBinding()
+	if err := r.Validate(); err != nil {
+		t.Fatalf("synthetic bound allocation rejected: %v", err)
+	}
+}
+
+func TestModelSettingsAutoCandidateRequiresValidatedMapBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*modelEstimateMemory)
+	}{
+		{"missing map", func(m *modelEstimateMemory) { m.Map = nil }},
+		{"missing binding", func(m *modelEstimateMemory) { m.Map.Binding = nil }},
+		{"invalid binding", func(m *modelEstimateMemory) { m.Map.Binding.Digest = "invalid" }},
+		{"unknown map", func(m *modelEstimateMemory) { m.Map.Unknown = "unmatched physical device" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			memory := autoTestMemory(now)
+			tc.change(memory)
+			requested := autoTestRequest()
+			layers := int32(1)
+			requested.GPU = &modelconfig.GPU{Mode: "layers", Layers: &layers}
+			requested.Context = &modelconfig.Context{Mode: "auto", Floor: 4096, Cap: 4096}
+			state := modelEstimateState{now: func() time.Time { return now }, run: autoTestEstimate}
+			proposal, err := resolveModelSettingsAutoInput(context.Background(), "exact", requested, autoTestInput(), modelAutoOperation{Memory: &autoTestMemoryOwner{memory: memory}}, &state)
+			if err == nil || proposal.Resolved != nil || proposal.Status == "fits" {
+				t.Fatal("GPU candidate without a validated map binding was accepted")
+			}
+		})
+	}
 }
 
 // A synthetic complete cost owner, not an assertion that Task 10 prices a full
 // native graph. It uses the REAL bounded tensor transfer and supplies explicit
 // host-only layer-independent costs for the otherwise missing graph components.
 func autoTestEstimate(ctx context.Context, in modelEstimateInput) modelconfig.Estimate {
+	allocation := in.Allocation.Clone()
+	in.Allocation = &allocation
+	// The synthetic cost input has an exact supported physical binding. Task 5
+	// still owns attaching that binding to the separately selected allocation.
+	if in.Allocation.GPU.Mode == "layers" && in.Allocation.GPU.Layers != nil && *in.Allocation.GPU.Layers > 0 {
+		in.Allocation.DeviceBinding = autoTestDeviceBinding()
+	}
 	m, reason := modelEstimateAdapt(ctx, in.Facts)
 	if reason != "" {
 		return modelEstimateUnknown(reason)
@@ -82,7 +139,7 @@ func autoTestEstimate(ctx context.Context, in modelEstimateInput) modelconfig.Es
 		{Name: "attention-cache", DomainID: "host", Status: "estimated", Bytes: strconv.FormatUint(uint64(in.Allocation.TotalContext)*32, 10)},
 		{Name: "compute-workspace", DomainID: "host", Status: "estimated", Bytes: "1024"},
 		{Name: "prompt-cache", DomainID: "host", Status: "estimated", Bytes: "1048576"},
-		{Name: "recurrent-state", Status: "excluded"}, {Name: "companions", Status: "excluded"},
+		{Name: "recurrent-state", Status: "excluded", Reason: "synthetic dense fixture has no recurrent state"}, {Name: "companions", Status: "excluded", Reason: "synthetic artifact set has no companions"},
 	}}
 	if in.Allocation.GPU.Mode != "cpu" {
 		out.Domains = append(out.Domains, modelconfig.MemoryDomain{ID: "offload-unmapped", Kind: "device", RequiredBytes: strconv.FormatUint(device, 10)})
@@ -218,7 +275,7 @@ func TestModelSettingsAutoFloorOnlyFitWithinBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		out.Domains[0].RequiredBytes = strconv.FormatUint(h+extra, 10)
-		out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "synthetic-context-workspace", Status: "estimated", DomainID: "host", Bytes: strconv.FormatUint(extra, 10)})
+		out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "compute-workspace", Status: "estimated", DomainID: "host", Bytes: strconv.FormatUint(extra, 10), Reason: "synthetic context-dependent workspace charge"})
 		return out
 	}}
 	// Assert the complete total-cost proof, not just monotonic tensor weights.
@@ -454,6 +511,8 @@ func TestModelSettingsAutoFrozenApplyValidation(t *testing.T) {
 		panic("missing synthetic weak-model")
 	}
 	test("frozen Auto accepted without telemetry", func(*settings.Request) {}, false)
+	test("missing reviewed GPU binding", func(p *settings.Request) { selected(p).Resolved.DeviceBinding = nil }, true)
+	test("mismatched reviewed GPU binding", func(p *settings.Request) { selected(p).Resolved.DeviceBinding.Digest = strings.Repeat("f", 64) }, true)
 	test("conversion label cannot authorize Auto", func(p *settings.Request) { selected(p).Resolved.ResolverRevision = externalConversionResolver }, true)
 	test("missing reviewed identity", func(p *settings.Request) { selected(p).Resolved.ReviewedInputID = "" }, true)
 	test("tampered reviewed identity", func(p *settings.Request) {
@@ -540,7 +599,7 @@ func TestModelSettingsAutoUMASingleReserve(t *testing.T) {
 		{Name: "attention-cache", DomainID: "shared", Status: "estimated", Bytes: "256"},
 		{Name: "compute-workspace", DomainID: "shared", Status: "estimated", Bytes: "128"},
 		{Name: "prompt-cache", DomainID: "shared", Status: "estimated", Bytes: "128"},
-		{Name: "recurrent-state", Status: "excluded"}, {Name: "companions", Status: "excluded"},
+		{Name: "recurrent-state", Status: "excluded", Reason: "synthetic dense fixture has no recurrent state"}, {Name: "companions", Status: "excluded", Reason: "synthetic artifact set has no companions"},
 	}}
 	known, fits, _ := modelAutoFit(out, memory, now, modelconfig.GPU{Mode: "cpu"})
 	if !known || !fits {
@@ -574,6 +633,40 @@ func TestModelSettingsAutoPreviewRecalculateIsExplicit(t *testing.T) {
 		t.Fatal("Recalculate changed accepted runtime")
 	}
 	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsAutoFiniteRenderingRejectsInvalidPreviousBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*modelconfig.ResolvedLoad)
+	}{
+		{"missing binding", func(r *modelconfig.ResolvedLoad) { r.DeviceBinding = nil }},
+		{"different physical device", func(r *modelconfig.ResolvedLoad) {
+			r.DeviceBinding.DeviceID = "GPU-22222222-2222-2222-2222-222222222222"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, frozen, owner := autoTestFrozenLaunch(t)
+			loads := modelconfig.CloneLoads(frozen.Settings.ModelLoads)
+			for i := range loads {
+				if loads[i].ModelID == "weak-model" {
+					tc.mutate(loads[i].Resolved)
+				}
+			}
+			f.st.plat.Runtime.ModelLoads = loads
+			request := settingsRequest(t, f.ex)
+			request.ModelChange = &modelconfig.ModelChange{ModelID: "weak-model", ExpectedPolicyRevision: "0", Load: &modelconfig.LoadPatch{Set: autoTestRequest()}}
+			owner.calls = 0
+			ctx := context.WithValue(context.Background(), modelAutoOperationKey{}, modelAutoOperation{Memory: owner})
+			preview, err := f.ex.previewModelLoadChange(ctx, f.st, request)
+			if err == nil && len(preview.Errors) == 0 {
+				t.Fatal("finite rendering accepted invalid previous physical binding")
+			}
+			if owner.calls != 0 {
+				t.Fatal("invalid reviewed binding reached new Auto selection")
+			}
+		})
+	}
 }
 
 func TestModelSettingsAutoPublicPreviewUsesOwnerCompiler(t *testing.T) {
@@ -635,7 +728,10 @@ func TestModelSettingsAutoLayerDependentWorkspaceKeepsCPU(t *testing.T) {
 						t.Fatal(err)
 					}
 					out.Domains[0].RequiredBytes = strconv.FormatUint(host+extra, 10)
-					out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "offloaded-workspace", Status: "estimated", DomainID: "host", Bytes: strconv.FormatUint(extra, 10)})
+					out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "compute-workspace", Status: "estimated", DomainID: "host", Bytes: strconv.FormatUint(extra, 10), Reason: "synthetic offload-dependent workspace charge"})
+				}
+				if err := out.Validate(); err != nil {
+					t.Fatalf("synthetic layer-dependent workspace fixture is invalid: %v", err)
 				}
 				return out
 			}}

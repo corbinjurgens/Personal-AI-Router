@@ -14,6 +14,21 @@ import (
 
 func testPointer[T any](value T) *T { return &value }
 
+func TestPublicMemoryAuthorityRejected(t *testing.T) {
+	for _, field := range []string{"memory", "Memory", "deviceBinding", "nativeMap", "hop", "trusted", "settings"} {
+		t.Run(field, func(t *testing.T) {
+			data := []byte(`{"engine":"llamacpp","modelId":"model","` + field + `":{}}`)
+			if _, err := DecodeInspectRequest(data); err == nil {
+				t.Fatal("public inspection accepted worker authority")
+			}
+			data = []byte(`{"modelId":"model","expectedPolicyRevision":"0","load":{"set":{"slots":1,"` + field + `":{}}}}`)
+			if _, err := DecodeModelChange(data); err == nil {
+				t.Fatal("public change accepted worker authority")
+			}
+		})
+	}
+}
+
 func testResolvedLoad() ModelLoad {
 	return ModelLoad{
 		ModelID:   "exact/Model:Q4",
