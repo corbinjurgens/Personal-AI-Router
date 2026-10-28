@@ -13,12 +13,13 @@ import { createPairApi, type INodePolicyApi } from '@/ui/api/pair-api'
 import { ServiceCallError } from '@/ui/api/service-transport'
 import ModelSettingsCopy from '@/ui/components/ModelSettings/ModelSettingsCopy'
 import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
+import ModelLoadSettings from '@/ui/components/ModelSettings/ModelLoadSettings'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
 import type { EngineSettingsSnapshot } from '@/shared/types/engine-settings'
-import type { InspectModelResult } from '@/shared/types/model-config'
+import type { Estimate, InspectModelResult } from '@/shared/types/model-config'
 import type { EngineProgress } from '@/shared/types/engines'
 import type { IEngineApi } from '@/ui/api/engine-api'
 import { ModelCopyModal } from '@/ui/components/ModelManager/ModelCopyModal'
@@ -26,6 +27,7 @@ import { useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
 import { defaultPortableLoadFields } from '@/shared/utils/node-policy-model-copy'
+import { parseEngineSettingsPreview } from '@/electron/service-bridge/engine-settings'
 
 vi.mock('@/ui/components/ModelManager/ModelCopyModal', () => ({
     ModelCopyModal: ({ open, onOpenChange }: ComponentProps<typeof ModelCopyModal>) =>
@@ -404,6 +406,28 @@ describe('selective generation copy', () => {
 })
 
 describe('portable target-previewed copy', () => {
+    const memory: Estimate = {
+        status: 'estimated',
+        memoryTimestamp: '2026-10-28T00:00:00Z',
+        domains: [
+            {
+                id: 'host',
+                kind: 'host',
+                capacityBytes: '10000000000',
+                freeBytes: '9000000000',
+                requiredBytes: '1000000000'
+            }
+        ],
+        components: [
+            { name: 'weights', domainId: 'host', status: 'estimated', bytes: '1000000000' },
+            ...['kv', 'state', 'workspace', 'prompt-cache', 'companions'].map(
+                name =>
+                    ({ name, status: 'excluded', reason: 'Not present' }) satisfies NonNullable<
+                        Estimate['components']
+                    >[number]
+            )
+        ]
+    }
     const getSettings = vi.fn<IEngineApi['getSettings']>()
     const inspect = vi.fn<IEngineApi['inspectModel']>()
     const review = vi.fn<IEngineApi['previewSettings']>()
@@ -559,6 +583,209 @@ describe('portable target-previewed copy', () => {
         await check('Copy to peer')
         await click('Preview selected targets')
     }
+    it('keeps a completed destination review when the mounted source debounce refreshes only estimates', async () => {
+        vi.useFakeTimers()
+        try {
+            await act(async () =>
+                root.render(
+                    <>
+                        <ModelLoadSettings
+                            target={{ nodeId: 'self', engine: 'llamacpp' }}
+                            modelId="model"
+                            policy={source}
+                            savedPolicy={source}
+                            policyRevision="1"
+                            authority="source"
+                            disabled={false}
+                        />
+                        <ModelSettingsCopy
+                            identity={identity}
+                            policy={source}
+                            targetId="self"
+                            onConfigureTarget={configure}
+                        />
+                    </>
+                )
+            )
+            await click('Select portable load and routing preferences')
+            await check('Copy to peer')
+            await act(async () =>
+                useEngineSettingsStore.getState().editModel('self:llamacpp:model', {
+                    modelId: 'model',
+                    expectedPolicyRevision: '1',
+                    load: { set: { slots: 3 } }
+                })
+            )
+            await click('Preview selected targets')
+            const confirmation = () =>
+                Array.from(container.querySelectorAll('button')).find(
+                    item => item.textContent === 'Confirm copy to peer'
+                )
+            expect(confirmation()?.disabled).toBe(false)
+            inspect.mockImplementation(async request => ({
+                ...inspected(request.nodeId ?? 'self', request.modelId),
+                estimate: { status: 'unknown', timestamp: '2026-10-28T00:00:01Z' }
+            }))
+            await act(async () => vi.advanceTimersByTime(250))
+            expect(review.mock.calls.some(([request]) => request.nodeId === 'self')).toBe(true)
+            expect(confirmation()?.disabled).toBe(false)
+            expect(apply).not.toHaveBeenCalled()
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+    it('marks a destination estimate stale when its reviewed target revision expires', async () => {
+        inspect.mockImplementation(async request => ({
+            ...inspected(request.nodeId ?? 'self', request.modelId),
+            estimate: memory
+        }))
+        review.mockImplementation(async request => ({
+            settings: request.settings,
+            revision: 5,
+            policyRevision: '1',
+            previewDigest: 'a'.repeat(64),
+            errors: {},
+            restart: false,
+            rebind: false,
+            estimate: memory
+        }))
+        await extendedPreview()
+        expect(container.textContent).toContain('(Fits)')
+        await act(async () =>
+            useEngineSettingsStore.getState().receive({
+                ...settings('peer'),
+                sequence: 2,
+                revision: 6
+            })
+        )
+        expect(
+            useEngineSettingsStore.getState().modelDrafts['peer:llamacpp:model'].review
+        ).toBeUndefined()
+        expect(container.textContent).toContain('Advisory memory estimate (stale)')
+        expect(container.textContent).not.toContain('(Fits)')
+        const confirmation = Array.from(container.querySelectorAll('button')).find(
+            item => item.textContent === 'Confirm copy to peer'
+        )
+        expect(confirmation?.disabled).toBe(true)
+    })
+    it('reviews independently fresh Auto for each destination and applies only its target digest', async () => {
+        useNodesStore.setState({
+            nodes: new Map([
+                ['peer', node('peer')],
+                ['second', node('second')]
+            ])
+        })
+        getSettings.mockImplementation(async target => {
+            const value = settings(target.nodeId)
+            if (target.nodeId === 'self') {
+                const load = value.settings.modelLoads?.[0]
+                if (!load) throw new Error('Source fixture load missing')
+                load.requested = {
+                    context: { mode: 'auto', floor: 4096, cap: 8192 },
+                    gpu: { mode: 'auto' },
+                    slots: 1
+                }
+            }
+            return value
+        })
+        inspect.mockImplementation(async request => {
+            const value = inspected(request.nodeId ?? 'self', request.modelId)
+            value.options?.push({
+                field: 'context',
+                label: 'Context',
+                kind: 'integer',
+                portable: true,
+                supported: true
+            })
+            return value
+        })
+        const revisions = new Map<string, number>()
+        review.mockImplementation(async request => {
+            const version = (revisions.get(request.nodeId) ?? 0) + 1
+            revisions.set(request.nodeId, version)
+            const id = `${request.nodeId}-auto-${version}`
+            const digest = (request.nodeId === 'peer' ? 'a' : 'b').repeat(63) + version
+            return parseEngineSettingsPreview(
+                JSON.parse(
+                    JSON.stringify({
+                        settings: request.settings,
+                        revision: 5,
+                        policyRevision: '1',
+                        previewDigest: digest,
+                        errors: {},
+                        restart: true,
+                        rebind: false,
+                        auto: {
+                            status: 'available',
+                            requested: request.modelChange?.load?.set ?? {},
+                            estimate: { status: 'estimated', source: id },
+                            resolverRevision: 'auto/fixture',
+                            reviewedInputId: id,
+                            resolved: {
+                                perSlotContext: request.nodeId === 'peer' ? 4096 : 8192,
+                                totalContext: request.nodeId === 'peer' ? 4096 : 8192,
+                                slots: 1,
+                                gpu:
+                                    request.nodeId === 'peer'
+                                        ? { mode: 'cpu' }
+                                        : { mode: 'layers', layers: 8 },
+                                options: {},
+                                artifacts: [
+                                    {
+                                        role: 'model',
+                                        path: `/${request.nodeId}/model.gguf`,
+                                        resolvedTarget: `/${request.nodeId}/model.gguf`,
+                                        size: '1024',
+                                        mtimeNs: '1',
+                                        sampleSha256: 'c'.repeat(64)
+                                    }
+                                ],
+                                nativeBuildId: `${request.nodeId}-build`,
+                                sourceInputDigest: 'd'.repeat(64),
+                                presetDigest: 'e'.repeat(64),
+                                resolverRevision: 'auto/fixture',
+                                reviewedInputId: id
+                            }
+                        }
+                    })
+                )
+            )
+        })
+        await render()
+        await click('Select portable load and routing preferences')
+        await check('Copy to peer')
+        await check('Copy to second')
+        await click('Preview selected targets')
+        expect(review).toHaveBeenCalledTimes(2)
+        for (const [request] of review.mock.calls) {
+            expect(request.modelChange?.load?.set).toEqual({
+                context: { mode: 'auto', floor: 4096, cap: 8192 },
+                slots: 1,
+                gpu: { mode: 'auto' }
+            })
+            expect(request.settings).toEqual(settings(request.nodeId).settings)
+            expect(JSON.stringify(request)).not.toContain('source-build')
+            expect(JSON.stringify(request)).not.toContain('/source/')
+            expect(JSON.stringify(request.modelChange)).not.toContain('layers')
+        }
+        expect(container.textContent).toContain('Feasible context: 4096')
+        expect(container.textContent).toContain('Feasible context: 8192')
+        expect(container.textContent).not.toContain('"layers":20')
+        expect(apply).not.toHaveBeenCalled()
+        await click('Preview selected targets')
+        expect(review).toHaveBeenCalledTimes(4)
+        expect(container.textContent).toContain('peer-auto-2')
+        expect(container.textContent).toContain('second-auto-2')
+        await click('Confirm copy to peer')
+        expect(apply.mock.calls[0]?.[0]).toMatchObject({
+            nodeId: 'peer',
+            modelChange: {
+                previewDigest: 'a'.repeat(63) + '2',
+                load: { set: { gpu: { mode: 'auto' } } }
+            }
+        })
+        expect(set).not.toHaveBeenCalled()
+    })
     it('centralizes tuning defaults and previews target-local placement with no source resolution authority', async () => {
         expect(
             defaultPortableLoadFields(inspected('self'), { slots: 2, gpu: { mode: 'cpu' } })
