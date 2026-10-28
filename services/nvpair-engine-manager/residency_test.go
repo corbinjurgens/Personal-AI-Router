@@ -1206,19 +1206,56 @@ func TestResidentMalformedGrantNeverAuthorizesLiveContext(t *testing.T) {
 	test := func(name string, envelope func(string) string, clientRequest bool) {
 		t.Run(name, func(t *testing.T) {
 			f := newResidentFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			handled := make(chan struct{})
+			var dispatchID string
 			f.grant = func(req residentDispatchRequest) {
+				dispatchID = req.ID
 				raw := json.RawMessage(envelope(req.ID))
 				msg := &Message{JSONRPC: "2.0", Method: residentDispatchReplyMethod, Params: raw}
+				handle := func() {
+					defer close(handled)
+					f.m.handleMessage(context.Background(), msg)
+				}
 				if clientRequest {
 					id := json.RawMessage(`10`)
 					msg.ID = &id
-					go f.m.handleMessage(context.Background(), msg)
+					go handle()
 				} else {
-					f.m.handleMessage(context.Background(), msg)
+					handle()
 				}
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			defer cancel()
+			send := f.m.residentDispatch.send
+			f.m.residentDispatch.send = func(ctx context.Context, method string, params any) error {
+				if err := send(ctx, method, params); err != nil {
+					return err
+				}
+				select {
+				case <-handled:
+				case <-ctx.Done():
+					t.Error("reconciliation ended before the malformed reply was handled")
+					return ctx.Err()
+				}
+				// Inspect before the relay can select cancellation instead of a bad
+				// grant. Cancellation below only releases the rejected-reply wait.
+				if err := ctx.Err(); err != nil {
+					t.Errorf("malformed reply was not checked with a live context: %v", err)
+				}
+				f.m.residentDispatch.mu.Lock()
+				pending := f.m.residentDispatch.pending[dispatchID]
+				f.m.residentDispatch.mu.Unlock()
+				select {
+				case reply := <-pending:
+					if reply.Error == nil && reply.Result != nil && reply.Result.Validate() == nil && reply.Result.Dispatched {
+						t.Error("malformed reply authorized resident dispatch")
+					}
+					pending <- reply
+				default:
+				}
+				cancel()
+				return nil
+			}
 			result, err := f.ex.reconcileResident(ctx, f.p)
 			if err != nil || result.Outcome != nodepolicy.ResidentNotDispatched {
 				t.Errorf("result=%+v err=%v", result, err)
