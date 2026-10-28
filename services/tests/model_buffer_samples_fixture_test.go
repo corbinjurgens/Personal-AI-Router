@@ -405,9 +405,8 @@ func newModelBufferProcessFixture(t *testing.T, configure ...func(*modelSettings
 		t.Fatalf("private fixed-image junction: %v: %s", err, output)
 	}
 	junctionCreated = true
-	resolved, err := filepath.EvalSymlinks(install)
-	if err != nil || !strings.EqualFold(filepath.Clean(resolved), filepath.Clean(imageDir)) {
-		t.Fatalf("private install junction must resolve to registered fixed image directory: %q %v", resolved, err)
+	if err := modelBufferSameDirectory(install, imageDir); err != nil {
+		t.Fatalf("private install junction must resolve to registered fixed image directory: %v", err)
 	}
 	library, err := os.OpenFile(f.library, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -547,11 +546,30 @@ func (f *modelBufferProcessFixture) assertBufferEngineManifests(t *testing.T) {
 	}
 }
 
+// modelBufferSameDirectory compares directory identity. EvalSymlinks does not
+// follow Windows junctions, so it returns the link spelling; Stat follows the
+// junction and SameFile compares the volume and file index, as the engine
+// manager's windowsImageJunction test does.
+func modelBufferSameDirectory(link, target string) error {
+	got, err := os.Stat(link)
+	if err != nil {
+		return err
+	}
+	want, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(got, want) {
+		return fmt.Errorf("%q does not resolve to %q", link, target)
+	}
+	return nil
+}
+
 func (f *modelBufferProcessFixture) assertNativeRoot(t *testing.T) {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(filepath.Join(jointAppDir(f.base), "engine-bin", "llamacpp"))
-	if err != nil || !strings.EqualFold(filepath.Clean(root), filepath.Clean(filepath.Dir(f.image))) {
-		t.Fatalf("junction changed before fixed-image use: %q %v", root, err)
+	root := filepath.Join(jointAppDir(f.base), "engine-bin", "llamacpp")
+	if err := modelBufferSameDirectory(root, filepath.Dir(f.image)); err != nil {
+		t.Fatalf("junction changed before fixed-image use: %v", err)
 	}
 	modelBufferAssertOnlyStub(t, root, f.library)
 }
