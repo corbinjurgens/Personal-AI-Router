@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"nvpair-shared/buildapply"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
@@ -79,6 +78,8 @@ func init() {
 	}
 	os.Exit(0)
 }
+
+const stopPauseResponse = `{"model":"switch-model","choices":[{"index":0,"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]}` + "\n"
 
 // Native fake only: production owns lifetime, admission and availability. The
 // parent control request holds execution until release or upstream cancellation.
@@ -151,13 +152,25 @@ func runStopPauseModel() error {
 				return
 			}
 			var gate struct {
-				ID   int  `json:"id"`
-				Hold bool `json:"hold"`
+				ID     int  `json:"id"`
+				Hold   bool `json:"hold"`
+				Prefix bool `json:"prefix"`
 			}
 			if err := get(r.Context(), control+"/begin", &gate); err != nil {
 				return
 			}
 			resident.Store(true)
+			prefixBytes := 0
+			if gate.Prefix && !body.Stream {
+				w.Header().Set("Content-Length", strconv.Itoa(len(stopPauseResponse)))
+				prefixBytes = len(`{"model":"switch-model","choices":[`)
+				if _, err := io.WriteString(w, stopPauseResponse[:prefixBytes]); err != nil {
+					return
+				}
+				if err := http.NewResponseController(w).Flush(); err != nil {
+					return
+				}
+			}
 			if body.Stream {
 				w.Header().Set("Content-Type", "text/event-stream")
 				if _, err := io.WriteString(w, "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"model\":\"switch-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"},\"finish_reason\":null}]}\n\n"); err != nil {
@@ -175,7 +188,7 @@ func runStopPauseModel() error {
 			if body.Stream {
 				fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 			} else {
-				fmt.Fprintln(w, `{"model":"switch-model","choices":[{"index":0,"message":{"role":"assistant","content":"finished"},"finish_reason":"stop"}]}`)
+				fmt.Fprint(w, stopPauseResponse[prefixBytes:])
 			}
 		default:
 			fmt.Fprintln(w, `{"version":"fixture","role":"router"}`)
@@ -192,6 +205,7 @@ type stopPauseNative struct {
 	server         *httptest.Server
 	mu             sync.Mutex
 	hold           bool
+	bodyPrefix     bool
 	requests       []*stopPauseGate
 	loads, unloads int
 	resident       bool
@@ -207,9 +221,9 @@ func newStopPauseNative(t *testing.T, e *switchProcessFixture, adopted bool) *st
 		case "/begin":
 			gate := &stopPauseGate{release: make(chan struct{}), held: make(chan struct{}), departed: make(chan struct{})}
 			n.requests = append(n.requests, gate)
-			id, hold := len(n.requests), n.hold
+			id, hold, prefix := len(n.requests), n.hold, n.bodyPrefix
 			n.mu.Unlock()
-			if err := json.NewEncoder(w).Encode(map[string]any{"id": id, "hold": hold}); err != nil {
+			if err := json.NewEncoder(w).Encode(map[string]any{"id": id, "hold": hold, "prefix": prefix}); err != nil {
 				t.Errorf("encode native gate: %v", err)
 			}
 		case "/hold":
@@ -690,47 +704,159 @@ func testStopPauseActive(t *testing.T, peer bool) {
 }
 
 func testStopPauseQueue(t *testing.T, pinned bool) {
-	f := newStopPauseFixture(t)
-	f.startModel(t)
+	var f *stopPauseFixture
+	var origin *stopPausePeer
+	if pinned {
+		f, origin = newStopPausePair(t)
+		// Keep the real origin's fallback engine locally Off through its owner.
+		origin.engine.rpcOK(t, "engine:stop", map[string]string{"engine": "llamacpp"})
+	} else {
+		f = newStopPauseFixture(t)
+		f.startModel(t)
+	}
 	policy := fetchServicePolicy(t, f.client).Policy
 	policy.Admission.MaxConcurrentPerModel = 1
 	policy.Admission.QueueTimeoutSeconds = 120
 	setServicePolicy(t, f.client, policy)
 	f.native.holding(true)
+	f.native.mu.Lock()
+	f.native.bodyPrefix = true
+	f.native.mu.Unlock()
 	client := &http.Client{Timeout: 90 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
+	call := func(method string, params any) json.RawMessage { return f.call(t, method, params) }
+	port, originID := f.engine.targetFacadePort, f.nodeID
 	if pinned {
-		client = f.service.peer
+		origin.publishTarget(t, f)
+		call = func(method string, params any) json.RawMessage { return origin.engine.rpcOK(t, method, params) }
+		port, originID = origin.engine.targetFacadePort, origin.id
+		call("llamacpp-proxy:node/select", map[string]string{"id": f.nodeID})
 	}
-	one := f.request(t, client, f.engine.targetFacadePort, pinned, 5000)
-	gate := f.native.gate(t, 1)
-	activeWork := func(want int) {
+	var subscribed struct {
+		Subscribed bool `json:"subscribed"`
+	}
+	task2Decode(t, call("workloads:subscribe", map[string]any{}), &subscribed)
+	if !subscribed.Subscribed {
+		t.Fatal("origin did not acknowledge public workload subscription")
+	}
+	workloads := func() []departedRunInfo {
 		t.Helper()
-		// This existing public read is a cached broker observation only. It
-		// never initializes build apply, inspects an installation, calls native
-		// status or activates anything. Do not interpret Impact.Complete as
-		// admission evidence: only its explicitly known ActiveWork is used.
-		task1Eventually(t, "broker observes active plus queued admission", 15*time.Second, func() bool {
-			var result buildapply.Result[buildapply.Impact]
-			task2Decode(t, f.call(t, "build:apply-impact", map[string]any{}), &result)
-			return result.Available && result.Value != nil && result.Value.ActiveWork.Known && result.Value.ActiveWork.Value != nil && *result.Value.ActiveWork.Value == want
-		})
+		var initial struct {
+			Workloads []departedRunInfo `json:"workloads"`
+		}
+		task2Decode(t, call("workloads:get-initial", nil), &initial)
+		return initial.Workloads
 	}
-	activeWork(1)
-	two := f.request(t, client, f.engine.targetFacadePort, pinned, 5000)
-	activeWork(2)
-	// One native execution plus two admitted-or-queued requests on a policy
-	// with a single slot proves that the second request actually joined queue.
+	if baseline := workloads(); len(baseline) != 0 {
+		t.Fatalf("origin workload baseline is not empty: %+v", baseline)
+	}
+	waitWorkload := func(state string, prior *departedRunInfo) departedRunInfo {
+		t.Helper()
+		var found departedRunInfo
+		task1Eventually(t, "origin publishes own "+state+" workload", 15*time.Second, func() bool {
+			for _, w := range workloads() {
+				if prior != nil && w.key() == prior.key() {
+					continue
+				}
+				if w.State != state {
+					continue
+				}
+				if w.ID == "" || w.RunID == "" || w.OriginatedFrom != originID || w.Engine != "llamacpp" || w.Model != "switch-model" || (state == "running" && w.ScheduledOn != f.nodeID) || (state == "queued" && w.ScheduledOn != "" && w.ScheduledOn != f.nodeID) || w.CompletedAt != nil {
+					t.Fatalf("invalid own workload identity/placement: %+v", w)
+				}
+				if (state == "running" && w.StartedAt == nil) || (state == "queued" && w.StartedAt != nil) || (prior != nil && (w.ID == prior.ID || w.RunID != prior.RunID)) {
+					t.Fatalf("invalid workload lifecycle: prior=%+v current=%+v", prior, w)
+				}
+				found = w
+				return true
+			}
+			return false
+		})
+		return found
+	}
+	// Retain raw bytes and declared length for the interrupted active response.
+	// The shared binding helper deliberately requires a complete JSON body.
+	type activeResponse struct {
+		status             int
+		declared           int64
+		raw                []byte
+		readErr, decodeErr error
+	}
+	request, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", port), strings.NewReader(`{"model":"switch-model","stream":false,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(nodepolicy.EnginePrepareBudgetHeader, "5000")
+	one := make(chan activeResponse, 1)
+	go func() {
+		response, err := client.Do(request)
+		if err != nil {
+			one <- activeResponse{readErr: err}
+			return
+		}
+		raw, readErr := io.ReadAll(response.Body)
+		if closeErr := response.Body.Close(); readErr == nil {
+			readErr = closeErr
+		}
+		var body json.RawMessage
+		decodeErr := json.NewDecoder(bytes.NewReader(raw)).Decode(&body)
+		one <- activeResponse{response.StatusCode, response.ContentLength, raw, readErr, decodeErr}
+	}()
+	gate := f.native.gate(t, 1)
+	running := waitWorkload("running", nil)
+	two := f.request(t, client, port, false, 5000)
+	queued := waitWorkload("queued", &running)
 	f.native.assertCounts(t, 1, 0, 0)
 	f.availability(t, nodepolicy.Paused, "immediate")
 	f.assertPaused(t, nodepolicy.PausedLocally)
 	stopPauseBarrier(t, gate.departed, "active request cancelled before queue could execute")
-	for _, done := range []<-chan engineBindingResponse{one, two} {
-		if response := engineBindingAwait(t, done); response.status == http.StatusOK {
-			t.Fatal("active or queued request succeeded after Pause")
+	select {
+	case response := <-one:
+		if response.status == http.StatusOK {
+			// The first body byte commits status (routing.go:297); committed
+			// output is not replayed. A truncated 200 is an honest active
+			// interruption result only with incomplete body and decode errors.
+			if len(response.raw) == 0 || len(response.raw) >= len(stopPauseResponse) || !bytes.HasPrefix([]byte(stopPauseResponse), response.raw) || !errors.Is(response.readErr, io.ErrUnexpectedEOF) || !errors.Is(response.decodeErr, io.ErrUnexpectedEOF) {
+				t.Fatalf("active response was not an incomplete committed prefix: %+v", response)
+			}
+			if pinned {
+				// setPeerStreamFraming uses chunked peer framing for its
+				// disposition trailer, removing the native Content-Length.
+				if response.declared != -1 {
+					t.Fatalf("pinned response Content-Length = %d, want unknown chunked length", response.declared)
+				}
+			} else if response.declared != int64(len(stopPauseResponse)) || int64(len(response.raw)) >= response.declared {
+				t.Fatalf("local response did not retain the declared native length: %+v", response)
+			}
 		}
+	case <-time.After(100 * time.Second):
+		t.Fatal("active cancellation exceeded HTTP request bound")
+	}
+	if response := engineBindingAwait(t, two); response.status == http.StatusOK {
+		t.Fatal("queued request succeeded after Pause")
 	}
 	f.native.assertCounts(t, 1, 0, 0)
+	if pinned {
+		origin.native.assertCounts(t, 0, 0, 0)
+	}
+	failed := map[departedRunKey]departedRunInfo{}
+	task1Eventually(t, "own active and queued workloads fail", 15*time.Second, func() bool {
+		clear(failed)
+		for _, w := range workloads() {
+			if w.key() != running.key() && w.key() != queued.key() {
+				t.Fatalf("unexpected workload after Pause: %+v", w)
+			}
+			if w.State == "running" || w.State == "queued" {
+				continue
+			}
+			if w.State != "failed" || w.CompletedAt == nil || w.Error == nil || w.Model != "switch-model" || (w.key() == queued.key() && w.StartedAt != nil) {
+				t.Fatalf("queued/active cancellation outcome=%+v", w)
+			}
+			failed[w.key()] = w
+		}
+		return len(failed) == 2
+	})
 	if !pinned {
 		for _, record := range f.history(t, 2) {
 			if record.State != "failed" {
@@ -746,8 +872,33 @@ func testStopPauseQueue(t *testing.T, pinned bool) {
 		return len(f.engine.starts["llamacpp"]) == 2
 	})
 	f.publish(t, false)
-	assertEngineBindingSuccess(t, engineBindingAwait(t, f.request(t, client, f.engine.targetFacadePort, pinned, 5000)), "llamacpp", f.nodeID)
+	if pinned {
+		origin.publishTarget(t, f)
+	}
+	assertEngineBindingSuccess(t, engineBindingAwait(t, f.request(t, client, port, false, 5000)), "llamacpp", f.nodeID)
 	f.native.assertCounts(t, 2, 0, 0)
+	if pinned {
+		origin.native.assertCounts(t, 0, 0, 0)
+	}
+	task1Eventually(t, "Resume completes only fresh demand and preserves failures", 15*time.Second, func() bool {
+		preserved, completed := 0, 0
+		for _, w := range workloads() {
+			if previous, ok := failed[w.key()]; ok {
+				if !reflect.DeepEqual(w, previous) {
+					t.Fatalf("Resume rewrote failed workload: before=%+v after=%+v", previous, w)
+				}
+				preserved++
+			} else if w.State == "completed" && w.CompletedAt != nil && w.OriginatedFrom == originID && w.Engine == "llamacpp" && w.RunID == running.RunID && w.ID != "" && w.Model == "switch-model" && w.ScheduledOn == f.nodeID {
+				completed++
+			} else if w.State != "running" && w.State != "queued" {
+				t.Fatalf("unexpected workload after Resume: %+v", w)
+			}
+		}
+		if completed > 1 {
+			t.Fatalf("Resume replayed queued requests: completed=%d", completed)
+		}
+		return preserved == 2 && completed == 1
+	})
 	if !pinned {
 		completed := 0
 		for _, record := range f.history(t, 3) {
@@ -1162,15 +1313,21 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	f.publishDirectory(t, noderec.DirectoryNode{HostUUID: peerID, ClusterUUID: peerID, Name: peerID, IP: "127.0.0.1", Trusted: true,
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceOllama: {Port: e.facadePort}, noderec.ServiceLlamaCPP: {Port: e.targetFacadePort}},
 		Models:   inventory.Models, ModelsByEngine: inventory.ByEngine, LoadedByEngine: inventory.Loaded, Policy: inventory.Policy})
+	p.publishTarget(t, f)
+	return f, p
+}
+
+func (p *stopPausePeer) publishTarget(t *testing.T, f *stopPauseFixture) {
+	t.Helper()
 	// Publish the real target's control route through the existing scanner.
 	// Outbound RPCs retain the normal pinned client and target broker relay.
 	target := f.publish(t, false)
-	target.Services[noderec.ServiceEngineControl] = noderec.ServiceStatus{Port: s.ports.engineControl}
-	target.Services[noderec.ServiceEngineManager] = noderec.ServiceStatus{Port: s.ports.engineManagerHTTP}
+	target.Services[noderec.ServiceEngineControl] = noderec.ServiceStatus{Port: f.service.ports.engineControl}
+	target.Services[noderec.ServiceEngineManager] = noderec.ServiceStatus{Port: f.service.ports.engineManagerHTTP}
 	frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeUpdated, Params: mustMarshal(t, noderec.NodeEvent{Node: target})}
 	plain := &http.Client{Timeout: 5 * time.Second}
 	defer plain.CloseIdleConnections()
-	response, err := plain.Post(fmt.Sprintf("http://127.0.0.1:%d", e.scannerPort), "application/json", bytes.NewReader(mustMarshal(t, frame)))
+	response, err := plain.Post(fmt.Sprintf("http://127.0.0.1:%d", p.engine.scannerPort), "application/json", bytes.NewReader(mustMarshal(t, frame)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1180,7 +1337,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 		t.Fatalf("origin scanner publication HTTP=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
 	}
 	task1Eventually(t, "origin manager reaches target-owned pinned policy relay", 15*time.Second, func() bool {
-		got := e.rpc(t, "engine:remote-policy-get", map[string]string{"nodeId": f.nodeID})
+		got := p.engine.rpc(t, "engine:remote-policy-get", map[string]string{"nodeId": f.nodeID})
 		if got.Error != nil {
 			return false
 		}
@@ -1190,7 +1347,6 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 		task2Decode(t, got.Result, &policy)
 		return policy.Policy.Revision == fetchServicePolicy(t, f.client).Policy.Revision
 	})
-	return f, p
 }
 
 func (f *stopPauseFixture) history(t *testing.T, count int) []nodepolicy.RoutingHistoryRecord {
