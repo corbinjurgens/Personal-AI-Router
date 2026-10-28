@@ -14,8 +14,47 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/buildapply"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestBuildApplyMaintenanceRefusesResumeWithoutSupersedingPause(t *testing.T) {
+	f := newBuildApplyTestFixture(t)
+	op := requireBuildApplyPrepared(t, f.b.prepareBuildApply(f.request(t)))
+	r := &f.b.nodePolicy
+	r.mu.Lock()
+	generation, policy := r.transitionGen, r.current
+	r.mu.Unlock()
+	state, err := f.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally)
+	var busy *buildApplyBusyError
+	if state != "" || !errors.As(err, &busy) || policyErrorCode(err) != buildapply.CodeMaintenanceBusy {
+		t.Fatalf("Resume during maintenance = %q, %v", state, err)
+	}
+	r.mu.Lock()
+	unchanged := r.transitionGen == generation && reflect.DeepEqual(r.current, policy) && r.buildApplyOperation == op.OperationID
+	r.mu.Unlock()
+	if !unchanged || f.b.wakeRefusal() == "" {
+		t.Fatal("maintenance Resume superseded Pause or permitted wake")
+	}
+	if state, err := f.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
+		t.Fatalf("local safety Pause during maintenance = %q, %v", state, err)
+	}
+	if f.b.buildApplyMaintenance.active == nil || f.b.nodePolicy.current.PausedBy != nodepolicy.PausedLocally {
+		t.Fatal("safety Pause released maintenance or lost local provenance")
+	}
+}
+
+func TestBuildApplyAcceptedFenceRefusesWakeBeforePhysicalPause(t *testing.T) {
+	b := &Broker{}
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.buildApplyOperation = "accepted-operation"
+	r.live = nodepolicy.Available
+	r.mu.Unlock()
+	if b.wakeRefusal() == "" {
+		t.Fatal("wake crossed accepted maintenance before physical Pause")
+	}
+}
 
 // paProjectionBarrier replies only after the fake engine's single reader has
 // recorded every preceding projection on this connection.

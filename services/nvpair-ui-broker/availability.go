@@ -7,9 +7,9 @@ package main
 // (FORK_DESIGN.md §3.4). Pausing only affects work executed on this machine:
 // requests entering this node are still routed to other machines.
 //
-// Transitions run one at a time. A newer node:set-availability cancels the one
+// Transitions run one at a time. An accepted node:set-availability cancels the one
 // in progress, which stops at its next step and reports that it was
-// superseded, so the latest request always wins and nothing deadlocks waiting
+// superseded, so the latest accepted request wins and nothing deadlocks waiting
 // for a drain that is no longer wanted.
 
 import (
@@ -83,12 +83,30 @@ func (b *Broker) setAvailabilityRequestAs(ctx context.Context, state nodepolicy.
 // setAvailabilityModeLocked executes an accepted availability request.
 // Caller holds r.mu and has authorized the request.
 func (b *Broker) setAvailabilityModeLocked(ctx context.Context, r *policyRuntime, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, mode nodepolicy.PauseMode) (nodepolicy.Availability, error) {
-	var saveErr error
-	var saved bool
+	if state == nodepolicy.Available && r.buildApplyOperation != "" {
+		r.mu.Unlock()
+		return "", &buildApplyBusyError{}
+	}
+	accepted := r.acceptAvailabilityLocked(state, origin, mode)
+	r.mu.Unlock()
+	return b.runAcceptedAvailability(ctx, r, accepted)
+}
+
+// Registration has no I/O. Build admission calls this under the same policy
+// lock as its exact owner comparison, then releases all admission locks before
+// executing the canonical transition. Ordinary availability uses it too.
+type acceptedAvailability struct {
+	state  nodepolicy.Availability
+	origin nodepolicy.PauseOrigin
+	mode   nodepolicy.PauseMode
+	gen    uint64
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (r *policyRuntime) acceptAvailabilityLocked(state nodepolicy.Availability, origin nodepolicy.PauseOrigin, mode nodepolicy.PauseMode) acceptedAvailability {
 	immediate := state == nodepolicy.Paused && mode == nodepolicy.PauseImmediate
 	if immediate {
-		// Acceptance must stop execution even while durable replacement retries.
-		// Publish this volatile fence before entering the persistence barrier.
 		r.live = nodepolicy.Draining
 		r.cancelActive = true
 	}
@@ -97,13 +115,20 @@ func (b *Broker) setAvailabilityModeLocked(ctx context.Context, r *policyRuntime
 		r.localPauseRequested = origin == nodepolicy.PausedLocally || r.localPauseRequested || pausedLocally(r.current)
 	}
 	r.transitionGen++
-	gen := r.transitionGen
 	if r.transitionCancel != nil {
 		r.transitionCancel()
 	}
 	tctx, cancel := context.WithCancel(context.Background())
 	r.transitionCancel = cancel
-	r.mu.Unlock()
+	return acceptedAvailability{state, origin, mode, r.transitionGen, tctx, cancel}
+}
+
+func (b *Broker) runAcceptedAvailability(ctx context.Context, r *policyRuntime, accepted acceptedAvailability) (nodepolicy.Availability, error) {
+	state, origin, mode := accepted.state, accepted.origin, accepted.mode
+	gen, tctx, cancel := accepted.gen, accepted.ctx, accepted.cancel
+	var saveErr error
+	var saved bool
+	immediate := state == nodepolicy.Paused && mode == nodepolicy.PauseImmediate
 
 	if state == nodepolicy.Paused {
 		// Publish before waiting for engineConfigMu or transitionMu. Admission
@@ -257,6 +282,10 @@ func (b *Broker) pushAvailabilityAndActivate(persisted bool) {
 func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin, mode nodepolicy.PauseMode) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if ctx.Err() != nil {
+		r.mu.Unlock()
+		return "", errAvailabilitySuperseded
+	}
 	policy, persisted := r.current, false
 	var err error
 	// Recheck physical shutdown on a repeated pause without assigning another

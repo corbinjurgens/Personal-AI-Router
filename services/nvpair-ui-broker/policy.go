@@ -156,6 +156,9 @@ type policyRuntime struct {
 	// pendingPauseRequested fences management from acceptance of either origin's
 	// pause until it is stored, or a local Resume takes effect. Guarded by mu.
 	pendingPauseRequested bool
+	// Set with build admission under engineConfigMu -> mu. Safety Pause and
+	// local policy edits remain available, but Resume cannot cross maintenance.
+	buildApplyOperation string
 
 	// Admission state from the proxy, and a channel closed on every update so
 	// waiters can block on a change without polling.
@@ -260,7 +263,7 @@ func (r *policyRuntime) initLocked() {
 // independent: a peer pause has the same boundary as a local pause. Caller
 // holds r.mu; localPauseRequested also retains existing scoped obligations.
 func (r *policyRuntime) managementBlockedLocked() bool {
-	return r.pendingPauseRequested || r.localPauseRequested || r.current.Availability == nodepolicy.Paused ||
+	return r.buildApplyOperation != "" || r.pendingPauseRequested || r.localPauseRequested || r.current.Availability == nodepolicy.Paused ||
 		r.live == nodepolicy.Draining || r.live == nodepolicy.Paused
 }
 
@@ -780,7 +783,11 @@ func (b *Broker) wakeRefusal() string {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	live := r.live
+	maintenance := r.buildApplyOperation != ""
 	r.mu.Unlock()
+	if maintenance {
+		return "Build apply maintenance is active; engines cannot wake until it finishes and this node is resumed locally."
+	}
 	if live != nodepolicy.Available {
 		return fmt.Sprintf("this node is %s; engines are not started on demand", live)
 	}
@@ -816,7 +823,10 @@ func policyErrorCode(err error) int {
 	var veto *localVetoError
 	var denied *remoteManagementDeniedError
 	var locked *nodepolicy.RemoteSettingLockedError
+	var maintenance *buildApplyBusyError
 	switch {
+	case errors.As(err, &maintenance):
+		return maintenance.Code()
 	case errors.As(err, &locked):
 		return codeRemoteSettingLocked
 	case errors.As(err, &invalid):

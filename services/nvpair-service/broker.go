@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,8 +89,17 @@ func (r *brokerRun) writeFrame(frame []byte) error {
 // Zero proves no transmission; -1 denotes an invalid Writer count whose
 // transmission cannot be established from the io.Writer contract.
 func (r *brokerRun) writeFrameProgress(frame []byte) (int, error) {
+	return r.writeFrameProgressContext(context.Background(), frame)
+}
+
+func (r *brokerRun) writeFrameProgressContext(ctx context.Context, frame []byte) (int, error) {
 	r.wmu.Lock()
 	defer r.wmu.Unlock()
+	// A queued maintenance frame must not become a late lifecycle command
+	// after its budget expired. Once a frame starts, finish it atomically.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	select {
 	case <-r.exited:
 		return 0, errors.New("broker has exited")
@@ -120,6 +130,15 @@ func (r *brokerRun) writeMessage(msg *jsonrpc.Message) error {
 	return r.writeFrame(append(data, '\n'))
 }
 
+func (r *brokerRun) writeMessageContext(ctx context.Context, msg *jsonrpc.Message) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	_, err = r.writeFrameProgressContext(ctx, append(data, '\n'))
+	return err
+}
+
 // closeStdin closes the broker's stdin without taking the write lock: a writer
 // stuck behind a broker that stopped reading holds that lock, and closing the
 // pipe is what unblocks it.
@@ -146,6 +165,12 @@ func (s *Service) superviseBroker() {
 	attempt := 0
 	for {
 		if s.isStopping() {
+			return
+		}
+		if err := s.checkBuildApplyEntry(context.Background()); err != nil {
+			// An accepted transaction owns the next executable lifetime. A
+			// crash of the predecessor broker cannot create an old-byte retry.
+			slog.Warn("broker start gated by unresolved build apply")
 			return
 		}
 		proc, err := s.cfg.spawn()

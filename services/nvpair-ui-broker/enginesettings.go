@@ -612,6 +612,11 @@ func (b *Broker) previewEngineSettings(ctx context.Context, p settings.Request, 
 	if err := validateModelSettingsEntry(p); err != nil {
 		return settings.Preview{}, err
 	}
+	lease, err := b.reserveBuildApplySettings()
+	if err != nil {
+		return settings.Preview{}, err
+	}
+	defer lease.Release()
 	if p.ModelChange != nil {
 		return b.previewModelSettings(ctx, p, caller)
 	}
@@ -636,6 +641,11 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	if err := validateModelSettingsEntry(p); err != nil {
 		return settingsReceipt{}, err
 	}
+	lease, err := b.reserveBuildApplySettings()
+	if err != nil {
+		return settingsReceipt{}, err
+	}
+	defer lease.Release()
 	if p.ModelChange != nil {
 		return b.applyModelSettings(ctx, p, caller)
 	}

@@ -4,6 +4,7 @@
 import { BrowserWindow } from 'electron'
 import { parseServiceBuildId } from '@/shared/utils/service-build'
 import { availabilityValue } from './node-availability'
+import { BUILD_APPLY_MAX_STATUS_BYTES } from '@/shared/types/build-apply'
 import type {
     Observation,
     BuildIdentity,
@@ -12,6 +13,8 @@ import type {
     BuildApplyImpact,
     BuildApplyPreview,
     BuildApplyOperation,
+    BuildApplyStatus,
+    BuildApplyStatusState,
     BuildApplyFailure,
     BuildApplyPhase,
     BuildApplyOutcome,
@@ -29,6 +32,12 @@ function object(value: JsonValue | undefined): JsonObject {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
     return value
 }
+function fields(value: JsonValue | undefined, names: string[]): JsonObject {
+    const row = object(value)
+    if (Object.keys(row).length !== names.length || names.some(name => !Object.hasOwn(row, name)))
+        return invalid()
+    return row
+}
 function text(value: JsonValue | undefined, limit = 4096): string {
     if (
         typeof value !== 'string' ||
@@ -37,6 +46,10 @@ function text(value: JsonValue | undefined, limit = 4096): string {
     )
         return invalid()
     return value
+}
+function token(value: JsonValue | undefined): string {
+    const id = text(value, 128)
+    return /^[a-zA-Z0-9_-]+$/.test(id) ? id : invalid()
 }
 function flag(value: JsonValue | undefined): boolean {
     return typeof value === 'boolean' ? value : invalid()
@@ -51,7 +64,7 @@ function list<T>(value: JsonValue | undefined, read: (entry: JsonValue) => T): T
     return value.map(entry => read(entry))
 }
 function observed<T>(value: JsonValue | undefined, read: (entry: JsonValue) => T): Observation<T> {
-    const row = object(value)
+    const row = fields(value, ['known', 'value'])
     const known = flag(row.known)
     if (!known) {
         if (row.value !== null) return invalid()
@@ -61,7 +74,7 @@ function observed<T>(value: JsonValue | undefined, read: (entry: JsonValue) => T
     return { known: true, value: read(row.value) }
 }
 function identity(value: JsonValue | undefined): BuildIdentity {
-    const row = object(value)
+    const row = fields(value, ['buildId', 'sourceRevision', 'dirty', 'sha256'])
     return {
         buildId: observed(row.buildId, value => parseServiceBuildId(text(value, 128)) ?? invalid()),
         sourceRevision: observed(row.sourceRevision, revision),
@@ -70,7 +83,17 @@ function identity(value: JsonValue | undefined): BuildIdentity {
     }
 }
 function fences(value: JsonValue | undefined): BuildApplyFences {
-    const row = object(value)
+    const row = fields(value, [
+        'runtimeGeneration',
+        'serviceInstance',
+        'brokerGeneration',
+        'managerIncarnation',
+        'policyRevision',
+        'settingsRevision',
+        'intentRevision',
+        'locksRevision',
+        'availabilityRevision'
+    ])
     return {
         runtimeGeneration: observed(row.runtimeGeneration, text),
         serviceInstance: observed(row.serviceInstance, text),
@@ -104,7 +127,7 @@ function engine(value: JsonValue): BuildApplyEngineFact {
     }
 }
 function refusal(value: JsonValue | undefined): BuildApplyRefusal {
-    const row = object(value)
+    const row = fields(value, ['code', 'detail'])
     return { code: text(row.code, 128), detail: text(row.detail, 1024) }
 }
 function layout(value: JsonValue): BuildApplyLayout {
@@ -186,7 +209,7 @@ function impact(value: JsonValue | undefined): BuildApplyImpact {
 function preview(value: JsonValue): BuildApplyPreview {
     const row = object(value)
     return {
-        previewId: text(row.previewId, 128),
+        previewId: token(row.previewId),
         expiresAt: text(row.expiresAt, 64),
         hostId: observed(row.hostId, text),
         platform: text(row.platform, 32),
@@ -243,7 +266,16 @@ function confidence(value: JsonValue | undefined): BuildApplyConfidence {
 }
 function failure(value: JsonValue | undefined): BuildApplyFailure | null {
     if (value === null) return null
-    const row = object(value)
+    const row = fields(value, [
+        'phase',
+        'reason',
+        'detail',
+        'bytesChanged',
+        'settingsChanged',
+        'runningIdentity',
+        'readbackConfidence',
+        'safeNextAction'
+    ])
     return {
         phase: phase(row.phase),
         reason: text(row.reason, 128),
@@ -255,10 +287,30 @@ function failure(value: JsonValue | undefined): BuildApplyFailure | null {
         safeNextAction: text(row.safeNextAction, 1024)
     }
 }
-export function parseBuildApplyOperation(value: JsonValue | undefined): BuildApplyOperation {
-    const row = object(value)
-    return {
-        operationId: text(row.operationId, 128),
+export function parseBuildApplyOperation(
+    value: JsonValue | undefined,
+    expectedPreviewId = ''
+): BuildApplyOperation {
+    if (expectedPreviewId !== '') token(expectedPreviewId)
+    const row = fields(value, [
+        'operationId',
+        'previewId',
+        'ownershipAcknowledged',
+        'phase',
+        'outcome',
+        'failure',
+        'saved',
+        'enforced',
+        'physicalStop',
+        'remainsPaused',
+        'runningService',
+        'runningGui',
+        'readbackConfidence',
+        'fences'
+    ])
+    const operation: BuildApplyOperation = {
+        operationId: token(row.operationId),
+        previewId: token(row.previewId),
         ownershipAcknowledged: flag(row.ownershipAcknowledged),
         phase: phase(row.phase),
         outcome: outcome(row.outcome),
@@ -272,12 +324,20 @@ export function parseBuildApplyOperation(value: JsonValue | undefined): BuildApp
         readbackConfidence: confidence(row.readbackConfidence),
         fences: fences(row.fences)
     }
+    if (
+        (expectedPreviewId !== '' && operation.previewId !== expectedPreviewId) ||
+        (operation.outcome === null && operation.failure !== null) ||
+        (operation.outcome === 'succeeded' && operation.failure !== null) ||
+        (operation.failure !== null && operation.failure.phase !== operation.phase)
+    )
+        return invalid()
+    return operation
 }
 function result<T>(
     value: JsonValue | undefined,
     read: (entry: JsonValue) => T
 ): BuildApplyResult<T> {
-    const row = object(value)
+    const row = fields(value, ['available', 'value', 'refusal'])
     if (!flag(row.available)) {
         if (row.value !== null) return invalid()
         return { available: false, value: null, refusal: refusal(row.refusal) }
@@ -291,9 +351,54 @@ export function parseBuildApplyPreviewResult(
     return result(value, preview)
 }
 export function parseBuildApplyOperationResult(
-    value: JsonValue | undefined
+    value: JsonValue | undefined,
+    expectedPreviewId = ''
 ): BuildApplyResult<BuildApplyOperation> {
-    return result(value, parseBuildApplyOperation)
+    if (expectedPreviewId !== '') token(expectedPreviewId)
+    return result(value, entry => parseBuildApplyOperation(entry, expectedPreviewId))
+}
+
+export function parseBuildApplyStatusResult(
+    value: JsonValue | undefined,
+    expectedPreviewId = ''
+): BuildApplyResult<BuildApplyStatus> {
+    if (expectedPreviewId !== '') token(expectedPreviewId)
+    if (
+        value === undefined ||
+        Buffer.byteLength(JSON.stringify(value), 'utf8') > BUILD_APPLY_MAX_STATUS_BYTES
+    )
+        return invalid()
+    return result<BuildApplyStatus>(value, entry => {
+        const row = fields(entry, ['state', 'operation'])
+        const state = statusState(row.state)
+        if (state === 'idle') {
+            if (row.operation !== null || expectedPreviewId !== '') return invalid()
+            return { state: 'idle', operation: null }
+        }
+        const operation = parseBuildApplyOperation(row.operation, expectedPreviewId)
+        switch (state) {
+            case 'pending':
+                if (operation.outcome !== null) return invalid()
+                return { state: 'pending', operation }
+            case 'terminal':
+                if (operation.outcome === null) return invalid()
+                return { state: 'terminal', operation }
+            case 'unknown':
+                return { state: 'unknown', operation }
+        }
+    })
+}
+
+function statusState(value: JsonValue | undefined): BuildApplyStatusState {
+    switch (value) {
+        case 'idle':
+        case 'pending':
+        case 'terminal':
+        case 'unknown':
+            return value
+        default:
+            return invalid()
+    }
 }
 
 let operationObserver: ((operation: BuildApplyOperation) => void) | null = null

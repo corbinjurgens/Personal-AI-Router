@@ -18,9 +18,34 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/buildapply"
 	"nvpair-shared/ipc"
 	"nvpair-shared/secretenv/secretenvtest"
 )
+
+func TestBuildApplyStartupGateRetainsUnresolvedOutcomes(t *testing.T) {
+	test := func(name string, state buildapply.JournalState, readErr error, wantError bool) {
+		t.Run(name, func(t *testing.T) {
+			err := checkBuildApplyState(state, readErr)
+			if (err != nil) != wantError {
+				t.Fatalf("startup error=%v, want error=%v", err, wantError)
+			}
+			if wantError && !errors.Is(err, buildapply.ErrRecoveryNeeded) {
+				t.Fatalf("missing recovery category: %v", err)
+			}
+		})
+	}
+	test("idle", buildapply.JournalState{}, nil, false)
+	test("pending", buildapply.JournalState{Current: &buildapply.Receipt{}}, nil, true)
+	failed := buildapply.OutcomeFailed
+	test("failed remains current", buildapply.JournalState{Current: &buildapply.Receipt{Outcome: &failed}}, nil, true)
+	uncertain := buildapply.OutcomeUncertain
+	test("uncertain remains current", buildapply.JournalState{Current: &buildapply.Receipt{Outcome: &uncertain}}, nil, true)
+	succeeded := buildapply.OutcomeSucceeded
+	test("confirmed terminal", buildapply.JournalState{LastTerminal: &buildapply.Receipt{Outcome: &succeeded}}, nil, false)
+	test("unconfirmed terminal publication", buildapply.JournalState{LastTerminal: &buildapply.Receipt{Outcome: &succeeded}, TerminalPending: true}, nil, true)
+	test("unreadable is gated", buildapply.JournalState{}, errors.New("unreadable"), true)
+}
 
 // fakeServiceEnv makes the test binary act as a minimal service: it listens on
 // Endpoint(), greets each connection with its argv, and exits on "quit".

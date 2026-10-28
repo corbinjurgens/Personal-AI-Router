@@ -81,7 +81,7 @@ func packageWrite(t *testing.T, path string, data []byte) {
 
 func packageFixture(t *testing.T, settings string) string {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	root, err := filepath.EvalSymlinks(packageFixtureTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestPackageBoundsWithSmallFixtures(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
+			root := packageFixtureTempDir(t)
 			packageWrite(t, filepath.Join(root, "éé"), []byte("four"))
 			if test.limits.path != 3 {
 				packageWrite(t, filepath.Join(root, "other"), []byte("four"))
@@ -408,7 +408,7 @@ func TestPackageManifestClaimsDoNotSupplyMissingSourceOrSettings(t *testing.T) {
 }
 
 func TestPackageCaseCollisionRefuses(t *testing.T) {
-	root := t.TempDir()
+	root := packageFixtureTempDir(t)
 	packageWrite(t, filepath.Join(root, "file"), []byte("a"))
 	packageWrite(t, filepath.Join(root, "FILE"), []byte("b"))
 	entries, err := os.ReadDir(root)
