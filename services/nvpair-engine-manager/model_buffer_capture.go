@@ -7,11 +7,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"math"
 	"math/big"
+	"os"
 	"reflect"
 	"regexp"
 	"slices"
@@ -146,6 +149,43 @@ type modelBufferCapture struct {
 	wallHigh                             int64
 	clockUncertain                       bool
 	budgetOmitted                        bool
+	unsupportedLogged                    bool // guarded by mu; one warning per capture
+}
+
+type modelBufferSourceDiagnostic struct {
+	stage string
+	err   error
+}
+
+func (d modelBufferSourceDiagnostic) warn() {
+	slog.Warn("model buffer capture unavailable", "stage", d.stage, "reason", modelBufferDiagnosticError(d.err))
+}
+
+// These errors come only from file/source validation, never native output.
+// Structured filesystem errors can contain relative paths without separators.
+func modelBufferDiagnosticError(err error) string {
+	var pathErr *os.PathError
+	var linkErr *os.LinkError
+	text := err.Error()
+	var fieldErr *ServingFieldError
+	if errors.As(err, &fieldErr) && fieldErr.Field == "serving" && fieldErr.ModelID == "" {
+		text = fieldErr.Reason
+	}
+	// Fixed validator messages use slashes as punctuation, not paths.
+	if text == "native library snapshot bound/cancellation" || text == "unsupported native injection/MIG/MPS environment" {
+		return text
+	}
+	if errors.As(err, &pathErr) || errors.As(err, &linkErr) || strings.ContainsAny(text, "/\\:\"'\r\n\x00") {
+		return fmt.Sprintf("%T", err)
+	}
+	return text
+}
+
+func modelBufferDiagnosticBuild(build string) string {
+	if len(build) > 256 || strings.ContainsAny(build, "/\\:\"'\r\n\x00") {
+		return "redacted"
+	}
+	return build
 }
 
 // The worker owns all estimation and disk publication. One coalescing pending
@@ -177,17 +217,23 @@ func modelBufferHash(value any) string {
 }
 
 func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepared *llamaServingLaunch, inputs map[string]modelEstimateInput, command launchCommand, contexts ...context.Context) *modelBufferCapture {
-	if st.manifest.FamilyOrDefault() != "llamacpp" || prepared == nil {
+	if st.manifest.FamilyOrDefault() != "llamacpp" {
+		return nil
+	}
+	if prepared == nil {
+		slog.Warn("model buffer capture unavailable", "stage", "capture-create", "reason", "unprepared")
 		return nil
 	}
 	loads := modelBufferPreparedLoads(prepared)
 	if len(loads) == 0 {
+		slog.Warn("model buffer capture unavailable", "stage", "capture-create", "reason", "no-loads")
 		return nil
 	}
 	c := &modelBufferCapture{owner: &e.modelBuffers, token: modelBufferHash(newOpID()), engineID: modelBufferHash(engine), managerID: modelBufferHash(e.switchIncarnation), prepared: prepared, children: map[int]*modelBufferChild{}, frozen: map[string]*modelBufferFrozen{}, charge: 16 << 10, wallHigh: time.Now().UnixNano()}
 	c.owner.mu.Lock()
 	if c.owner.closed || c.charge > modelBufferCaptureBytes-c.owner.bytes {
 		c.owner.mu.Unlock()
+		slog.Warn("model buffer capture unavailable", "stage", "capture-create", "reason", "budget")
 		return nil
 	}
 	c.owner.bytes += c.charge
@@ -201,8 +247,14 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 	// File-only verification, never native enumeration or helper execution.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	command, constrainErr := modelConstrainCommand(command, prepared.ModelLoads)
-	source, err := modelReviewedNativeSource(ctx, st, command)
+	var diagnostic modelBufferSourceDiagnostic
+	source, err := modelReviewedNativeSource(ctx, st, command, &diagnostic)
 	cancel()
+	if constrainErr != nil {
+		(modelBufferSourceDiagnostic{stage: "constrain-command", err: constrainErr}).warn()
+	} else if err != nil {
+		diagnostic.warn()
+	}
 	if err == nil && constrainErr == nil {
 		c.sourceID = source
 	}
@@ -655,6 +707,19 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 			continue
 		}
 		if !modelBufferBuildSupported(p.Build) || p.Build != p.RouterBuild || p.Context != int64(f.context) || p.Slots != int64(f.slots) {
+			if !c.unsupportedLogged {
+				c.unsupportedLogged = true
+				switch {
+				case !modelBufferBuildSupported(p.Build):
+					slog.Warn("model buffer capture unavailable", "stage", "build-support", "build", modelBufferDiagnosticBuild(p.Build))
+				case p.Build != p.RouterBuild:
+					slog.Warn("model buffer capture unavailable", "stage", "router-build", "build", modelBufferDiagnosticBuild(p.Build), "router_build", modelBufferDiagnosticBuild(p.RouterBuild))
+				case p.Context != int64(f.context):
+					slog.Warn("model buffer capture unavailable", "stage", "context", "context", p.Context, "frozen_context", f.context)
+				case p.Slots != int64(f.slots):
+					slog.Warn("model buffer capture unavailable", "stage", "slots", "slots", p.Slots, "frozen_slots", f.slots)
+				}
+			}
 			child.sample = modelconfig.BufferObservation{Status: "unknown", Reason: "unsupported-build"}
 			child.poisoned = true
 			continue
