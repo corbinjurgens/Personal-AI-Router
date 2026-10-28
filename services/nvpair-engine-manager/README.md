@@ -5,6 +5,52 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-engine-manager
 
+## Operation-scoped memory device map
+
+`mapModelSettingsDevices` is an internal, independently callable review adapter.
+It accepts a selected b11146 runtime/library snapshot, effective selection and
+environment, explicit native-initialization permission, and supplied target
+host/run/topology identity. It owns no telemetry cache and makes no capacity or
+Fits decision. CPU placement uses only the supplied host/shared pool.
+
+CUDA matching requires canonical PCI plus a full physical GPU UUID, and on
+Windows the same driver's LUID matching the supplied DXGI identity. Review runs
+the private metadata helper again with UUID-only `CUDA_VISIBLE_DEVICES` and
+requires the same physical device at `CUDA0`. The returned binding retains that
+UUID, pool, constrained environment and stable digest. Observation identity
+includes producer run; stable binding identity excludes run and observation.
+Names, sizes and list position never prove a match. Unsupported exports,
+ambiguous aliases, MIG/MPS environments, shared/discrete mixtures, Metal,
+Vulkan, HIP and split-device selection remain Unknown.
+
+The existing executable's private `--private-model-devices` mode exits before
+registry/transport startup. It reads a bounded internal runtime snapshot from
+stdin, verifies selected library hashes and the pinned `ggml_commit()` revision,
+and uses ggml metadata plus CUDA driver
+identity APIs. It loads no model and starts no engine or network listener. The
+parent enforces a three-second ceiling, combined stdout/stderr ceiling of
+64 KiB, device bound, credential-environment filtering, cancellation and reaping.
+Unix uses purego; Windows uses x/sys restricted DLL loading and purego calls.
+The helper also arms its own hard process-exit deadline before reading input,
+so a stuck native call remains bounded after manager exit. Unix environment key
+spelling is preserved. Linux forces the MPS pipe directory to `/dev/null`, a
+verified character device that cannot contain MPS control pipes; this constraint
+is retained in the replay environment instead of trusting absent MPS variables.
+Native initialization remains subject to the target's Pause/activation owner.
+
+Production joins belong to Task 5: obtain target-owned topology and freshness,
+resolve the managed runtime with `modelDeviceRuntimeSnapshot`, supply effective
+launch selection/environment and current native permission at explicit review,
+then persist/compile the returned UUID constraint and `--device CUDA0` through
+the existing settings/serving owner. Apply/recovery/start must replay the frozen
+binding without invoking this adapter. These joins are not enabled here.
+Task 1's memory domain wire alone does not supply the full PCI/UUID/LUID topology;
+missing identity must stay Unknown at that join.
+
+Source fixtures under `TestModelSettingsDevices` inject enumeration results or
+use a TestMain sentinel before normal startup. They never load real libraries.
+These fixtures do not establish native acceptance, which remains UNTESTED.
+
 ## Local engine API keys
 
 `engine:set-credential` takes `{engine, credential}`; an empty credential

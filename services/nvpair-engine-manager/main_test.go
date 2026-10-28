@@ -25,6 +25,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 3 && os.Args[1] == "model-devices-test-child" {
+		os.Exit(runModelDevicesTestChild(os.Args[2]))
+	}
 	// Tests must never initialize a native credential store, even when a bundled
 	// manifest opts in. Each executor lazily receives a fresh private fake.
 	newCredentialBackend = func() credentialBackend { return &credentialFake{} }
