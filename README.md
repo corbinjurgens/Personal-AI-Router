@@ -54,10 +54,13 @@ an ordinary choice: a paired device that you have given management permission
 can still start that engine on request. A lock, shown as a padlock next to the
 switch, keeps the engine Off and refuses every start, model load and engine
 switch to it until you unlock it. You can change a lock only on the device that
-runs the engine, and unlocking does not start the engine. Pausing a node stops
-its engines, unloads its models and refuses management requests from other
-devices, while status and model files stay readable. Only the paused device can
-resume itself, so resume it there.
+runs the engine, and unlocking does not start the engine. **Pause node** uses
+the target's configured finish or cancel and drain settings. **Stop local models
+now** immediately cancels local execution and starts stopping controlled
+engines. Both require Resume on the target device. Routing to other nodes stays
+available. An externally owned engine can leave Pause incomplete until its owner
+stops it. Status and metadata reads remain available; accepted file-only
+transfers can continue, while new copies remain subject to Pause admission.
 
 ## Quick start
 

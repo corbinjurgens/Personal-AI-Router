@@ -45,7 +45,8 @@ interface SettingsStore {
     previewModel: (
         target: EngineSettingsTarget,
         change: ModelChange,
-        authority: string
+        authority: string,
+        advisoryOnly?: boolean
     ) => Promise<void>
     applyModel: (key: string, authority: string) => Promise<void>
     readModelOutcome: (key: string) => Promise<void>
@@ -54,6 +55,7 @@ interface SettingsStore {
 interface ModelDraft {
     change?: ModelChange
     inspection?: InspectModelResult
+    advisory?: EngineSettingsPreview
     review?: {
         request: EngineSettingsRequest
         preview: EngineSettingsPreview
@@ -74,6 +76,25 @@ interface ModelDraft {
     uncertain?: boolean
     generation: number
 }
+interface ModelPreviewOwner {
+    key: string
+    generation: number
+    advisoryOnly: boolean
+    authority: string
+    authorityState: string
+    pending?: {
+        key: string
+        generation: number
+        advisoryOnly: boolean
+        authority: string
+        authorityState: string
+        run: () => Promise<void>
+        finish: () => void
+    }
+}
+// Transport calls cannot be aborted. Keep their ownership until they settle,
+// even when a draft is logically cancelled, and coalesce its next request.
+let modelPreview: ModelPreviewOwner | undefined
 export const modelSettingsKey = (target: EngineSettingsTarget, modelId: string): string =>
     `${engineSettingsKey(target)}:${modelId}`
 
@@ -81,6 +102,7 @@ function invalidateDraft(draft?: ModelDraft): ModelDraft {
     return {
         ...draft,
         review: undefined,
+        advisory: undefined,
         generation: (draft?.generation ?? 0) + 1,
         ...(draft?.previewOperation ? { busy: false, previewOperation: undefined } : {})
     }
@@ -161,10 +183,14 @@ function modelAuthority(target: EngineSettingsTarget): string {
     ])
 }
 
-async function authorizeModel(request: EngineSettingsRequest): Promise<void> {
+async function authorizeModel(
+    request: EngineSettingsRequest,
+    current: () => boolean
+): Promise<void> {
     if (!useConnectionStore.getState().connected) throw new Error('Device disconnected.')
     const local = request.nodeId === useConnectionStore.getState().selfId
     const policy = await window.pairApi.nodePolicy.get(local ? undefined : request.nodeId)
+    if (!current()) throw new Error('Preview expired. Your draft is kept.')
     if (policy.revision !== request.modelChange?.expectedPolicyRevision)
         throw new Error('Policy changed. Preview again; your draft is kept.')
     if (!local) {
@@ -172,6 +198,7 @@ async function authorizeModel(request: EngineSettingsRequest): Promise<void> {
             throw new Error('Destination authority is unavailable.')
         const permission = useNodeConfigurationStore.getState().management.get(request.nodeId)
         const fresh = await window.pairApi.cluster.getRemoteManagementForNode(request.nodeId)
+        if (!current()) throw new Error('Preview expired. Your draft is kept.')
         if (
             permission?.state !== 'allowed' ||
             fresh.state !== 'allowed' ||
@@ -251,7 +278,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             }))
         }
     },
-    previewModel: async (target, change, authority) => {
+    previewModel: async (target, change, authority, advisoryOnly = false) => {
         // The wire contract rejects an empty selected policy patch, even when
         // the same operation includes a valid load edit.
         change = structuredClone(change)
@@ -262,11 +289,83 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 delete change.policy
         }
         const key = modelSettingsKey(target, change.modelId)
-        if (get().modelDrafts[key]?.busy || get().modelDrafts[key]?.uncertain) return
+        const draft = get().modelDrafts[key]
+        const owner = modelPreview
+        const authorityState = modelAuthority(target)
+        const explicit = owner?.pending ?? owner
+        // Background estimates must not displace a user-requested review,
+        // including a destination review while the source editor stays mounted.
+        if (
+            advisoryOnly &&
+            [owner, owner?.pending].some(
+                request =>
+                    request &&
+                    !request.advisoryOnly &&
+                    get().modelDrafts[request.key]?.generation === request.generation
+            )
+        )
+            return
+        if (
+            advisoryOnly &&
+            JSON.stringify(draft?.change) === JSON.stringify(change) &&
+            ((draft?.review?.authority === authority &&
+                draft.review.authorityState === authorityState) ||
+                (explicit &&
+                    explicit.key === key &&
+                    !explicit.advisoryOnly &&
+                    explicit.generation === draft?.generation &&
+                    explicit.authority === authority &&
+                    explicit.authorityState === authorityState))
+        )
+            return
+        if ((draft?.busy && !draft.previewOperation) || draft?.uncertain) return
         get().editModel(key, change)
         const generation = get().modelDrafts[key].generation
+        if (owner) {
+            if (owner.key !== key) get().invalidateModel(owner.key)
+            if (owner.pending && owner.pending.key !== key) get().invalidateModel(owner.pending.key)
+            owner.pending?.finish()
+            return new Promise<void>(finish => {
+                owner.pending = {
+                    key,
+                    generation,
+                    advisoryOnly,
+                    authority,
+                    authorityState,
+                    finish,
+                    run: async () => {
+                        if (modelAuthority(target) !== authorityState) {
+                            get().invalidateModel(key)
+                            return
+                        }
+                        await get().previewModel(target, change, authority, advisoryOnly)
+                    }
+                }
+                set(state => ({
+                    modelDrafts: {
+                        ...state.modelDrafts,
+                        [key]: {
+                            ...state.modelDrafts[key],
+                            busy: true,
+                            previewOperation: crypto.randomUUID()
+                        }
+                    }
+                }))
+            })
+        }
+        const active: ModelPreviewOwner = {
+            key,
+            generation,
+            advisoryOnly,
+            authority,
+            authorityState
+        }
+        modelPreview = active
         const operation = crypto.randomUUID()
-        const authorityState = modelAuthority(target)
+        const current = () =>
+            get().modelDrafts[key]?.generation === generation &&
+            get().modelDrafts[key]?.previewOperation === operation &&
+            modelAuthority(target) === authorityState
         const put = (value: Partial<ModelDraft>) => {
             if (
                 get().modelDrafts[key]?.generation === generation &&
@@ -292,6 +391,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         }))
         try {
             await get().reload(target)
+            if (!current()) return
             if (JSON.stringify(get().modelDrafts[key]?.change) !== JSON.stringify(change))
                 throw new Error('Draft changed during preview. Review again.')
             if (get().modelDrafts[key]?.previewOperation !== operation) return
@@ -307,11 +407,13 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
                 settings: structuredClone(snapshot.settings),
                 modelChange: structuredClone(change)
             }
-            await authorizeModel(request)
+            await authorizeModel(request, current)
+            if (!current()) return
             const inspection = await window.pairApi.engines.inspectModel({
                 ...target,
                 modelId: change.modelId
             })
+            if (!current()) return
             if (
                 inspection.engine !== target.engine ||
                 inspection.modelId !== change.modelId ||
@@ -319,6 +421,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             )
                 throw new Error('Inspection target mismatch.')
             const preview = await window.pairApi.engines.previewSettings(request)
+            if (!current()) return
             if (
                 modelAuthority(target) !== authorityState ||
                 baselineIdentity(get().entries[engineSettingsKey(target)]?.snapshot) !==
@@ -326,17 +429,43 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             )
                 throw new Error('Target changed during preview. Review again.')
             if (
+                preview.revision !== snapshot.revision ||
+                (preview.policyRevision !== undefined &&
+                    preview.policyRevision !== change.expectedPolicyRevision)
+            )
+                throw new Error('Preview revisions do not match the target. Review again.')
+            const saved = snapshot.settings.modelLoads?.find(
+                load => load.modelId === change.modelId
+            )?.requested
+            const context = change.load?.clear?.includes('context')
+                ? undefined
+                : (change.load?.set.context ?? saved?.context)
+            const gpu = change.load?.clear?.includes('gpu')
+                ? undefined
+                : (change.load?.set.gpu ?? saved?.gpu)
+            const automatic = !!change.load && (context?.mode === 'auto' || gpu?.mode === 'auto')
+            if (
+                advisoryOnly ||
                 Object.keys(preview.errors).length ||
                 !preview.previewDigest ||
-                preview.revision !== snapshot.revision ||
-                preview.policyRevision !== change.expectedPolicyRevision
+                preview.policyRevision !== change.expectedPolicyRevision ||
+                (automatic &&
+                    (!preview.auto?.resolved ||
+                        preview.auto.status === 'unavailable' ||
+                        preview.auto.estimate.status !== 'estimated' ||
+                        !!preview.auto.estimate.unknowns?.length ||
+                        !preview.auto.reviewedInputId ||
+                        !preview.auto.resolverRevision?.startsWith('auto/')))
             ) {
                 put({
                     inspection,
                     review: undefined,
+                    advisory: preview,
                     message:
                         Object.values(preview.errors).join('; ') ||
-                        'A reviewed digest and both current revisions are required.'
+                        (advisoryOnly
+                            ? undefined
+                            : 'A reviewed Auto resolution, digest and current revisions are required.')
                 })
                 return
             }
@@ -358,6 +487,24 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
             put({ review: undefined, message: getErrorString(error) })
         } finally {
             put({ busy: false, previewOperation: undefined })
+            modelPreview = undefined
+            const pending = active.pending
+            if (pending) {
+                if (get().modelDrafts[pending.key]?.generation === pending.generation) {
+                    // Release the queued marker before re-entering this owner.
+                    set(state => ({
+                        modelDrafts: {
+                            ...state.modelDrafts,
+                            [pending.key]: {
+                                ...state.modelDrafts[pending.key],
+                                busy: false,
+                                previewOperation: undefined
+                            }
+                        }
+                    }))
+                    void pending.run().finally(pending.finish)
+                } else pending.finish()
+            }
         }
     },
     applyModel: async (key, authority) => {
@@ -387,7 +534,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         put({ busy: true })
         try {
             if (!current()) throw new Error('Preview expired. Your draft is kept.')
-            await authorizeModel(request)
+            await authorizeModel(request, current)
             const inspection = await window.pairApi.engines.inspectModel({
                 engine: request.engine,
                 nodeId: request.nodeId,

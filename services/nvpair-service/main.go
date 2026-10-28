@@ -12,6 +12,8 @@
 //	nvpair-service [flags] [-- broker args]
 //	nvpair-service status
 //	nvpair-service diagnose [--json]
+//	nvpair-service apply-build status --json
+//	nvpair-service apply-build recover OPERATION_ID
 //	nvpair-service stop
 //	nvpair-service autostart enable [flags] [-- broker args]
 //	nvpair-service autostart disable|status
@@ -46,6 +48,8 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
+		case "apply-build":
+			return runBuildApply(args[1:], stdout, stderr)
 		case "autostart":
 			if err := runAutostart(args[1:], stdout); err != nil {
 				fmt.Fprintln(stderr, "nvpair-service:", err)
@@ -110,6 +114,7 @@ func newRunFlags(stderr io.Writer) (*flag.FlagSet, *runOptions, func() slog.Leve
 		fmt.Fprintln(stderr, "usage: nvpair-service [flags] [-- broker args]")
 		fmt.Fprintln(stderr, "       nvpair-service status | stop")
 		fmt.Fprintln(stderr, "       "+diagnoseUsage)
+		fmt.Fprintln(stderr, "       nvpair-service apply-build status --json | recover OPERATION_ID")
 		fmt.Fprintln(stderr, "       nvpair-service autostart enable [--systemd] [flags] [-- broker args] | disable | status")
 		fs.PrintDefaults()
 	}
@@ -167,6 +172,10 @@ func hasFlag(args []string, name string) bool {
 }
 
 func serve(opts *runOptions, stdout io.Writer) int {
+	if err := checkBuildApplyProcessEntry(context.Background()); err != nil {
+		fmt.Fprintln(os.Stderr, "nvpair-service: an unresolved build apply prevents startup; read apply-build status --json")
+		return 1
+	}
 	logDir := opts.logDir
 	if logDir == "" {
 		dir, err := appdir.Path("logs")

@@ -99,7 +99,8 @@ export default defineConfig({
                     // Run E2E sequentially to avoid port collisions and to
                     // keep the host's resource graph readable when triaging.
                     pool: 'forks',
-                    poolOptions: { forks: { singleFork: true } }
+                    maxWorkers: 1,
+                    isolate: false
                 }
             }
         ]

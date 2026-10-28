@@ -619,10 +619,10 @@ therefore enter the same routing path without being reconfigured.
 The rearrangement is conditional, and PAIR yields rather than fights:
 
 - An **unknown process** is never moved or killed, whatever is holding the port.
-- A running engine PAIR **adopted** is left alone when the only way to move it
-  would be to kill its process. Ollama works this way. Where the engine publishes
-  an official stop command, as LM Studio does with `lms server stop`, PAIR can use
-  that command to stop it and bring it back on the configured port.
+- A running externally owned engine PAIR **adopted** is left alone. An official
+  stop command, including LM Studio's `lms server stop`, does not confer ownership
+  or permit automatic relocation. Reclaiming a managed-process orphan instead
+  requires positive managed-install, image and endpoint evidence.
 - If the engine is already running on the compatibility port, PAIR does not take
   that port. The proxy stays where it is and the takeover is reported as blocked.
 - If anything else holds the port, the outcome is the same. PAIR steers the proxy
@@ -981,21 +981,29 @@ Refusal saves no revision or receipt and supersedes no transition. Reads and
 local configuration remain available. Only local Resume clears the fence at
 the authoritative availability transition; local activation requires Resume.
 
-Pause drains or cancels admitted work, reads fresh engine/model inventory,
-unloads every known loaded model and intent-neutrally sleeps every reported
-engine. The schema-v2 `stopEngines` and `unloadModels` inputs are obsolete and
+Configured Pause follows the saved finish/cancel and drain settings. A target-local
+immediate Pause cancels active execution and starts shutdown without the drain or
+cancel-settle wait. The manager protects externally owned engines; inability to
+prove controlled shutdown leaves the fence in place. The router and service stay
+running. Metadata and file reads remain available, and accepted file-only
+transfers can continue; new copy admission remains subject to Pause and
+peer-mutation gates. Precommit work may route to
+another eligible destination; committed interrupted streams fail rather than
+splice or continue at a paid provider. SC-b continuation is not implemented.
+The schema-v2 `stopEngines` and `unloadModels` inputs are obsolete and
 normalize to true; reading an old file does not rewrite it. Engine-stop failure
 retains stored pause and live draining, reports actual availability, and returns
 `-32000` with `Pause could not stop every engine: ` plus bounded detail. A local
 Pause can retry; peer retries remain fenced. A paused node skips saved-On
 restoration on startup and manager replacement. Local Resume wakes only
-unlocked saved-On engines through the manager's existing guards. The broker's
+unlocked saved-On engines and reconciles resident declarations through existing
+guards; cancelled requests are not replayed. The broker's
 model-configuration reasons are `paused` for either-origin pause and `engine-off`
 for ordinary saved Off; saved Off is not inferred to be an engine lock.
 
 Conservative switch cleanup may release a reconciled manager reservation while
 retaining a durable pause obligation and recovery receipt behind the pause
-fence. This allows intent-neutral shutdown to finish. Inventory, unload, sleep
+fence. This allows intent-neutral shutdown to finish. Inventory, controlled cleanup, sleep
 and shutdown verification use one manager; a replacement cannot complete an
 older manager's proof. Recovery verifies a stored pause before opening the
 replacement's management surface. A repeated completed Pause rechecks physical

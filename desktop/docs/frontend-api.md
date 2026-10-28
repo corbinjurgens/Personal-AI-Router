@@ -55,13 +55,11 @@ They do not imply a WebSocket connection. Browser clients are not supported.
 `NodeAvailabilityRequest` object `{nodeId?, state, pauseMode?}` through the
 supervisor and `node:set-availability` transport. `state` is `available` or
 `paused`. Omitted `pauseMode` means `configured`, using the saved active-work
-and drain options. Settings and the self-only tray retain that configured
-behavior. Resume must omit mode. Null or unknown modes are invalid.
+and drain options. Resume must omit mode. Null or unknown modes are invalid.
 
-`immediate` is recognized but currently unavailable locally (`-32000`,
-`Immediate pause is unavailable until safe execution stopping is enabled.`).
-It performs no save, transition supersession, proxy or engine effect. It is
-not exposed as an enabled control. An authorized peer receives `-32602`,
+`immediate` cancels target execution and starts shutdown without drain or
+cancel-settle waits. The self-only **Stop local models now** action uses it;
+**Pause node** uses configured timing. An authorized peer receives `-32602`,
 `Immediate pause must be requested on this node.` The target rechecks actual
 peer authority: management denial (`-32012`) and the pause fence (`-32011`)
 precede mode refusal. A peer cannot Resume or repeat Pause through that fence.
@@ -73,9 +71,9 @@ initial/live readback. Local activation fields stay intact; remote projection
 does not expose them or private routing. Tray projection filters peer pushes.
 Availability mutation results never supply durable engine lifecycle state.
 
-Pause affects this target's execution while routing remains available.
-Immediate physical stopping and clean interrupted-stream failure are not yet
-enabled; seamless committed-stream continuation remains separate work.
+Pause affects this target's execution while routing remains available. An
+incomplete shutdown retains the fence and draining state. Committed interrupted
+streams fail cleanly where supported; seamless continuation remains separate work.
 
 ### Model engine bindings in Routing & resources
 

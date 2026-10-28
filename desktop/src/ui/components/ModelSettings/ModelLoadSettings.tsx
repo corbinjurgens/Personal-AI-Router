@@ -28,10 +28,12 @@ function fieldPatch(
     const number = Number(value)
     switch (field) {
         case 'context':
+            if (value === 'auto') return { context: { mode: 'auto', floor: 4096, cap: 8192 } }
             return Number.isSafeInteger(number)
                 ? { context: { mode: 'fixed', tokens: number } }
                 : null
         case 'gpu':
+            if (value === 'auto') return { gpu: { mode: 'auto' } }
             if (value === 'cpu' || value === 'native-default') return { gpu: { mode: value } }
             if (value === 'layers')
                 return { gpu: { mode: 'layers', layers: current.gpu?.layers ?? 0 } }
@@ -107,6 +109,7 @@ export default function ModelLoadSettings({
     }, [nodeId, engine, modelId])
     useEffect(() => {
         useEngineSettingsStore.getState().invalidateModel(key)
+        return () => useEngineSettingsStore.getState().invalidateModel(key)
     }, [key, authority, policy, policyRevision, disabled])
     const edit = (patch: Partial<ModelChange>) => {
         useEngineSettingsStore.getState().editModel(key, {
@@ -120,11 +123,30 @@ export default function ModelLoadSettings({
         disabled ||
         !!entry?.unavailable ||
         !snapshot?.editable ||
-        !!draft?.busy ||
+        (!!draft?.busy && !draft.previewOperation) ||
         !!draft?.uncertain
     const requested =
         snapshot?.settings.modelLoads?.find(item => item.modelId === modelId)?.requested ?? {}
     const resolved = snapshot?.settings.modelLoads?.find(item => item.modelId === modelId)?.resolved
+    const effectiveContext = load?.clear?.includes('context')
+        ? undefined
+        : (load?.set.context ?? requested.context)
+    const effectiveGpu = load?.clear?.includes('gpu') ? undefined : (load?.set.gpu ?? requested.gpu)
+    const autoSelected = effectiveContext?.mode === 'auto' || effectiveGpu?.mode === 'auto'
+    const draftIdentity = JSON.stringify(draft?.change)
+    const invalid = Object.keys(validation).length > 0
+    useEffect(() => {
+        if (!draftIdentity || disabled || invalid || !policyRevision) return
+        const timer = window.setTimeout(() => {
+            const currentDraft = useEngineSettingsStore.getState().modelDrafts[key]
+            const current = currentDraft?.change
+            if (!currentDraft?.review && current?.load && JSON.stringify(current) === draftIdentity)
+                void useEngineSettingsStore
+                    .getState()
+                    .previewModel({ nodeId, engine }, current, authority, true)
+        }, 250)
+        return () => window.clearTimeout(timer)
+    }, [draftIdentity, disabled, invalid, policyRevision, key, nodeId, engine, authority])
     const controls = (basic: boolean) =>
         loadFields
             .filter(
@@ -140,16 +162,22 @@ export default function ModelLoadSettings({
                             {field}: support Unknown
                         </Text>
                     )
-                const current = load?.set[field] ?? requested[field]
+                const current = load?.clear?.includes(field)
+                    ? undefined
+                    : (load?.set[field] ?? requested[field])
+                if (field === 'context' && typeof current === 'object' && current.mode === 'auto')
+                    return null
                 const display =
                     values[field] ??
                     (load?.clear?.includes(field)
                         ? ''
                         : typeof current === 'object'
                           ? field === 'context'
-                              ? 'tokens' in current
-                                  ? String(current.tokens ?? '')
-                                  : ''
+                              ? current.mode === 'auto'
+                                  ? 'auto'
+                                  : 'tokens' in current
+                                    ? String(current.tokens ?? '')
+                                    : ''
                               : current.mode
                           : current === undefined
                             ? ''
@@ -191,7 +219,10 @@ export default function ModelLoadSettings({
                                     ...(
                                         descriptor.values ??
                                         (descriptor.kind === 'boolean' ? ['true', 'false'] : [])
-                                    ).map(value => ({ value, children: value }))
+                                    ).map(value => ({ value, children: value })),
+                                    ...(field === 'gpu' && !descriptor.values?.includes('auto')
+                                        ? [{ value: 'auto', children: 'auto' }]
+                                        : [])
                                 ]}
                                 onValueChange={change}
                             />
@@ -272,6 +303,97 @@ export default function ModelLoadSettings({
                 not lock load settings.
             </Text>
             {controls(true)}
+            <FormField
+                slotLabel="Context mode"
+                slotHelp="Auto uses a target/cap of 8192 tokens, a floor of 4096 and one slot unless explicitly changed."
+            >
+                <Select
+                    aria-label="Context mode"
+                    value={effectiveContext?.mode ?? 'inherited'}
+                    disabled={blocked || resolved?.kvUnified === true}
+                    items={[
+                        { value: 'inherited', children: 'Inherited' },
+                        { value: 'fixed', children: 'Fixed' },
+                        { value: 'auto', children: 'Auto' }
+                    ]}
+                    onValueChange={value => {
+                        setValidation(previous => {
+                            const next = { ...previous }
+                            delete next['auto.floor']
+                            delete next['auto.cap']
+                            delete next.context
+                            return next
+                        })
+                        const set = { ...load?.set }
+                        const clear: Array<keyof RequestedLoad> = (load?.clear ?? []).filter(
+                            field => field !== 'context'
+                        )
+                        if (value === 'inherited') {
+                            delete set.context
+                            clear.push('context')
+                        } else if (value === 'auto')
+                            set.context = { mode: 'auto', floor: 4096, cap: 8192 }
+                        else set.context = { mode: 'fixed', tokens: 8192 }
+                        setValues(previous => {
+                            const next = { ...previous }
+                            delete next.context
+                            delete next['auto.floor']
+                            delete next['auto.cap']
+                            return next
+                        })
+                        edit({ load: { set, clear } })
+                    }}
+                />
+            </FormField>
+            {effectiveContext?.mode === 'auto' &&
+                (['floor', 'cap'] satisfies Array<'floor' | 'cap'>).map(field => (
+                    <FormField key={field} slotLabel={`Auto context ${field}`}>
+                        <TextInput
+                            aria-label={`Auto context ${field}`}
+                            type="number"
+                            value={
+                                values[`auto.${field}`] ??
+                                String(
+                                    effectiveContext?.[field] ?? (field === 'floor' ? 4096 : 8192)
+                                )
+                            }
+                            disabled={blocked}
+                            onValueChange={value => {
+                                setValues(previous => ({ ...previous, [`auto.${field}`]: value }))
+                                const number = Number(value)
+                                if (!value || !Number.isSafeInteger(number) || number <= 0) {
+                                    validateField(
+                                        `auto.${field}`,
+                                        `Auto ${field}: enter a positive integer.`
+                                    )
+                                    useEngineSettingsStore.getState().invalidateModel(key)
+                                    return
+                                }
+                                validateField(`auto.${field}`)
+                                const context = load?.set.context ?? requested.context
+                                edit({
+                                    load: {
+                                        set: {
+                                            ...load?.set,
+                                            context: {
+                                                mode: 'auto',
+                                                floor: context?.floor ?? 4096,
+                                                cap: context?.cap ?? 8192,
+                                                [field]: number,
+                                                ...(field === 'cap' &&
+                                                number < 4096 &&
+                                                (context?.floor ?? 4096) === 4096
+                                                    ? { floor: Math.floor(number / 256) * 256 }
+                                                    : {})
+                                            }
+                                        },
+                                        clear: load?.clear?.filter(item => item !== 'context')
+                                    }
+                                })
+                            }}
+                        />
+                    </FormField>
+                ))}
             <Text kind="body/regular/sm">
                 Saved requested overrides: {JSON.stringify(requested)}. Unset leaves remain
                 inherited.
@@ -401,14 +523,16 @@ export default function ModelLoadSettings({
             )}
             <ModelSettingsPreview
                 inspection={inspection}
-                preview={draft?.review?.preview}
+                preview={draft?.review?.preview ?? draft?.advisory}
+                reviewed={!!draft?.review}
+                stale={!!draft?.previewOperation || (!!load && !draft?.review && !draft?.advisory)}
                 snapshot={snapshot}
             />
             <Button
                 kind="secondary"
                 disabled={
                     blocked ||
-                    !dirty ||
+                    (!dirty && !autoSelected) ||
                     !generation.ok ||
                     Object.keys(validation).length > 0 ||
                     (!!load && resolved?.kvUnified === true)
@@ -418,10 +542,24 @@ export default function ModelLoadSettings({
                     const selectedPolicy = { ...draft?.change?.policy }
                     delete selectedPolicy.generation
                     delete selectedPolicy.requestOptionsMode
+                    const savedAuto =
+                        !load && autoSelected
+                            ? {
+                                  set: {
+                                      ...(requested.context?.mode === 'auto'
+                                          ? { context: requested.context }
+                                          : {}),
+                                      ...(requested.gpu?.mode === 'auto'
+                                          ? { gpu: requested.gpu }
+                                          : {})
+                                  }
+                              }
+                            : undefined
                     void useEngineSettingsStore.getState().previewModel(
                         target,
                         {
                             ...draft?.change,
+                            ...(savedAuto ? { load: savedAuto } : {}),
                             modelId,
                             expectedPolicyRevision: policyRevision,
                             policy: { ...selectedPolicy, ...generation.value }
@@ -430,7 +568,7 @@ export default function ModelLoadSettings({
                     )
                 }}
             >
-                Preview model changes
+                {autoSelected ? 'Recalculate' : 'Preview model changes'}
             </Button>
             <Button
                 disabled={

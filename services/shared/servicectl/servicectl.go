@@ -21,6 +21,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"nvpair-shared/buildapply"
 )
 
 // EndpointEnv overrides the endpoint Endpoint returns. Tests use it to point a
@@ -39,6 +41,23 @@ const dialRetryInterval = 100 * time.Millisecond
 
 // ErrNotRunning reports that nothing is listening on the endpoint.
 var ErrNotRunning = errors.New("nvpair-service is not running")
+
+// CheckBuildApplyStartup is read-only. An unreadable or unfinished operation
+// refuses ordinary TUI/autostart launch; no caller may clear its journal.
+func CheckBuildApplyStartup() error {
+	state, err := buildapply.ReadJournal()
+	return checkBuildApplyState(state, err)
+}
+
+func checkBuildApplyState(state buildapply.JournalState, err error) error {
+	if err != nil {
+		return errors.Join(buildapply.ErrRecoveryNeeded, err)
+	}
+	if state.Current != nil || state.TerminalPending {
+		return buildapply.ErrRecoveryNeeded
+	}
+	return nil
+}
 
 // Endpoint returns this user's nvpair-service endpoint: <appdir>/service.sock
 // on Linux and macOS, \\.\pipe\nvpair-service-<username> on Windows. EndpointEnv
@@ -89,6 +108,9 @@ func StartDetached(binaryPath string, brokerArgs []string) error {
 // after process creation, uses null stdio and the executable's directory, and
 // inherits the caller's whole environment, including provider credentials.
 func StartDetachedArgs(binaryPath string, args []string) error {
+	if err := CheckBuildApplyStartup(); err != nil {
+		return err
+	}
 	cmd := exec.Command(binaryPath, args...)
 	cmd.Dir = filepath.Dir(binaryPath)
 	// Nil stdio is the null device: a detached service must not hold the
@@ -110,6 +132,9 @@ func StartDetachedArgs(binaryPath string, args []string) error {
 // errors, including cancellation and permission failures, are returned.
 func ConnectOrStart(ctx context.Context, binaryPath string, brokerArgs []string) (io.ReadWriteCloser, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := CheckBuildApplyStartup(); err != nil {
 		return nil, err
 	}
 	endpoint, err := Endpoint()

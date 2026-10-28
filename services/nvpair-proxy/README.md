@@ -418,7 +418,12 @@ authorize fallback after it. A normalized peer response ends with the internal
 `[DONE]` from a destination cannot make an interrupted peer workload completed.
 Missing or invalid disposition is a peer interruption, not completion.
 
-SC-a never dispatches again after commit. A peer or engine loss mid-stream
+Before commitment, a paused local attempt can be excluded and retried on an
+eligible destination within the existing budgets. A peer destination is terminal
+and leaves fallback to the origin. Pause does not cancel work already executing
+elsewhere or stop this router's listeners.
+
+SC-a never dispatches again after commit. A pause, peer or engine loss mid-stream
 ends a managed OpenAI stream with an error frame plus `[DONE]`, not a pause,
 until SC-b (Ollama uses its error object). Endings are best effort when delivery
 fails. Qualified same-model continuation
@@ -426,7 +431,8 @@ fails. Qualified same-model continuation
 is available to consumer banks independently; its presentation remains separate.
 Destination ingress remains local-only with no onward dispatch;
 recognizing a terminal frame does not resolve an uncertain strict admission
-hold. Non-streaming whole-body recovery remains outside SC-a.
+hold. Non-streaming whole-body recovery remains outside SC-a. It does not splice
+responses or continue at a paid provider.
 
 **Persisted port.** A port chosen at runtime via `set-port` is saved to the
 per-user data dir (`%LocalAppData%\Nvidia Corporation\Personal AI Router` on

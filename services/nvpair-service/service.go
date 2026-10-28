@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/buildapply"
 	"nvpair-shared/buildinfo"
 	"nvpair-shared/ipc"
 	"nvpair-shared/jsonrpc"
@@ -62,9 +63,10 @@ var errAlreadyRunning = errors.New("already running")
 
 // config is everything a Service needs. Tests replace spawn and backoff.
 type config struct {
-	endpoint       string
-	version        string
-	serviceBuildID buildinfo.ID
+	buildApplyOwners buildApplyEvidenceOwner
+	endpoint         string
+	version          string
+	serviceBuildID   buildinfo.ID
 	// logPath is the broker log file; empty disables the file.
 	logPath    string
 	logMaxSize int64
@@ -106,14 +108,16 @@ type Service struct {
 	restarts    int
 	stopping    bool
 
-	stopCh       chan struct{}
-	stopOnce     sync.Once
-	stopped      chan struct{}
-	exitCh       chan struct{}
-	exitOnce     sync.Once
-	brokerDone   chan struct{}
-	history      *serviceHistory
-	buildPreview *buildApplyPreviewState
+	stopCh        chan struct{}
+	stopOnce      sync.Once
+	stopped       chan struct{}
+	exitCh        chan struct{}
+	exitOnce      sync.Once
+	brokerDone    chan struct{}
+	history       *serviceHistory
+	buildPreview  *buildApplyPreviewState
+	buildApply    *buildApplyAdmissionState
+	buildGUIReady *buildapply.RunnerReservation
 }
 
 // pendingRequest is a request in flight at the broker under a service id.
@@ -128,6 +132,9 @@ type pendingRequest struct {
 }
 
 func newService(cfg config) *Service {
+	if cfg.buildApplyOwners == nil {
+		cfg.buildApplyOwners = unavailableBuildApplyEvidence{}
+	}
 	return &Service{
 		cfg:        cfg,
 		clients:    make(map[*client]struct{}),
@@ -145,11 +152,18 @@ func newService(cfg config) *Service {
 // ends or a client sends service/stop. It returns errAlreadyRunning when another
 // service answers on the endpoint.
 func (s *Service) Run(ctx context.Context) error {
+	if err := s.checkBuildApplyEntry(ctx); err != nil {
+		return err
+	}
 	release, err := acquireInstanceLock(s.cfg.endpoint)
 	if err != nil {
 		return err
 	}
 	defer release()
+	// Recheck after endpoint ownership, before creating logs/listeners/broker.
+	if err := s.checkBuildApplyEntry(ctx); err != nil {
+		return err
+	}
 
 	if alreadyAnswering(ctx, s.cfg.endpoint) {
 		return errAlreadyRunning
@@ -346,6 +360,8 @@ func (s *Service) handleClientFrame(c *client, frame []byte) bool {
 			return false
 		case strings.HasSuffix(msg.Method, unsubscribeSuffix), strings.HasPrefix(msg.Method, servicePrefix):
 			return true
+		case strings.HasPrefix(msg.Method, "build:apply-"):
+			return true
 		}
 		s.forwardNotification(frame)
 	}
@@ -363,7 +379,17 @@ func (s *Service) handleClientRequest(c *client, msg *jsonrpc.Message) bool {
 	case msg.Method == methodStatus:
 		c.respond(msg.ID, s.status())
 	case msg.Method == methodStop:
+		if err := s.checkBuildApplyStop(msg.Params); err != nil {
+			c.respondError(msg.ID, codeUnavailable, "Build apply owns shutdown until its exact runner acknowledges.")
+			return true
+		}
 		go s.handleStop(c, msg.ID)
+	case msg.Method == buildApplyNativeReadMethod:
+		go s.respondBuildApplyNativeRead(c, msg)
+	case msg.Method == buildApplyNativePrepareMethod || msg.Method == buildApplyNativeFinishMethod:
+		go s.respondBuildApplyOwnerCommand(c, msg)
+	case strings.HasPrefix(msg.Method, "build:apply-"):
+		c.respondError(msg.ID, codeMethodNotFound, "Build maintenance is service-owned.")
 	case isBuildApplyMethod(msg.Method):
 		s.handleBuildApply(c, msg)
 	case msg.Method == methodShutdown:
@@ -446,6 +472,10 @@ func (s *Service) isStopping() bool {
 // forwardRequest sends a client's request to the broker under a service-unique
 // id and remembers how to route the answer back.
 func (s *Service) forwardRequest(c *client, msg *jsonrpc.Message) {
+	if !s.buildApplyAllowsActivation(msg) {
+		c.respondError(msg.ID, buildapply.CodeMaintenanceBusy, "Finish the local build apply before local Resume.")
+		return
+	}
 	s.mu.Lock()
 	run := s.broker
 	switch {
@@ -474,6 +504,10 @@ func (s *Service) forwardRequest(c *client, msg *jsonrpc.Message) {
 }
 
 func (s *Service) forwardNotification(frame []byte) {
+	var msg jsonrpc.Message
+	if json.Unmarshal(frame, &msg) != nil || strings.HasPrefix(msg.Method, "build:apply-") || !s.buildApplyAllowsActivation(&msg) {
+		return
+	}
 	s.mu.Lock()
 	run := s.broker
 	s.mu.Unlock()
