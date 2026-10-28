@@ -423,6 +423,11 @@ func newPolicyJointFixture(t *testing.T, options ...policyJointFixtureOption) *p
 		option(&f.want)
 	}
 	jointWriteJSON(t, f.path, f.want)
+	if f.want.Availability == nodepolicy.Paused {
+		// Absent engines have no process to stop. Release the owned probe
+		// endpoint so recovery can verify that their connections are refused.
+		f.inert.Close()
+	}
 
 	binDir := testbin.Dir(t, "tests", "policy-joint", "joint-target-engine", "joint-origin-engine", "joint-empty-scanner")
 	f.engine = filepath.Join(binDir, testbin.Exe("joint-target-engine"))
