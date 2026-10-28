@@ -447,7 +447,7 @@ func (f *stopPauseFixture) assertPaused(t *testing.T, origin nodepolicy.PauseOri
 	identities := append([]serviceProcessIdentity(nil), f.engine.identities...)
 	f.engine.mu.Unlock()
 	for _, identity := range identities {
-		stopped, err := switchProcessIdentityStopped(context.Background(), identity)
+		stopped, err := f.engine.processStopped(context.Background(), identity)
 		if err != nil || !stopped {
 			t.Fatalf("Pause completed before native lifetime exited: identity=%+v stopped=%t err=%v", identity, stopped, err)
 		}
@@ -568,7 +568,7 @@ func testStopPauseRemoteRefusals(t *testing.T) {
 	f.engine.mu.Lock()
 	identity := f.engine.engineIdentities["llamacpp"][0]
 	f.engine.mu.Unlock()
-	if stopped, err := switchProcessIdentityStopped(context.Background(), identity); err != nil || stopped {
+	if stopped, err := f.engine.processStopped(context.Background(), identity); err != nil || stopped {
 		t.Fatalf("refusal stopped actual model lifetime: stopped=%t err=%v", stopped, err)
 	}
 	gate.once.Do(func() { close(gate.release) })
@@ -968,7 +968,7 @@ func testStopPauseDrain(t *testing.T, escalate bool) {
 	f.engine.mu.Lock()
 	identity := f.engine.engineIdentities["llamacpp"][0]
 	f.engine.mu.Unlock()
-	if stopped, err := switchProcessIdentityStopped(context.Background(), identity); err != nil || stopped {
+	if stopped, err := f.engine.processStopped(context.Background(), identity); err != nil || stopped {
 		t.Fatalf("configured finish killed held execution: stopped=%t err=%v", stopped, err)
 	}
 	select {
@@ -1095,6 +1095,17 @@ func testStopPauseAdopted(t *testing.T) {
 			waitErr := cmd.Wait()
 			t.Fatalf("record external lifetime: identity=%+v inspect=%v path=%v kill=%v wait=%v", identity, identityErr, pathErr, killErr, waitErr)
 		}
+		proof, err := retainFixtureProcessLifetime(identity)
+		if err != nil {
+			killErr := cmd.Process.Kill()
+			waitErr := cmd.Wait()
+			t.Fatalf("retain external lifetime: %v kill=%v wait=%v", err, killErr, waitErr)
+		}
+		t.Cleanup(func() {
+			if err := proof.close(); err != nil {
+				t.Errorf("close external lifetime: %v", err)
+			}
+		})
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 		var once sync.Once
@@ -1116,7 +1127,9 @@ func testStopPauseAdopted(t *testing.T) {
 				case <-time.After(10 * time.Second):
 					t.Error("fixture-owner child did not reap")
 				}
-				assertSwitchProcessIdentityStopped(t, identity)
+				if stopped, err := proof.wait(10 * time.Second); err != nil || !stopped {
+					t.Fatalf("external lifetime stopped=%t error=%v", stopped, err)
+				}
 			})
 		}
 		t.Cleanup(stopOwner)
@@ -1205,7 +1218,7 @@ func (p *stopPausePeer) assertPaused(t *testing.T) {
 	identities := append([]serviceProcessIdentity(nil), p.engine.identities...)
 	p.engine.mu.Unlock()
 	for _, identity := range identities {
-		stopped, err := switchProcessIdentityStopped(context.Background(), identity)
+		stopped, err := p.engine.processStopped(context.Background(), identity)
 		if err != nil || !stopped {
 			t.Fatalf("peer Pause completed before native lifetime exited: identity=%+v stopped=%t err=%v", identity, stopped, err)
 		}

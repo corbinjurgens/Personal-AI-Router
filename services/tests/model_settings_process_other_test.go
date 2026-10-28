@@ -1,33 +1,28 @@
-//go:build !windows
-
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
 
 package tests
 
 import (
-	"context"
+	"errors"
 	"time"
 )
 
-func modelSettingsReplaceProcess(expected serviceProcessIdentity, kill func() error, timeout time.Duration) (bool, error) {
+func modelSettingsReplaceProcess(expected serviceProcessIdentity, kill func() error, timeout time.Duration) (exited bool, err error) {
+	proof, err := retainFixtureProcessLifetime(expected)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		if closeErr := proof.close(); closeErr != nil {
+			exited = false
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	if err := kill(); err != nil {
 		return false, err
 	}
-	// Preserve the existing non-Windows identity proof and inspection errors.
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	tick := time.NewTicker(25 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		stopped, err := switchProcessIdentityStopped(ctx, expected)
-		if err != nil || stopped {
-			return stopped, err
-		}
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-tick.C:
-		}
-	}
+	return proof.wait(timeout)
 }

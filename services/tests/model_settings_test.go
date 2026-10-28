@@ -408,7 +408,7 @@ func TestModelSettingsRunningRestartConsumesWholeFinitePreset(t *testing.T) {
 	if !after.Running || !after.Settings.Equal(preview.Settings) || !reflect.DeepEqual(policy, f.policy(t)) {
 		t.Fatal("running apply did not persist selected settings and preserve policy")
 	}
-	assertSwitchProcessIdentityStopped(t, initial)
+	f.assertProcessStopped(t, initial)
 	replacement := f.engineIdentity(t, 2)
 	if replacement == initial {
 		t.Fatal("running apply reused the initial router lifetime")
@@ -458,7 +458,7 @@ func TestModelSettingsTimedDrainPrecedesWholeRouterRestart(t *testing.T) {
 	configure.unblock()
 	f.finishApply(t, applyID)
 	f.settled(t, request.RequestID, "succeeded")
-	assertSwitchProcessIdentityStopped(t, initial)
+	f.assertProcessStopped(t, initial)
 	gate.unblock()
 	select {
 	case <-done:
@@ -537,7 +537,7 @@ func TestModelSettingsBareAcceptedRestartRequiresFreshLocalSupersession(t *testi
 	case <-time.After(10 * time.Second):
 		t.Fatal("crashed synthetic inference did not return")
 	}
-	assertSwitchProcessIdentityStopped(t, initial)
+	f.assertProcessStopped(t, initial)
 	assertJournalUnchanged()
 	const interrupted = "Interrupted before changes; preview again on this device."
 	type receipt struct {
