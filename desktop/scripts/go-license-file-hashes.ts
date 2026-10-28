@@ -13,8 +13,6 @@ export const goLicenseFileHashes: Readonly<Record<string, string>> = {
         '283ea6cc2997a1a70da0049e09adf9317bb60ca1b51279b65196b83a69e1996b',
     'github.com/smallnest/ringbuffer@v0.0.0-20241116012123-461381446e3d':
         'da686686dff4164a151d3b04e42b805549e1b0f144f9edda21c828ffecf8fca5',
-    'golang.org/x/crypto@v0.29.0':
-        '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'golang.org/x/crypto@v0.55.0':
         '22975ebe413674bc619428a26e53412013dccffa69e2f27100dbd8d946fde287',
     'golang.org/x/exp@v0.0.0-20241108190413-2d47ceb2692f':
