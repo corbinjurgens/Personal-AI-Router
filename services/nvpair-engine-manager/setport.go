@@ -102,6 +102,7 @@ func (e *Executor) SetPort(ctx context.Context, engine string, port int) (Engine
 			return EngineStatus{}, err
 		}
 		st.mu.Lock()
+		st.withdrawOwnerKnowledgeLocked()
 		st.port = oldPort
 		if st.plat != nil {
 			st.plat.Runtime.Port = oldPort
@@ -112,6 +113,7 @@ func (e *Executor) SetPort(ctx context.Context, engine string, port int) (Engine
 	}
 
 	st.mu.Lock()
+	st.withdrawOwnerKnowledgeLocked()
 	st.port = port
 	if st.plat != nil {
 		st.plat.Runtime.Port = port

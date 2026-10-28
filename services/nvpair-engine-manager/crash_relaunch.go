@@ -30,6 +30,7 @@ func (e *Executor) scheduleCrashRelaunch(st *engineState, engine string) {
 	}
 	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), crashRelaunchContextKey{}, true))
 	recovery := &engineRelaunch{cancel: cancel, done: make(chan struct{})}
+	st.withdrawOwnerKnowledgeLocked()
 	st.relaunch = recovery
 	st.mu.Unlock()
 	go e.runCrashRelaunch(ctx, st, engine, recovery)
@@ -94,6 +95,7 @@ func cancelCrashRelaunch(st *engineState) <-chan struct{} {
 	recovery := st.relaunch
 	// A crash watcher may not have scheduled yet when an intentional stop
 	// arrives. Fence that late scheduling even when there is no live process.
+	st.withdrawOwnerKnowledgeLocked()
 	st.stopping = true
 	st.mu.Unlock()
 	if recovery == nil {
@@ -117,6 +119,7 @@ func (e *Executor) cancelPausedCrashRelaunches() {
 		st.mu.Lock()
 		recovery := st.relaunch
 		if recovery != nil {
+			st.withdrawOwnerKnowledgeLocked()
 			st.stopping = true
 		}
 		st.mu.Unlock()

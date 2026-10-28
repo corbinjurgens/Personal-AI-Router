@@ -39,6 +39,9 @@ func (e *Executor) admitBoundEngineMutation(engine, operationID string) (func(),
 			return nil, &switchBusyError{engine}
 		}
 	}
+	// This entry reserves the same evidence generation's retirement before
+	// publishing the global key or cold activation. Keep it held until both
+	// are retired below, including the interval before done reacquires the gate.
 	done, err := e.admitMutationLocked(engine)
 	if err != nil {
 		return nil, err

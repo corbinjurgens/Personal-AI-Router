@@ -77,12 +77,14 @@ type engineState struct {
 	// opMu is never held while contentMu is taken. See model_mutation.go.
 	contentMu chan struct{}
 
-	mu        sync.Mutex
-	installed bool
-	running   bool
-	healthy   bool
-	stopping  bool
-	adopted   bool // started externally; we can't stop it
+	mu sync.Mutex
+	// Evidence belongs to this state and is published only by completed owners.
+	ownerKnowledge ownerStateKnowledge
+	installed      bool
+	running        bool
+	healthy        bool
+	stopping       bool
+	adopted        bool // started externally; we can't stop it
 	// reclaimFailed fences adoption until verified stop or owned cold start.
 	reclaimFailed bool
 	// reclaimPID is evidence to check, never authority to signal a process.
@@ -127,9 +129,12 @@ type Executor struct {
 	switchMu          sync.Mutex
 	switchMutations   map[string]int
 	switchIncarnation string
-	switchParent      switchBrokerCall
-	settingsHub       settings.Hub
-	settingsParent    func(context.Context, string, settings.Request, string) (json.RawMessage, error)
+	// Entry reserves retirement capacity, so this fence cannot wrap or miss ABA.
+	ownerAdmissionGeneration uint64
+	ownerAdmissionHeld       uint64
+	switchParent             switchBrokerCall
+	settingsHub              settings.Hub
+	settingsParent           func(context.Context, string, settings.Request, string) (json.RawMessage, error)
 	// policyParent relays a paired node's node-policy call to the broker
 	// (policyrelay.go). nil until a Manager wires it.
 	policyParent func(ctx context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error)

@@ -141,8 +141,12 @@ func (e *Executor) setEngineLockedCommand(st *engineState, engine string, locked
 		st.mu.Unlock()
 		running := !e.waitUnavailable(st.plat.Runtime.Ready, port, presenceRefusalWindow) || !orphanPIDExited(pid)
 		st.mu.Lock()
+		st.withdrawOwnerKnowledgeLocked()
 		st.reclaimFailed = true
 		st.running, st.healthy, st.adopted = running, false, running
+		if running {
+			st.observeOwnerPresenceLocked(false)
+		}
 		st.mu.Unlock()
 		e.emitState(engine)
 		return fmt.Errorf("lock %s: %w", engine, err)

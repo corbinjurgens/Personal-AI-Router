@@ -521,6 +521,7 @@ func (e *Executor) reclaimOrphanForPID(ctx context.Context, st *engineState, eng
 		return true, fmt.Errorf("reclaim owned %s orphan: previous pid %d termination is unverified", engine, previousPID)
 	}
 	st.mu.Lock()
+	st.withdrawOwnerKnowledgeLocked()
 	st.reclaimPID = pid
 	st.mu.Unlock()
 	if err := terminatePIDContext(ctx, pid, stopGrace(rt)); err != nil {
@@ -540,6 +541,7 @@ func (e *Executor) reclaimOrphanForPID(ctx context.Context, st *engineState, eng
 
 func (e *Executor) failOrphanReclaim(st *engineState, engine string, err error) {
 	st.mu.Lock()
+	st.withdrawOwnerKnowledgeLocked()
 	st.reclaimFailed = true
 	st.running, st.healthy, st.adopted = false, false, false
 	st.runID = ""

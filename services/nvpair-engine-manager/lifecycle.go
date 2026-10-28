@@ -168,6 +168,16 @@ func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts)
 
 // doStart performs the start. Callers must hold st.opMu.
 func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, opts startOpts) (err error) {
+	st.mu.Lock()
+	st.withdrawOwnerKnowledgeLocked()
+	st.mu.Unlock()
+	defer func() {
+		if err != nil {
+			st.mu.Lock()
+			st.withdrawOwnerKnowledgeLocked()
+			st.mu.Unlock()
+		}
+	}()
 	ctx, finish := e.startContext(ctx, st)
 	cleanupCtx := context.Background()
 	if opts.BoundedCleanup {
@@ -191,6 +201,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	running := st.running
 	adopted := st.adopted
 	if running && !adopted {
+		st.observeOwnerPresenceLocked(false)
 		st.mu.Unlock()
 		return nil
 	}
@@ -346,6 +357,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	st.adopted = false
 	st.reclaimFailed = false
 	st.reclaimPID = 0
+	st.observeOwnerPresenceLocked(false)
 	st.gen++
 	gen := st.gen
 	recovery := st.relaunch
@@ -819,6 +831,7 @@ func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 		stopping := st.stopping
 		current := st.proc == proc
 		if current {
+			st.withdrawOwnerKnowledgeLocked()
 			st.proc = nil
 			st.running = false
 			st.runID = ""
@@ -901,6 +914,11 @@ func (e *Executor) stopFromApplied(engine string, origin intentOrigin, operation
 }
 
 func (e *Executor) verifyStopped(engine string) (settings.SwitchEngineState, error) {
+	done, err := e.admitOwnerCheckpoint()
+	if err != nil {
+		return settings.SwitchEngineState{}, err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return settings.SwitchEngineState{}, err
@@ -962,6 +980,16 @@ func (err *stopOwnershipChangedError) Error() string {
 }
 
 func (e *Executor) doStopOwnedContext(ctx context.Context, st *engineState, engine string, ownership *stopOwnership) (err error) {
+	st.mu.Lock()
+	st.ownerKnowledge.PresenceKnown, st.ownerKnowledge.PositiveStop = false, false
+	st.mu.Unlock()
+	defer func() {
+		if err != nil {
+			st.mu.Lock()
+			st.withdrawOwnerKnowledgeLocked()
+			st.mu.Unlock()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1165,6 +1193,10 @@ func (e *Executor) markStopped(st *engineState, engine string) {
 	st.proc = nil
 	st.reclaimFailed = false
 	st.reclaimPID = 0
+	// Process stop/reclaim reaches this boundary only after its existing
+	// termination verification. Command completion alone does not prove that
+	// detached model processes have exited. Keep that physical fact unknown.
+	st.observeOwnerPresenceLocked(st.plat.Runtime.modeOrDefault() == "process")
 	st.mu.Unlock()
 	// A deliberately-stopped engine has no live unhealthy/crash condition.
 	e.reporter.clear(unhealthyID(engine))
