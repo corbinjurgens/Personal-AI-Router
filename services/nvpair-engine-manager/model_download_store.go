@@ -186,9 +186,20 @@ func (s modelDownloadStore) loadJournal() (map[downloadContentKey]modelDownloadM
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, modeldownload.MaxJournalBytes+1))
-	if err != nil || len(data) > modeldownload.MaxJournalBytes || !utf8.Valid(data) {
+	if err != nil {
 		return nil, nil, false, false, errDownloadPersistence
 	}
+	return decodeModelDownloadJournal(data)
+}
+
+// decodeModelDownloadJournal validates the complete current journal from the
+// exact bytes supplied by its caller.
+func decodeModelDownloadJournal(data []byte) (map[downloadContentKey]modelDownloadMarker, map[string]modelCopyMarker, bool, bool, error) {
+	if len(data) > modeldownload.MaxJournalBytes || !utf8.Valid(data) {
+		return nil, nil, false, false, errDownloadPersistence
+	}
+	markers := make(map[downloadContentKey]modelDownloadMarker)
+	copies := make(map[string]modelCopyMarker)
 	var journal modelDownloadJournal
 	if json.Unmarshal(data, &journal) != nil {
 		return nil, nil, false, false, errDownloadPersistence
@@ -249,24 +260,19 @@ func (s modelDownloadStore) save(markers map[downloadContentKey]modelDownloadMar
 		return false, false, errDownloadPersistence
 	}
 	// Validate our own output too, before the first filesystem effect.
-	var checked modelDownloadJournal
-	if json.Unmarshal(data, &checked) != nil {
+	if _, _, _, _, err := decodeModelDownloadJournal(data); err != nil {
 		return false, false, errDownloadPersistence
 	}
-	ids, identities := make(map[string]bool), make(map[string]bool)
 	for _, marker := range journal.Entries {
 		key, keyErr := downloadKey(marker.Engine, marker.Model, marker.Naming)
-		if keyErr != nil || key.model != marker.ContentKey || !lowerHex(marker.ID, 32) || ids[marker.ID] || markers[key] != marker {
+		if keyErr != nil || markers[key] != marker {
 			return false, false, errDownloadPersistence
 		}
-		ids[marker.ID] = true
 	}
 	for _, marker := range journal.Copies {
-		identity := marker.Role + "\x00" + marker.SourceNodeID + "\x00" + marker.DestinationNodeID + "\x00" + marker.Engine + "\x00" + marker.ContentKey
-		if marker.validate() != nil || ids[marker.OpID] || identities[identity] || copies[marker.OpID] != marker {
+		if copies[marker.OpID] != marker {
 			return false, false, errDownloadPersistence
 		}
-		ids[marker.OpID], identities[identity] = true, true
 	}
 	err = s.replace.WriteFile(s.path, data, 0600)
 	if err == nil {
