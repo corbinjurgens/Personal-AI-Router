@@ -147,12 +147,15 @@ func prepareStrataRuntimeHashes(ctx context.Context, command launchCommand, rt R
 			return ctx.Err()
 		case hashed = <-done:
 		}
-		if hashed.err != nil {
-			return hashed.err
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		after, err := os.Stat(path)
 		if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || before.ModTime() != after.ModTime() {
 			return servingError("Strata runtime changed during preparation.")
+		}
+		if hashed.err != nil {
+			return hashed.err
 		}
 		if replaced {
 			fileHashes.remember(path, hashed.sum)

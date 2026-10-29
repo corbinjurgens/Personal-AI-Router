@@ -484,15 +484,22 @@ func TestLinkedModelHashBinding(t *testing.T) {
 		assertCounts(t, counts, 0, 0)
 	})
 
-	concurrent := func(name string, cancelLeader, replaceObject, cancelWaiter bool) {
+	concurrent := func(name string, cancelLeader, replaceObject, cancelWaiter, opening bool) {
 		t.Run(name, func(t *testing.T) {
 			data := []byte("original")
 			e, replacement := fixture(t, data)
 			entered, release := make(chan struct{}), make(chan struct{})
 			var first, releaseOnce sync.Once
 			c, counts := observe(e, nil, func(f *linkedHashFile) {
-				f.beforeRead = func() {
-					first.Do(func() { close(entered); <-release })
+				if opening {
+					f.stat = func() (os.FileInfo, error) {
+						first.Do(func() { close(entered); <-release })
+						return f.File.Stat()
+					}
+				} else {
+					f.beforeRead = func() {
+						first.Do(func() { close(entered); <-release })
+					}
 				}
 			})
 			type result struct {
@@ -583,16 +590,21 @@ func TestLinkedModelHashBinding(t *testing.T) {
 			if cancelLeader && !replaceObject && !cancelWaiter {
 				wantOpens++
 			}
-			assertCounts(t, counts, wantOpens*e.size, wantOpens)
+			wantBytes := wantOpens * e.size
+			if opening {
+				wantBytes -= e.size // Canceled opening closes before any content read.
+			}
+			assertCounts(t, counts, wantBytes, wantOpens)
 			if cancelLeader && replaceObject {
 				assertUnpublished(t, c, listFor(e))
 			}
 		})
 	}
-	concurrent("unchanged concurrent requests share one stream", false, false, false)
-	concurrent("unchanged waiter retries a canceled leader", true, false, false)
-	concurrent("real canceled leader cannot refresh waiting authority", true, true, false)
-	concurrent("canceled waiter leaves the leader usable", false, false, true)
+	concurrent("unchanged concurrent requests share one stream", false, false, false, false)
+	concurrent("unchanged waiter retries a canceled leader", true, false, false, false)
+	concurrent("real canceled leader cannot refresh waiting authority", true, true, false, false)
+	concurrent("canceled waiter leaves the leader usable", false, false, true, false)
+	concurrent("unchanged waiter retries cancellation during checked opening", true, false, false, true)
 
 	t.Run("path wrappers hash current destination objects and remembered IDs stay pinned", func(t *testing.T) {
 		data := []byte("original")

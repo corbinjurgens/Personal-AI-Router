@@ -190,12 +190,16 @@ func (c *hashCache) sum(ctx context.Context, abs string, onBytes func(int64)) (s
 	if err != nil {
 		return "", err
 	}
-	return c.sumBound(ctx, e, onBytes)
+	return c.sumBoundKey(ctx, e, abs, onBytes)
 }
 
 // sumBound retains the requesting object's authority across cache hits, waits
 // and retries. Only the path-based wrappers may capture a current object.
 func (c *hashCache) sumBound(ctx context.Context, e sourceEvidence, onBytes func(int64)) (string, error) {
+	return c.sumBoundKey(ctx, e, e.target, onBytes)
+}
+
+func (c *hashCache) sumBoundKey(ctx context.Context, e sourceEvidence, abs string, onBytes func(int64)) (string, error) {
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -203,7 +207,7 @@ func (c *hashCache) sumBound(ctx context.Context, e sourceEvidence, onBytes func
 		if e.directory || validateSource(e) != nil {
 			return "", fmt.Errorf("invalid hash source evidence")
 		}
-		abs, info := e.target, e.info
+		info := e.info
 		key := hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano()}
 		c.mu.Lock()
 		if cached, ok := c.done[abs]; ok && cached.size == key.size && cached.mtime == key.mtime && cached.info != nil && os.SameFile(cached.info, info) {
@@ -250,7 +254,7 @@ func (c *hashCache) sumBound(ctx context.Context, e sourceEvidence, onBytes func
 		call.sum, call.err = c.hashBound(ctx, e, onBytes)
 		c.mu.Lock()
 		delete(c.inflight, key)
-		if call.err == nil && ctx.Err() != nil {
+		if ctx.Err() != nil {
 			call.sum, call.err = "", ctx.Err()
 		}
 		if call.err == nil {
@@ -283,7 +287,7 @@ func (c *hashCache) remember(abs, sum string) {
 	if c.done == nil {
 		c.done = make(map[string]hashEntry)
 	}
-	c.done[e.target] = hashEntry{path: e.target, size: e.size, mtime: e.mtime, sum: sum, info: e.info}
+	c.done[abs] = hashEntry{path: abs, size: e.size, mtime: e.mtime, sum: sum, info: e.info}
 	c.mu.Unlock()
 }
 
@@ -296,7 +300,7 @@ func hashFile(ctx context.Context, abs string, onBytes func(int64)) (string, err
 	if err != nil {
 		return "", err
 	}
-	return fileHashes.hashBound(ctx, e, onBytes)
+	return fileHashes.sumBoundKey(ctx, e, abs, onBytes)
 }
 
 func (c *hashCache) hashBound(ctx context.Context, e sourceEvidence, onBytes func(int64)) (string, error) {
