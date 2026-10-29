@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"runtime"
@@ -18,6 +19,74 @@ import (
 )
 
 func TestMemoryPlanProcessUnixTrees(t *testing.T) { testMemoryPlanProcessTrees(t) }
+
+func TestMemoryPlanProcessUnixCleanup(t *testing.T) {
+	type step struct {
+		signal syscall.Signal
+		err    error
+	}
+	test := func(name string, steps []step) {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			calls := 0
+			err := cleanupMemoryPlanProcessGroup(ctx, 123, func(pid int, signal syscall.Signal) error {
+				if calls >= len(steps) {
+					t.Fatal("cleanup continued after confirmed group absence")
+				}
+				want := steps[calls]
+				calls++
+				if pid != -123 || signal != want.signal {
+					t.Fatalf("signal call %d: pid=%d signal=%v, want pid=-123 signal=%v", calls, pid, signal, want.signal)
+				}
+				return want.err
+			})
+			if err != nil || calls != len(steps) {
+				t.Fatalf("cleanup: err=%v calls=%d, want nil and %d", err, calls, len(steps))
+			}
+		})
+	}
+	test("exiting group rejects kill before disappearing", []step{
+		{syscall.SIGKILL, syscall.EPERM},
+		{0, syscall.EPERM},
+		{syscall.SIGKILL, nil},
+		{0, syscall.ESRCH},
+	})
+	test("exiting group rejects probe before disappearing", []step{
+		{syscall.SIGKILL, nil},
+		{0, syscall.EPERM},
+		{0, syscall.ESRCH},
+	})
+	test("absent group", []step{{syscall.SIGKILL, syscall.ESRCH}})
+	for _, denied := range []bool{false, true} {
+		name := "live group is unconfirmed"
+		if denied {
+			name = "permission denied is unconfirmed"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			err := cleanupMemoryPlanProcessGroup(ctx, 123, func(pid int, signal syscall.Signal) error {
+				if pid != -123 {
+					t.Fatalf("cleanup signalled pid=%d, want group -123", pid)
+				}
+				cancel()
+				if denied {
+					return syscall.EPERM
+				}
+				return nil
+			})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cleanup without absence proof: %v, want cancellation", err)
+			}
+		})
+	}
+	t.Run("unexpected signal error", func(t *testing.T) {
+		if err := cleanupMemoryPlanProcessGroup(context.Background(), 123, func(int, syscall.Signal) error { return syscall.EIO }); !errors.Is(err, syscall.EIO) {
+			t.Fatalf("cleanup signal error: %v, want EIO", err)
+		}
+	})
+}
 
 func assertMemoryPlanProcessStopped(t *testing.T, pid int) {
 	t.Helper()

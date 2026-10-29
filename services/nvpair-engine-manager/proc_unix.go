@@ -72,24 +72,39 @@ func startMemoryPlanProcess(ctx context.Context, cmd *exec.Cmd) (func(context.Co
 	}
 	pgid := cmd.Process.Pid
 	return func(ctx context.Context) error {
-		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return err
-		}
-		for {
-			err := syscall.Kill(-pgid, 0)
+		return cleanupMemoryPlanProcessGroup(ctx, pgid, syscall.Kill)
+	}, nil
+}
+
+func cleanupMemoryPlanProcessGroup(ctx context.Context, pgid int, kill func(int, syscall.Signal) error) error {
+	signalled := false
+	for {
+		// Darwin can return EPERM for a group whose last members are exiting.
+		// It is not absence proof: retry both signalling and confirmation inside
+		// the original deadline, so genuine permission denial still fails closed.
+		if !signalled {
+			err := kill(-pgid, syscall.SIGKILL)
 			if err == syscall.ESRCH {
 				return nil
 			}
-			if err != nil {
+			if err != nil && err != syscall.EPERM {
 				return err
 			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(10 * time.Millisecond):
-			}
+			signalled = err == nil
 		}
-	}, nil
+		err := kill(-pgid, 0)
+		if err == syscall.ESRCH {
+			return nil
+		}
+		if err != nil && err != syscall.EPERM {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 // gracefulSignal sends SIGTERM to the process's own group if it leads one,
