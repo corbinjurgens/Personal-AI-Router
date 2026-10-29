@@ -754,23 +754,40 @@ func TestLinkedModelNativeSnapshot(t *testing.T) {
 			t.Skipf("symlink unavailable: %v", err)
 		}
 		c := &counts{}
-		list, err := ex.modelSourceFilesWithAccess(ctx, "lmstudio", "demo", access(c))
-		assertEmpty(t, list, err)
-		if c.reads != 0 || c.streams != 0 || c.dirs != 0 {
-			t.Fatalf("outside target caused access: %+v", c)
+		seenDirs := map[string]bool{}
+		base := access(c)
+		openDir := base.openDir
+		base.openDir = func(path string) (servingDirectory, error) { seenDirs[path] = true; return openDir(path) }
+		list, err := ex.modelSourceFilesWithAccess(ctx, "lmstudio", "demo", base)
+		if err != nil || len(list.Files) != 2 || list.Files[0].Path != "owner/demo/model.gguf" || list.Files[0].abs != filepath.Join(outside, "model.gguf") || list.Files[1].Path != "owner/demo/mmproj.gguf" {
+			t.Fatalf("selected namespace files=%v err=%v", list.Files, err)
+		}
+		if c.reads != 0 || c.streams != 0 || !reflect.DeepEqual(seenDirs, map[string]bool{filepath.Join(root, "owner/demo"): true}) {
+			t.Fatalf("unexpected content or directory access: counts=%+v paths=%v", c, seenDirs)
 		}
 	})
-	t.Run("LM Studio selected directory links retain their existing refusal", func(t *testing.T) {
+	t.Run("LM Studio selected directory link retains its exact tree", func(t *testing.T) {
 		ex, root, rows := lmstudio(t, "MLX")
 		(*rows)[0].Path = "owner/linked"
 		if err := os.Symlink(filepath.Join(root, "owner/demo"), filepath.Join(root, "owner/linked")); err != nil {
 			t.Skipf("symlink unavailable: %v", err)
 		}
 		c := &counts{}
-		list, err := ex.modelSourceFilesWithAccess(ctx, "lmstudio", "demo", access(c))
-		assertEmpty(t, list, err)
-		if c.reads != 0 || c.streams != 0 || c.dirs != 0 {
-			t.Fatalf("selected directory link caused traversal: %+v", c)
+		seenDirs := map[string]bool{}
+		base := access(c)
+		openDir := base.openDir
+		base.openDir = func(path string) (servingDirectory, error) { seenDirs[path] = true; return openDir(path) }
+		list, err := ex.modelSourceFilesWithAccess(ctx, "lmstudio", "demo", base)
+		var paths []string
+		for _, file := range list.Files {
+			paths = append(paths, file.Path)
+		}
+		want := []string{"owner/linked/empty.json", "owner/linked/tokenizer/vocab.json", "owner/linked/weights.safetensors"}
+		if err != nil || !reflect.DeepEqual(paths, want) || list.Files[0].Size != 0 {
+			t.Fatalf("linked tree files=%v err=%v", paths, err)
+		}
+		if c.reads != 0 || c.streams != 0 || !reflect.DeepEqual(seenDirs, map[string]bool{filepath.Join(root, "owner/linked"): true, filepath.Join(root, "owner/linked/tokenizer"): true}) {
+			t.Fatalf("unexpected tree access: counts=%+v paths=%v", c, seenDirs)
 		}
 	})
 }
