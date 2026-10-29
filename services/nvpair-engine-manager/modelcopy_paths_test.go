@@ -5,10 +5,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 )
 
@@ -116,25 +118,62 @@ func testModelCopyDestinationReplacementAfterPreflight(t *testing.T) {
 	outside := filepath.Join(base, "outside")
 	writeTestFile(t, filepath.Join(parent, "existing"), []byte("original"))
 	writeTestFile(t, filepath.Join(outside, "sentinel"), []byte("keep"))
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("stat parent: %v", err)
+	}
+	if !os.SameFile(parentInfo, parentInfo) {
+		t.Fatal("parent identity is unavailable")
+	}
 	data := []byte("model")
 	src := &fakeModelSource{data: map[string][]byte{"file": data}}
+	called := false
+	var renameErr error
 	src.onFetch = func(string) {
-		if err := os.Rename(parent, filepath.Join(root, "original")); err != nil {
-			t.Fatalf("move parent: %v", err)
+		called = true
+		renameErr = os.Rename(parent, filepath.Join(root, "original"))
+		if renameErr != nil {
+			if runtime.GOOS != "windows" || !(errors.Is(renameErr, syscall.Errno(5)) || errors.Is(renameErr, syscall.Errno(32)) || errors.Is(renameErr, syscall.Errno(33))) {
+				t.Fatalf("move parent: %v", renameErr)
+			}
+			return
 		}
 		if err := os.Symlink(outside, parent); err != nil {
 			t.Fatalf("replace parent: %v", err)
 		}
 	}
 	f := plannedFile{modelFile: modelFile{Path: "file", Size: int64(len(data)), SHA256: sha256Hex(data)}, root: root, dest: filepath.Join(parent, "file")}
-	if _, _, err := downloadPlannedFile(context.Background(), src, "llamacpp", "model", f, func(int64) {}); err == nil {
+	_, _, copyErr := downloadPlannedFile(context.Background(), src, "llamacpp", "model", f, func(int64) {})
+	if !called {
+		t.Fatal("fetch hook was not called")
+	}
+	if renameErr == nil && copyErr == nil {
 		t.Fatal("accepted replaced parent")
+	}
+	if renameErr != nil {
+		t.Logf("Windows prevented parent replacement: %v; copy result: %v", renameErr, copyErr)
+		currentInfo, err := os.Stat(parent)
+		if err != nil || !os.SameFile(parentInfo, currentInfo) {
+			t.Fatalf("parent changed after refused rename: %v", err)
+		}
+		existing, err := os.ReadFile(filepath.Join(parent, "existing"))
+		if err != nil || string(existing) != "original" {
+			t.Fatalf("existing = %q, error = %v", existing, err)
+		}
+		if copyErr == nil {
+			copied, err := os.ReadFile(f.dest)
+			if err != nil || sha256Hex(copied) != sha256Hex(data) {
+				t.Fatalf("destination digest mismatch, error = %v", err)
+			}
+		}
 	}
 	got, err := os.ReadFile(filepath.Join(outside, "sentinel"))
 	if err != nil || string(got) != "keep" {
 		t.Fatalf("sentinel = %q, error = %v", got, err)
 	}
-	if _, err := os.Stat(filepath.Join(outside, "file")); !os.IsNotExist(err) {
-		t.Fatalf("outside destination exists or stat failed: %v", err)
+	for _, name := range []string{"file", "file.part"} {
+		if _, err := os.Lstat(filepath.Join(outside, name)); !os.IsNotExist(err) {
+			t.Fatalf("outside %s exists or lstat failed: %v", name, err)
+		}
 	}
 }
