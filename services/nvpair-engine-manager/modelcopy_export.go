@@ -24,6 +24,7 @@ import (
 	"unicode"
 
 	"nvpair-shared/durablefile"
+	"nvpair-shared/engines"
 	"nvpair-shared/modelconfig"
 )
 
@@ -237,7 +238,18 @@ func nativeExportID(list modelFileList) (string, error) {
 // A cold full hash may outlive a settings update. Re-resolve after hashing so
 // a manifest is never issued from a configuration superseded during that read.
 func (e *Executor) recheckCopyExport(ctx context.Context, list modelFileList) error {
-	current, err := e.modelSourceFiles(ctx, list.Engine, list.Model)
+	var current modelFileList
+	var err error
+	if list.Layout == llamaArtifactsLayout {
+		var st *engineState
+		var store engineModelStore
+		st, store, err = e.modelStoreFor(list.Engine)
+		if err == nil {
+			current, err = e.llamaExportFilesBound(ctx, st, store, list.Model, servingFileAccess{}, &list)
+		}
+	} else {
+		current, err = e.modelSourceFiles(ctx, list.Engine, list.Model)
+	}
 	if err != nil || current.Layout != list.Layout || current.binding != list.binding || len(current.Files) != len(list.Files) {
 		return fmt.Errorf("custom artifact binding changed during hashing")
 	}
@@ -396,6 +408,10 @@ func (e *Executor) llamaExportFiles(ctx context.Context, st *engineState, store 
 }
 
 func (e *Executor) llamaExportFilesWithAccess(ctx context.Context, st *engineState, store engineModelStore, model string, access servingFileAccess) (modelFileList, error) {
+	return e.llamaExportFilesBound(ctx, st, store, model, access, nil)
+}
+
+func (e *Executor) llamaExportFilesBound(ctx context.Context, st *engineState, store engineModelStore, model string, access servingFileAccess, expected *modelFileList) (modelFileList, error) {
 	if err := ctx.Err(); err != nil {
 		return modelFileList{}, err
 	}
@@ -420,7 +436,13 @@ func (e *Executor) llamaExportFilesWithAccess(ctx context.Context, st *engineSta
 		}
 		return observation, checkConfiguration()
 	}
-	list, presetSelected, err := resolveLlamaArtifacts(ctx, snapshot, command, store, model, access)
+	var list modelFileList
+	var presetSelected bool
+	if expected == nil {
+		list, presetSelected, err = resolveLlamaArtifacts(ctx, snapshot, command, store, model, access)
+	} else {
+		list, presetSelected, err = resolveLlamaArtifactsExpected(ctx, snapshot, command, store, model, access, *expected)
+	}
 	if err != nil {
 		return modelFileList{}, err
 	}
@@ -466,6 +488,117 @@ func (e *Executor) llamaExportFilesWithAccess(ctx context.Context, st *engineSta
 // The boolean identifies a matching preset so copy approval applies to that
 // source, without making receipt-only exports depend on unrelated declarations.
 func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command launchCommand, store engineModelStore, model string, access servingFileAccess) (modelFileList, bool, error) {
+	return resolveLlamaArtifactsBound(ctx, snapshot, command, store, model, access, nil)
+}
+
+// Rechecks retain every agreeing source, including sources that did not supply
+// the returned file paths. They never capture authority for a replacement.
+func resolveLlamaArtifactsExpected(ctx context.Context, snapshot *engineState, command launchCommand, store engineModelStore, model string, access servingFileAccess, expected modelFileList) (modelFileList, bool, error) {
+	if expected.Engine != store.engine || expected.Model != model || expected.source == nil {
+		return modelFileList{}, false, errModelInspectionChanged
+	}
+	return resolveLlamaArtifactsBound(ctx, snapshot, command, store, model, access, &expected)
+}
+
+type llamaResolutionEvidence struct {
+	source   *sourceSnapshot
+	expected *sourceSnapshot
+}
+
+func (r llamaResolutionEvidence) file(path string) (sourceEvidence, error) {
+	if r.expected == nil {
+		return captureSource(path, false)
+	}
+	for _, selector := range r.expected.selectors {
+		if selector.file.configured == path {
+			return selector.file, validateSource(selector.file)
+		}
+	}
+	for _, file := range r.expected.artifacts {
+		if file.configured == path && file.info != nil {
+			e := sourceEvidence{configured: file.configured, target: file.abs, info: file.info, size: file.Size, mtime: file.info.ModTime().UnixNano()}
+			return e, validateSource(e)
+		}
+	}
+	return sourceEvidence{}, errModelInspectionChanged
+}
+
+func (r llamaResolutionEvidence) selector(ctx context.Context, path string, access servingFileAccess) ([]byte, *engines.ServingBinding, error) {
+	e, err := r.file(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	data, binding, err := access.sourceExpected(ctx, e, servingSmallFileLimit, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	if r.expected != nil {
+		found := false
+		for _, old := range r.expected.selectors {
+			if old.file.configured == path {
+				found = old.binding != nil && *old.binding == *binding && bytes.Equal(old.bytes, data)
+				break
+			}
+		}
+		if !found {
+			return nil, nil, errModelInspectionChanged
+		}
+	}
+	r.source.selectors = append(r.source.selectors, selectorEvidence{file: e, bytes: append([]byte(nil), data...), binding: binding})
+	return data, binding, nil
+}
+
+func (r llamaResolutionEvidence) artifact(ctx context.Context, path string, access servingFileAccess) (*engines.ServingBinding, os.FileInfo, error) {
+	e, err := r.file(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	binding, err := access.bindingExpected(ctx, e.configured, e.target, e.info)
+	if err != nil {
+		return nil, nil, err
+	}
+	if r.expected != nil {
+		found := false
+		for _, old := range r.expected.artifacts {
+			if old.configured == path && old.sample == binding.SampleSHA256 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, nil, errModelInspectionChanged
+		}
+	}
+	return binding, e.info, nil
+}
+
+func validateResolutionEvidence(ctx context.Context, source *sourceSnapshot) error {
+	if source == nil || len(source.artifacts) == 0 {
+		return errModelInspectionChanged
+	}
+	var evidence []sourceEvidence
+	evidence = append(evidence, source.directories...)
+	for _, selector := range source.selectors {
+		evidence = append(evidence, selector.file)
+	}
+	for _, file := range source.artifacts {
+		if file.info == nil {
+			return errModelInspectionChanged
+		}
+		evidence = append(evidence, sourceEvidence{configured: file.configured, target: file.abs, info: file.info, size: file.Size, mtime: file.info.ModTime().UnixNano()})
+	}
+	for _, e := range evidence {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := validateSource(e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func resolveLlamaArtifactsBound(ctx context.Context, snapshot *engineState, command launchCommand, store engineModelStore, model string, access servingFileAccess, expected *modelFileList) (modelFileList, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return modelFileList{}, false, err
 	}
@@ -479,6 +612,34 @@ func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command l
 		return modelFileList{}, false, errNoArtifactBinding
 	}
 	rt := snapshot.plat.Runtime
+	configuration, err := json.Marshal(struct {
+		Command launchCommand
+		Serving any
+		Loads   []modelconfig.ModelLoad
+	}{command, rt.Serving, rt.ModelLoads})
+	if err != nil {
+		return modelFileList{}, false, err
+	}
+	evidence := llamaResolutionEvidence{source: &sourceSnapshot{engine: store.engine, root: store.root, configuration: string(configuration)}}
+	if expected != nil {
+		evidence.expected = expected.source
+		if expected.source.engine != store.engine || expected.source.root != store.root || (expected.source.inventory == nil && expected.source.configuration != string(configuration)) {
+			return modelFileList{}, false, errModelInspectionChanged
+		}
+		if err := validateResolutionEvidence(ctx, expected.source); err != nil {
+			return modelFileList{}, false, err
+		}
+		// Typed resolution also uses this opener, so even its initial sampling
+		// must retain the request's original object rather than a fresh stat.
+		originalAccess := access
+		access.open = func(path string) (servingArtifactFile, error) {
+			old, err := evidence.file(path)
+			if err != nil {
+				return nil, err
+			}
+			return originalAccess.checkedOpen(ctx, old.configured, old.target, old.info)
+		}
+	}
 	presetConfigured := rt.Serving != nil && len(rt.ModelLoads) == 0
 	for _, arg := range command.Args {
 		name, _, _ := strings.Cut(arg, "=")
@@ -508,7 +669,7 @@ func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command l
 		if !artifactPathSafe(source) {
 			return modelFileList{}, false, errNoArtifactBinding
 		}
-		data, binding, readErr := access.source(ctx, source)
+		data, binding, readErr := evidence.selector(ctx, source, access)
 		if readErr != nil {
 			return modelFileList{}, false, fmt.Errorf("configured custom preset is missing or unstable")
 		}
@@ -537,17 +698,14 @@ func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command l
 				if !artifactPathSafe(path) || !strings.HasSuffix(path, ".gguf") {
 					return modelFileList{}, false, fmt.Errorf("custom copies require local GGUF model and draft artifacts")
 				}
-				current, bindErr := access.binding(ctx, path)
+				current, info, bindErr := evidence.artifact(ctx, path, access)
 				if bindErr != nil {
 					return modelFileList{}, false, fmt.Errorf("configured model or draft shard is missing or unstable")
 				}
-				info, statErr := os.Stat(current.ResolvedTarget)
-				if statErr != nil {
-					return modelFileList{}, false, fmt.Errorf("configured artifact is unavailable")
-				}
 				list.Files = append(list.Files, modelFile{Role: roles[i], Path: roles[i] + "/" + filepath.Base(path), Size: info.Size(), abs: current.ResolvedTarget, configured: current.SourcePath, sample: current.SampleSHA256, info: info})
 			}
-			after, afterErr := access.binding(ctx, source)
+			old := evidence.source.selectors[len(evidence.source.selectors)-1].file
+			after, afterErr := access.bindingExpected(ctx, old.configured, old.target, old.info)
 			if afterErr != nil || *binding != *after {
 				return modelFileList{}, false, fmt.Errorf("configured preset changed during export resolution")
 			}
@@ -566,7 +724,7 @@ func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command l
 			}
 		}
 	}
-	receipt, receiptErr := readCopyReceiptWithAccess(ctx, store, model, access)
+	receipt, receiptErr := readCopyReceiptBound(ctx, store, model, access, &evidence)
 	if receiptErr != nil && !errors.Is(receiptErr, os.ErrNotExist) {
 		return modelFileList{}, false, receiptErr
 	}
@@ -581,13 +739,9 @@ func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command l
 			if err := safeCopyDestinationBounded(ctx, store.root, path, access.scan); err != nil {
 				return modelFileList{}, false, fmt.Errorf("copied artifact location is unsafe: %w", err)
 			}
-			binding, err := access.binding(ctx, path)
+			binding, info, err := evidence.artifact(ctx, path, access)
 			if err != nil {
 				return modelFileList{}, false, fmt.Errorf("committed copy artifact is missing or unstable")
-			}
-			info, err := os.Stat(binding.ResolvedTarget)
-			if err != nil {
-				return modelFileList{}, false, fmt.Errorf("committed copy artifact unavailable")
 			}
 			f.abs, f.configured, f.info, f.asserted, f.SHA256 = binding.ResolvedTarget, binding.SourcePath, info, f.SHA256, ""
 			f.sample = binding.SampleSHA256
@@ -628,8 +782,16 @@ func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command l
 		bindings := make([]string, 0, len(candidates))
 		for _, candidate := range candidates {
 			bindings = append(bindings, candidate.binding)
+			evidence.source.artifacts = append(evidence.source.artifacts, candidate.Files...)
 		}
 		candidates[0].binding = exportBinding(candidates[0], bindings)
+		candidates[0].source = evidence.source
+		if err := validateResolutionEvidence(ctx, evidence.source); err != nil {
+			return modelFileList{}, false, err
+		}
+		if expected != nil && (candidates[0].binding != expected.binding || len(evidence.source.artifacts) != len(expected.source.artifacts) || len(evidence.source.selectors) != len(expected.source.selectors)) {
+			return modelFileList{}, false, errModelInspectionChanged
+		}
 		return candidates[0], presetSelected, nil
 	}
 	if _, _, err := splitLlamaModel(model); err == nil {
@@ -641,9 +803,31 @@ func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command l
 				return modelFileList{}, false, err
 			}
 		}
-		list, err := boundedLlamaCacheArtifacts(ctx, store, model, access)
+		var list modelFileList
+		var err error
+		if expected != nil {
+			old := *expected
+			hfSource := *expected.source
+			prefix := len(evidence.source.selectors)
+			if prefix > len(hfSource.selectors) {
+				return modelFileList{}, false, errModelInspectionChanged
+			}
+			hfSource.selectors = hfSource.selectors[prefix:]
+			old.source = &hfSource
+			list, err = boundedLlamaCacheArtifactsExpected(ctx, store, model, access, old)
+		} else {
+			list, err = boundedLlamaCacheArtifacts(ctx, store, model, access)
+		}
+		if err == nil {
+			list.source.configuration = string(configuration)
+			list.source.selectors = append(evidence.source.selectors, list.source.selectors...)
+		}
 		if err == nil && access.recognize != nil {
-			list.source = nativeSourceSnapshot(store, observation, list.Files)
+			native := nativeSourceSnapshot(store, observation, list.Files)
+			list.source.run, list.source.configuration, list.source.recognition, list.source.inventory = native.run, native.configuration, native.recognition, native.inventory
+		}
+		if err == nil {
+			err = validateResolutionEvidence(ctx, list.source)
 		}
 		return list, false, err
 	}
@@ -666,6 +850,10 @@ func readCopyReceipt(store engineModelStore, model string) (copyReceipt, error) 
 }
 
 func readCopyReceiptWithAccess(ctx context.Context, store engineModelStore, model string, access servingFileAccess) (copyReceipt, error) {
+	return readCopyReceiptBound(ctx, store, model, access, nil)
+}
+
+func readCopyReceiptBound(ctx context.Context, store engineModelStore, model string, access servingFileAccess, evidence *llamaResolutionEvidence) (copyReceipt, error) {
 	path := filepath.Join(copyAliasDir(store.root, model), "copy.json")
 	if err := safeCopyDestinationBounded(ctx, store.root, path, access.scan); err != nil {
 		return copyReceipt{}, fmt.Errorf("copy receipt location is unsafe: %w", err)
@@ -680,7 +868,13 @@ func readCopyReceiptWithAccess(ctx context.Context, store engineModelStore, mode
 	if !info.Mode().IsRegular() || info.Size() > maxCopyManifest {
 		return copyReceipt{}, fmt.Errorf("invalid copy receipt")
 	}
-	data, binding, err := access.source(ctx, path)
+	var data []byte
+	var binding *engines.ServingBinding
+	if evidence == nil {
+		data, binding, err = access.source(ctx, path)
+	} else {
+		data, binding, err = evidence.selector(ctx, path, access)
+	}
 	if err != nil || len(data) > maxCopyManifest {
 		return copyReceipt{}, fmt.Errorf("invalid copy receipt")
 	}
