@@ -123,6 +123,217 @@ func TestModelSettingsEstimateDenseAndGQA(t *testing.T) {
 	}
 }
 
+func TestModelSettingsEstimatePinnedSpecialCaches(t *testing.T) {
+	test := func(name, arch string, facts map[string]gguffacts.Numeric, fa string, full bool, want string) {
+		t.Run(name, func(t *testing.T) {
+			in := estimateFixture(arch)
+			for key, value := range facts {
+				in.Facts.Shards[0].Numeric[arch+"."+key] = value
+			}
+			in.Allocation.Options.FlashAttention = &fa
+			in.SWAFull = &full
+			c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+			if c.Status != "estimated" || c.Bytes != want || c.LowBytes != want || c.HighBytes != want || c.Basis != "derived" {
+				t.Fatalf("cache = %+v, want derived %s", c, want)
+			}
+		})
+	}
+	n := func(v uint64) gguffacts.Numeric { return gguffacts.Numeric{Type: 10, Bits: v} }
+	mla := map[string]gguffacts.Numeric{"attention.head_count_kv": n(1), "attention.key_length": n(96), "attention.value_length": n(64), "attention.key_length_mla": n(48), "attention.value_length_mla": n(32), "attention.kv_lora_rank": n(64), "rope.dimension_count": n(32)}
+	// 7fe450e1 src/llama-kv-cache.cpp:229-234: K only, 2*96*1024*2 = 393216.
+	// src/llama-model.cpp:1371-1380 loads the stored width, not the MLA query width.
+	test("MLA FA on", "deepseek2", mla, "on", false, "393216")
+	test("MLA FA off", "deepseek2", mla, "off", false, "393216")
+	mlaNext := make(map[string]gguffacts.Numeric)
+	for k, v := range mla {
+		mlaNext[k] = v
+	}
+	mlaNext["nextn_predict_layers"] = n(1)
+	// Main context excludes the trailing NextN block: llama-model.cpp:2676-2681.
+	test("MLA main context NextN", "deepseek2", mlaNext, "on", false, "196608")
+	// Gemma4 first 2 of 3 blocks own caches; full SWA and equal widths make
+	// the pattern immaterial to bytes: 2*(32*2+32*2)*1024*2 = 524288.
+	// models/gemma4.cpp:7-10, llama-hparams.cpp:320-327, llama-kv-cache-iswa.cpp:74-81.
+	test("shared KV full cache equal widths", "gemma4", map[string]gguffacts.Numeric{"block_count": n(3), "attention.shared_kv_layers": n(1), "attention.sliding_window": n(256), "attention.sliding_window_pattern": {Type: 7, Array: []uint64{1, 0, 1}}, "attention.key_length_swa": n(32), "attention.value_length_swa": n(32)}, "on", true, "524288")
+}
+
+func TestModelSettingsEstimateSpecialCacheUnknowns(t *testing.T) {
+	for _, tc := range []struct {
+		arch, field, reason string
+		value               uint64
+	}{
+		{"llama", "attention.shared_kv_layers", "shared-KV", 1},
+		{"llama", "nextn_predict_layers", "NextN", 1},
+		{"deepseek2", "attention.kv_lora_rank", "MLA", 64},
+		{"deepseek3", "attention.kv_lora_rank", "architecture", 64},
+		{"gemma4", "attention.shared_kv_layers", "shared-KV", 2},
+	} {
+		t.Run(tc.arch+" "+tc.field, func(t *testing.T) {
+			in := estimateFixture(tc.arch)
+			in.Facts.Shards[0].Numeric[tc.arch+"."+tc.field] = gguffacts.Numeric{Type: 10, Bits: tc.value}
+			c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+			if c.Status != "unknown" || !strings.Contains(c.Reason, tc.reason) {
+				t.Fatalf("cache = %+v, want named %s unknown", c, tc.reason)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateClass(t *testing.T) {
+	for _, tc := range []struct{ arch, want string }{
+		{"llama", "dense"}, {"qwen2", "dense"}, {"qwen3moe", "moe"},
+		{"deepseek2", "mla"}, {"deepseek32", "mla"}, {"gemma4", "swa"},
+		{"lfm2moe", "hybrid"}, {"qwen35", "hybrid"}, {"unmapped", "unmapped"},
+	} {
+		t.Run(tc.arch, func(t *testing.T) {
+			m, reason := modelEstimateAdapt(context.Background(), estimateFixture(tc.arch).Facts)
+			if reason != "" {
+				t.Fatal(reason)
+			}
+			if got := modelEstimateClass(m); got != tc.want {
+				t.Fatalf("class = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	t.Run("window takes precedence over experts", func(t *testing.T) {
+		in := estimateFixture("qwen3moe")
+		in.Facts.Shards[0].Numeric["qwen3moe.attention.sliding_window"] = gguffacts.Numeric{Type: 10, Bits: 256}
+		m, reason := modelEstimateAdapt(context.Background(), in.Facts)
+		if reason != "" {
+			t.Fatal(reason)
+		}
+		if got := modelEstimateClass(m); got != "swa" {
+			t.Fatalf("class = %q, want swa", got)
+		}
+	})
+}
+
+func TestModelSettingsEstimateClassSelectsBand(t *testing.T) {
+	key := modelEstimateCalibrationKey{"weights", "moe", "cpu"}
+	modelEstimateCalibrations[key] = modelEstimateCalibration{LowNum: 1, LowDen: 2, HighNum: 2, HighDen: 1}
+	t.Cleanup(func() { delete(modelEstimateCalibrations, key) })
+	moe := estimateTestComponent(t, estimateFixtureResult(t, estimateFixture("qwen3moe")), "weights")
+	if moe.Basis != "calibrated" || moe.LowBytes != "163968" || moe.HighBytes != "655872" {
+		t.Fatalf("MoE band = %+v", moe)
+	}
+	dense := estimateTestComponent(t, estimateFixtureResult(t, estimateFixture("llama")), "weights")
+	if dense.Basis != "derived" || dense.LowBytes != dense.Bytes || dense.HighBytes != dense.Bytes {
+		t.Fatalf("MoE band leaked to dense = %+v", dense)
+	}
+}
+
+func TestModelSettingsEstimateMLARejectsUnconfirmedLayout(t *testing.T) {
+	for _, tc := range []struct {
+		name, field string
+		value       uint64
+	}{
+		{"query width used as stored key", "attention.key_length", 48},
+		{"multiple latent heads", "attention.head_count_kv", 2},
+		{"missing paired MLA width", "attention.value_length_mla", 0},
+		{"missing rotary width", "rope.dimension_count", 0},
+		{"all NextN context", "nextn_predict_layers", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateFixture("deepseek2")
+			for k, v := range map[string]uint64{"attention.head_count_kv": 1, "attention.key_length": 96, "attention.value_length": 64, "attention.key_length_mla": 48, "attention.value_length_mla": 32, "attention.kv_lora_rank": 64, "rope.dimension_count": 32} {
+				in.Facts.Shards[0].Numeric["deepseek2."+k] = gguffacts.Numeric{Type: 10, Bits: v}
+			}
+			in.Facts.Shards[0].Numeric["deepseek2."+tc.field] = gguffacts.Numeric{Type: 10, Bits: tc.value}
+			c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+			if c.Status != "unknown" || c.Reason == "" {
+				t.Fatalf("cache = %+v, want named unknown", c)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateSpecialCacheNativeGuards(t *testing.T) {
+	shared := func() modelEstimateInput {
+		in := estimateFixture("gemma4")
+		for field, value := range map[string]uint64{"block_count": 3, "attention.shared_kv_layers": 1, "attention.sliding_window": 256, "attention.key_length_swa": 32, "attention.value_length_swa": 32} {
+			in.Facts.Shards[0].Numeric["gemma4."+field] = gguffacts.Numeric{Type: 4, Bits: value}
+		}
+		in.Facts.Shards[0].Numeric["gemma4.attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 7, Array: []uint64{1, 0, 1}}
+		full, fa := true, "on"
+		in.SWAFull, in.Allocation.Options.FlashAttention = &full, &fa
+		return in
+	}
+	for _, tc := range []struct {
+		name, fa, status, bytes, reason string
+	}{
+		{"FA on variable heads", "on", "estimated", "393216", ""},
+		{"FA off variable heads", "off", "unknown", "", "transposed V"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := shared()
+			in.Facts.Shards[0].Numeric["gemma4.attention.head_count_kv"] = gguffacts.Numeric{Type: 4, Array: []uint64{1, 2, 1}}
+			in.Allocation.Options.FlashAttention = &tc.fa
+			c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+			// 7fe450e1 llama-kv-cache.cpp:209-234 pads every transposed V
+			// to the global maximum width, even when K widths vary by layer.
+			if c.Status != tc.status || c.Bytes != tc.bytes || !strings.Contains(c.Reason, tc.reason) {
+				t.Fatalf("cache=%+v, want %s %s (%s)", c, tc.status, tc.bytes, tc.reason)
+			}
+		})
+	}
+	t.Run("explicit recurrent NextN mask", func(t *testing.T) {
+		in := estimateFixture("qwen35")
+		for field, value := range map[string]uint64{"block_count": 4, "nextn_predict_layers": 1, "full_attention_interval": 2} {
+			in.Facts.Shards[0].Numeric["qwen35."+field] = gguffacts.Numeric{Type: 4, Bits: value}
+		}
+		in.Facts.Shards[0].Numeric["qwen35.attention.recurrent_layers"] = gguffacts.Numeric{Type: 7, Array: []uint64{0, 1, 0, 0}}
+		c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+		// models/qwen35.cpp:17-21 gives this mask precedence over interval.
+		if c.Status != "unknown" || !strings.Contains(c.Reason, "explicit recurrent") {
+			t.Fatalf("cache=%+v, want named explicit-mask unknown", c)
+		}
+	})
+	for _, tc := range []struct {
+		name, status, bytes string
+		latent, rope        uint64
+	}{
+		{"aligned MLA precision", "estimated", "208896", 64, 32},
+		{"MLA V precision rejected", "unknown", "", 48, 16},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateFixture("deepseek2")
+			for field, value := range map[string]uint64{"attention.head_count_kv": 1, "attention.key_length": tc.latent + tc.rope, "attention.value_length": tc.latent, "attention.key_length_mla": tc.rope + 16, "attention.value_length_mla": 32, "attention.kv_lora_rank": tc.latent, "rope.dimension_count": tc.rope} {
+				in.Facts.Shards[0].Numeric["deepseek2."+field] = gguffacts.Numeric{Type: 4, Bits: value}
+			}
+			fa, quant := "on", "q8_0"
+			in.Allocation.Options.FlashAttention = &fa
+			in.Allocation.Options.CacheTypeK, in.Allocation.Options.CacheTypeV = &quant, &quant
+			c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+			// llama-context.cpp:3803-3809 still validates V precision for MLA.
+			if c.Status != tc.status || c.Bytes != tc.bytes {
+				t.Fatalf("cache=%+v, want %s %s", c, tc.status, tc.bytes)
+			}
+		})
+	}
+	t.Run("floating shared pattern", func(t *testing.T) {
+		in := shared()
+		in.Facts.Shards[0].Numeric["gemma4.attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 6, Array: []uint64{1, 0, 1}}
+		c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+		// llama-model-loader.cpp:365-380 rejects float arrays for this field.
+		if c.Status != "unknown" || !strings.Contains(c.Reason, "pattern") {
+			t.Fatalf("cache=%+v, want named pattern unknown", c)
+		}
+	})
+	t.Run("shared quantized head precision", func(t *testing.T) {
+		in := shared()
+		for _, field := range []string{"attention.key_length", "attention.value_length", "attention.key_length_swa", "attention.value_length_swa"} {
+			in.Facts.Shards[0].Numeric["gemma4."+field] = gguffacts.Numeric{Type: 4, Bits: 16}
+		}
+		quant := "q8_0"
+		in.Allocation.Options.CacheTypeK, in.Allocation.Options.CacheTypeV = &quant, &quant
+		c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+		// Native precision validation is per head, not the combined GQA row.
+		if c.Status != "unknown" || !strings.Contains(c.Reason, "precision") {
+			t.Fatalf("cache=%+v, want named precision unknown", c)
+		}
+	})
+}
+
 func TestModelSettingsEstimateMixedCacheBlocks(t *testing.T) {
 	for _, tc := range []struct{ name, k, v, fa, want, status string }{
 		{"q8 K with f16 V", "q8_0", "f16", "off", "401408", "estimated"},
