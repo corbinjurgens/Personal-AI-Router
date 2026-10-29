@@ -22,16 +22,17 @@ import (
 )
 
 type loadedLlamaFake struct {
-	mu      sync.Mutex
-	loaded  string
-	props   string
-	status  int
-	onProps func()
-	onLoad  func(*http.Request)
-	gets    atomic.Int32
-	loads   atomic.Int32
-	models  atomic.Int32
-	model   string
+	mu        sync.Mutex
+	loaded    string
+	props     string
+	status    int
+	onProps   func()
+	onLoad    func(*http.Request)
+	gets      atomic.Int32
+	loads     atomic.Int32
+	autoloads atomic.Int32
+	models    atomic.Int32
+	model     string
 }
 
 func TestLoadedServingInvalidationConcurrentAdoptedOperations(t *testing.T) {
@@ -90,9 +91,13 @@ func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			onLoad(r)
 		}
 	}
-	if r.Method != http.MethodGet {
+	if r.Method == http.MethodPost && r.URL.Path == "/models/load" {
 		recordLoad()
-		w.WriteHeader(http.StatusBadRequest)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.NotFound(w, r)
 		return
 	}
 	switch r.URL.Path {
@@ -101,9 +106,9 @@ func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, loaded)
 	case "/props":
 		s.gets.Add(1)
-		// Simulate llama's autoload default: an unsafe query records a load.
+		// Simulate llama's autoload default separately from explicit load requests.
 		if r.URL.Query().Get("autoload") != "false" || r.URL.Query().Get("model") != s.model {
-			recordLoad()
+			s.autoloads.Add(1)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -116,8 +121,7 @@ func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		fmt.Fprint(w, props)
 	default:
-		recordLoad()
-		w.WriteHeader(http.StatusNotFound)
+		http.NotFound(w, r)
 	}
 }
 
@@ -193,7 +197,7 @@ func TestLoadedServingEncodedNameNeverAutoloads(t *testing.T) {
 	if err != nil || value.PerSlotContextTokens != 8192 || value.Slots != 2 {
 		t.Fatalf("per-slot observation: %+v %v", value, err)
 	}
-	if server.gets.Load() != 1 || server.loads.Load() != 0 {
+	if server.gets.Load() != 1 || server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 		t.Fatalf("GETs=%d loads=%d", server.gets.Load(), server.loads.Load())
 	}
 	readbackProof(t, f, 1)
@@ -213,7 +217,7 @@ func TestLoadedServingColdAndUnloadClearProof(t *testing.T) {
 	server.mu.Unlock()
 	f.ex.sweepLoaded(context.Background(), nil, true)
 	readbackProof(t, f, 0)
-	if server.gets.Load() != 0 || server.loads.Load() != 0 {
+	if server.gets.Load() != 0 || server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 		t.Fatal("cold model was probed or loaded")
 	}
 	if len(f.ex.modelIdentity().Engines["fake"].Serving) != 2 {
@@ -232,7 +236,7 @@ func TestLoadedServingColdAndUnloadClearProof(t *testing.T) {
 	if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
 		t.Fatal("unloaded model retained proof")
 	}
-	if server.gets.Load() != 1 || server.loads.Load() != 0 {
+	if server.gets.Load() != 1 || server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 		t.Fatal("unloaded model was probed or loaded")
 	}
 }
@@ -246,7 +250,7 @@ func TestLoadedServingSleepingAndTransitionalModelsAreNotProbed(t *testing.T) {
 			server.mu.Unlock()
 			f.ex.sweepLoaded(context.Background(), nil, false)
 			readbackProof(t, f, 0)
-			if server.gets.Load() != 0 || server.loads.Load() != 0 {
+			if server.gets.Load() != 0 || server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 				t.Fatal("non-loaded model was probed or woken")
 			}
 			if len(f.ex.modelIdentity().Engines["fake"].Serving) != 2 {
@@ -280,7 +284,7 @@ func TestLoadedServingAmbiguousLoadedMappingCannotWake(t *testing.T) {
 	action.Result = &result
 	st.manifest.Actions["loaded_models"] = action
 	f.ex.sweepLoaded(context.Background(), nil, false)
-	if server.gets.Load() != 0 || server.loads.Load() != 0 {
+	if server.gets.Load() != 0 || server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 		t.Fatal("ambiguous mapping probed sleeping model")
 	}
 	if len(f.ex.modelIdentity().Engines["fake"].ModelDigests) != 0 {
@@ -330,7 +334,7 @@ func TestLoadedServingInvalidAllocationWithdrawsIdentity(t *testing.T) {
 			if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
 				t.Fatal("invalid observation returned proof")
 			}
-			if server.loads.Load() != 0 {
+			if server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 				t.Fatal("observation triggered load")
 			}
 			server.mu.Lock()
@@ -451,7 +455,7 @@ func TestLoadedServingTransportFailureRecoversNextSweep(t *testing.T) {
 					if drift != "" {
 						t.Fatalf("transport failure latched drift: %s", drift)
 					}
-					if server.loads.Load() != 0 {
+					if server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 						t.Fatal("failed observation triggered a load")
 					}
 					f.ex.client.Transport = original
@@ -512,7 +516,7 @@ func TestLoadedServingRedirectIsTransportUnknown(t *testing.T) {
 					if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err != nil {
 						t.Fatalf("next good sweep did not restore observation: %v", err)
 					}
-					if server.loads.Load() != 0 {
+					if server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 						t.Fatal("observation triggered a load")
 					}
 				})
@@ -573,7 +577,7 @@ func TestLoadedServingSemanticEvidenceSurvivesTransportFailure(t *testing.T) {
 			if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
 				t.Fatal("good sweep cleared semantic latch")
 			}
-			if server.loads.Load() != 0 {
+			if server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 				t.Fatal("observation triggered a load")
 			}
 			st.mu.Lock()
@@ -684,7 +688,7 @@ func TestLoadedServingCancellationBoundsHTTP(t *testing.T) {
 	server.mu.Unlock()
 	f.ex.sweepLoaded(ctx, nil, false)
 	readbackProof(t, f, 0)
-	if server.loads.Load() != 0 {
+	if server.loads.Load() != 0 || server.autoloads.Load() != 0 {
 		t.Fatal("cancelled observation loaded model")
 	}
 }
