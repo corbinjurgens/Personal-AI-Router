@@ -127,8 +127,12 @@ func TestLinkedModelRecognitionBoundary(t *testing.T) {
 					source.inventory.modelsDir != observation.modelsDir || source.inventory.epoch != observation.epoch || len(source.artifacts) != len(list.Files) {
 					t.Fatalf("source lost its exact native observation, run, configuration or artifact set: %+v", source)
 				}
-				if *calls != 1 {
-					t.Errorf("fresh selected-engine recognition calls=%d, want 1", *calls)
+				wantCalls := 1
+				if f.engine == "ollama" {
+					wantCalls = 2
+				}
+				if *calls != wantCalls {
+					t.Errorf("fresh selected-engine recognition calls=%d, want %d (Ollama includes final-publication recheck)", *calls, wantCalls)
 				}
 				if c.readAt == 0 || c.opens != c.closes || (f.engine == "llamacpp" && c.readDir == 0) {
 					t.Fatalf("native control did not exercise closed instrumented readers: %+v", c)
@@ -247,8 +251,8 @@ func TestLinkedModelRecognitionBoundary(t *testing.T) {
 			t.Fatalf("native LM Studio row: %v", err)
 		}
 		assertFiles(t, fixture{ex, "lmstudio", model, map[string]int64{path: 128}}, list)
-		if calls != 1 {
-			t.Fatalf("native row queries=%d, want 1", calls)
+		if calls != 2 {
+			t.Fatalf("native row queries=%d, want 2 including final-publication row-drift check", calls)
 		}
 	})
 

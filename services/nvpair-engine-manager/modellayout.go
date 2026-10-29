@@ -121,7 +121,23 @@ func (e *Executor) modelSourceFiles(ctx context.Context, engine, model string) (
 	return e.modelSourceFilesWithAccess(ctx, engine, model, servingFileAccess{})
 }
 
+// Rechecks retain the original selection authority, including metadata for files
+// which will only be reached after reading a selector or enumerating a directory.
+func (e *Executor) modelSourceFilesExpected(ctx context.Context, engine, model string, access servingFileAccess, expected modelFileList) (modelFileList, error) {
+	if expected.Engine != engine || expected.Model != model || expected.source == nil {
+		return modelFileList{}, errModelInspectionChanged
+	}
+	return e.modelSourceFilesBound(ctx, engine, model, access, &expected)
+}
+
 func (e *Executor) modelSourceFilesWithAccess(ctx context.Context, engine, model string, access servingFileAccess) (modelFileList, error) {
+	return e.modelSourceFilesBound(ctx, engine, model, access, nil)
+}
+
+func (e *Executor) modelSourceFilesBound(ctx context.Context, engine, model string, access servingFileAccess, expected *modelFileList) (modelFileList, error) {
+	if err := ctx.Err(); err != nil {
+		return modelFileList{}, err
+	}
 	st, store, err := e.modelStoreFor(engine)
 	if err != nil {
 		return modelFileList{}, err
@@ -129,6 +145,14 @@ func (e *Executor) modelSourceFilesWithAccess(ctx context.Context, engine, model
 	var list modelFileList
 	switch store.adapter {
 	case engines.NameOllama:
+		var old *sourceSnapshot
+		if expected != nil {
+			old = expected.source
+			if old.engine != engine || old.root != store.root || old.inventory == nil ||
+				e.nativeSourceCurrent(ctx, st, store, *old.inventory) != nil || validateSourceSnapshot(ctx, old) != nil {
+				return modelFileList{}, errModelInspectionChanged
+			}
+		}
 		observation, recognitionErr := e.recognizeModelSource(ctx, engine, model)
 		if recognitionErr != nil {
 			return modelFileList{}, recognitionErr
@@ -136,15 +160,30 @@ func (e *Executor) modelSourceFilesWithAccess(ctx context.Context, engine, model
 		if err := e.nativeSourceCurrent(ctx, st, store, observation); err != nil {
 			return modelFileList{}, err
 		}
-		list, err = ollamaSourceFilesWithAccess(ctx, store.root, model, access)
+		if old != nil && (old.run != observation.runID || old.configuration != observation.launchDigest || !bytes.Equal(old.recognition, observation.raw)) {
+			return modelFileList{}, errModelInspectionChanged
+		}
+		list, err = ollamaSourceFilesBound(ctx, store.root, model, access, old)
 		if err == nil {
-			err = e.nativeSourceCurrent(ctx, st, store, observation)
-			list.source = nativeSourceSnapshot(store, observation, list.Files)
+			current, recognitionErr := e.recognizeModelSource(ctx, engine, model)
+			if recognitionErr != nil {
+				return modelFileList{}, recognitionErr
+			}
+			if current.runID != observation.runID || current.launchDigest != observation.launchDigest || !bytes.Equal(current.raw, observation.raw) {
+				return modelFileList{}, errModelInspectionChanged
+			}
+			err = e.nativeSourceCurrent(ctx, st, store, current)
+			native := nativeSourceSnapshot(store, observation, list.Files)
+			list.source.engine, list.source.run, list.source.configuration = native.engine, native.run, native.configuration
+			list.source.recognition, list.source.inventory = native.recognition, native.inventory
+			if err == nil {
+				err = validateSourceSnapshot(ctx, list.source)
+			}
 		}
 	case engines.NameLlamaCPP:
-		list, err = e.llamaExportFilesWithAccess(ctx, st, store, model, access)
+		list, err = e.llamaExportFilesBound(ctx, st, store, model, access, expected)
 	case engines.NameLMStudio:
-		list, err = e.lmstudioSourceFiles(ctx, store, model)
+		list, err = e.lmstudioSourceFilesBound(ctx, st, store, model, access, expected)
 	}
 	if err != nil {
 		return modelFileList{}, err
@@ -394,55 +433,165 @@ func ollamaSourceFiles(root, model string) (modelFileList, error) {
 }
 
 func ollamaSourceFilesWithAccess(ctx context.Context, root, model string, access servingFileAccess) (modelFileList, error) {
+	return ollamaSourceFilesBound(ctx, root, model, access, nil)
+}
+
+func ollamaSourceFilesBound(ctx context.Context, root, model string, access servingFileAccess, expected *sourceSnapshot) (modelFileList, error) {
+	if expected != nil && (expected.root != root || len(expected.selectors) != 1 || validateSourceSnapshot(ctx, expected) != nil) {
+		return modelFileList{}, errModelInspectionChanged
+	}
+	if expected != nil && (expected.selectors[0].binding == nil || int64(len(expected.selectors[0].bytes)) != expected.selectors[0].file.size) {
+		return modelFileList{}, errModelInspectionChanged
+	}
 	rel, err := ollamaManifestRel(model)
 	if err != nil {
 		return modelFileList{}, fmt.Errorf("%w: %v", errModelNotFound, err)
 	}
-	manifestPath, info, err := confinedRegularFile(root, filepath.Join(root, filepath.FromSlash(rel)))
+	source := &sourceSnapshot{root: root}
+	scan := &llamaCacheScan{snapshot: source, expected: expected}
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	for _, dir := range []string{root, filepath.Dir(path)} {
+		if _, err := scan.directory(dir); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return modelFileList{}, fmt.Errorf("%w: Ollama has no model %q on this node", errModelNotFound, model)
+			}
+			return modelFileList{}, err
+		}
+	}
+	manifest, err := nativeSourceArtifact(root, rel, "", expected)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return modelFileList{}, fmt.Errorf("%w: Ollama has no model %q on this node", errModelNotFound, model)
 		}
 		return modelFileList{}, err
 	}
-	f, err := access.checkedOpen(ctx, filepath.Join(root, filepath.FromSlash(rel)), manifestPath, info)
+	selector := selectorEvidence{file: sourceEvidence{configured: manifest.configured, target: manifest.abs,
+		info: manifest.info, size: manifest.Size, mtime: manifest.info.ModTime().UnixNano()}}
+	if expected != nil {
+		selector = expected.selectors[0]
+		if selector.file.configured != path {
+			return modelFileList{}, errModelInspectionChanged
+		}
+	}
+	data, binding, err := access.sourceExpected(ctx, selector.file, ollamaManifestLimit, false)
 	if err != nil {
 		return modelFileList{}, err
 	}
-	data, err := io.ReadAll(io.NewSectionReader(f, 0, ollamaManifestLimit+1))
-	closeErr := f.Close()
-	if err != nil {
-		return modelFileList{}, err
+	if expected != nil && (!bytes.Equal(selector.bytes, data) || selector.binding == nil || *selector.binding != *binding) {
+		return modelFileList{}, errModelInspectionChanged
 	}
-	if closeErr != nil {
-		return modelFileList{}, closeErr
-	}
-	if len(data) > ollamaManifestLimit {
-		return modelFileList{}, fmt.Errorf("manifest exceeds the small-file limit")
-	}
+	source.selectors = []selectorEvidence{{file: selector.file, bytes: append([]byte(nil), data...), binding: binding}}
 	m, err := parseOllamaManifest(data)
 	if err != nil {
 		return modelFileList{}, err
+	}
+	declared := map[string]int64{}
+	for _, layer := range append([]ollamaLayer{m.Config}, m.Layers...) {
+		if layer.Digest == "" {
+			continue
+		}
+		if size, ok := declared[layer.Digest]; layer.Size < 0 || (ok && size != layer.Size) {
+			return modelFileList{}, fmt.Errorf("manifest has inconsistent blob sizes")
+		}
+		declared[layer.Digest] = layer.Size
 	}
 	blobs, err := m.blobs()
 	if err != nil {
 		return modelFileList{}, err
 	}
-	var list modelFileList
+	if len(blobs) >= maxCopyArtifacts {
+		return modelFileList{}, errModelArtifactLimit
+	}
+	if _, err := scan.directory(filepath.Join(root, "blobs")); err != nil {
+		return modelFileList{}, err
+	}
+	list := modelFileList{source: source}
 	for _, b := range blobs {
+		if err := ctx.Err(); err != nil {
+			return modelFileList{}, err
+		}
 		brel := "blobs/sha256-" + b.Digest
-		real, binfo, err := confinedRegularFile(root, filepath.Join(root, filepath.FromSlash(brel)))
+		file, err := nativeSourceArtifact(root, brel, b.Digest, expected)
 		if err != nil {
 			return modelFileList{}, fmt.Errorf("model %q is incomplete on this node (%s): %w", model, brel, err)
 		}
-		if b.Size > 0 && binfo.Size() != b.Size {
-			return modelFileList{}, fmt.Errorf("model %q is incomplete on this node: %s is %d bytes, manifest says %d", model, brel, binfo.Size(), b.Size)
+		if file.Size != b.Size {
+			return modelFileList{}, fmt.Errorf("model %q is incomplete on this node: %s is %d bytes, manifest says %d", model, brel, file.Size, b.Size)
 		}
 		// The blob's name is its sha256; the destination verifies it.
-		list.Files = append(list.Files, modelFile{Path: brel, Size: binfo.Size(), SHA256: b.Digest, abs: real, configured: filepath.Join(root, filepath.FromSlash(brel)), info: binfo})
+		list.Files = append(list.Files, file)
 	}
-	list.Files = append(list.Files, modelFile{Path: rel, Size: info.Size(), abs: manifestPath, configured: filepath.Join(root, filepath.FromSlash(rel)), info: info})
+	list.Files = append(list.Files, manifest)
+	if err := finishNativeSource(ctx, &list, expected); err != nil {
+		return modelFileList{}, err
+	}
+	// Re-read only the bound selector after the complete artifact preflight.
+	data, finalBinding, err := access.sourceExpected(ctx, selector.file, ollamaManifestLimit, false)
+	if err != nil || !bytes.Equal(data, source.selectors[0].bytes) || finalBinding == nil || *finalBinding != *binding {
+		return modelFileList{}, errModelInspectionChanged
+	}
+	if err := validateSourceSnapshot(ctx, source); err != nil {
+		return modelFileList{}, err
+	}
 	return list, nil
+}
+
+// Keep native file admission at the existing confinement owner. Rechecks look
+// up the old evidence before touching a newly selected path and never renew it.
+func nativeSourceArtifact(root, rel, digest string, expected *sourceSnapshot) (modelFile, error) {
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	var old *modelFile
+	if expected != nil {
+		for i := range expected.artifacts {
+			if expected.artifacts[i].Path == rel {
+				old = &expected.artifacts[i]
+				break
+			}
+		}
+		if old == nil || old.configured != path || old.SHA256 != digest || old.info == nil ||
+			validateSource(sourceEvidence{configured: old.configured, target: old.abs, info: old.info,
+				size: old.Size, mtime: old.info.ModTime().UnixNano()}) != nil {
+			return modelFile{}, errModelInspectionChanged
+		}
+	}
+	real, info, err := confinedRegularFile(root, path)
+	if err != nil {
+		return modelFile{}, err
+	}
+	if old != nil {
+		if old.abs != real || !sameSource(old.info, info, false) {
+			return modelFile{}, errModelInspectionChanged
+		}
+		return *old, nil
+	}
+	evidence, err := captureSource(path, false)
+	if err != nil || evidence.target != real || !sameSource(evidence.info, info, false) {
+		return modelFile{}, errModelInspectionChanged
+	}
+	return modelFile{Path: rel, Size: evidence.size, SHA256: digest,
+		configured: evidence.configured, abs: evidence.target, info: evidence.info}, nil
+}
+
+func finishNativeSource(ctx context.Context, list *modelFileList, expected *sourceSnapshot) error {
+	if expected != nil {
+		if len(list.Files) != len(expected.artifacts) || len(list.source.directories) != len(expected.directories) || len(list.source.selectors) != len(expected.selectors) {
+			return errModelInspectionChanged
+		}
+		for i, dir := range list.source.directories {
+			if dir.configured != expected.directories[i].configured {
+				return errModelInspectionChanged
+			}
+		}
+		for i, file := range list.Files {
+			old := expected.artifacts[i]
+			if file.Path != old.Path || file.Size != old.Size || file.SHA256 != old.SHA256 || file.Role != old.Role ||
+				file.configured != old.configured || file.abs != old.abs || !sameSource(file.info, old.info, false) {
+				return errModelInspectionChanged
+			}
+		}
+	}
+	list.source.artifacts = append([]modelFile(nil), list.Files...)
+	return validateSourceSnapshot(ctx, list.source)
 }
 
 func ollamaPlan(root, model string, list modelFileList) (copyPlan, error) {
@@ -851,7 +1000,14 @@ func (s *llamaCacheScan) selector(ctx context.Context, path, target string, info
 }
 
 func validateLlamaSource(ctx context.Context, snapshot *sourceSnapshot) error {
-	if snapshot == nil || len(snapshot.directories) == 0 || len(snapshot.selectors) == 0 || len(snapshot.artifacts) == 0 {
+	if snapshot == nil || len(snapshot.selectors) == 0 {
+		return errModelInspectionChanged
+	}
+	return validateSourceSnapshot(ctx, snapshot)
+}
+
+func validateSourceSnapshot(ctx context.Context, snapshot *sourceSnapshot) error {
+	if snapshot == nil || len(snapshot.directories) == 0 || len(snapshot.artifacts) == 0 {
 		return errModelInspectionChanged
 	}
 	check := func(evidence sourceEvidence) error {
@@ -1248,72 +1404,142 @@ var lmsListModels = func(ctx context.Context, e *Executor, cli string) ([]lmsLis
 }
 
 func (e *Executor) lmstudioSourceFiles(ctx context.Context, store engineModelStore, model string) (modelFileList, error) {
-	entries, err := lmsListModels(ctx, e, store.cli)
+	st, current, err := e.modelStoreFor(store.engine)
+	if err != nil || current != store {
+		return modelFileList{}, errModelInspectionChanged
+	}
+	return e.lmstudioSourceFilesBound(ctx, st, store, model, servingFileAccess{}, nil)
+}
+
+// LM Studio's downloaded row group is the native selector. Freeze its values,
+// together with the launch and namespace, before enumerating the selected model.
+func (e *Executor) lmstudioSourceFilesBound(ctx context.Context, st *engineState, store engineModelStore, model string, access servingFileAccess, expected *modelFileList) (modelFileList, error) {
+	configuration := func() (string, string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", "", err
+		}
+		current, currentStore, err := e.modelStoreFor(store.engine)
+		if err != nil || current != st || currentStore != store {
+			return "", "", errModelInspectionChanged
+		}
+		st.mu.Lock()
+		run := st.runID
+		data, err := json.Marshal(struct {
+			CLI, Adapter, ModelsDir, Launch string
+			Running                         bool
+		}{store.cli, store.adapter, st.modelsDir, st.launchDigest, st.running})
+		st.mu.Unlock()
+		return run, string(data), err
+	}
+	run, config, err := configuration()
 	if err != nil {
 		return modelFileList{}, err
 	}
-	var matched []lmsListEntry
-	seen := map[string]bool{}
-	for _, entry := range entries {
-		p := normalizeSlashPath(entry.Path)
-		if p == "" || seen[p] || !lmsEntryMatchesModel(entry, model) {
-			continue
-		}
-		seen[p] = true
-		matched = append(matched, entry)
-	}
-	if len(matched) == 0 {
-		return modelFileList{}, fmt.Errorf("%w: LM Studio has no model %q on this node", errModelNotFound, model)
-	}
-	for _, entry := range matched[1:] {
-		if entry.ModelKey == "" || entry.ModelKey != matched[0].ModelKey {
-			return modelFileList{}, fmt.Errorf("model id %q matches %d LM Studio models; name one by its model key", model, len(matched))
+	var old *sourceSnapshot
+	if expected != nil {
+		old = expected.source
+		if old == nil || old.engine != store.engine || old.root != store.root || old.run != run || old.configuration != config || validateSourceSnapshot(ctx, old) != nil {
+			return modelFileList{}, errModelInspectionChanged
 		}
 	}
-	var list modelFileList
+	matched, recognition, err := e.lmstudioSourceRows(ctx, store, model)
+	if err != nil {
+		return modelFileList{}, err
+	}
+	if old != nil && !bytes.Equal(old.recognition, recognition) {
+		return modelFileList{}, errModelInspectionChanged
+	}
+	checkConfiguration := func() error {
+		currentRun, currentConfig, err := configuration()
+		if err != nil || currentRun != run || currentConfig != config {
+			return errModelInspectionChanged
+		}
+		return nil
+	}
+	if err := checkConfiguration(); err != nil {
+		return modelFileList{}, err
+	}
+	if old != nil {
+		if err := validateSourceSnapshot(ctx, old); err != nil {
+			return modelFileList{}, err
+		}
+	}
+	source := &sourceSnapshot{engine: store.engine, root: store.root, run: run, configuration: config, recognition: recognition}
+	budget := access.scan
+	if budget == nil {
+		budget = &modelArtifactScan{}
+	}
+	scan := &llamaCacheScan{budget: budget, access: access, snapshot: source, expected: old}
+	root, err := scan.directory(store.root)
+	if err != nil {
+		return modelFileList{}, err
+	}
+	list := modelFileList{source: source}
 	added := map[string]bool{}
 	add := func(abs string) error {
-		real, info, err := confinedRegularFile(store.root, abs)
-		if err != nil {
-			return err
-		}
 		rel, err := filepath.Rel(store.root, abs)
 		if err != nil {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
 		if !validModelRelPath(rel) {
-			return fmt.Errorf("model file %q has a name this service cannot copy safely", rel)
+			return fmt.Errorf("model file has an unsafe relative name")
 		}
-		if added[rel] {
-			return nil
+		key := copyPathKey(rel)
+		if added[key] {
+			for _, file := range list.Files {
+				if file.Path == rel {
+					return nil
+				}
+			}
+			return errNoArtifactBinding
 		}
-		added[rel] = true
-		list.Files = append(list.Files, modelFile{Path: rel, Size: info.Size(), abs: real, configured: abs, info: info})
+		if len(list.Files) >= maxCopyArtifacts {
+			return errModelArtifactLimit
+		}
+		file, err := nativeSourceArtifact(store.root, rel, "", old)
+		if err != nil {
+			return err
+		}
+		added[key] = true
+		list.Files = append(list.Files, file)
 		return nil
 	}
-	for _, entry := range matched {
-		rel := normalizeSlashPath(entry.Path)
-		if !validModelRelPath(rel) {
-			return modelFileList{}, fmt.Errorf("LM Studio reports an unsafe path %q for %q", entry.Path, model)
+	var walk func(string, int) error
+	walk = func(dir string, depth int) error {
+		if depth > 64 {
+			return errModelArtifactLimit
 		}
+		resolved, err := resolveExistingPath(dir)
+		if err != nil || !pathWithinRoot(root.target, resolved) {
+			return fmt.Errorf("unsafe native model directory")
+		}
+		return scan.enumerate(ctx, dir, func(entry os.DirEntry) error {
+			path := filepath.Join(dir, entry.Name())
+			if entry.IsDir() {
+				return walk(path, depth+1)
+			}
+			return add(path)
+		})
+	}
+	for _, entry := range matched {
+		if err := ctx.Err(); err != nil {
+			return modelFileList{}, err
+		}
+		rel := normalizeSlashPath(entry.Path)
 		abs := filepath.Join(store.root, filepath.FromSlash(rel))
 		info, err := os.Stat(abs)
 		if err != nil {
-			return modelFileList{}, fmt.Errorf("LM Studio lists %q but it is not on disk: %w", rel, err)
+			return modelFileList{}, fmt.Errorf("LM Studio model is not on disk: %w", err)
 		}
 		if info.IsDir() {
-			// An MLX model is a directory of weights and configuration.
-			err = filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-				if d.IsDir() {
-					return nil
-				}
-				return add(path)
-			})
-			if err != nil {
+			// WalkDir did not follow a selected directory symlink. Keep that
+			// admission boundary while replacing its unchecked enumeration.
+			entryInfo, err := os.Lstat(abs)
+			if err != nil || !entryInfo.IsDir() || entryInfo.Mode()&os.ModeSymlink != 0 {
+				return modelFileList{}, fmt.Errorf("unsupported native model directory link")
+			}
+			if err := walk(abs, 0); err != nil {
 				return modelFileList{}, err
 			}
 			continue
@@ -1321,18 +1547,88 @@ func (e *Executor) lmstudioSourceFiles(ctx context.Context, store engineModelSto
 		if err := add(abs); err != nil {
 			return modelFileList{}, err
 		}
-		// A vision GGUF's projector sits beside it and LM Studio pairs them.
-		siblings, _ := os.ReadDir(filepath.Dir(abs))
-		for _, s := range siblings {
-			name := s.Name()
-			if !s.IsDir() && strings.HasSuffix(strings.ToLower(name), ".gguf") && strings.Contains(strings.ToLower(name), "mmproj") {
-				if err := add(filepath.Join(filepath.Dir(abs), name)); err != nil {
-					return modelFileList{}, err
-				}
+		// Enumerate the configured namespace, never the resolved file's parent.
+		err = scan.enumerate(ctx, filepath.Dir(abs), func(s os.DirEntry) error {
+			name := strings.ToLower(s.Name())
+			if !s.IsDir() && strings.HasSuffix(name, ".gguf") && strings.Contains(name, "mmproj") {
+				return add(filepath.Join(filepath.Dir(abs), s.Name()))
 			}
+			return nil
+		})
+		if err != nil {
+			return modelFileList{}, err
 		}
 	}
+	if err := finishNativeSource(ctx, &list, old); err != nil {
+		return modelFileList{}, err
+	}
+	if err := checkConfiguration(); err != nil {
+		return modelFileList{}, err
+	}
+	_, currentRows, err := e.lmstudioSourceRows(ctx, store, model)
+	if err != nil {
+		return modelFileList{}, err
+	}
+	if !bytes.Equal(recognition, currentRows) {
+		return modelFileList{}, errModelInspectionChanged
+	}
+	if err := checkConfiguration(); err != nil {
+		return modelFileList{}, err
+	}
+	if err := validateSourceSnapshot(ctx, source); err != nil {
+		return modelFileList{}, err
+	}
 	return list, nil
+}
+
+func (e *Executor) lmstudioSourceRows(ctx context.Context, store engineModelStore, model string) ([]lmsListEntry, []byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	entries, err := lmsListModels(ctx, e, store.cli)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	var matched []lmsListEntry
+	var group []lmsListEntry
+	seen := map[string]lmsListEntry{}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if !lmsEntryMatchesModel(entry, model) {
+			continue
+		}
+		p := normalizeSlashPath(entry.Path)
+		if p == "" || !validModelRelPath(p) {
+			return nil, nil, fmt.Errorf("LM Studio reports an unsafe model path")
+		}
+		if len(group) >= maxCopyArtifacts {
+			return nil, nil, errModelArtifactLimit
+		}
+		group = append(group, entry)
+		if previous, ok := seen[p]; ok {
+			if previous != entry {
+				return nil, nil, fmt.Errorf("LM Studio reports ambiguous model rows")
+			}
+			continue
+		}
+		seen[p] = entry
+		matched = append(matched, entry)
+	}
+	if len(matched) == 0 {
+		return nil, nil, fmt.Errorf("%w: LM Studio has no model %q on this node", errModelNotFound, model)
+	}
+	for _, entry := range matched[1:] {
+		if entry.ModelKey == "" || entry.ModelKey != matched[0].ModelKey {
+			return nil, nil, fmt.Errorf("model id matches distinct LM Studio models; name one by its model key")
+		}
+	}
+	data, err := json.Marshal(group)
+	return matched, data, err
 }
 
 func (e *Executor) lmstudioPlan(st *engineState, store engineModelStore, list modelFileList) (copyPlan, error) {
