@@ -21,6 +21,7 @@ package main
 //     model id to a path: a GGUF file, or a directory for MLX models.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -725,13 +726,10 @@ func (b *modelArtifactScan) directoryWithAccess(ctx context.Context, path string
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if b.entries >= modelArtifactScanEntries {
+			if b.entries >= modelArtifactScanEntries || len(entry.Name()) > 1024 {
 				return errModelArtifactLimit
 			}
 			b.entries++
-			if len(entry.Name()) > 1024 {
-				return errModelArtifactLimit
-			}
 			if err := visit(entry); err != nil {
 				return err
 			}
@@ -745,11 +743,158 @@ func (b *modelArtifactScan) directoryWithAccess(ctx context.Context, path string
 	}
 }
 
+func (b *modelArtifactScan) directoryExpected(ctx context.Context, evidence sourceEvidence, access servingFileAccess, visit func(os.DirEntry) error) error {
+	entries, err := access.readDirectory(ctx, evidence, modelArtifactScanEntries-b.entries)
+	if err != nil {
+		return err
+	}
+	// Reserve the whole batch before recursion so buffered sibling entries
+	// remain charged to the shared budget while a child is enumerated.
+	b.entries += len(entries)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(entry.Name()) > 1024 {
+			return errModelArtifactLimit
+		}
+		if err := visit(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// HF selection retains metadata before each first read. Rechecks use only the
+// old records, with a complete metadata preflight before any content access.
+type llamaCacheScan struct {
+	budget   *modelArtifactScan
+	access   servingFileAccess
+	snapshot *sourceSnapshot
+	expected *sourceSnapshot
+}
+
+func (s *llamaCacheScan) directory(path string) (sourceEvidence, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return sourceEvidence{}, err
+	}
+	for _, evidence := range s.snapshot.directories {
+		if evidence.configured == path {
+			return evidence, nil
+		}
+	}
+	var evidence sourceEvidence
+	if s.expected != nil {
+		for _, old := range s.expected.directories {
+			if old.configured == path {
+				evidence = old
+				break
+			}
+		}
+		err = validateSource(evidence)
+	} else {
+		evidence, err = captureSource(path, true)
+	}
+	if err != nil {
+		return sourceEvidence{}, err
+	}
+	s.snapshot.directories = append(s.snapshot.directories, evidence)
+	return evidence, nil
+}
+
+func (s *llamaCacheScan) enumerate(ctx context.Context, path string, visit func(os.DirEntry) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	evidence, err := s.directory(path)
+	if err != nil {
+		return err
+	}
+	return s.budget.directoryExpected(ctx, evidence, s.access, visit)
+}
+
+func (s *llamaCacheScan) selector(ctx context.Context, path, target string, info os.FileInfo) ([]byte, error) {
+	var evidence sourceEvidence
+	var old selectorEvidence
+	var err error
+	if s.expected != nil {
+		i := len(s.snapshot.selectors)
+		if i >= len(s.expected.selectors) || s.expected.selectors[i].file.configured != path {
+			return nil, errModelInspectionChanged
+		}
+		old = s.expected.selectors[i]
+		evidence = old.file
+		err = validateSource(evidence)
+	} else {
+		evidence, err = captureSource(path, false)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if evidence.target != target || !sameSource(evidence.info, info, false) {
+		return nil, errModelInspectionChanged
+	}
+	if evidence.size > 4096 {
+		return nil, errModelArtifactLimit
+	}
+	data, binding, err := s.access.sourceExpected(ctx, evidence, 4096, true)
+	if err != nil {
+		return nil, err
+	}
+	if s.expected != nil && (!bytes.Equal(old.bytes, data) || old.binding == nil || *old.binding != *binding) {
+		return nil, errModelInspectionChanged
+	}
+	s.snapshot.selectors = append(s.snapshot.selectors, selectorEvidence{file: evidence, bytes: data, binding: binding})
+	return data, nil
+}
+
+func validateLlamaSource(ctx context.Context, snapshot *sourceSnapshot) error {
+	if snapshot == nil || len(snapshot.directories) == 0 || len(snapshot.selectors) == 0 || len(snapshot.artifacts) == 0 {
+		return errModelInspectionChanged
+	}
+	check := func(evidence sourceEvidence) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return validateSource(evidence)
+	}
+	for _, evidence := range snapshot.directories {
+		if err := check(evidence); err != nil {
+			return err
+		}
+	}
+	for _, selector := range snapshot.selectors {
+		if err := check(selector.file); err != nil {
+			return err
+		}
+	}
+	for _, artifact := range snapshot.artifacts {
+		if artifact.info == nil {
+			return errModelInspectionChanged
+		}
+		if err := check(sourceEvidence{configured: artifact.configured, target: artifact.abs, info: artifact.info,
+			size: artifact.Size, mtime: artifact.info.ModTime().UnixNano()}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (b *modelArtifactScan) cachedRef(ctx context.Context, repoDir string, access servingFileAccess) (string, error) {
+	scan := &llamaCacheScan{budget: b, access: access, snapshot: &sourceSnapshot{}}
+	return scan.cachedRef(ctx, repoDir)
+}
+
+func (s *llamaCacheScan) cachedRef(ctx context.Context, repoDir string) (string, error) {
 	refs := filepath.Join(repoDir, "refs")
+	if _, err := s.directory(refs); err != nil {
+		return "", err
+	}
 	read := func(name string) (string, error) {
 		path := filepath.Join(refs, name)
-		_, info, err := confinedRegularFile(repoDir, path)
+		real, info, err := confinedRegularFile(repoDir, path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return "", os.ErrNotExist
@@ -759,10 +904,7 @@ func (b *modelArtifactScan) cachedRef(ctx context.Context, repoDir string, acces
 		if info.Size() > 4096 {
 			return "", errModelArtifactLimit
 		}
-		if info.Size() == 0 {
-			return "", nil
-		}
-		data, _, err := access.source(ctx, path)
+		data, err := s.selector(ctx, path, real, info)
 		if err != nil {
 			if ctx.Err() != nil {
 				return "", ctx.Err()
@@ -787,7 +929,7 @@ func (b *modelArtifactScan) cachedRef(ctx context.Context, repoDir string, acces
 		return commit, nil
 	}
 	var names []string
-	if err := b.directoryWithAccess(ctx, refs, access, func(entry os.DirEntry) error {
+	if err := s.enumerate(ctx, refs, func(entry os.DirEntry) error {
 		if entry.Type().IsRegular() {
 			names = append(names, entry.Name())
 		}
@@ -812,6 +954,30 @@ func (b *modelArtifactScan) cachedRef(ctx context.Context, repoDir string, acces
 }
 
 func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, model string, access servingFileAccess) (modelFileList, error) {
+	return resolveBoundedLlamaCacheArtifacts(ctx, store, model, access, nil)
+}
+
+func boundedLlamaCacheArtifactsExpected(ctx context.Context, store engineModelStore, model string, access servingFileAccess, expected modelFileList) (modelFileList, error) {
+	if expected.Engine != store.engine || expected.Model != model || expected.source == nil || expected.source.root != store.root || expected.source.engine != store.engine {
+		return modelFileList{}, errModelInspectionChanged
+	}
+	if err := validateLlamaSource(ctx, expected.source); err != nil {
+		return modelFileList{}, err
+	}
+	list, err := resolveBoundedLlamaCacheArtifacts(ctx, store, model, access, expected.source)
+	if err != nil {
+		return modelFileList{}, err
+	}
+	if list.Revision != expected.Revision || list.binding != expected.binding {
+		return modelFileList{}, errModelInspectionChanged
+	}
+	return list, nil
+}
+
+func resolveBoundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, model string, access servingFileAccess, expected *sourceSnapshot) (modelFileList, error) {
+	if err := ctx.Err(); err != nil {
+		return modelFileList{}, err
+	}
 	root := store.root
 	repo, tag, err := splitLlamaModel(model)
 	if err != nil {
@@ -822,7 +988,14 @@ func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, mod
 	if scan == nil {
 		scan = &modelArtifactScan{}
 	}
-	commit, err := scan.cachedRef(ctx, repoDir, access)
+	source := &sourceSnapshot{engine: store.engine, root: root}
+	hf := &llamaCacheScan{budget: scan, access: access, snapshot: source, expected: expected}
+	for _, dir := range []string{root, repoDir} {
+		if _, err := hf.directory(dir); err != nil {
+			return modelFileList{}, err
+		}
+	}
+	commit, err := hf.cachedRef(ctx, repoDir)
 	if err != nil {
 		if errors.Is(err, errModelArtifactLimit) || errors.Is(err, errNoArtifactBinding) || ctx.Err() != nil {
 			return modelFileList{}, err
@@ -830,6 +1003,9 @@ func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, mod
 		return modelFileList{}, fmt.Errorf("%w: llama.cpp has no cached %q on this node", errModelNotFound, repo)
 	}
 	snap := filepath.Join(repoDir, "snapshots", commit)
+	if _, err := hf.directory(filepath.Join(repoDir, "snapshots")); err != nil {
+		return modelFileList{}, err
+	}
 	realRepo, err := resolveExistingPath(repoDir)
 	if err != nil {
 		return modelFileList{}, err
@@ -845,7 +1021,7 @@ func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, mod
 		if err != nil || !pathWithinRoot(realRepo, resolved) {
 			return fmt.Errorf("unsafe cache directory")
 		}
-		return scan.directoryWithAccess(ctx, dir, access, func(d os.DirEntry) error {
+		return hf.enumerate(ctx, dir, func(d os.DirEntry) error {
 			path := filepath.Join(dir, d.Name())
 			if d.IsDir() {
 				return walk(path, depth+1)
@@ -881,7 +1057,7 @@ func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, mod
 		return modelFileList{}, fmt.Errorf("%w: llama.cpp has no cached GGUF for %q on this node", errModelNotFound, model)
 	}
 	blobs, _ := resolveExistingPath(filepath.Join(repoDir, "blobs"))
-	list := modelFileList{Engine: store.engine, Model: model, Revision: commit}
+	list := modelFileList{Engine: store.engine, Model: model, Revision: commit, source: source}
 	for _, rel := range selected {
 		if err := ctx.Err(); err != nil {
 			return modelFileList{}, err
@@ -897,25 +1073,64 @@ func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, mod
 		if !artifactPathSafe(path) || !artifactPathSafe(real) {
 			return modelFileList{}, errNoArtifactBinding
 		}
-		binding, err := access.binding(ctx, path)
-		if err != nil || binding.ResolvedTarget != real {
-			return modelFileList{}, fmt.Errorf("cache artifact missing or changed")
+		evidence, err := captureSource(path, false)
+		if err != nil || evidence.target != real || !sameSource(info, evidence.info, false) {
+			return modelFileList{}, errModelInspectionChanged
 		}
 		role := "model"
 		if !ggufIsModel(rel) {
 			role = "companion"
 		}
-		f := modelFile{Path: rel, Role: role, Size: info.Size(), abs: real, configured: binding.SourcePath, sample: binding.SampleSHA256, info: info}
+		f := modelFile{Path: rel, Role: role, Size: info.Size(), abs: real, configured: evidence.configured, info: evidence.info}
 		// A snapshot entry that links to an LFS blob is named by its sha256.
 		if blobs != "" && filepath.Dir(real) == blobs && validSHA256(filepath.Base(real)) {
 			f.SHA256 = filepath.Base(real)
 		}
 		list.Files = append(list.Files, f)
 	}
+	// Compare the complete selection before sampling any selected artifact.
+	if expected != nil {
+		if len(list.Files) != len(expected.artifacts) || len(source.selectors) != len(expected.selectors) || len(source.directories) != len(expected.directories) {
+			return modelFileList{}, errModelInspectionChanged
+		}
+		for i, dir := range source.directories {
+			if dir.configured != expected.directories[i].configured {
+				return modelFileList{}, errModelInspectionChanged
+			}
+		}
+		for i, file := range list.Files {
+			old := expected.artifacts[i]
+			if file.Path != old.Path || file.Role != old.Role || file.configured != old.configured || file.abs != old.abs || !sameSource(file.info, old.info, false) {
+				return modelFileList{}, errModelInspectionChanged
+			}
+			list.Files[i] = old
+		}
+	}
+	for i := range list.Files {
+		file := &list.Files[i]
+		binding, err := access.bindingExpected(ctx, file.configured, file.abs, file.info)
+		if err != nil || (expected != nil && binding.SampleSHA256 != file.sample) {
+			return modelFileList{}, errModelInspectionChanged
+		}
+		file.sample = binding.SampleSHA256
+	}
 	if err := validateResolvedArtifacts(list); err != nil {
 		return modelFileList{}, err
 	}
 	list.binding = exportBinding(list, struct{ Root, Revision string }{root, commit})
+	source.artifacts = append([]modelFile(nil), list.Files...)
+	if err := validateLlamaSource(ctx, source); err != nil {
+		return modelFileList{}, err
+	}
+	for _, selector := range source.selectors {
+		data, binding, err := access.sourceExpected(ctx, selector.file, 4096, true)
+		if err != nil || !bytes.Equal(data, selector.bytes) || *binding != *selector.binding {
+			return modelFileList{}, errModelInspectionChanged
+		}
+	}
+	if err := validateLlamaSource(ctx, source); err != nil {
+		return modelFileList{}, err
+	}
 	return list, nil
 }
 
