@@ -16,6 +16,9 @@
 - none ✅
 
 ### Requests the backend handles but the bridge never calls (unused capability)
+- ⚠️ nvpair-engine-manager → auto:16384
+- ⚠️ nvpair-engine-manager → auto:32768
+- ⚠️ nvpair-engine-manager → auto:8192
 - ⚠️ nvpair-engine-manager → engine:configure-launch
 - ⚠️ nvpair-engine-manager → engine:configured-ports
 - ⚠️ nvpair-engine-manager → engine:describe
@@ -138,6 +141,9 @@
 | `engine:switch-changed` | notification (we consume) | ✅ yes |
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
+| `auto:16384` | request (we call) | ⚠️ not called |
+| `auto:32768` | request (we call) | ⚠️ not called |
+| `auto:8192` | request (we call) | ⚠️ not called |
 | `engine:action` | request (we call) | ✅ yes |
 | `engine:activate-bound-engine` | request (we call) | ➖ ignored |
 | `engine:active-model-copies` | request (we call) | ✅ yes |

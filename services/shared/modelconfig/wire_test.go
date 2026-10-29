@@ -264,7 +264,7 @@ func TestInspectCloneDetachesFactsDescriptorsAndEstimates(t *testing.T) {
 }
 
 func TestInspectResultPreservesBytePrecisionAndUnknownImpact(t *testing.T) {
-	input := InspectResult{Engine: "llamacpp", ModelID: "m", Status: "resolved", Artifacts: []ArtifactSummary{{Role: "model", Identity: "opaque-sampled-binding", Size: "9007199254740993", Assurance: "sampled-local-binding"}}, Estimate: Estimate{Status: "partial", HostBytes: "18446744073709551615", Unknowns: []string{"device mapping"}, Domains: []MemoryDomain{{ID: "uma", Kind: "shared", CapacityBytes: "9007199254740993"}}, Components: []EstimateComponent{{Name: "weights", DomainID: "uma", Status: "estimated", Bytes: "9007199254740993"}}}}
+	input := InspectResult{Engine: "llamacpp", ModelID: "m", Status: "resolved", Artifacts: []ArtifactSummary{{Role: "model", Identity: "opaque-sampled-binding", Size: "9007199254740993", Assurance: "sampled-local-binding"}}, Estimate: Estimate{Status: "partial", HostBytes: "18446744073709551615", Unknowns: []string{"device mapping"}, Domains: []MemoryDomain{{ID: "uma", Kind: "shared", CapacityBytes: "9007199254740993"}}, Components: []EstimateComponent{{Name: "weights", DomainID: "uma", Status: "estimated", Bytes: "9007199254740993", LowBytes: "9007199254740993", HighBytes: "9007199254740993", Basis: "derived"}}}}
 	got, err := DecodeInspectResult(mustJSON(t, input))
 	if err != nil {
 		t.Fatal(err)
@@ -321,6 +321,44 @@ func TestResolvedLoadRejectsCompanionArtifact(t *testing.T) {
 	})
 	if _, err := CanonicalLoads([]ModelLoad{load}); err == nil {
 		t.Fatal("accepted companion artifact in resolved serving load")
+	}
+}
+
+func TestEstimateRetainsMemoryPlanWithSelectedOverride(t *testing.T) {
+	for _, kind := range []string{"engine-report", "user-stated", "measured", "engine-report"} {
+		e := memoryPlanEstimateFixture()
+		e.EstimateSource.Kind = kind
+		if kind != "engine-report" {
+			e.EstimateSource.Provider, e.EstimateSource.Revision = "selected-figure", "recorded-at"
+		}
+		if err := e.Validate(); err != nil {
+			t.Fatalf("source %s: %v", kind, err)
+		}
+	}
+}
+
+func TestEstimateRejectsInvalidRanges(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*EstimateComponent)
+	}{
+		{"missing low", func(c *EstimateComponent) { c.LowBytes = "" }},
+		{"missing high", func(c *EstimateComponent) { c.HighBytes = "" }},
+		{"low above expected", func(c *EstimateComponent) { c.LowBytes = "101" }},
+		{"high below expected", func(c *EstimateComponent) { c.HighBytes = "99" }},
+		{"noncanonical", func(c *EstimateComponent) { c.HighBytes = "0100" }},
+		{"overflow", func(c *EstimateComponent) { c.HighBytes = "18446744073709551616" }},
+		{"invalid basis", func(c *EstimateComponent) { c.Basis = "guess" }},
+		{"unknown with bytes", func(c *EstimateComponent) { c.Status = "unknown" }},
+		{"partial without residual", func(c *EstimateComponent) { c.Status = "partial"; c.Reason = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := completeMemoryArithmeticFixture()
+			tc.edit(&e.Components[0])
+			if e.Validate() == nil {
+				t.Fatal("accepted invalid range")
+			}
+		})
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"math"
 	"nvpair-shared/noderec"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -18,11 +20,92 @@ func completeMemoryArithmeticFixture() Estimate {
 		if name == "weights" {
 			c.Status = "estimated"
 			c.Bytes = "100"
+			c.LowBytes, c.HighBytes, c.Basis = "100", "100", "derived"
 			c.DomainID = "ram"
 		}
 		e.Components = append(e.Components, c)
 	}
 	return e
+}
+
+func TestMemoryUncertaintyNeverImprovesVerdict(t *testing.T) {
+	for _, available := range []string{"10737418240", "100"} {
+		for _, status := range []string{"unknown", "partial"} {
+			for _, domain := range []string{"ram", ""} {
+				t.Run(available+"/"+status+"/"+domain, func(t *testing.T) {
+					e := completeMemoryArithmeticFixture()
+					e.Domains[0].FreeBytes = available
+					want := CompareEstimate(e).FreeFit
+					c := EstimateComponent{Name: "runtime-overhead", Status: status, DomainID: domain, Reason: "unpriced residual"}
+					if status == "partial" {
+						c.Bytes, c.LowBytes, c.HighBytes, c.Basis = "0", "0", "0", "heuristic"
+					}
+					e.Components = append(e.Components, c)
+					got := CompareEstimate(e)
+					warning := "not priced: runtime-overhead"
+					if domain == "" {
+						warning = "not priced (any pool): runtime-overhead"
+					}
+					if got.FreeFit != want || !slices.Contains(got.Domains[0].Unknowns, warning) {
+						t.Fatalf("verdict/warnings = %+v, want %s with warning", got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestMemoryRangesAndSourceSlots(t *testing.T) {
+	t.Run("missing weights cannot form summed requirement", func(t *testing.T) {
+		e := completeMemoryArithmeticFixture()
+		e.Components = e.Components[1:]
+		if got := CompareEstimate(e); got.FreeFit != "unknown" {
+			t.Fatalf("missing weights=%+v", got)
+		}
+	})
+	t.Run("partial retains priced upper band", func(t *testing.T) {
+		e := completeMemoryArithmeticFixture()
+		e.Components[0].Status, e.Components[0].Reason, e.Components[0].HighBytes = "partial", "unpriced residual", "200"
+		e.Domains[0].FreeBytes = strconv.FormatUint(199+MemoryReserve(10<<30), 10)
+		got := CompareEstimate(e)
+		if got.FreeFit != "tight" || !slices.Contains(got.Domains[0].Unknowns, "not priced: weights") {
+			t.Fatalf("partial=%+v", got)
+		}
+	})
+	t.Run("unknown weights", func(t *testing.T) {
+		e := completeMemoryArithmeticFixture()
+		e.Components[0] = EstimateComponent{Name: "weights", DomainID: "ram", Status: "unknown", Reason: "unavailable"}
+		if got := CompareEstimate(e); got.FreeFit != "unknown" {
+			t.Fatalf("unknown weights=%+v", got)
+		}
+	})
+	for _, tc := range []struct{ name, available, want string }{
+		{"upper reserve boundary", strconv.FormatUint(200+MemoryReserve(10<<30), 10), "fits"},
+		{"below upper reserve", strconv.FormatUint(199+MemoryReserve(10<<30), 10), "tight"},
+		{"expected boundary", "100", "tight"},
+		{"upper alone exceeds", "150", "tight"},
+		{"expected exceeds", "99", "exceeds"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := completeMemoryArithmeticFixture()
+			e.Components[0].HighBytes = "200"
+			e.Domains[0].FreeBytes = tc.available
+			if got := CompareEstimate(e); got.FreeFit != tc.want {
+				t.Fatalf("comparison=%+v want %s", got, tc.want)
+			}
+		})
+	}
+	for _, kind := range []string{"user-stated", "measured", "engine-report"} {
+		t.Run(kind, func(t *testing.T) {
+			e := completeMemoryArithmeticFixture()
+			e.Components = nil
+			e.EstimateSource = &EstimateSource{Kind: kind, Provider: "fixture", Revision: "1", Basis: "synthetic", UnpricedCosts: []string{"transient peaks"}}
+			got := CompareEstimate(e)
+			if got.FreeFit != "fits" || !slices.Contains(got.Domains[0].Unknowns, "not priced (any pool): transient peaks") {
+				t.Fatalf("slot comparison=%+v", got)
+			}
+		})
+	}
 }
 func TestMemoryCompleteSyntheticComparisons(t *testing.T) {
 	for _, tc := range []struct{ name, available, want string }{{"sufficient", "10737418240", "fits"}, {"no reserve", "100", "tight"}, {"shortfall", "99", "exceeds"}, {"zero available", "0", "exceeds"}, {"missing available", "", "unknown"}} {
@@ -45,8 +128,6 @@ func TestMemoryIncompleteSyntheticComparisons(t *testing.T) {
 		mutate func(*Estimate)
 	}{
 		{"partial workspace", func(e *Estimate) { e.Components[3].Status = "partial" }},
-		{"missing category", func(e *Estimate) { e.Components = e.Components[:5] }},
-		{"sum mismatch", func(e *Estimate) { e.Domains[0].RequiredBytes = "101" }},
 		{"expired", func(e *Estimate) { e.Domains[0].RemainingValidityMS = 0 }},
 		{"unmapped", func(e *Estimate) { e.Components[0].DomainID = "" }},
 		{"unmapped physical device", func(e *Estimate) { e.Domains[0].Kind = "device"; e.Domains[0].DeviceID = "" }},
@@ -147,6 +228,7 @@ func TestMemoryComparisonOverflowIsUnknown(t *testing.T) {
 	e := completeMemoryArithmeticFixture()
 	e.Domains[0].RequiredBytes, e.Domains[0].CapacityBytes, e.Domains[0].FreeBytes = "18446744073709551615", "18446744073709551615", "18446744073709551615"
 	e.Components[0].Bytes = "18446744073709551615"
+	e.Components[0].LowBytes, e.Components[0].HighBytes = e.Components[0].Bytes, e.Components[0].Bytes
 	got := CompareEstimate(e)
 	if got.CapacityFit != "unknown" || got.FreeFit != "unknown" {
 		t.Fatal("overflow acquired a sized comparison verdict")

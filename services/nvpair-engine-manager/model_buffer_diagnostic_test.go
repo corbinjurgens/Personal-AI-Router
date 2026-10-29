@@ -83,7 +83,7 @@ func TestModelBufferCaptureCreationDiagnostics(t *testing.T) {
 	test("runtime snapshot", "runtime-snapshot", "missing pinned install", func(f *modelBufferTestFixture, _ **llamaServingLaunch, _ *launchCommand) {
 		f.load.st.plat.Install = nil
 	})
-	test("executable binding", "executable-binding", "serving artifact is missing or unresolved", func(_ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
+	test("executable binding", "executable-binding", "*fs.PathError", func(_ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
 		c.Bin = filepath.Join(t.TempDir(), "missing")
 	})
 	test("native environment", "native-environment", "Reviewed Auto native library search escapes its selected build.", func(_ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {

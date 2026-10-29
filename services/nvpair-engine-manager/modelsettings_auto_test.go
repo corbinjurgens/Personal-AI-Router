@@ -135,15 +135,15 @@ func autoTestEstimate(ctx context.Context, in modelEstimateInput) modelconfig.Es
 	}
 	extra := uint64(in.Allocation.TotalContext)*32 + 1024 + 1048576
 	out := modelconfig.Estimate{Status: "estimated", Domains: []modelconfig.MemoryDomain{{ID: "host", Kind: "host", RequiredBytes: strconv.FormatUint(host+extra, 10)}}, Components: []modelconfig.EstimateComponent{
-		{Name: "weights", DomainID: "host", Status: "estimated", Bytes: strconv.FormatUint(host, 10)},
-		{Name: "attention-cache", DomainID: "host", Status: "estimated", Bytes: strconv.FormatUint(uint64(in.Allocation.TotalContext)*32, 10)},
-		{Name: "compute-workspace", DomainID: "host", Status: "estimated", Bytes: "1024"},
-		{Name: "prompt-cache", DomainID: "host", Status: "estimated", Bytes: "1048576"},
+		{Name: "weights", DomainID: "host", Status: "estimated", Bytes: strconv.FormatUint(host, 10), LowBytes: strconv.FormatUint(host, 10), HighBytes: strconv.FormatUint(host, 10), Basis: "derived"},
+		{Name: "attention-cache", DomainID: "host", Status: "estimated", Bytes: strconv.FormatUint(uint64(in.Allocation.TotalContext)*32, 10), LowBytes: strconv.FormatUint(uint64(in.Allocation.TotalContext)*32, 10), HighBytes: strconv.FormatUint(uint64(in.Allocation.TotalContext)*32, 10), Basis: "derived"},
+		{Name: "compute-workspace", DomainID: "host", Status: "estimated", Bytes: "1024", LowBytes: "1024", HighBytes: "1024", Basis: "derived"},
+		{Name: "prompt-cache", DomainID: "host", Status: "estimated", Bytes: "1048576", LowBytes: "1048576", HighBytes: "1048576", Basis: "derived"},
 		{Name: "recurrent-state", Status: "excluded", Reason: "synthetic dense fixture has no recurrent state"}, {Name: "companions", Status: "excluded", Reason: "synthetic artifact set has no companions"},
 	}}
 	if in.Allocation.GPU.Mode != "cpu" {
 		out.Domains = append(out.Domains, modelconfig.MemoryDomain{ID: "offload-unmapped", Kind: "device", RequiredBytes: strconv.FormatUint(device, 10)})
-		out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "weights", DomainID: "offload-unmapped", Status: "estimated", Bytes: strconv.FormatUint(device, 10)})
+		out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "weights", DomainID: "offload-unmapped", Status: "estimated", Bytes: strconv.FormatUint(device, 10), LowBytes: strconv.FormatUint(device, 10), HighBytes: strconv.FormatUint(device, 10), Basis: "derived"})
 	}
 	return out
 }
@@ -284,7 +284,7 @@ func TestModelSettingsAutoFloorOnlyFitWithinBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		out.Domains[0].RequiredBytes = strconv.FormatUint(h+extra, 10)
-		out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "compute-workspace", Status: "estimated", DomainID: "host", Bytes: strconv.FormatUint(extra, 10), Reason: "synthetic context-dependent workspace charge"})
+		out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "compute-workspace", Status: "estimated", DomainID: "host", Bytes: strconv.FormatUint(extra, 10), LowBytes: strconv.FormatUint(extra, 10), HighBytes: strconv.FormatUint(extra, 10), Basis: "derived", Reason: "synthetic context-dependent workspace charge"})
 		return out
 	}}
 	// Assert the complete total-cost proof, not just monotonic tensor weights.
@@ -669,10 +669,10 @@ func TestModelSettingsAutoUMASingleReserve(t *testing.T) {
 	const capacity = uint64(8589934592)
 	memory := &modelEstimateMemory{Identity: "UMA", Source: "synthetic-owner", At: now, UMA: true, Domains: []modelconfig.MemoryDomain{{ID: "shared", Kind: "shared", CapacityBytes: strconv.FormatUint(capacity, 10), FreeBytes: strconv.FormatUint(required+capacity/10+1+(512<<20), 10)}}}
 	out := modelconfig.Estimate{Status: "estimated", Domains: []modelconfig.MemoryDomain{{ID: "shared", Kind: "shared", RequiredBytes: "1024"}}, Components: []modelconfig.EstimateComponent{
-		{Name: "weights", DomainID: "shared", Status: "estimated", Bytes: "512"},
-		{Name: "attention-cache", DomainID: "shared", Status: "estimated", Bytes: "256"},
-		{Name: "compute-workspace", DomainID: "shared", Status: "estimated", Bytes: "128"},
-		{Name: "prompt-cache", DomainID: "shared", Status: "estimated", Bytes: "128"},
+		{Name: "weights", DomainID: "shared", Status: "estimated", Bytes: "512", LowBytes: "512", HighBytes: "512", Basis: "derived"},
+		{Name: "attention-cache", DomainID: "shared", Status: "estimated", Bytes: "256", LowBytes: "256", HighBytes: "256", Basis: "derived"},
+		{Name: "compute-workspace", DomainID: "shared", Status: "estimated", Bytes: "128", LowBytes: "128", HighBytes: "128", Basis: "derived"},
+		{Name: "prompt-cache", DomainID: "shared", Status: "estimated", Bytes: "128", LowBytes: "128", HighBytes: "128", Basis: "derived"},
 		{Name: "recurrent-state", Status: "excluded", Reason: "synthetic dense fixture has no recurrent state"}, {Name: "companions", Status: "excluded", Reason: "synthetic artifact set has no companions"},
 	}}
 	known, fits, _ := modelAutoFit(out, memory, now, modelconfig.GPU{Mode: "cpu"})
@@ -802,7 +802,7 @@ func TestModelSettingsAutoLayerDependentWorkspaceKeepsCPU(t *testing.T) {
 						t.Fatal(err)
 					}
 					out.Domains[0].RequiredBytes = strconv.FormatUint(host+extra, 10)
-					out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "compute-workspace", Status: "estimated", DomainID: "host", Bytes: strconv.FormatUint(extra, 10), Reason: "synthetic offload-dependent workspace charge"})
+					out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "compute-workspace", Status: "estimated", DomainID: "host", Bytes: strconv.FormatUint(extra, 10), LowBytes: strconv.FormatUint(extra, 10), HighBytes: strconv.FormatUint(extra, 10), Basis: "derived", Reason: "synthetic offload-dependent workspace charge"})
 				}
 				if err := out.Validate(); err != nil {
 					t.Fatalf("synthetic layer-dependent workspace fixture is invalid: %v", err)

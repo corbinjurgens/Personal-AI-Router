@@ -209,6 +209,8 @@ export type Estimate = {
         capacityBytes?: string
         freeBytes?: string
         requiredBytes?: string
+        requiredLowBytes?: string
+        requiredHighBytes?: string
         reserveBytes?: string
         capacityFit?: 'unknown' | 'exceeds' | 'tight' | 'fits'
         freeFit?: 'unknown' | 'exceeds' | 'tight' | 'fits'
@@ -226,6 +228,9 @@ export type Estimate = {
         domainId?: string
         status: 'estimated' | 'partial' | 'unknown' | 'excluded'
         bytes?: string
+        lowBytes?: string
+        highBytes?: string
+        basis?: 'derived' | 'heuristic' | 'calibrated' | 'observed'
         reason?: string
     }>
     assumptions?: string[]
@@ -281,6 +286,7 @@ type LoadBufferComponent =
     | 'compute-workspace'
     | 'prompt-cache'
     | 'companions'
+    | 'runtime-overhead'
 type LoadBufferReason =
     | 'observation-omitted'
     | 'response-budget'

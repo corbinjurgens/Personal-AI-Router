@@ -33,7 +33,7 @@ function observation(): LoadBufferObservation {
         upstreamPin: '7fe450e19305b828c199d602c23a8337aaa1f03b',
         buildAssurance: 'recognized-self-reported-pin',
         estimatorRevision:
-            'pair-gguf/1;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385',
+            'pair-gguf/2;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385',
         capturedOptions: {
             context: { mode: 'fixed', tokens: 8192 },
             slots: 2,
