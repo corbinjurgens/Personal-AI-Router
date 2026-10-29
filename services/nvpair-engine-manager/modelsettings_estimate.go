@@ -499,6 +499,9 @@ func calculateModelEstimate(ctx context.Context, in modelEstimateInput) modelcon
 	}
 	kv, recurrent := modelEstimateCaches(ctx, m, in)
 	out.Components = append(out.Components, kv, recurrent, modelEstimateCompute(ctx, m, in))
+	if in.Allocation != nil && in.Allocation.GPU.Mode == "layers" && in.Allocation.GPU.Layers != nil && *in.Allocation.GPU.Layers > 0 {
+		out.Components = append(out.Components, modelEstimateComputePortion(ctx, m, in, true))
+	}
 	if in.Allocation != nil && in.Allocation.Options.CacheRAM != nil && *in.Allocation.Options.CacheRAM > 0 {
 		c := estimateComponent("prompt-cache", modelEstimateMul(uint64(*in.Allocation.Options.CacheRAM), 1<<20), "configured host prompt-cache ceiling; usage is demand-dependent")
 		c.LowBytes = "0"
@@ -1238,10 +1241,120 @@ func modelEstimateCachesForLayers(ctx context.Context, m modelEstimateModel, in 
 	return kv, recurrent
 }
 
-// Only an ordinary dense CPU graph is admitted to the full library heuristic.
-// Missing dimensions do not trigger heuristic defaults; complex graphs retain
-// their independent weight/cache results and an Unknown workspace.
+// Validate only graph inputs consumed by the heuristic, not native loadability.
+// Tensor owners: 7fe450e1 src/models/{qwen2moe,qwen3moe,deepseek2,lfm2}.cpp.
+func modelEstimateSpecialComputeLayout(m *modelEstimateModel) string {
+	emb, _ := m.number("embedding_length")
+	ffn, _ := m.number("feed_forward_length")
+	layers, _ := m.number("block_count")
+	heads, _ := m.number("attention.head_count")
+	shape := func(name string, dims ...uint64) bool {
+		t, ok := m.file.TensorInfos.Get(name)
+		return ok && slices.Equal(t.Dimensions, dims)
+	}
+	experts, moe := m.number("expert_count")
+	used, usedOK := m.number("expert_used_count")
+	width, widthOK := m.number("expert_feed_forward_length")
+	shared, _ := m.number("expert_shared_feed_forward_length")
+	// Native qwen{2,3}moe.cpp uses n_ff/n_expert_used when width is
+	// omitted. The parser's Architecture does not apply that default.
+	// Pass the proven native width, then require matching expert tensors below.
+	set := func(key string, n uint64) {
+		m.file.Header.MetadataKV = append(m.file.Header.MetadataKV, gguf.GGUFMetadataKV{Key: m.arch + "." + key, ValueType: gguf.GGUFMetadataValueTypeUint64, Value: n})
+	}
+	if _, exists := m.numeric[m.arch+".expert_feed_forward_length"]; !exists && (m.arch == "qwen2moe" || m.arch == "qwen3moe") && usedOK && used > 0 && ffn%used == 0 {
+		width, widthOK = ffn/used, true
+		set("expert_feed_forward_length", width)
+	}
+	if _, exists := m.numeric[m.arch+".expert_shared_feed_forward_length"]; !exists && m.arch == "qwen2moe" {
+		shared = ffn
+		set("expert_shared_feed_forward_length", shared)
+	}
+	if m.arch == "lfm2" && (experts != 0 || used != 0) {
+		return "LFM2 dense graph contains unconfirmed experts"
+	}
+	if moe && experts > 0 {
+		if !usedOK || used == 0 || used > experts || experts > 65536 {
+			return "MoE expert_used_count missing or inconsistent"
+		}
+		if !widthOK || width == 0 || width > 65536 {
+			return "MoE expert_feed_forward_length missing or unconfirmed"
+		}
+	} else if m.arch != "lfm2" {
+		return "MoE expert_count unavailable"
+	}
+	if m.arch == "qwen2moe" && shared == 0 {
+		return "MoE expert_shared_feed_forward_length missing or unconfirmed"
+	}
+	if m.arch == "deepseek2" {
+		count, ok := m.number("expert_shared_count")
+		if _, exists := m.numeric[m.arch+".expert_shared_feed_forward_length"]; !exists && ok {
+			shared = modelEstimateMul(count, width)
+			set("expert_shared_feed_forward_length", shared)
+		}
+		if !ok || shared != modelEstimateMul(count, width) {
+			return "MLA shared expert width/count unconfirmed"
+		}
+	}
+	for i := uint64(0); i < layers; i++ {
+		p := "blk." + strconv.FormatUint(i, 10) + "."
+		if !shape(p+"attn_norm.weight", emb) || !shape(p+"ffn_norm.weight", emb) {
+			return "graph layer norms incomplete: " + p
+		}
+		if moe && experts > 0 {
+			if !shape(p+"ffn_gate_inp.weight", emb, experts) || !shape(p+"ffn_gate_exps.weight", emb, width, experts) || !shape(p+"ffn_up_exps.weight", emb, width, experts) || !shape(p+"ffn_down_exps.weight", width, emb, experts) {
+				return "MoE active expert tensor width incomplete: " + p
+			}
+			if shared > 0 && (!shape(p+"ffn_gate_shexp.weight", emb, shared) || !shape(p+"ffn_up_shexp.weight", emb, shared) || !shape(p+"ffn_down_shexp.weight", shared, emb)) {
+				return "MoE shared expert tensors incomplete: " + p
+			}
+		} else if !shape(p+"ffn_gate.weight", emb, ffn) || !shape(p+"ffn_up.weight", emb, ffn) || !shape(p+"ffn_down.weight", ffn, emb) {
+			return "hybrid FFN tensors incomplete: " + p
+		}
+		if m.arch == "deepseek2" {
+			q, qok := m.number("attention.q_lora_rank")
+			kv, kok := m.number("attention.kv_lora_rank")
+			k, keyOK := m.number("attention.key_length_mla")
+			v, valueOK := m.number("attention.value_length_mla")
+			rope, rok := m.number("rope.dimension_count")
+			// deepseek2.cpp:114-119 selects split K/V projections for MLA;
+			// the legacy unsplit attn_kv_b tensor belongs to its non-MLA branch.
+			if !qok || !kok || !keyOK || !valueOK || !rok || q == 0 || kv == 0 || k <= rope || v == 0 || k > 65536 || v > 65536 || q > 65536 || kv > 65536 || !shape(p+"attn_q_a.weight", emb, q) || !shape(p+"attn_q_a_norm.weight", q) || !shape(p+"attn_q_b.weight", q, heads*k) || !shape(p+"attn_kv_a_mqa.weight", emb, kv+rope) || !shape(p+"attn_kv_a_norm.weight", kv) || !shape(p+"attn_k_b.weight", k-rope, kv, heads) || !shape(p+"attn_v_b.weight", kv, v, heads) || !shape(p+"attn_output.weight", heads*v, emb) {
+				return "MLA query/latent/rotary graph inputs unconfirmed: " + p
+			}
+			continue
+		}
+		hkv, ok := m.number("attention.head_count_kv")
+		if m.arch == "lfm2" {
+			n := m.numeric[m.arch+".attention.head_count_kv"]
+			if len(n.Array) != int(layers) {
+				return "hybrid per-layer KV heads unavailable"
+			}
+			hkv, ok = modelEstimateUint(gguffacts.Numeric{Type: n.Type, Bits: n.Array[i]})
+			if ok && hkv == 0 {
+				cache, valid := m.number("shortconv.l_cache")
+				if !valid || cache == 0 || cache > 65536 || !shape(p+"shortconv.conv.weight", cache, emb) || !shape(p+"shortconv.in_proj.weight", emb, 3*emb) || !shape(p+"shortconv.out_proj.weight", emb, emb) {
+					return "hybrid shortconv graph inputs unavailable: " + p
+				}
+				continue
+			}
+			// lfm2.cpp:69-72 creates per-head Q/K normalization weights.
+			if !shape(p+"attn_q_norm.weight", emb/heads) || !shape(p+"attn_k_norm.weight", emb/heads) {
+				return "hybrid attention normalization tensors incomplete: " + p
+			}
+		}
+		if !ok || hkv == 0 || hkv > heads || !shape(p+"attn_q.weight", emb, emb) || !shape(p+"attn_k.weight", emb, emb/heads*hkv) || !shape(p+"attn_v.weight", emb, emb/heads*hkv) || !shape(p+"attn_output.weight", emb, emb) {
+			return "attention graph tensors incomplete: " + p
+		}
+	}
+	return ""
+}
+
 func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEstimateInput) (out modelconfig.EstimateComponent) {
+	return modelEstimateComputePortion(ctx, m, in, false)
+}
+
+func modelEstimateComputePortion(ctx context.Context, m modelEstimateModel, in modelEstimateInput, device bool) (out modelconfig.EstimateComponent) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			reason := "pinned library compute panic"
@@ -1252,7 +1365,7 @@ func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEst
 		}
 	}()
 	u := unknownEstimateComponent("compute-workspace", "architecture/native graph mapping or effective batch/FA options unavailable")
-	if in.Allocation == nil || in.Support != modelEstimatorSupport || in.BuildID == "" || !slices.Contains([]string{"llama", "qwen2", "qwen3"}, m.arch) {
+	if in.Allocation == nil || in.Support != modelEstimatorSupport || in.BuildID == "" || !slices.Contains([]string{"llama", "qwen2", "qwen3", "qwen2moe", "qwen3moe", "deepseek2", "lfm2"}, m.arch) {
 		return u
 	}
 	a := in.Allocation
@@ -1264,7 +1377,8 @@ func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEst
 		u.Reason = "batch limits or library minimum batch mismatch"
 		return u
 	}
-	for _, field := range []string{"block_count", "embedding_length", "feed_forward_length", "attention.head_count", "attention.head_count_kv", "vocab_size"} {
+	special := slices.Contains([]string{"qwen2moe", "qwen3moe", "deepseek2", "lfm2"}, m.arch)
+	for _, field := range []string{"block_count", "embedding_length", "feed_forward_length", "attention.head_count", "vocab_size"} {
 		v, ok := m.number(field)
 		if !ok || v == 0 || v > 65536 || field == "block_count" && v > modelEstimateLayers {
 			u.Reason = "dense graph required scalar dimension missing/outside range: " + field
@@ -1272,6 +1386,9 @@ func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEst
 		}
 	}
 	for _, field := range []string{"expert_count", "attention.sliding_window", "attention.kv_lora_rank", "attention.key_length_mla", "attention.value_length_mla", "full_attention_interval", "attention.shared_kv_layers", "nextn_predict_layers"} {
+		if special && slices.Contains([]string{"expert_count", "attention.kv_lora_rank", "attention.key_length_mla", "attention.value_length_mla"}, field) {
+			continue
+		}
 		if n, exists := m.numeric[m.arch+"."+field]; exists {
 			v, ok := modelEstimateUint(n)
 			if !ok || v != 0 {
@@ -1283,7 +1400,7 @@ func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEst
 	heads, _ := m.number("attention.head_count")
 	emb, _ := m.number("embedding_length")
 	hkv, _ := m.number("attention.head_count_kv")
-	if emb%heads != 0 || hkv > heads {
+	if emb%heads != 0 || hkv > heads || !special && hkv == 0 {
 		u.Reason = "dense graph attention dimensions inconsistent"
 		return u
 	}
@@ -1299,7 +1416,7 @@ func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEst
 	// Refuse malformed/special state metadata rather than letting the library
 	// infer a recurrent graph under a nominally dense architecture.
 	for key := range m.numeric {
-		if strings.Contains(key, ".ssm.") || strings.Contains(key, ".shortconv.") || strings.Contains(key, ".wkv.") {
+		if strings.Contains(key, ".ssm.") || strings.Contains(key, ".shortconv.") && m.arch != "lfm2" || strings.Contains(key, ".wkv.") {
 			u.Reason = "dense graph contains unmapped recurrent metadata"
 			return u
 		}
@@ -1330,20 +1447,34 @@ func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEst
 	ffn, _ := m.number("feed_forward_length")
 	vocab, _ := m.number("vocab_size")
 	layers, _ := m.number("block_count")
-	if !shape("token_embd.weight", emb, vocab) || !shape("output_norm.weight", emb) {
+	if special {
+		if reason := modelEstimateSpecialComputeLayout(&m); reason != "" {
+			u.Reason = reason
+			return u
+		}
+	}
+	norm := "output_norm.weight"
+	if m.arch == "lfm2" {
+		// lfm2.cpp:39 / llama-arch.cpp:436 names OUTPUT_NORM_LFM2.
+		norm = "token_embd_norm.weight"
+	}
+	if !shape("token_embd.weight", emb, vocab) || !shape(norm, emb) {
 		u.Reason = "dense graph embedding/output shapes incomplete"
 		return u
 	}
 	for _, field := range []string{"attention.key_length", "attention.value_length"} {
 		if _, exists := m.numeric[m.arch+"."+field]; exists {
 			width, _ := m.number(field)
-			if width != emb/heads {
+			if width != emb/heads && m.arch != "deepseek2" {
 				u.Reason = "dense graph unequal head widths unmapped"
 				return u
 			}
 		}
 	}
 	for i := uint64(0); i < layers; i++ {
+		if special {
+			break
+		}
 		prefix := "blk." + strconv.FormatUint(i, 10) + "."
 		if !shape(prefix+"attn_norm.weight", emb) || !shape(prefix+"attn_q.weight", emb, emb) || !shape(prefix+"attn_k.weight", emb, emb/heads*hkv) || !shape(prefix+"attn_v.weight", emb, emb/heads*hkv) || !shape(prefix+"attn_output.weight", emb, emb) || !shape(prefix+"ffn_norm.weight", emb) || !shape(prefix+"ffn_gate.weight", emb, ffn) || !shape(prefix+"ffn_up.weight", emb, ffn) || !shape(prefix+"ffn_down.weight", ffn, emb) {
 			u.Reason = "dense graph required tensor shape incomplete: " + prefix
@@ -1359,20 +1490,39 @@ func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEst
 		u.Reason = "estimator operation budget exhausted"
 		return u
 	}
-	if a.GPU.Mode != "cpu" {
-		u.Reason = "GPU graph/device mapping unavailable; CPU workspace cannot price offloaded graph"
+	offload := int32(0)
+	if a.GPU.Mode == "layers" && a.GPU.Layers != nil && *a.GPU.Layers >= 0 && uint64(*a.GPU.Layers) <= layers+1 {
+		offload = *a.GPU.Layers
+	} else if a.GPU.Mode != "cpu" {
+		u.Reason = "finite single-device layer placement unavailable; multi-device splits unsupported"
 		return u
 	}
-	if a.Options.OpOffload == nil || *a.Options.OpOffload {
+	if offload == 0 && (device || a.Options.OpOffload == nil || *a.Options.OpOffload) {
 		u.Reason = "CPU graph requires explicit op-offload=false; native offload mapping unavailable"
 		return u
 	}
-	opts := []gguf.GGUFRunEstimateOption{gguf.WithLLaMACppContextSize(a.TotalContext), gguf.WithParallelSize(a.Slots), gguf.WithLLaMACppLogicalBatchSize(batch), gguf.WithLLaMACppPhysicalBatchSize(ubatch), gguf.WithLLaMACppCacheKeyType(kt), gguf.WithLLaMACppCacheValueType(vt), gguf.WithLLaMACppOffloadLayers(0)}
+	if offload > 0 && modelEstimateBackend(in) == "" {
+		u.Reason = "single-device native inventory unavailable"
+		return u
+	}
+	if offload > 0 {
+		count := 0
+		for _, d := range in.Memory.Map.Devices {
+			if d.Kind != 0 {
+				count++
+			}
+		}
+		if count != 1 {
+			u.Reason = "multi-device compute split unconfirmed"
+			return u
+		}
+	}
+	opts := []gguf.GGUFRunEstimateOption{gguf.WithLLaMACppContextSize(a.TotalContext), gguf.WithParallelSize(a.Slots), gguf.WithLLaMACppLogicalBatchSize(batch), gguf.WithLLaMACppPhysicalBatchSize(ubatch), gguf.WithLLaMACppCacheKeyType(kt), gguf.WithLLaMACppCacheValueType(vt), gguf.WithLLaMACppOffloadLayers(uint64(offload))}
 	if *a.Options.FlashAttention == "on" {
 		opts = append(opts, gguf.WithFlashAttention())
 	}
 	result := m.file.EstimateLLaMACppRun(opts...)
-	if len(result.Devices) > 64 {
+	if len(result.Devices) > 2 {
 		u.Reason = "library device limit"
 		return u
 	}
@@ -1384,13 +1534,25 @@ func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEst
 	// buffer as host memory. Only its CPU portion is mapped here; full CPU
 	// scratch remains unsized rather than summing fictitious device allocations.
 	c := result.Devices[0].Computation
-	total := modelEstimateAdd(modelEstimateAdd(uint64(c.Footprint), uint64(c.Input)), modelEstimateAdd(uint64(c.Compute), uint64(c.Output)))
+	if device {
+		if len(result.Devices) != 2 {
+			u.Reason = "library device computation unavailable"
+			return u
+		}
+		c = result.Devices[1].Computation
+	}
+	// Computation.Sum reuses compute/output storage, taking their maximum.
+	total := modelEstimateAdd(modelEstimateAdd(uint64(c.Footprint), uint64(c.Input)), max(uint64(c.Compute), uint64(c.Output)))
 	if total == 0 {
 		return u
 	}
-	component := estimateComponent("compute-workspace", total, "pinned library dense CPU graph portion only; complete CPU scratch/op-offload mapping unavailable; no hypothetical GPU buffer charged as host")
+	component := estimateComponent("compute-workspace", total, "pinned library graph portion only; native scratch, allocator and transient peaks unpriced; no hypothetical device buffer charged at zero GPU layers")
 	component.Status = "partial"
 	component.Basis = "heuristic"
+	component.DomainID = "host"
+	if device {
+		component.DomainID = "offload-unmapped"
+	}
 	return component
 }
 
@@ -1418,6 +1580,14 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 			panic(errModelEstimateOverflow)
 		}
 		if c.Name == "companions" {
+			continue
+		}
+		if c.Name == "compute-workspace" && c.DomainID != "" {
+			if c.DomainID == "host" {
+				host = modelEstimateAdd(host, n)
+			} else {
+				device = modelEstimateAdd(device, n)
+			}
 			continue
 		}
 		if cpu || c.Name == "prompt-cache" {

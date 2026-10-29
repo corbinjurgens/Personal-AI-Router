@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	gguf "github.com/gpustack/gguf-parser-go"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/gguffacts"
 	"nvpair-shared/modelconfig"
@@ -385,6 +386,334 @@ func TestModelSettingsEstimateDenseAndGQA(t *testing.T) {
 			}
 			if out.Status != "partial" || len(out.Unknowns) == 0 || out.BuildID != in.BuildID {
 				t.Fatalf("lost partial/build disclosure: %+v", out)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateComputePlacements(t *testing.T) {
+	for _, arch := range []string{"qwen2moe", "qwen3moe", "deepseek2", "lfm2"} {
+		for _, placement := range []string{"cpu", "full", "partial"} {
+			t.Run(arch+"/"+placement, func(t *testing.T) {
+				in := estimateComputeFixture(arch)
+				if placement != "cpu" {
+					n := int32(2)
+					if placement == "full" {
+						n = 3
+					}
+					in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &n}
+					in.Memory = &modelEstimateMemory{Map: &modelDeviceMap{Devices: []modelNativeDevice{{Kind: 1, Selector: "CUDA0"}}}}
+				}
+				out := estimateFixtureResult(t, in)
+				m, reason := modelEstimateAdapt(context.Background(), in.Facts)
+				if reason != "" {
+					t.Fatal(reason)
+				}
+				if reason := modelEstimateSpecialComputeLayout(&m); reason != "" {
+					t.Fatal(reason)
+				}
+				ngl := uint64(0)
+				if in.Allocation.GPU.Layers != nil {
+					ngl = uint64(*in.Allocation.GPU.Layers)
+				}
+				library := m.file.EstimateLLaMACppRun(gguf.WithLLaMACppContextSize(1024), gguf.WithParallelSize(1), gguf.WithLLaMACppLogicalBatchSize(64), gguf.WithLLaMACppPhysicalBatchSize(32), gguf.WithLLaMACppCacheKeyType(gguf.GGMLTypeF16), gguf.WithLLaMACppCacheValueType(gguf.GGMLTypeF16), gguf.WithLLaMACppOffloadLayers(ngl))
+				domains := map[string]bool{}
+				for _, c := range out.Components {
+					if c.Name != "compute-workspace" {
+						continue
+					}
+					n, err := strconv.ParseUint(c.Bytes, 10, 64)
+					if err != nil || n == 0 || c.Status != "partial" || c.Basis != "heuristic" || c.LowBytes != strconv.FormatUint(n*3/4, 10) || c.HighBytes != strconv.FormatUint((n*3+1)/2, 10) {
+						t.Fatalf("compute portion = %+v (%v)", c, err)
+					}
+					domains[c.DomainID] = true
+					idx := 0
+					if c.DomainID == "offload-unmapped" {
+						idx = 1
+					}
+					if n != uint64(library.Devices[idx].Computation.Sum()) {
+						t.Fatalf("priced library portion = %d, want %+v", n, library.Devices[idx].Computation)
+					}
+				}
+				if !domains["host"] || (placement != "cpu" && !domains["offload-unmapped"]) || (placement == "cpu" && len(domains) != 1) {
+					t.Fatalf("compute domains = %v", domains)
+				}
+			})
+		}
+	}
+}
+
+func TestModelSettingsEstimateComputeUnknownInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*modelEstimateInput)
+		reason string
+	}{
+		{"missing active experts", func(in *modelEstimateInput) { delete(in.Facts.Shards[0].Numeric, "qwen3moe.expert_used_count") }, "expert_used_count"},
+		{"expert width differs from tensors", func(in *modelEstimateInput) {
+			in.Facts.Shards[0].Numeric["qwen3moe.expert_feed_forward_length"] = gguffacts.Numeric{Type: 10, Bits: 48}
+		}, "expert tensor width"},
+		{"multiple devices", func(in *modelEstimateInput) {
+			n := int32(2)
+			in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &n}
+			in.Memory = &modelEstimateMemory{Map: &modelDeviceMap{Devices: []modelNativeDevice{{Kind: 1, Selector: "CUDA0"}, {Kind: 1, Selector: "CUDA1"}}}}
+		}, "multi-device"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateComputeFixture("qwen3moe")
+			tc.change(&in)
+			c := estimateTestComponent(t, estimateFixtureResult(t, in), "compute-workspace")
+			if c.Status != "unknown" || c.Bytes != "" || !strings.Contains(c.Reason, tc.reason) {
+				t.Fatalf("unconfirmed compute = %+v", c)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateComputeZeroLayersExcludesDevice(t *testing.T) {
+	in := estimateComputeFixture("qwen3moe")
+	n := int32(0)
+	in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &n}
+	out := estimateFixtureResult(t, in)
+	for _, c := range out.Components {
+		if c.Name == "compute-workspace" && (c.DomainID != "host" || c.Status != "partial") {
+			t.Fatalf("zero-layer portion = %+v", c)
+		}
+	}
+}
+
+func TestModelSettingsEstimateComputeExpertInputs(t *testing.T) {
+	for _, arch := range []string{"qwen3moe", "deepseek2"} {
+		t.Run(arch, func(t *testing.T) {
+			in := estimateComputeFixture(arch)
+			m, reason := modelEstimateAdapt(context.Background(), in.Facts)
+			if reason != "" {
+				t.Fatal(reason)
+			}
+			if reason := modelEstimateSpecialComputeLayout(&m); reason != "" {
+				t.Fatal(reason)
+			}
+			a := m.file.Architecture()
+			if a.ExpertCount != 8 || a.ExpertUsedCount != 2 || a.ExpertFeedForwardLength != 96 || (arch == "deepseek2" && (a.ExpertSharedCount != 1 || a.ExpertSharedFeedForwardLength != 96)) {
+				t.Fatalf("library expert input = %+v", a)
+			}
+			// Independent call proves placement options and the once-counted
+			// host portion. The hypothetical device row must not enter CPU bytes.
+			want := m.file.EstimateLLaMACppRun(gguf.WithLLaMACppContextSize(1024), gguf.WithParallelSize(1), gguf.WithLLaMACppLogicalBatchSize(64), gguf.WithLLaMACppPhysicalBatchSize(32), gguf.WithLLaMACppCacheKeyType(gguf.GGMLTypeF16), gguf.WithLLaMACppCacheValueType(gguf.GGMLTypeF16), gguf.WithLLaMACppOffloadLayers(0))
+			got := modelEstimateCompute(context.Background(), m, in)
+			if got.Bytes != strconv.FormatUint(uint64(want.Devices[0].Computation.Sum()), 10) || got.DomainID != "host" {
+				t.Fatalf("host library portion = %+v", got)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateComputeNativeExpertDefaults(t *testing.T) {
+	for _, arch := range []string{"qwen2moe", "qwen3moe", "deepseek2"} {
+		t.Run(arch, func(t *testing.T) {
+			in := estimateComputeFixture(arch)
+			if arch == "deepseek2" {
+				delete(in.Facts.Shards[0].Numeric, arch+".expert_shared_feed_forward_length")
+			} else {
+				delete(in.Facts.Shards[0].Numeric, arch+".expert_feed_forward_length")
+				in.Facts.Shards[0].Numeric[arch+".feed_forward_length"] = gguffacts.Numeric{Type: 10, Bits: 192}
+			}
+			m, reason := modelEstimateAdapt(context.Background(), in.Facts)
+			if reason != "" {
+				t.Fatal(reason)
+			}
+			if reason := modelEstimateSpecialComputeLayout(&m); reason != "" {
+				t.Fatal(reason)
+			}
+			a := m.file.Architecture()
+			if a.ExpertFeedForwardLength != 96 || a.ExpertUsedCount != 2 || (arch == "deepseek2" && a.ExpertSharedFeedForwardLength != 96) {
+				t.Fatalf("native defaults passed to parser = %+v", a)
+			}
+			if c := estimateTestComponent(t, estimateFixtureResult(t, in), "compute-workspace"); c.Status != "partial" {
+				t.Fatalf("defaulted graph = %+v", c)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateComputePanicUnknown(t *testing.T) {
+	in := estimateComputeFixture("qwen3moe")
+	m, reason := modelEstimateAdapt(context.Background(), in.Facts)
+	if reason != "" {
+		t.Fatal(reason)
+	}
+	// Malformed library-only value bypasses the typed fact adapter to exercise
+	// the actual run-estimate recovery boundary, without a production hook.
+	for i := range m.file.Header.MetadataKV {
+		if m.file.Header.MetadataKV[i].Key == "qwen3moe.expert_used_count" {
+			m.file.Header.MetadataKV[i].Value = "panic fixture"
+			m.file.Header.MetadataKV[i].ValueType = gguf.GGUFMetadataValueTypeString
+		}
+	}
+	c := modelEstimateCompute(context.Background(), m, in)
+	if c.Status != "unknown" || c.Bytes != "" || c.Reason != "pinned library compute panic" {
+		t.Fatalf("panic result = %+v", c)
+	}
+}
+
+func estimateComputeFixture(arch string) modelEstimateInput {
+	in := estimateFixture(arch)
+	add := func(name string, dims ...uint64) {
+		n := uint64(2)
+		for _, d := range dims {
+			n *= d
+		}
+		in.Facts.Shards[0].Tensors = append(in.Facts.Shards[0].Tensors, gguffacts.Tensor{Name: name, Type: 1, Dimensions: dims, Bytes: n})
+	}
+	set := func(key string, n uint64) {
+		in.Facts.Shards[0].Numeric[arch+"."+key] = gguffacts.Numeric{Type: 10, Bits: n}
+	}
+	// Replace the deliberately incomplete cache-only fixture with graph tensors.
+	in.Facts.Shards[0].Tensors = nil
+	add("token_embd.weight", 128, 256)
+	if arch == "lfm2" {
+		add("token_embd_norm.weight", 128)
+	} else {
+		add("output_norm.weight", 128)
+	}
+	add("output.weight", 128, 256)
+	if arch == "qwen2moe" || arch == "qwen3moe" || arch == "deepseek2" {
+		set("expert_count", 8)
+		set("expert_used_count", 2)
+		set("expert_feed_forward_length", 96)
+	}
+	if arch == "qwen2moe" {
+		set("expert_shared_feed_forward_length", 256)
+	}
+	if arch == "deepseek2" {
+		set("attention.q_lora_rank", 32)
+		set("attention.kv_lora_rank", 32)
+		set("attention.key_length_mla", 32)
+		set("attention.value_length_mla", 32)
+		set("rope.dimension_count", 16)
+		set("expert_shared_count", 1)
+		set("expert_shared_feed_forward_length", 96)
+	}
+	if arch == "lfm2" {
+		in.Facts.Shards[0].Numeric[arch+".attention.head_count_kv"] = gguffacts.Numeric{Type: 10, Array: []uint64{0, 2}}
+		set("shortconv.l_cache", 3)
+	}
+	for i := 0; i < 2; i++ {
+		p := "blk." + strconv.Itoa(i) + "."
+		add(p+"attn_norm.weight", 128)
+		add(p+"ffn_norm.weight", 128)
+		if arch == "deepseek2" {
+			add(p+"attn_q_a.weight", 128, 32)
+			add(p+"attn_q_a_norm.weight", 32)
+			add(p+"attn_q_b.weight", 32, 128)
+			add(p+"attn_kv_a_mqa.weight", 128, 48)
+			add(p+"attn_kv_a_norm.weight", 32)
+			add(p+"attn_k_b.weight", 16, 32, 4)
+			add(p+"attn_v_b.weight", 32, 32, 4)
+		} else if arch == "lfm2" && i == 0 {
+			add(p+"shortconv.conv.weight", 3, 128)
+			add(p+"shortconv.in_proj.weight", 128, 384)
+			add(p+"shortconv.out_proj.weight", 128, 128)
+		} else {
+			add(p+"attn_q.weight", 128, 128)
+			add(p+"attn_k.weight", 128, 64)
+			add(p+"attn_v.weight", 128, 64)
+			if arch == "lfm2" {
+				add(p+"attn_q_norm.weight", 32)
+				add(p+"attn_k_norm.weight", 32)
+			}
+		}
+		add(p+"attn_output.weight", 128, 128)
+		if arch == "lfm2" {
+			add(p+"ffn_gate.weight", 128, 256)
+			add(p+"ffn_up.weight", 128, 256)
+			add(p+"ffn_down.weight", 256, 128)
+		} else {
+			add(p+"ffn_gate_inp.weight", 128, 8)
+			add(p+"ffn_gate_exps.weight", 128, 96, 8)
+			add(p+"ffn_up_exps.weight", 128, 96, 8)
+			add(p+"ffn_down_exps.weight", 96, 128, 8)
+			if arch == "deepseek2" {
+				add(p+"ffn_gate_shexp.weight", 128, 96)
+				add(p+"ffn_up_shexp.weight", 128, 96)
+				add(p+"ffn_down_shexp.weight", 96, 128)
+			}
+			if arch == "qwen2moe" {
+				add(p+"ffn_gate_inp_shexp.weight", 128)
+				add(p+"ffn_gate_shexp.weight", 128, 256)
+				add(p+"ffn_up_shexp.weight", 128, 256)
+				add(p+"ffn_down_shexp.weight", 256, 128)
+			}
+		}
+	}
+	return in
+}
+
+func TestModelSettingsEstimateComputeProductionExpertWidths(t *testing.T) {
+	for _, defaults := range []bool{false, true} {
+		name := "explicit widths"
+		if defaults {
+			name = "native defaults"
+		}
+		t.Run(name, func(t *testing.T) {
+			in := estimateComputeFixture("qwen2moe")
+			for key, value := range map[string]uint64{"feed_forward_length": 8192, "expert_feed_forward_length": 4096, "expert_shared_feed_forward_length": 8192} {
+				in.Facts.Shards[0].Numeric["qwen2moe."+key] = gguffacts.Numeric{Type: 10, Bits: value}
+			}
+			for i := range in.Facts.Shards[0].Tensors {
+				tensor := &in.Facts.Shards[0].Tensors[i]
+				width := uint64(0)
+				if strings.Contains(tensor.Name, "_exps.weight") {
+					width = 4096
+				} else if strings.Contains(tensor.Name, "_shexp.weight") && !strings.Contains(tensor.Name, "gate_inp") {
+					width = 8192
+				}
+				if width == 0 {
+					continue
+				}
+				index := 1
+				if strings.Contains(tensor.Name, "ffn_down") {
+					index = 0
+				}
+				tensor.Dimensions[index] = width
+				tensor.Bytes = 2
+				for _, dim := range tensor.Dimensions {
+					tensor.Bytes *= dim
+				}
+			}
+			if defaults {
+				delete(in.Facts.Shards[0].Numeric, "qwen2moe.expert_feed_forward_length")
+				delete(in.Facts.Shards[0].Numeric, "qwen2moe.expert_shared_feed_forward_length")
+			}
+			layers, fa := int32(3), "on"
+			in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+			in.Allocation.Options.FlashAttention = &fa
+			in.Memory = &modelEstimateMemory{Map: &modelDeviceMap{Devices: []modelNativeDevice{{Kind: 1, Selector: "CUDA0"}}}}
+			m, reason := modelEstimateAdapt(context.Background(), in.Facts)
+			if reason != "" {
+				t.Fatal(reason)
+			}
+			if reason := modelEstimateSpecialComputeLayout(&m); reason != "" {
+				t.Fatal(reason)
+			}
+			inputs := m.file.Architecture()
+			if inputs.ExpertFeedForwardLength != 4096 || inputs.ExpertSharedFeedForwardLength != 8192 || inputs.ExpertUsedCount != 2 {
+				t.Fatalf("parser inputs=%+v", inputs)
+			}
+			// The flash graph consumes routed/shared activation widths. Compare
+			// the production result, so changing inputs at its callsite is caught.
+			want := m.file.EstimateLLaMACppRun(gguf.WithLLaMACppContextSize(1024), gguf.WithParallelSize(1), gguf.WithLLaMACppLogicalBatchSize(64), gguf.WithLLaMACppPhysicalBatchSize(32), gguf.WithLLaMACppCacheKeyType(gguf.GGMLTypeF16), gguf.WithLLaMACppCacheValueType(gguf.GGMLTypeF16), gguf.WithLLaMACppOffloadLayers(3), gguf.WithFlashAttention())
+			found := false
+			for _, c := range estimateFixtureResult(t, in).Components {
+				if c.Name == "compute-workspace" && c.DomainID == "offload-unmapped" {
+					found = true
+					if c.Status != "partial" || c.Basis != "heuristic" || c.Bytes != strconv.FormatUint(uint64(want.Devices[1].Computation.Sum()), 10) {
+						t.Fatalf("production device portion=%+v, want %d", c, want.Devices[1].Computation.Sum())
+					}
+				}
+			}
+			if !found {
+				t.Fatal("missing production device computation")
 			}
 		})
 	}
