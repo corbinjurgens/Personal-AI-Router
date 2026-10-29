@@ -102,6 +102,7 @@ type modelBufferFrozen struct {
 	optionUnknowns                                        []string
 	artifacts                                             []modelconfig.ArtifactSummary
 	optionsID, inputID                                    string
+	configurationKey                                      string
 	context, slots                                        int32
 	baseline                                              []modelconfig.BufferBaseline
 	baselineDone                                          bool
@@ -365,6 +366,7 @@ func (e *Executor) newModelBufferCapture(st *engineState, engine string, prepare
 			Options modelconfig.RequestedLoad
 			Preset  string
 		}{f.options, modelLoadDigest(prepared.Snapshot)})
+		f.configurationKey = modelConfigurationKey(in, c.sourceID, f.optionsID)
 		f.inputID = modelBufferHash(struct {
 			Advisory, Source, Options, Revision, Topology string
 		}{advisoryID, c.sourceID, f.optionsID, modelEstimatorRevision, f.topologyID})
@@ -748,6 +750,7 @@ func (e *Executor) observeModelBuffers(ctx context.Context, st *engineState, c *
 		}
 		o.OptionUnknowns = slices.Clone(f.optionUnknowns)
 		o.TopologyIdentity = f.topologyID
+		o.ConfigurationKey = f.configurationKey
 		for i := range o.Rows {
 			o.Rows[i].Stream = child.stream
 			switch o.Rows[i].Label {

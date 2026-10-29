@@ -248,6 +248,12 @@ func TestModelChangeCloneDetachesSelectionsAndInvalidNumbers(t *testing.T) {
 
 func TestInspectCloneDetachesFactsDescriptorsAndEstimates(t *testing.T) {
 	r := InspectResult{Facts: &Facts{ContextTokens: testPointer(int32(8192)), Dimensions: map[string]string{"embedding": "4096"}, Unknowns: []string{"companion"}}, Options: []OptionDescriptor{{Field: "gpu", Values: []string{"cpu"}, Minimum: testPointer(json.Number("0")), Default: json.RawMessage(`"cpu"`)}}, Estimate: Estimate{Assumptions: []string{"uncalibrated"}, Components: []EstimateComponent{{Name: "weights"}}}}
+	r.ConfigurationPools = []string{"host"}
+	detached := r.Clone()
+	detached.ConfigurationPools[0] = "shared"
+	if r.ConfigurationPools[0] != "host" {
+		t.Fatal("clone aliases pools")
+	}
 	before := mustJSON(t, r)
 	copy := r.Clone()
 	*copy.Facts.ContextTokens = 4096

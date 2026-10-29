@@ -32,7 +32,7 @@ type modelBufferTestFixture struct {
 }
 
 func TestModelBufferSplitBaselinePersists(t *testing.T) {
-	f := newModelBufferTestFixture(t)
+	f := newModelBufferTestFixtureWithContext(t, keyTestMemoryContext())
 	f.load.ex.modelEstimates.run = func(context.Context, modelEstimateInput) modelconfig.Estimate {
 		host := estimateComponent("weights", 100, "synthetic host")
 		device := estimateComponent("weights", 200, "synthetic device")
@@ -42,6 +42,9 @@ func TestModelBufferSplitBaselinePersists(t *testing.T) {
 	}
 	f.initial("medium-model", 31001)
 	o := f.confirm(t, "medium-model", 1)
+	if o.ConfigurationKey == "" || o.ConfigurationKey != f.capture.frozen["medium-model"].configurationKey {
+		t.Fatal("sample lost captured configuration key")
+	}
 	if err := o.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -58,6 +61,9 @@ func TestModelBufferSplitBaselinePersists(t *testing.T) {
 	}
 	if len(stored) != 1 {
 		t.Fatalf("persisted samples=%+v", stored)
+	}
+	if stored[0].Observation.ConfigurationKey != o.ConfigurationKey {
+		t.Fatal("store lost captured configuration key")
 	}
 	if err := validateModelBufferSample(stored[0]); err != nil {
 		t.Fatal(err)
@@ -92,6 +98,11 @@ func TestModelBufferBaselineLeastCertaintyAndOverflow(t *testing.T) {
 
 func newModelBufferTestFixture(t *testing.T, configure ...func(*modelLoadFixture)) *modelBufferTestFixture {
 	t.Helper()
+	return newModelBufferTestFixtureWithContext(t, context.Background(), configure...)
+}
+
+func newModelBufferTestFixtureWithContext(t *testing.T, ctx context.Context, configure ...func(*modelLoadFixture)) *modelBufferTestFixture {
+	t.Helper()
 	f := newModelLoadFixture(t)
 	for _, configure := range configure {
 		configure(&f)
@@ -117,7 +128,7 @@ func newModelBufferTestFixture(t *testing.T, configure ...func(*modelLoadFixture
 	if len(inputs) != len(prepared.ModelLoads) {
 		t.Fatal("actual-start compiler did not forward advisory inputs")
 	}
-	c := f.ex.newModelBufferCapture(f.st, "fake", prepared, inputs, command)
+	c := f.ex.newModelBufferCapture(f.st, "fake", prepared, inputs, command, ctx)
 	if c == nil || c.sourceID == "" {
 		t.Fatal("synthetic native source binding unavailable")
 	}

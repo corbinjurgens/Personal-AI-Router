@@ -68,7 +68,7 @@ func TestModelBufferObservationRounding(t *testing.T) {
 }
 
 func TestModelBufferObservationWire(t *testing.T) {
-	value := BufferObservation{Status: "unknown", Reason: "observation-omitted"}
+	value := BufferObservation{Status: "unknown", Reason: "observation-omitted", ConfigurationKey: strings.Repeat("a", 64)}
 	data, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +79,19 @@ func TestModelBufferObservationWire(t *testing.T) {
 	}
 	if err := decoded.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	if decoded.ConfigurationKey != value.ConfigurationKey {
+		t.Fatal("configuration key lost in roundtrip")
+	}
+	invalid := decoded
+	invalid.ConfigurationKey = "not-a-digest"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("invalid key accepted")
+	}
+	legacy := decoded
+	legacy.ConfigurationKey = ""
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("keyless diagnostic sample rejected: %v", err)
 	}
 	if err := DecodeStrict([]byte(`{"status":"unknown","current":false,"rawLog":"secret"}`), &decoded); err == nil {
 		t.Fatal("accepted unknown field")

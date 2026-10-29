@@ -277,6 +277,9 @@ export type InspectModelResult = {
     }>
     estimate: Estimate
     loadObservation?: LoadBufferObservation
+    configurationKey?: string
+    configurationKeyReason?: 'not-applied' | 'not-finite' | 'artifacts-unavailable'
+    configurationPools?: Array<'host' | 'device' | 'shared'>
 }
 
 type LoadBufferComponent =
@@ -309,6 +312,7 @@ type LoadBufferReason =
     | 'unsupported-buffer'
 /** Detached, service-owned evidence for one load, outside settings authority. */
 type LoadBufferObservation = {
+    configurationKey?: string
     status: 'unknown' | 'partial' | 'reported'
     current: boolean
     reason?: LoadBufferReason
