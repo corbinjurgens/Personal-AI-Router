@@ -194,6 +194,8 @@ type EstimateComponent struct {
 // Estimate is advisory, never allocation/admission/qualification authority.
 type Estimate struct {
 	Status          string              `json:"status"`
+	EstimateSource  *EstimateSource     `json:"estimateSource,omitempty"`
+	MemoryPlan      *MemoryPlan         `json:"memoryPlan,omitempty"`
 	Source          string              `json:"source,omitempty"`
 	BuildID         string              `json:"buildId,omitempty"`
 	Timestamp       string              `json:"timestamp,omitempty"`
@@ -717,6 +719,15 @@ func (c ModelChange) Clone() ModelChange {
 	return c
 }
 func (e Estimate) Clone() Estimate {
+	if e.MemoryPlan != nil {
+		plan := e.MemoryPlan.Clone()
+		e.MemoryPlan = &plan
+	}
+	if e.EstimateSource != nil {
+		source := *e.EstimateSource
+		source.UnpricedCosts = slices.Clone(source.UnpricedCosts)
+		e.EstimateSource = &source
+	}
 	e.Domains = slices.Clone(e.Domains)
 	for i := range e.Domains {
 		e.Domains[i].Unknowns = slices.Clone(e.Domains[i].Unknowns)
@@ -849,10 +860,29 @@ func (r InspectResult) Validate() error {
 	if err := r.Estimate.Validate(); err != nil {
 		return err
 	}
+	if plan := r.Estimate.MemoryPlan; plan != nil && (plan.Identity.Engine != r.Engine || plan.Identity.ModelID != r.ModelID) {
+		return fmt.Errorf("inspect: memory plan identity mismatch")
+	}
 	return CheckPayloadSize(r)
 }
 
 func (e Estimate) Validate() error {
+	if e.MemoryPlan != nil {
+		if err := e.MemoryPlan.Validate(); err != nil {
+			return err
+		}
+		if e.EstimateSource == nil || e.EstimateSource.Kind != "engine-report" || e.EstimateSource.Provider != e.MemoryPlan.Identity.Provider || e.EstimateSource.Revision != e.MemoryPlan.Identity.Revision || len(e.Components) != 0 {
+			return fmt.Errorf("estimate: memory plan requires matching engine provenance and separate accounting")
+		}
+		if !slices.Contains([]string{"partial", "estimated"}, e.Status) || (e.MemoryPlan.partial() || len(e.EstimateSource.UnpricedCosts) != 0) && e.Status != "partial" {
+			return fmt.Errorf("estimate: memory plan accounting requires partial advisory status")
+		}
+	}
+	if e.EstimateSource != nil {
+		if err := e.EstimateSource.validate(); err != nil {
+			return err
+		}
+	}
 	if !validMemoryFit(e.CapacityFit) || !validMemoryFit(e.FreeFit) {
 		return fmt.Errorf("estimate: invalid comparison")
 	}

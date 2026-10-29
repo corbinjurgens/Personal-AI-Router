@@ -86,8 +86,112 @@ export type ArtifactSummary = {
     size: string
     assurance: string
 }
+type MemoryPlanConfig = {
+    contextTokens: number
+    kvFormat?: 'fp16' | 'bf16' | 'int8' | 'q4_0' | 'k8v4' | 'f16' | 'q8_0'
+    batchSize?: number
+    microbatch?: { mode: 'fixed' | 'auto'; tokens?: number; limit?: number }
+    parallelSlots?: number
+    devices: Array<{ backend: string; selector: string }>
+    placement: 'cpu' | 'device' | 'hybrid'
+}
+type MemoryPlanGroupName =
+    | 'weights'
+    | 'kv_cache'
+    | 'compute_scratch'
+    | 'output_buffers'
+    | 'runtime_driver_overhead'
+    | 'transient_peak'
+type MemoryPlanAmount = {
+    name: string
+    bytes: string
+    basis?: string
+    provenance?: string
+}
+type MemoryPlanResource = {
+    kind: 'device' | 'host_ram' | 'host_commit'
+    nativeSelector?: string
+    physicalId?: string
+    poolId?: string
+    mapping: 'unproven' | 'proven' | 'not-applicable'
+    mappingBasis: string
+    groups: Array<{
+        name: MemoryPlanGroupName
+        bytes?: string
+        quality: 'exact' | 'estimated' | 'unknown'
+        basis: string
+        additive: boolean
+        combinedMembership?: MemoryPlanGroupName[]
+    }>
+    combinedAllocations?: Array<{
+        members: MemoryPlanGroupName[]
+        bytes?: string
+        quality: 'exact' | 'estimated' | 'unknown'
+        basis: string
+    }>
+    allocatedBytes?: string
+    mappedViewBytes?: string
+    pricedTotalBytes: string
+    pricedTotalBasis: string
+    minimumSelectionCapacityBytes?: string
+    minimumSelectionCapacityBasis?: string
+    assumptions?: MemoryPlanAmount[]
+    requiredWithAllowancesBytes: string
+    budgetBytes?: string
+    shortfallBytes?: string
+    shortfallBasis?: string
+    callerAllowances?: MemoryPlanAmount[]
+    uncoveredCosts?: string[]
+}
+/** Engine accounting views, independent of launch authority and PAIR fit. */
+export type MemoryPlan = {
+    identity: {
+        engine: string
+        provider: string
+        revision: string
+        executableSHA256: string
+        build: {
+            version?: string
+            revision?: string
+            dirty?: boolean
+            timestamp?: string
+            basis: string
+        }
+        runtimeSourceSHA256: string
+        modelId: string
+        contentSHA256?: string
+        contentAssurance: string
+        assertedContentSHA256?: string
+        artifactIdentitySHA256: string
+        cacheable: boolean
+        cacheableReason?: string
+    }
+    requested: MemoryPlanConfig
+    resolved?: MemoryPlanConfig
+    configurationComplete: boolean
+    pricingScope: 'resolved_configuration' | 'minimum_supported_layout'
+    pricingQualification: 'non-replayable-pricing-inputs'
+    devices: MemoryPlanResource[]
+    hostRAM: MemoryPlanResource
+    hostCommit: MemoryPlanResource
+    verdict: {
+        status: 'does_not_fit' | 'not_evaluated' | 'indeterminate' | 'fits_within_allowances'
+        conditional: boolean
+        budgetBasis?: 'before_runtime_initialization' | 'after_runtime_initialization'
+        basis: string
+    }
+    warnings?: string[]
+}
 export type Estimate = {
     status: 'estimated' | 'partial' | 'unknown' | 'unavailable'
+    estimateSource?: {
+        kind: 'engine-report' | 'pair-estimate' | 'measured' | 'user-stated'
+        provider: string
+        revision: string
+        basis: string
+        unpricedCosts?: string[]
+    }
+    memoryPlan?: MemoryPlan
     source?: string
     buildId?: string
     timestamp?: string
