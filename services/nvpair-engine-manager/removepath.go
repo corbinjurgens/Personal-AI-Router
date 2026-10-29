@@ -181,7 +181,7 @@ func directoriesAbove(path string) []os.FileInfo {
 		}
 	}
 	walk(path)
-	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
+	if resolved, err := resolveExistingPath(path); err == nil && resolved != path {
 		walk(resolved)
 	}
 	return out
@@ -202,19 +202,13 @@ func safeRemoveUnderRoot(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("remove_path: target: %w", err)
 	}
-	evalRoot, err := filepath.EvalSymlinks(absRoot)
+	evalRoot, err := resolveExistingPath(absRoot)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("remove_path: root symlink: %w", err)
-		}
-		evalRoot = absRoot
+		return fmt.Errorf("remove_path: root resolution: %w", err)
 	}
-	evalTarget, err := filepath.EvalSymlinks(absTarget)
+	evalTarget, err := resolveExistingPath(absTarget)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("remove_path: target symlink: %w", err)
-		}
-		evalTarget = absTarget
+		return fmt.Errorf("remove_path: target resolution: %w", err)
 	}
 	if !pathWithinRoot(evalRoot, evalTarget) {
 		return fmt.Errorf("remove_path: %q escapes allowed root %q", evalTarget, evalRoot)

@@ -399,7 +399,7 @@ func modelDeviceRuntimeSnapshot(ctx context.Context, st *engineState, build stri
 	if !isManagedInstallPath(bin, root) {
 		return modelDeviceRuntime{}, errors.New("native runtime is not managed")
 	}
-	root, err := resolveNativeSourcePath(root)
+	root, err := resolveExistingPath(root)
 	if err != nil {
 		return modelDeviceRuntime{}, err
 	}
@@ -435,7 +435,7 @@ func modelDeviceHashFile(ctx context.Context, root, name string) (string, error)
 	if filepath.Base(name) != name || !modelDeviceLibraryName(name) {
 		return "", errors.New("invalid selected library name")
 	}
-	p, err := resolveNativeSourcePath(filepath.Join(root, name))
+	p, err := resolveExistingPath(filepath.Join(root, name))
 	if err != nil {
 		return "", err
 	}

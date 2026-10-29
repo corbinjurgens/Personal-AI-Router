@@ -751,7 +751,7 @@ func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, mod
 		return modelFileList{}, fmt.Errorf("%w: llama.cpp has no cached %q on this node", errModelNotFound, repo)
 	}
 	snap := filepath.Join(repoDir, "snapshots", commit)
-	realRepo, err := filepath.EvalSymlinks(repoDir)
+	realRepo, err := resolveExistingPath(repoDir)
 	if err != nil {
 		return modelFileList{}, err
 	}
@@ -762,7 +762,7 @@ func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, mod
 		if depth > 64 {
 			return errModelArtifactLimit
 		}
-		resolved, err := filepath.EvalSymlinks(dir)
+		resolved, err := resolveExistingPath(dir)
 		if err != nil || !pathWithinRoot(realRepo, resolved) {
 			return fmt.Errorf("unsafe cache directory")
 		}
@@ -801,7 +801,7 @@ func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, mod
 	if len(selected) == 0 {
 		return modelFileList{}, fmt.Errorf("%w: llama.cpp has no cached GGUF for %q on this node", errModelNotFound, model)
 	}
-	blobs, _ := filepath.EvalSymlinks(filepath.Join(repoDir, "blobs"))
+	blobs, _ := resolveExistingPath(filepath.Join(repoDir, "blobs"))
 	list := modelFileList{Engine: store.engine, Model: model, Revision: commit}
 	for _, rel := range selected {
 		if err := ctx.Err(); err != nil {

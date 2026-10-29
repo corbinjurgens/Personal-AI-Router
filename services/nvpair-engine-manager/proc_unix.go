@@ -26,7 +26,7 @@ import (
 // lookup that hung would wedge StopAll (and the whole app shutdown).
 const portLookupTimeout = 2 * time.Second
 
-func resolveNativeSourcePath(path string) (string, error) {
+func resolveExistingPath(path string) (string, error) {
 	return filepath.EvalSymlinks(path)
 }
 

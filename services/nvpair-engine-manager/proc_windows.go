@@ -24,9 +24,9 @@ import (
 // force-kills engine-manager on a timeout.
 const taskkillTimeout = 5 * time.Second
 
-// resolveNativeSourcePath follows junctions as well as symlinks, including
+// resolveExistingPath follows junctions as well as symlinks, including
 // reparse points in ancestor directories. Never retain an unresolved spelling.
-func resolveNativeSourcePath(path string) (string, error) {
+func resolveExistingPath(path string) (string, error) {
 	resolved, _, err := windowsFinalPath(path)
 	if err != nil {
 		return "", err

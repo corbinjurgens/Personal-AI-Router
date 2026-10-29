@@ -54,7 +54,7 @@ func modelNativeEnvironment(root string, overrides map[string]string) ([]string,
 		if len(paths) != 1 || paths[0] == "" {
 			return nil, servingError("Reviewed Auto requires native library search confined to its selected build.")
 		}
-		resolved, err := resolveNativeSourcePath(paths[0])
+		resolved, err := resolveExistingPath(paths[0])
 		if err != nil || resolved != root {
 			return nil, servingError("Reviewed Auto native library search escapes its selected build.")
 		}
