@@ -458,7 +458,7 @@ func ollamaSourceFilesBound(ctx context.Context, root, model string, access serv
 			return modelFileList{}, err
 		}
 	}
-	manifest, err := nativeSourceArtifact(root, rel, "", expected)
+	manifest, err := ollamaSourceArtifact(root, rel, "", expected)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return modelFileList{}, fmt.Errorf("%w: Ollama has no model %q on this node", errModelNotFound, model)
@@ -511,7 +511,7 @@ func ollamaSourceFilesBound(ctx context.Context, root, model string, access serv
 			return modelFileList{}, err
 		}
 		brel := "blobs/sha256-" + b.Digest
-		file, err := nativeSourceArtifact(root, brel, b.Digest, expected)
+		file, err := ollamaSourceArtifact(root, brel, b.Digest, expected)
 		if err != nil {
 			return modelFileList{}, fmt.Errorf("model %q is incomplete on this node (%s): %w", model, brel, err)
 		}
@@ -534,6 +534,33 @@ func ollamaSourceFilesBound(ctx context.Context, root, model string, access serv
 		return modelFileList{}, err
 	}
 	return list, nil
+}
+
+// Only the selected manifest and its named blobs enter this source route.
+// Destination and other native adapters retain their own strict admission.
+func ollamaSourceArtifact(root, rel, digest string, expected *sourceSnapshot) (modelFile, error) {
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if expected != nil {
+		for _, old := range expected.artifacts {
+			if old.Path != rel {
+				continue
+			}
+			if old.configured != path || old.SHA256 != digest || old.info == nil ||
+				validateSource(sourceEvidence{configured: old.configured, target: old.abs, info: old.info, size: old.Size, mtime: old.info.ModTime().UnixNano()}) != nil {
+				return modelFile{}, errModelInspectionChanged
+			}
+			return old, nil
+		}
+		return modelFile{}, errModelInspectionChanged
+	}
+	evidence, err := captureSource(path, false)
+	if err != nil {
+		return modelFile{}, err
+	}
+	if !artifactPathSafe(evidence.configured) || !artifactPathSafe(evidence.target) {
+		return modelFile{}, errNoArtifactBinding
+	}
+	return modelFile{Path: rel, Size: evidence.size, SHA256: digest, configured: evidence.configured, abs: evidence.target, info: evidence.info}, nil
 }
 
 // Keep native file admission at the existing confinement owner. Rechecks look
