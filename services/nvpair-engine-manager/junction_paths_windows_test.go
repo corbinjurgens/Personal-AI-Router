@@ -201,7 +201,12 @@ func TestModelFileHTTPAcceptsJunctionSelectedBinding(t *testing.T) {
 	}
 	junction(t, filepath.Join(repoDir, "snapshots", commit), filepath.Join(repoDir, "blobs"))
 	ex := copyTestExecutor(t, "llamacpp", base, true)
-	q := url.Values{"engine": {"llamacpp"}, "model": {repo + ":Q4_K_M"}, "path": {name}}
+	_, client := modelFileServer(t, ex, nil)
+	list, err := client.modelFiles(context.Background(), "llamacpp", repo+":Q4_K_M", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := url.Values{"engine": {"llamacpp"}, "model": {repo + ":Q4_K_M"}, "path": {name}, "exportId": {list.ExportID}}
 	w := httptest.NewRecorder()
 	(&controlServer{exec: ex}).handleModelFile(w, httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+q.Encode(), nil))
 	if w.Code != http.StatusOK || w.Body.String() != string(data) {

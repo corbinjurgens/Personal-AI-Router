@@ -130,8 +130,7 @@ type issuedCopyKey struct {
 	model string
 }
 type issuedCopyExport struct {
-	id, binding string
-	infos       []os.FileInfo
+	list modelFileList
 }
 
 // Only the latest issued identity per local alias is retained. A finite cache
@@ -139,11 +138,11 @@ type issuedCopyExport struct {
 // capacity eviction requires a fresh listing; unchanged listings are stable.
 var issuedCopyExports = struct {
 	sync.Mutex
-	entries map[issuedCopyKey]issuedCopyExport
+	entries map[issuedCopyKey]*issuedCopyExport
 	order   []issuedCopyKey
-}{entries: map[issuedCopyKey]issuedCopyExport{}}
+}{entries: map[issuedCopyKey]*issuedCopyExport{}}
 
-func rememberCopyExport(st *engineState, list modelFileList) {
+func rememberCopyExport(st *engineState, list modelFileList) *issuedCopyExport {
 	key := issuedCopyKey{st, list.Model}
 	issuedCopyExports.Lock()
 	defer issuedCopyExports.Unlock()
@@ -154,11 +153,34 @@ func rememberCopyExport(st *engineState, list modelFileList) {
 		}
 		issuedCopyExports.order = append(issuedCopyExports.order, key)
 	}
-	infos := make([]os.FileInfo, len(list.Files))
-	for i, f := range list.Files {
-		infos[i] = f.info
+	list.Files = append([]modelFile(nil), list.Files...)
+	issued := &issuedCopyExport{list: list}
+	issuedCopyExports.entries[key] = issued
+	return issued
+}
+
+func issuedCopyGeneration(st *engineState, model string) *issuedCopyExport {
+	issuedCopyExports.Lock()
+	defer issuedCopyExports.Unlock()
+	return issuedCopyExports.entries[issuedCopyKey{st, model}]
+}
+
+func invalidateCopyGeneration(st *engineState, model string, generation *issuedCopyExport) {
+	if generation == nil {
+		return
 	}
-	issuedCopyExports.entries[key] = issuedCopyExport{list.ExportID, list.binding, infos}
+	issuedCopyExports.Lock()
+	defer issuedCopyExports.Unlock()
+	key := issuedCopyKey{st, model}
+	if issuedCopyExports.entries[key] == generation {
+		delete(issuedCopyExports.entries, key)
+		for i, item := range issuedCopyExports.order {
+			if item == key {
+				issuedCopyExports.order = append(issuedCopyExports.order[:i], issuedCopyExports.order[i+1:]...)
+				break
+			}
+		}
+	}
 }
 
 func checkIssuedCopyExport(st *engineState, list modelFileList) bool {
@@ -166,19 +188,50 @@ func checkIssuedCopyExport(st *engineState, list modelFileList) bool {
 	issuedCopyExports.Lock()
 	defer issuedCopyExports.Unlock()
 	issued, ok := issuedCopyExports.entries[key]
-	if !ok || issued.id != list.ExportID || issued.binding != list.binding || len(issued.infos) != len(list.Files) {
-		if ok {
-			issuedCopyExports.entries[key] = issuedCopyExport{}
-		}
+	if !ok || issued.list.ExportID != list.ExportID || issued.list.binding != list.binding || len(issued.list.Files) != len(list.Files) {
 		return false
 	}
 	for i, f := range list.Files {
-		if !sameCopyFile(issued.infos[i], f.info) {
-			issuedCopyExports.entries[key] = issuedCopyExport{}
+		if !sameCopyFile(issued.list.Files[i].info, f.info) {
 			return false
 		}
 	}
 	return true
+}
+
+func issuedCopyList(st *engineState, model, id string) (modelFileList, bool) {
+	issuedCopyExports.Lock()
+	defer issuedCopyExports.Unlock()
+	issued, ok := issuedCopyExports.entries[issuedCopyKey{st, model}]
+	if !ok || id == "" || issued.list.ExportID != id {
+		return modelFileList{}, false
+	}
+	list := issued.list
+	list.Files = append([]modelFile(nil), list.Files...)
+	return list, true
+}
+
+func nativeExportID(list modelFileList) (string, error) {
+	if len(list.Files) == 0 || len(list.Files) > maxCopyArtifacts {
+		return "", fmt.Errorf("invalid artifact count")
+	}
+	seen := map[string]bool{}
+	var total int64
+	for _, f := range list.Files {
+		key := copyPathKey(f.Path)
+		if !validModelRelPath(f.Path) || seen[key] || !validSHA256(f.SHA256) || f.Size < 0 || f.Size > int64(^uint64(0)>>1)-total || f.info == nil || f.configured == "" || f.abs == "" {
+			return "", fmt.Errorf("invalid artifact metadata")
+		}
+		seen[key] = true
+		total += f.Size
+	}
+	list.ExportID = ""
+	data, err := json.Marshal(list)
+	if err != nil || len(data) > maxCopyManifest {
+		return "", fmt.Errorf("copy manifest exceeds bounds")
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // A cold full hash may outlive a settings update. Re-resolve after hashing so

@@ -40,10 +40,15 @@ func TestModelDownloadExportReaderHoldsThroughBody(t *testing.T) {
 	fixture := writeOllamaModel(t, filepath.Join(root, "models"), "demo", 64, 1)
 	ex := copyTestExecutor(t, "ollama", root, true)
 	server := &controlServer{exec: ex}
+	_, client := modelFileServer(t, ex, nil)
+	list, err := client.modelFiles(context.Background(), "ollama", "demo", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writer := &modelDownloadBodyWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
 	var release sync.Once
 	done := make(chan struct{})
-	request := httptest.NewRequest(http.MethodGet, controlModelFilePath+"?engine=ollama&model=demo&path="+url.QueryEscape(fixture.manifestRel), nil)
+	request := httptest.NewRequest(http.MethodGet, controlModelFilePath+"?engine=ollama&model=demo&path="+url.QueryEscape(fixture.manifestRel)+"&exportId="+url.QueryEscape(list.ExportID), nil)
 	go func() {
 		defer close(done)
 		server.handleModelFile(writer, request)
@@ -51,7 +56,7 @@ func TestModelDownloadExportReaderHoldsThroughBody(t *testing.T) {
 	t.Cleanup(func() { release.Do(func() { close(writer.release) }); <-done })
 	<-writer.entered
 	var effects int
-	err := ex.withModelMutation(context.Background(), "ollama", func() error { effects++; return nil })
+	err = ex.withModelMutation(context.Background(), "ollama", func() error { effects++; return nil })
 	if !errors.Is(err, errDownloadBusy) || effects != 0 {
 		t.Fatalf("mutation during body: effects=%d error=%v", effects, err)
 	}
@@ -294,10 +299,14 @@ func TestModelFileRejectsTraversalAndUnlistedFiles(t *testing.T) {
 	fx := writeOllamaModel(t, root, "tiny", 1024, 1)
 	other := writeOllamaModel(t, root, "other", 1024, 2)
 	writeTestFile(t, filepath.Join(dir, "secret"), []byte("secret"))
-	srv, _ := modelFileServer(t, exec, nil)
+	srv, client := modelFileServer(t, exec, nil)
+	list, err := client.modelFiles(context.Background(), "ollama", "tiny", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	get := func(path string) int {
-		q := url.Values{"engine": {"ollama"}, "model": {"tiny"}, "path": {path}}
+		q := url.Values{"engine": {"ollama"}, "model": {"tiny"}, "path": {path}, "exportId": {list.ExportID}}
 		resp, err := srv.Client().Get(srv.URL + controlModelFilePath + "?" + q.Encode())
 		if err != nil {
 			t.Fatal(err)
@@ -332,13 +341,17 @@ func TestModelFileServesRanges(t *testing.T) {
 	exec := copyTestExecutor(t, "ollama", dir, true)
 	fx := writeOllamaModel(t, filepath.Join(dir, "models"), "tiny", 10000, 3)
 	_, client := modelFileServer(t, exec, nil)
+	list, err := client.modelFiles(context.Background(), "ollama", "tiny", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var rel string
 	for p, b := range fx.blobs {
 		if len(b) == 10000 {
 			rel = p
 		}
 	}
-	body, start, err := client.modelFile(context.Background(), "ollama", "tiny", rel, "", 4000)
+	body, start, err := client.modelFile(context.Background(), "ollama", "tiny", rel, list.ExportID, 4000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +360,7 @@ func TestModelFileServesRanges(t *testing.T) {
 	if start != 4000 || string(got) != string(fx.blobs[rel][4000:]) {
 		t.Fatalf("ranged read started at %d with %d bytes, want the tail from 4000", start, len(got))
 	}
-	if _, _, err := client.modelFile(context.Background(), "ollama", "tiny", rel, "", 20000); err != errRangeNotSatisfiable {
+	if _, _, err := client.modelFile(context.Background(), "ollama", "tiny", rel, list.ExportID, 20000); err != errRangeNotSatisfiable {
 		t.Fatalf("range past the end: err = %v, want errRangeNotSatisfiable", err)
 	}
 }

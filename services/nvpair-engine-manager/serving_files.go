@@ -59,6 +59,27 @@ func (a servingFileAccess) openFile(path string) (servingArtifactFile, error) {
 	return os.Open(path)
 }
 
+// Check the actual opened object before any content read. The caller retains
+// its original metadata across reopenings, including the small-source read.
+func (a servingFileAccess) checkedOpen(ctx context.Context, path, target string, expected os.FileInfo) (servingArtifactFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f, err := a.openFile(path)
+	if err != nil {
+		return nil, err
+	}
+	opened, statErr := f.Stat()
+	current, currentErr := os.Stat(path)
+	resolved, resolveErr := resolveExistingPath(path)
+	if statErr != nil || currentErr != nil || resolveErr != nil || resolved != target ||
+		!sameCopyFile(expected, opened) || !sameCopyFile(opened, current) {
+		f.Close()
+		return nil, fmt.Errorf("opened serving source changed")
+	}
+	return f, nil
+}
+
 // servingSource reads only small launch inputs. Model artifacts use the bounded
 // binding reader below, never this helper or a full-file content hash.
 func servingSource(path string) ([]byte, *engines.ServingBinding, error) {
@@ -66,14 +87,22 @@ func servingSource(path string) ([]byte, *engines.ServingBinding, error) {
 }
 
 func (a servingFileAccess) source(ctx context.Context, path string) ([]byte, *engines.ServingBinding, error) {
-	binding, err := a.binding(ctx, path)
+	initial, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("native serving source is unavailable")
+	}
+	target, err := resolveExistingPath(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("native serving source is unresolved")
+	}
+	binding, err := a.bindingExpected(ctx, path, target, initial)
 	if err != nil {
 		return nil, nil, err
 	}
 	if binding.SizeBytes > servingSmallFileLimit {
 		return nil, nil, fmt.Errorf("native serving source exceeds the small-file limit")
 	}
-	f, err := a.openFile(binding.SourcePath)
+	f, err := a.checkedOpen(ctx, binding.SourcePath, binding.ResolvedTarget, initial)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot open native serving source")
 	}
@@ -88,7 +117,14 @@ func (a servingFileAccess) source(ctx context.Context, path string) ([]byte, *en
 	if err != nil || len(data) > servingSmallFileLimit {
 		return nil, nil, fmt.Errorf("cannot read bounded native serving source")
 	}
-	after, err := a.binding(ctx, path)
+	opened, openedErr := f.Stat()
+	current, currentErr := os.Stat(path)
+	resolved, resolveErr := resolveExistingPath(path)
+	if openedErr != nil || currentErr != nil || resolveErr != nil || resolved != binding.ResolvedTarget ||
+		!sameCopyFile(initial, opened) || !sameCopyFile(opened, current) {
+		return nil, nil, fmt.Errorf("native serving source changed while reading")
+	}
+	after, err := a.bindingExpected(ctx, path, target, initial)
 	if err != nil || *binding != *after || int64(len(data)) != binding.SizeBytes {
 		return nil, nil, fmt.Errorf("native serving source changed while reading")
 	}
@@ -102,6 +138,10 @@ func servingFileBinding(path string) (*engines.ServingBinding, error) {
 }
 
 func (a servingFileAccess) binding(ctx context.Context, path string) (*engines.ServingBinding, error) {
+	return a.bindingExpected(ctx, path, "", nil)
+}
+
+func (a servingFileAccess) bindingExpected(ctx context.Context, path, expectedTarget string, expected os.FileInfo) (*engines.ServingBinding, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -117,7 +157,10 @@ func (a servingFileAccess) binding(ctx context.Context, path string) (*engines.S
 	if err != nil || !initial.Mode().IsRegular() || initial.Size() <= 0 {
 		return nil, fmt.Errorf("serving artifact must be a nonempty regular file")
 	}
-	f, err := a.openFile(source)
+	if expected != nil && (target != expectedTarget || !sameCopyFile(expected, initial)) {
+		return nil, fmt.Errorf("serving source changed before sampling")
+	}
+	f, err := a.checkedOpen(ctx, source, target, initial)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open serving artifact")
 	}
