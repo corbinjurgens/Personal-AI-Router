@@ -116,14 +116,10 @@ func prepareStrataRuntimeHashes(ctx context.Context, command launchCommand, rt R
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		before, err := os.Stat(path)
-		if err != nil {
-			return err
+		file, ok := prepared.evidence.artifacts[path]
+		if !ok || validateSource(file) != nil {
+			return servingError("Strata runtime changed during preparation.")
 		}
-		strataRuntimeHashes.Lock()
-		previous, known := strataRuntimeHashes.files[path]
-		strataRuntimeHashes.Unlock()
-		replaced := !known || !os.SameFile(before, previous.info)
 		// A waiter on an existing shared hash must also be cancellable.
 		type result struct {
 			sum string
@@ -131,14 +127,9 @@ func prepareStrataRuntimeHashes(ctx context.Context, command launchCommand, rt R
 		}
 		done := make(chan result, 1)
 		go func() {
-			// The shared cache keys size/mtime, so a replaced inode must not
-			// reuse either its cached digest or an older in-flight read.
-			if replaced {
-				sum, err := hashFile(ctx, path, nil)
-				done <- result{sum, err}
-				return
-			}
-			sum, err := fileHashes.sum(ctx, path, nil)
+			// The shared cache validates the pinned identity on hits and waits,
+			// and its checked opener retains it through every streamed read.
+			sum, err := fileHashes.sumBoundKey(ctx, file, path, nil)
 			done <- result{sum, err}
 		}()
 		var hashed result
@@ -150,19 +141,20 @@ func prepareStrataRuntimeHashes(ctx context.Context, command launchCommand, rt R
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		after, err := os.Stat(path)
-		if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || before.ModTime() != after.ModTime() {
+		if validateSource(file) != nil {
 			return servingError("Strata runtime changed during preparation.")
 		}
 		if hashed.err != nil {
 			return hashed.err
 		}
-		if replaced {
-			fileHashes.remember(path, hashed.sum)
-		}
 		strataRuntimeHashes.Lock()
-		strataRuntimeHashes.files[path] = strataRuntimeHash{after, hashed.sum}
+		strataRuntimeHashes.files[path] = strataRuntimeHash{file.info, hashed.sum}
 		strataRuntimeHashes.Unlock()
+	}
+	for _, file := range prepared.evidence.artifacts {
+		if validateSource(file) != nil {
+			return servingError("Strata input changed during preparation.")
+		}
 	}
 	return nil
 }
@@ -340,7 +332,7 @@ func compilePreparedServingAccess(st *engineState, command launchCommand, rt Run
 		return compileTypedLlamaExpected(st, command, rt, approved, access, nil, advisory...)
 	}
 	if strataServingRuntime(st, rt.Serving) {
-		return compileStrataServing(command, rt, approved)
+		return compileStrataServingExpected(context.Background(), command, rt, approved, access, nil)
 	}
 	return compileLlamaServingExpected(context.Background(), command, rt, approved, access, nil)
 }
@@ -475,7 +467,11 @@ func strataDistinctNames(raw json.RawMessage) bool {
 }
 
 func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*llamaServingLaunch, error) {
-	result, err := deriveStrataServing(command, rt)
+	return compileStrataServingExpected(context.Background(), command, rt, approved, servingFileAccess{}, nil)
+}
+
+func compileStrataServingExpected(ctx context.Context, command launchCommand, rt Runtime, approved bool, access servingFileAccess, expected *llamaServingEvidence) (*llamaServingLaunch, error) {
+	result, err := deriveStrataServingExpected(ctx, command, rt, access, expected)
 	if err != nil {
 		return nil, err
 	}
@@ -484,17 +480,20 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 			continue
 		}
 		path := artifact.Binding.SourcePath
+		file, ok := result.evidence.artifacts[path]
+		if !ok || validateSource(file) != nil {
+			return nil, servingError("Strata runtime changed before digest lookup.")
+		}
 		sum, err := strataRuntimeDigest(path)
 		if err != nil {
 			return nil, err
 		}
-		after, bindingErr := servingFileBinding(path)
-		if sum != artifact.SHA256 || bindingErr != nil || *after != *artifact.Binding {
+		if sum != artifact.SHA256 || validateSource(file) != nil {
 			return nil, servingError("Strata runtime full SHA256 mismatch or unstable file.")
 		}
 	}
-	expected := rt.Serving.Models[0].ExpectedNativeSourceDigest
-	if (approved && expected == "") || (expected != "" && expected != result.Digest) {
+	approvedDigest := rt.Serving.Models[0].ExpectedNativeSourceDigest
+	if (approved && approvedDigest == "") || (approvedDigest != "" && approvedDigest != result.Digest) {
 		return nil, servingError("Strata native source conflict; obtain a fresh preview.")
 	}
 	return result, nil
@@ -503,6 +502,10 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 // Derive and validate the complete selected-file closure using only bounded
 // reads. Both pre-lock hashing and locked compilation use this role check.
 func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch, error) {
+	return deriveStrataServingExpected(context.Background(), command, rt, servingFileAccess{}, nil)
+}
+
+func deriveStrataServingExpected(ctx context.Context, command launchCommand, rt Runtime, access servingFileAccess, expected *llamaServingEvidence) (*llamaServingLaunch, error) {
 	if rt.modeOrDefault() != "process" || rt.Serving == nil || len(servingDeclarationErrors(rt.Serving)) != 0 || len(rt.Serving.Models) != 1 {
 		return nil, servingError("Prepared Strata requires one declared model and an owned process launch.")
 	}
@@ -513,7 +516,75 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 	if err != nil {
 		return nil, err
 	}
-	data, binding, err := servingSource(source)
+	// Pin the complete declaration before reading selectors or sampling any
+	// artifact. A recheck keeps the original objects, never current path authority.
+	evidence := &llamaServingEvidence{artifacts: map[string]sourceEvidence{}}
+	for _, artifact := range rt.Serving.Models[0].Artifacts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		path := artifact.Binding.SourcePath
+		if _, duplicate := evidence.artifacts[path]; duplicate {
+			return nil, servingError("Every Strata artifact requires a unique declared file binding.")
+		}
+		var file sourceEvidence
+		var err error
+		if expected == nil {
+			file, err = captureSource(path, false)
+		} else {
+			var ok bool
+			file, ok = expected.artifacts[path]
+			if !ok || file.configured != path {
+				return nil, servingError("Missing prepared Strata artifact evidence.")
+			}
+			err = validateSource(file)
+		}
+		binding := artifact.Binding
+		if err != nil || binding.ResolvedTarget != file.target || binding.SizeBytes != file.size || binding.MtimeNS != strconv.FormatInt(file.mtime, 10) {
+			if path == source {
+				return nil, servingError("Strata config is missing, unstable or oversized.")
+			}
+			return nil, servingError("Strata artifact binding changed or is missing.")
+		}
+		evidence.artifacts[path] = file
+	}
+	// A declaration may name another alias of the exact selected object. Bind
+	// the configured selector path too, without granting its parent authority.
+	selector := func(path string) (sourceEvidence, error) {
+		file, ok := evidence.artifacts[path]
+		if !ok {
+			if expected == nil {
+				var err error
+				file, err = captureSource(path, false)
+				if err != nil {
+					return sourceEvidence{}, err
+				}
+			} else {
+				file, ok = expected.artifacts[path]
+				if !ok || file.configured != path || validateSource(file) != nil {
+					return sourceEvidence{}, servingError("Missing prepared Strata selector evidence.")
+				}
+			}
+			matched := false
+			for _, declared := range evidence.artifacts {
+				if file.target == declared.target && sameSource(file.info, declared.info, false) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return sourceEvidence{}, servingError("Strata selector has no declared artifact.")
+			}
+			evidence.artifacts[path] = file
+		}
+		return file, nil
+	}
+	file, err := selector(source)
+	if err != nil || (expected != nil && expected.source.configured != source) {
+		return nil, servingError("Missing declared Strata config evidence.")
+	}
+	evidence.source = file
+	data, binding, err := access.sourceExpected(ctx, file, servingSmallFileLimit, false)
 	if err != nil {
 		return nil, servingError("Strata config is missing, unstable or oversized.")
 	}
@@ -535,7 +606,7 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 	if err := validateStrataExtras(config); err != nil {
 		return nil, err
 	}
-	result := &llamaServingLaunch{Config: rt.Serving.Clone(), Source: source}
+	result := &llamaServingLaunch{Config: rt.Serving.Clone(), Source: source, evidence: evidence}
 	model := &result.Config.Models[0]
 	if config.ModelName != model.ModelID {
 		return nil, servingError("Strata model_name must exactly match the declared model.")
@@ -677,7 +748,15 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 		}
 	}
 	if expertTable != "" {
-		if err := strataExpertTable(expertTable, options["--native"], add); err != nil {
+		file, err := selector(expertTable)
+		if err != nil {
+			return nil, servingError("Missing declared Strata expert table evidence.")
+		}
+		data, _, err := access.sourceExpected(ctx, file, servingSmallFileLimit, false)
+		if err != nil {
+			return nil, servingError("The native_experts table is missing, unstable or oversized.")
+		}
+		if err := strataExpertTable(data, options["--native"], add); err != nil {
 			return nil, err
 		}
 	}
@@ -725,7 +804,8 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 		if !selected && !strings.HasPrefix(artifact.Role, "runtime:") {
 			return nil, servingError("Unselected Strata model artifact.")
 		}
-		current, err := servingFileBinding(path)
+		file := evidence.artifacts[path]
+		current, err := access.bindingExpected(ctx, path, file.target, file.info)
 		if err != nil || *current != *artifact.Binding {
 			return nil, servingError("Strata artifact binding changed or is missing.")
 		}
@@ -735,6 +815,9 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 		if !declared[path] {
 			return nil, servingError("Explicit Strata dependency has no declared artifact.")
 		}
+	}
+	if expected != nil && len(expected.artifacts) != len(evidence.artifacts) {
+		return nil, servingError("Prepared Strata declaration changed.")
 	}
 	// The server opens the log for append. It must be a new or existing regular
 	// file, never a link, and never the same file as any declared input, by
@@ -801,16 +884,12 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 // unsigned numbers and an optional shard column (one name, or for v4 a gate,up,
 // down list). Each named shard sits beside the first --native shard and must be
 // a declared model file. Anything else in the table is rejected.
-func strataExpertTable(table, native string, add func(path, role string) error) error {
+func strataExpertTable(data []byte, native string, add func(path, role string) error) error {
 	reject := func(reason string) error {
 		return servingError("The native_experts table " + reason + ".")
 	}
 	if native == "" {
 		return reject("needs --native to place its shards")
-	}
-	data, _, err := servingSource(table)
-	if err != nil {
-		return reject("is missing, unstable or oversized")
 	}
 	// The engine reads a version from every comment that starts with the tag and
 	// refuses one it does not know, so every such comment is checked here, and
@@ -911,7 +990,10 @@ func recheckPreparedServingAccess(st *engineState, launch launchCommand, rt Runt
 		}
 		current, err = compileTypedLlamaExpected(st, launch, rt, true, access, prepared.evidence.typed)
 	} else if strataServingRuntime(st, rt.Serving) {
-		current, err = compileStrataServing(launch, rt, true)
+		if prepared.evidence == nil {
+			return servingError("Missing prepared Strata evidence.")
+		}
+		current, err = compileStrataServingExpected(context.Background(), launch, rt, true, access, prepared.evidence)
 	} else {
 		if prepared.evidence == nil {
 			return servingError("Missing prepared serving evidence.")
