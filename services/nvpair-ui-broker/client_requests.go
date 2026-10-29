@@ -228,6 +228,8 @@ func (b *Broker) handleMessage(msg *Message) {
 	switch msg.Method {
 	case "engine:inspect-model":
 		go b.handleModelInspection(msg)
+	case "engine:set-stated-memory", "engine:clear-stated-memory":
+		go b.handleStatedMemory(msg)
 	case "engine:switch", "engine:switch-status", "engine:switch-fence":
 		go b.handleEngineSwitch(msg)
 	case "engine:get-settings", "engine:preview-settings", "engine:apply-settings":

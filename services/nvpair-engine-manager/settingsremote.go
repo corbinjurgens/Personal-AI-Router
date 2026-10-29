@@ -25,12 +25,117 @@ const settingsPath = "/v1/engine-settings/"
 
 func (s *controlServer) settingsRoutes() []controlRoute {
 	return []controlRoute{
+		{settingsPath + "set-stated-memory", http.MethodPost, controlMutation, "settings-set-stated-memory", s.settingsProfileHandler("set-stated-memory")},
+		{settingsPath + "clear-stated-memory", http.MethodPost, controlMutation, "settings-clear-stated-memory", s.settingsProfileHandler("clear-stated-memory")},
 		{settingsPath + "get", http.MethodPost, controlRead, "settings-get", s.settingsHandler("get")},
 		{settingsPath + "inspect", http.MethodPost, controlRead, "settings-inspect", s.settingsHandler("inspect")},
 		{settingsPath + "preview", http.MethodPost, controlRead, "settings-preview", s.settingsHandler("preview")},
 		{settingsPath + "apply", http.MethodPost, controlMutation, "settings-apply", s.settingsHandler("apply")},
 		{settingsPath + "events", http.MethodGet, controlRead, "settings-events", ignoreCaller(s.streamSettings)},
 	}
+}
+
+func (s *controlServer) settingsProfileHandler(method string) pinnedPeerHandler {
+	return func(w http.ResponseWriter, r *http.Request, caller string) {
+		if s.exec.memoryProfilesParent == nil {
+			http.Error(w, "settings coordinator unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		var engine string
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+		if err != nil {
+			http.Error(w, "invalid memory profile request", http.StatusBadRequest)
+			return
+		}
+		relay := settings.Relay{Method: method, Caller: caller}
+		if method == "set-stated-memory" {
+			p, err := modelconfig.DecodeSetStatedMemoryRequest(raw)
+			if err != nil {
+				http.Error(w, "invalid memory profile request", http.StatusBadRequest)
+				return
+			}
+			p.NodeID = ""
+			relay.SetStatedMemory = &p
+			engine = p.Engine
+		} else {
+			p, err := modelconfig.DecodeClearStatedMemoryRequest(raw)
+			if err != nil {
+				http.Error(w, "invalid memory profile request", http.StatusBadRequest)
+				return
+			}
+			p.NodeID = ""
+			relay.ClearStatedMemory = &p
+			engine = p.Engine
+		}
+		if err := s.exec.remoteVeto(engine); err != nil {
+			var veto *localVetoError
+			if errors.As(err, &veto) {
+				writeCodedError(w, veto.code, err.Error())
+			} else {
+				http.Error(w, "target engine unavailable", http.StatusServiceUnavailable)
+			}
+			return
+		}
+		result, err := s.exec.memoryProfilesParent(r.Context(), relay)
+		if err != nil {
+			var coded *codedError
+			if errors.As(err, &coded) && wireCodes[coded.code] != "" {
+				writeCodedError(w, coded.code, err.Error())
+			} else if errors.As(err, &coded) && coded.code == -32602 {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			} else {
+				http.Error(w, err.Error(), http.StatusConflict)
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(result)
+	}
+}
+
+func (m *Manager) remoteStatedMemory(ctx context.Context, msg *Message) {
+	method := strings.TrimPrefix(msg.Method, "engine:remote-")
+	var engine, node, model string
+	var payload any
+	if method == "set-stated-memory" {
+		p, err := modelconfig.DecodeSetStatedMemoryRequest(msg.Params)
+		if err != nil {
+			m.respondOrErr(msg, nil, modelSettingsParamsError(err))
+			return
+		}
+		engine, node, model = p.Engine, p.NodeID, p.ModelID
+		p.NodeID = ""
+		payload = p
+	} else {
+		p, err := modelconfig.DecodeClearStatedMemoryRequest(msg.Params)
+		if err != nil {
+			m.respondOrErr(msg, nil, modelSettingsParamsError(err))
+			return
+		}
+		engine, node, model = p.Engine, p.NodeID, p.ModelID
+		p.NodeID = ""
+		payload = p
+	}
+	peer, ok := m.peers.lookup(node)
+	if node == "" || !ok || m.mesh == nil {
+		m.respondOrErr(msg, nil, fmt.Errorf("memory profile target unavailable"))
+		return
+	}
+	client, err := m.remoteClient(ctx, peer)
+	if err != nil {
+		m.respondOrErr(msg, nil, err)
+		return
+	}
+	raw, err := client.postJSON(ctx, settingsPath+method, engine, payload)
+	if err != nil {
+		m.respondOrErr(msg, nil, err)
+		return
+	}
+	result, err := modelconfig.DecodeInspectResult(raw)
+	if err == nil && (result.NodeID != node || result.Engine != engine || result.ModelID != model) {
+		err = fmt.Errorf("memory profile target reply identity mismatch")
+	}
+	m.respondOrErr(msg, result, err)
 }
 
 // settingsHandler relays one local broker settings method for a pinned peer.
@@ -166,6 +271,10 @@ func (s *controlServer) streamSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) remoteSettings(ctx context.Context, msg *Message) {
+	if msg.Method == "engine:remote-set-stated-memory" || msg.Method == "engine:remote-clear-stated-memory" {
+		m.remoteStatedMemory(ctx, msg)
+		return
+	}
 	if msg.Method == "engine:remote-inspect-model" {
 		m.remoteInspectModel(ctx, msg)
 		return

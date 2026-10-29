@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -28,8 +29,141 @@ import (
 
 	"nvpair-shared/clustertrust"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 	"nvpair-shared/noderec"
 )
+
+func TestSettingsRemoteStatedMemoryTargetStore(t *testing.T) {
+	for _, transport := range []string{"direct", "reverse"} {
+		t.Run(transport, func(t *testing.T) {
+			target, q := memoryProfilesFixture(t)
+			target.ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
+			target.ex.memoryProfilesParent = func(ctx context.Context, relay settings.Relay) (json.RawMessage, error) {
+				if relay.Caller != "uuid-self" {
+					return nil, fmt.Errorf("unauthenticated caller")
+				}
+				var request any
+				if relay.Method == "set-stated-memory" {
+					request = relay.SetStatedMemory
+				} else {
+					request = relay.ClearStatedMemory
+				}
+				// Stand in only for the destination broker transport. The real
+				// worker decoder, remote marker, final veto and store all run.
+				params, err := json.Marshal(settings.WorkerRequest[any]{Request: request, Memory: modelBufferTestTargetMemory(), RemoteMemoryRecord: true})
+				if err != nil {
+					return nil, err
+				}
+				out := &syncBuffer{}
+				worker := &Manager{exec: target.ex, codec: NewCodec(out)}
+				id := json.RawMessage(`1`)
+				worker.statedMemory(ctx, &Message{ID: &id, Method: "engine:" + relay.Method, Params: params})
+				frames := out.frames()
+				if len(frames) != 1 || frames[0].ID == nil || string(*frames[0].ID) != "1" {
+					return nil, fmt.Errorf("uncorrelated target worker reply")
+				}
+				if frames[0].Error != nil {
+					return nil, &codedError{code: frames[0].Error.Code, message: frames[0].Error.Message}
+				}
+				result, err := modelconfig.DecodeInspectResult(frames[0].Result)
+				if err != nil {
+					return nil, err
+				}
+				result.NodeID = "host-peer"
+				return json.Marshal(result)
+			}
+			f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler { return (&controlServer{exec: target.ex, mesh: mesh}).mux() })
+			grantRemoteManagement(t, f.peerDir, "1", map[string]bool{"uuid-self": true})
+			if transport == "direct" {
+				f.directHealthy.Store(true)
+			}
+			originBase := t.TempDir()
+			if err := os.Chmod(originBase, 0700); err != nil {
+				t.Fatal(err)
+			}
+			origin := newModelMemoryProfiles(originBase)
+			f.m.exec.modelMemoryProfiles = origin
+			ctx := remoteFixtureContext(t)
+			set := modelconfig.SetStatedMemoryRequest{Engine: q.Engine, ModelID: q.ModelID, ConfigurationKey: q.ConfigurationKey, HostBytes: "1024"}
+			call := func(method string, p any) error {
+				t.Helper()
+				var raw []byte
+				var err error
+				switch request := p.(type) {
+				case modelconfig.SetStatedMemoryRequest:
+					request.NodeID = f.node.HostUUID
+					raw, err = json.Marshal(request)
+				case modelconfig.ClearStatedMemoryRequest:
+					request.NodeID = f.node.HostUUID
+					raw, err = json.Marshal(request)
+				default:
+					t.Fatal("unsupported fixture request")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				out := &syncBuffer{}
+				f.m.codec = NewCodec(out)
+				id := json.RawMessage(`1`)
+				f.m.remoteSettings(ctx, &Message{ID: &id, Method: "engine:remote-" + method, Params: raw})
+				frames := out.frames()
+				if len(frames) != 1 || frames[0].ID == nil || string(*frames[0].ID) != "1" {
+					t.Fatalf("origin response correlation: %+v", frames)
+				}
+				if frames[0].Error != nil {
+					return &codedError{code: frames[0].Error.Code, message: frames[0].Error.Message}
+				}
+				result, err := modelconfig.DecodeInspectResult(frames[0].Result)
+				if err == nil && (result.NodeID != f.node.HostUUID || result.Engine != q.Engine || result.ModelID != q.ModelID) {
+					t.Fatal("origin accepted a mismatched target receipt")
+				}
+				return err
+			}
+			if err := call("set-stated-memory", set); err != nil {
+				t.Fatal(err)
+			}
+			if len(target.ex.modelMemoryProfiles.records) != 1 || len(origin.records) != 0 {
+				t.Fatal("statement did not stay target-local")
+			}
+			if err := call("clear-stated-memory", q); err != nil {
+				t.Fatal(err)
+			}
+			if len(newModelMemoryProfiles(filepath.Dir(target.ex.modelMemoryProfiles.path)).records) != 0 || len(origin.records) != 0 {
+				t.Fatal("clear did not stay target-local")
+			}
+			target.ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+			if err := call("set-stated-memory", set); rpcCode(err) != codeLocalVeto {
+				t.Fatalf("paused remote set: %v", err)
+			}
+			if err := call("clear-stated-memory", q); rpcCode(err) != codeLocalVeto {
+				t.Fatalf("paused remote clear: %v", err)
+			}
+			target.ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
+			if _, err := target.ex.desired.setLocked(q.Engine, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := call("set-stated-memory", set); rpcCode(err) != codeEngineLocked {
+				t.Fatalf("locked remote set: %v", err)
+			}
+			if err := call("clear-stated-memory", q); rpcCode(err) != codeEngineLocked {
+				t.Fatalf("locked remote clear: %v", err)
+			}
+			if _, err := target.ex.desired.setLocked(q.Engine, false); err != nil {
+				t.Fatal(err)
+			}
+			grantRemoteManagement(t, f.peerDir, "2", map[string]bool{"uuid-self": false})
+			if err := call("set-stated-memory", set); rpcCode(err) != codeRemoteManagementDenied {
+				t.Fatalf("denied remote set: %v", err)
+			}
+			if err := call("clear-stated-memory", q); rpcCode(err) != codeRemoteManagementDenied {
+				t.Fatalf("denied remote clear: %v", err)
+			}
+			if len(origin.records) != 0 {
+				t.Fatal("origin store mutated")
+			}
+		})
+	}
+}
 
 func TestPeerSettingsWatchExcludesSelf(t *testing.T) {
 	f, events, closed, mutations := remoteEventFixture(t)

@@ -218,6 +218,82 @@ function withoutField(value: JsonValue, field: string): JsonValue {
 }
 
 describe('unified settings bridge', () => {
+    it('decodes bounded stated history with exact applied pools and unavailable-store reporting', () => {
+        const key = 'a'.repeat(64)
+        const profile = {
+            configurationKey: key,
+            kind: 'stated',
+            recordedAt: '2026-10-30T00:00:00Z',
+            hostBytes: '18446744073709551615',
+            current: true
+        }
+        const fixture = {
+            engine: 'llamacpp',
+            modelId: 'model',
+            status: 'unavailable',
+            configurationKey: key,
+            configurationPools: ['host'],
+            estimate: { status: 'unknown' },
+            memoryProfiles: [profile]
+        } satisfies JsonValue
+        expect(parseInspectModel(fixture).memoryProfiles).toEqual([profile])
+        expect(
+            parseInspectModel({ ...fixture, memoryProfiles: [], memoryProfilesUnavailable: true })
+                .memoryProfilesUnavailable
+        ).toBe(true)
+        expect(() =>
+            parseInspectModel({
+                ...fixture,
+                memoryProfiles: Array.from({ length: 9 }, () => profile)
+            })
+        ).toThrow()
+        expect(() =>
+            parseInspectModel({ ...fixture, memoryProfiles: [{ ...profile, hostBytes: '01' }] })
+        ).toThrow()
+        expect(() =>
+            parseInspectModel({ ...fixture, memoryProfiles: [{ ...profile, deviceBytes: '1' }] })
+        ).toThrow('pools')
+        expect(() =>
+            parseInspectModel({ ...fixture, memoryProfiles: [{ ...profile, current: false }] })
+        ).toThrow('current')
+    })
+
+    it('relays stated set and clear through the broker without losing byte strings', async () => {
+        const key = 'a'.repeat(64)
+        const response = {
+            engine: 'llamacpp',
+            nodeId: 'peer',
+            modelId: 'model',
+            status: 'unavailable',
+            estimate: { status: 'unknown' }
+        } satisfies JsonValue
+        mocks.supervisor.callProcess.mockResolvedValue(response)
+        const request = {
+            engine: 'llamacpp',
+            nodeId: 'peer',
+            modelId: 'model',
+            configurationKey: key,
+            hostBytes: '9007199254740993'
+        }
+        await handleServiceBridgeInvoke('engines:set-stated-memory', request)
+        expect(mocks.supervisor.callProcess).toHaveBeenLastCalledWith(
+            'broker',
+            'engine:set-stated-memory',
+            request
+        )
+        const clear = {
+            engine: request.engine,
+            nodeId: request.nodeId,
+            modelId: request.modelId,
+            configurationKey: key
+        }
+        await handleServiceBridgeInvoke('engines:clear-stated-memory', clear)
+        expect(mocks.supervisor.callProcess).toHaveBeenLastCalledWith(
+            'broker',
+            'engine:clear-stated-memory',
+            clear
+        )
+    })
     it('decodes configuration scope independently of a domainless estimate and captured key', () => {
         const key = 'a'.repeat(64)
         const result = parseInspectModel({

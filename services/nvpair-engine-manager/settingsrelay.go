@@ -133,6 +133,9 @@ func (m *Manager) handleSettingsMessage(ctx context.Context, msg *Message) bool 
 		return false
 	}
 	switch msg.Method {
+	case "engine:set-stated-memory", "engine:clear-stated-memory":
+		go m.statedMemory(ctx, msg)
+		return true
 	case "engine:inspect-model":
 		go m.inspectModel(ctx, msg)
 		return true
@@ -214,7 +217,7 @@ func (m *Manager) handleSettingsMessage(ctx context.Context, msg *Message) bool 
 			}
 		}()
 		return true
-	case "engine:remote-get-settings", "engine:remote-preview-settings", "engine:remote-apply-settings", "engine:remote-inspect-model":
+	case "engine:remote-get-settings", "engine:remote-preview-settings", "engine:remote-apply-settings", "engine:remote-inspect-model", "engine:remote-set-stated-memory", "engine:remote-clear-stated-memory":
 		go m.remoteSettings(ctx, msg)
 		return true
 	}

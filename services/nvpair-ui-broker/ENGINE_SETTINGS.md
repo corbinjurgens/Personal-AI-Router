@@ -7,6 +7,34 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Model configuration contract
 
+`engine:set-stated-memory` accepts `{engine,nodeId?,modelId,configurationKey,
+hostBytes?,deviceBytes?,sharedBytes?}`. `engine:clear-stated-memory` accepts the
+same identity without byte fields. Both return an inspection reply. Byte fields
+are canonical unsigned decimal strings and must cover exactly the applied
+`configurationPools`. The inspected configuration key is independent of estimate
+availability; stale keys return conflict `-32010`, asking the client to reinspect.
+
+The manager owns private `model-memory-profiles.json` beside its buffer history,
+through the existing durable-file replacer (0600). Records are bounded by 256
+entries and 1 MiB. An unreadable or corrupt store is preserved and reports
+`memoryProfilesUnavailable`; writes refuse. Inspection returns `memoryProfiles`
+with the current stated record first, followed by bounded history (at most 8),
+dropping non-current rows to respect the complete reply budget. A replacement
+that landed with uncertain durability is adopted in memory and reports that
+uncertain outcome; reinspect before retrying. Unsupported file entries are
+preserved, and the complete mutation reply is validated before publication.
+Statements do not overlay estimates or change policy, budgets, allocation or
+launch state.
+
+Remote set and clear use the strict settings relay union and authenticated
+mutation routes `POST /v1/engine-settings/set-stated-memory` and
+`POST /v1/engine-settings/clear-stated-memory`, through the existing direct or
+reverse transport. The destination broker rechecks remote-management permission,
+Pause and engine lock; only the destination store changes. Local recording is
+allowed while paused. Public requests cannot provide target-memory authority;
+the private worker envelope supplies target evidence and disables native helper
+initialization for recording.
+
 `engine:inspect-model` accepts `{engine,nodeId?,modelId}` and is a read through
 the existing settings relay and pinned `POST /v1/engine-settings/inspect` route.
 It does not initialize a settings journal, start an engine, download content,

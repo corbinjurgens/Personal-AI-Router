@@ -120,11 +120,12 @@ type engineState struct {
 // layer runs the long ones (install, start) in goroutines so the read
 // loop stays responsive.
 type Executor struct {
-	credentials     credentialStore
-	modelInspection modelInspectionState
-	modelEstimates  modelEstimateState
-	modelBuffers    modelBufferOwner
-	boundActivation *boundEngineActivation // switchAdmission; current cold operation
+	credentials         credentialStore
+	modelInspection     modelInspectionState
+	modelEstimates      modelEstimateState
+	modelBuffers        modelBufferOwner
+	modelMemoryProfiles *modelMemoryProfiles
+	boundActivation     *boundEngineActivation // switchAdmission; current cold operation
 	// switchAdmission protects reservation admission and active mutation counts;
 	// switchMu serializes checkpoint steps without holding the admission gate.
 	switchAdmission   sync.Mutex
@@ -137,6 +138,7 @@ type Executor struct {
 	switchParent             switchBrokerCall
 	settingsHub              settings.Hub
 	settingsParent           func(context.Context, string, settings.Request, string) (json.RawMessage, error)
+	memoryProfilesParent     func(context.Context, settings.Relay) (json.RawMessage, error)
 	// policyParent relays a paired node's node-policy call to the broker
 	// (policyrelay.go). nil until a Manager wires it.
 	policyParent func(ctx context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error)
@@ -281,6 +283,7 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 	}
 	e.downloads = newModelDownloads(e.switchIncarnation, baseDir, naming)
 	e.modelBuffers.store = newModelBufferStore(baseDir)
+	e.modelMemoryProfiles = newModelMemoryProfiles(baseDir)
 	return e
 }
 

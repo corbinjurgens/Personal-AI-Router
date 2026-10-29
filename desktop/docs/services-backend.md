@@ -5,6 +5,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # Services Backend Integration
 
+Stated memory recording follows the existing settings relay to its destination:
+`engine:set-stated-memory` and `engine:clear-stated-memory` (and manager
+`engine:remote-set-stated-memory` / `engine:remote-clear-stated-memory`) use
+authenticated mutation routes under `/v1/engine-settings/`. The destination
+broker owns remote grant, Pause and engine-lock checks. Target-only profiles
+persist privately in `model-memory-profiles.json`; inspection exposes bounded
+current-first `memoryProfiles` and `memoryProfilesUnavailable` on store failure.
+The bridge decodes exact decimal bytes, configuration identity, kind, timestamp
+and currentness. Recording uses the target's private memory envelope without
+native helper initialization, estimate overlays or launch/policy authority.
+
 Build apply uses a private, bounded `build:apply-impact` envelope from the
 broker to `nvpair-service`. The broker reads `engine:owner-evidence` from its
 current manager source; the service merges the manager's model, data and install

@@ -13,6 +13,46 @@ import (
 	"nvpair-shared/modelconfig"
 )
 
+func TestStatedMemoryRelayStrictUnion(t *testing.T) {
+	set := modelconfig.SetStatedMemoryRequest{Engine: "llamacpp", ModelID: "model", ConfigurationKey: strings.Repeat("a", 64), HostBytes: "1"}
+	valid := Relay{ID: "operation", Method: "set-stated-memory", Caller: "peer", SetStatedMemory: &set}
+	data, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeRelay(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy := decoded.Clone()
+	copy.SetStatedMemory.HostBytes = "2"
+	if decoded.SetStatedMemory.HostBytes != "1" {
+		t.Fatal("clone aliases request")
+	}
+	if decoded.Inspect != nil || !reflect.DeepEqual(decoded.Request, Request{}) {
+		t.Fatal("unexpected carrier")
+	}
+	clear := modelconfig.ClearStatedMemoryRequest{Engine: set.Engine, ModelID: set.ModelID, ConfigurationKey: set.ConfigurationKey}
+	valid.Method = "clear-stated-memory"
+	valid.SetStatedMemory = nil
+	valid.ClearStatedMemory = &clear
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	valid.SetStatedMemory = &set
+	if valid.Validate() == nil {
+		t.Fatal("accepted both mutations")
+	}
+	if _, err := json.Marshal(valid); err == nil {
+		t.Fatal("encoded both mutations")
+	}
+	valid.SetStatedMemory = nil
+	valid.Request.Engine = "llamacpp"
+	if valid.Validate() == nil {
+		t.Fatal("accepted settings beside profile")
+	}
+}
+
 func TestConfigCloneAndLaunchReconstruction(t *testing.T) {
 	ram, vram := int64(1024), int64(0)
 	launch := LaunchState{ServerPort: 8080, LaunchText: "--opaque", Serving: &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{ModelID: "exact", Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}}}}}

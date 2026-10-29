@@ -262,6 +262,111 @@ func modelSettingsParamsError(err error) error {
 	return &codedError{code: -32602, message: err.Error()}
 }
 
+type modelMemoryRecordRemoteKey struct{}
+
+func (e *Executor) recordStatedMemory(ctx context.Context, p modelconfig.ClearStatedMemoryRequest, set *modelconfig.SetStatedMemoryRequest) (modelconfig.InspectResult, error) {
+	if err := p.Validate(); err != nil {
+		return modelconfig.InspectResult{}, modelSettingsParamsError(err)
+	}
+	if p.NodeID != "" {
+		return modelconfig.InspectResult{}, modelSettingsParamsError(fmt.Errorf("nodeId: local target required"))
+	}
+	st, err := e.state(p.Engine)
+	if err != nil {
+		return modelconfig.InspectResult{}, err
+	}
+	before, err := inspectionSnapshot(st, p.Engine)
+	if err != nil {
+		return modelconfig.InspectResult{}, err
+	}
+	result, err := e.InspectModel(ctx, modelconfig.InspectRequest{Engine: p.Engine, ModelID: p.ModelID})
+	if err != nil {
+		return result, err
+	}
+	if result.ConfigurationKey == "" || result.ConfigurationKey != p.ConfigurationKey {
+		return result, &codedError{code: -32010, message: "Settings changed; reinspect and try again."}
+	}
+	var profile *modelconfig.MemoryProfile
+	if set != nil {
+		if err := set.Validate(); err != nil {
+			return result, modelSettingsParamsError(err)
+		}
+		value := modelconfig.MemoryProfile{ConfigurationKey: p.ConfigurationKey, Kind: "stated", RecordedAt: time.Now().UTC().Format(time.RFC3339Nano), HostBytes: set.HostBytes, DeviceBytes: set.DeviceBytes, SharedBytes: set.SharedBytes}
+		if err := value.ValidatePools(result.ConfigurationPools); err != nil {
+			return result, modelSettingsParamsError(err)
+		}
+		profile = &value
+	}
+	// Serialize the statement with finite configuration writers, without holding
+	// the engine mutex during inspection or estimation.
+	if !st.opMu.TryLock() {
+		return result, &codedError{code: -32010, message: "Settings changed; reinspect and try again."}
+	}
+	defer st.opMu.Unlock()
+	state := snapshotLlamaState(st)
+	command, err := launchForState(state, state.plat.Runtime.Port)
+	if err != nil {
+		return result, err
+	}
+	after := modelInspectionSnapshot{state: state, command: command, store: before.store}
+	if !before.equal(after) {
+		return result, &codedError{code: -32010, message: "Settings changed; reinspect and try again."}
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if remote, _ := ctx.Value(modelMemoryRecordRemoteKey{}).(bool); remote {
+		if err := e.remoteVeto(p.Engine); err != nil {
+			return result, err
+		}
+	}
+	if err := e.modelMemoryProfiles.updateInspection(p.Engine, p.ModelID, p.ConfigurationKey, profile, &result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (m *Manager) statedMemory(ctx context.Context, msg *Message) {
+	if msg.Method == "engine:set-stated-memory" {
+		p, err := settings.DecodeWorkerRequest[modelconfig.SetStatedMemoryRequest](msg.Params)
+		if err != nil {
+			m.respondOrErr(msg, nil, modelSettingsParamsError(err))
+			return
+		}
+		ctx = m.exec.modelMemoryContext(ctx, p.Request.Engine, p.Memory, false)
+		q := p.Request
+		if err := q.Validate(); err != nil {
+			m.respondOrErr(msg, nil, modelSettingsParamsError(err))
+			return
+		}
+		if p.RemoteMemoryRecord {
+			ctx = context.WithValue(ctx, modelMemoryRecordRemoteKey{}, true)
+			if err := m.exec.remoteVeto(q.Engine); err != nil {
+				m.respondOrErr(msg, nil, err)
+				return
+			}
+		}
+		result, err := m.exec.recordStatedMemory(ctx, modelconfig.ClearStatedMemoryRequest{Engine: q.Engine, NodeID: q.NodeID, ModelID: q.ModelID, ConfigurationKey: q.ConfigurationKey}, &q)
+		m.respondOrErr(msg, result, err)
+	} else {
+		p, err := settings.DecodeWorkerRequest[modelconfig.ClearStatedMemoryRequest](msg.Params)
+		if err != nil {
+			m.respondOrErr(msg, nil, modelSettingsParamsError(err))
+			return
+		}
+		ctx = m.exec.modelMemoryContext(ctx, p.Request.Engine, p.Memory, false)
+		if p.RemoteMemoryRecord {
+			ctx = context.WithValue(ctx, modelMemoryRecordRemoteKey{}, true)
+			if err := m.exec.remoteVeto(p.Request.Engine); err != nil {
+				m.respondOrErr(msg, nil, err)
+				return
+			}
+		}
+		result, err := m.exec.recordStatedMemory(ctx, p.Request, nil)
+		m.respondOrErr(msg, result, err)
+	}
+}
+
 // InspectModel is a target-local read. The broker supplies authenticated node
 // identity after this reply; a worker never echoes a caller's target as proof.
 // Artifact inspection reads bounded local metadata and samples without native,
@@ -294,15 +399,20 @@ func (e *Executor) InspectModel(ctx context.Context, p modelconfig.InspectReques
 		advisory.Memory, _ = op.Memory.ModelAutoMemory(ctx)
 	}
 	result.Estimate = e.modelEstimates.estimate(ctx, advisory)
-	// The final public reply keeps its existing ceiling. An advisory result
-	// cannot turn a successful artifact inspection into a payload-size failure.
-	if err := modelconfig.CheckPayloadSize(result); err != nil {
-		result.Estimate = modelEstimateUnknown("estimate omitted: complete inspection reply size limit")
-	}
-	if err := result.Validate(); err != nil {
+	e.modelMemoryProfiles.attach(&result)
+	if err := completeModelInspectionReply(&result); err != nil {
 		return modelconfig.InspectResult{}, err
 	}
 	return result, nil
+}
+
+func completeModelInspectionReply(result *modelconfig.InspectResult) error {
+	// The final public reply keeps its existing ceiling. An advisory result
+	// cannot turn a successful artifact inspection into a payload-size failure.
+	if err := modelconfig.CheckPayloadSize(*result); err != nil {
+		result.Estimate = modelEstimateUnknown("estimate omitted: complete inspection reply size limit")
+	}
+	return result.Validate()
 }
 
 func (m *Manager) inspectModel(ctx context.Context, msg *Message) {

@@ -54,7 +54,12 @@ import type {
     EngineSettingsPreview,
     EngineSettingsReceipt
 } from '@/shared/types/engine-settings'
-import type { InspectModelRequest, InspectModelResult } from '@/shared/types/model-config'
+import type {
+    InspectModelRequest,
+    InspectModelResult,
+    SetStatedMemoryRequest,
+    ClearStatedMemoryRequest
+} from '@/shared/types/model-config'
 import type { AppInitialSnapshot, ClusterInitialSnapshot } from '@/shared/types/bootstrap'
 import type { ServiceError } from '@/shared/types/errors'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -170,6 +175,11 @@ export interface WsInvokeChannelMap {
     'engines:get-intent': { request: void; response: EngineIntentSnapshot | null }
     'engines:get-settings': { request: EngineSettingsTarget; response: EngineSettingsSnapshot }
     'engines:inspect-model': { request: InspectModelRequest; response: InspectModelResult }
+    'engines:set-stated-memory': { request: SetStatedMemoryRequest; response: InspectModelResult }
+    'engines:clear-stated-memory': {
+        request: ClearStatedMemoryRequest
+        response: InspectModelResult
+    }
     'engines:switch': { request: SwitchRequest; response: { receipt: SwitchReceipt } }
     'engines:switch-status': { request: SwitchStatusRequest; response: SwitchStatus }
     'engines:switch-fence': { request: SwitchFenceRequest; response: SwitchFenceResult }

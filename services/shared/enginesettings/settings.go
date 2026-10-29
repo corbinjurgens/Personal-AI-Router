@@ -83,11 +83,12 @@ type Request struct {
 // WorkerRequest is parent-only operation input. Public Request decoding rejects
 // every field in this envelope; none is portable settings or journal material.
 type WorkerRequest[T any] struct {
-	Request           T                         `json:"request"`
-	Memory            *modelconfig.TargetMemory `json:"memory,omitempty"`
-	NativeInitAllowed bool                      `json:"nativeInitAllowed"`
-	ValidateResources bool                      `json:"validateResources,omitempty"`
-	ResourceModel     string                    `json:"resourceModel,omitempty"`
+	RemoteMemoryRecord bool                      `json:"remoteMemoryRecord,omitempty"`
+	Request            T                         `json:"request"`
+	Memory             *modelconfig.TargetMemory `json:"memory,omitempty"`
+	NativeInitAllowed  bool                      `json:"nativeInitAllowed"`
+	ValidateResources  bool                      `json:"validateResources,omitempty"`
+	ResourceModel      string                    `json:"resourceModel,omitempty"`
 }
 
 func DecodeWorkerRequest[T any](data []byte) (WorkerRequest[T], error) {
@@ -288,17 +289,44 @@ type Configure struct {
 
 // Relay is a correlated worker-to-parent request. It never blocks a reader.
 type Relay struct {
-	ID      string                      `json:"id"`
-	Method  string                      `json:"method"`
-	Caller  string                      `json:"caller,omitempty"`
-	Request Request                     `json:"request,omitempty"`
-	Inspect *modelconfig.InspectRequest `json:"inspect,omitempty"`
+	ID                string                                `json:"id"`
+	Method            string                                `json:"method"`
+	Caller            string                                `json:"caller,omitempty"`
+	Request           Request                               `json:"request,omitempty"`
+	Inspect           *modelconfig.InspectRequest           `json:"inspect,omitempty"`
+	SetStatedMemory   *modelconfig.SetStatedMemoryRequest   `json:"setStatedMemory,omitempty"`
+	ClearStatedMemory *modelconfig.ClearStatedMemoryRequest `json:"clearStatedMemory,omitempty"`
 }
 
 // Validate enforces the correlated union. Inspect uses its actual read shape;
 // it cannot smuggle a settings mutation beside the read request. Caller is filled
 // from authenticated transport by the parent, never accepted as peer authority.
 func (r Relay) Validate() error {
+	profileMethod := r.Method == "set-stated-memory" || r.Method == "clear-stated-memory"
+	if profileMethod {
+		if r.ID == "" || len(r.ID) > 128 || len(r.Caller) > 256 || r.Inspect != nil || !reflect.DeepEqual(r.Request, Request{}) {
+			return fmt.Errorf("relay: profile request only")
+		}
+		if r.Method == "set-stated-memory" {
+			if r.SetStatedMemory == nil || r.ClearStatedMemory != nil {
+				return fmt.Errorf("relay: set request required")
+			}
+			if err := r.SetStatedMemory.Validate(); err != nil {
+				return err
+			}
+		} else {
+			if r.ClearStatedMemory == nil || r.SetStatedMemory != nil {
+				return fmt.Errorf("relay: clear request required")
+			}
+			if err := r.ClearStatedMemory.Validate(); err != nil {
+				return err
+			}
+		}
+		return modelconfig.CheckPayloadSize(r)
+	}
+	if r.SetStatedMemory != nil || r.ClearStatedMemory != nil {
+		return fmt.Errorf("relay: unexpected memory profile request")
+	}
 	if r.ID == "" || len(r.ID) > 128 || len(r.Caller) > 256 {
 		return fmt.Errorf("relay: bounded correlation identity required")
 	}
@@ -327,7 +355,7 @@ func DecodeRelay(data []byte) (Relay, error) {
 	if err := r.Validate(); err != nil {
 		return Relay{}, err
 	}
-	if r.Method != "inspect" {
+	if r.Method != "inspect" && r.Method != "set-stated-memory" && r.Method != "clear-stated-memory" {
 		c, err := r.Request.Settings.Canonical()
 		if err != nil {
 			return Relay{}, err
@@ -337,6 +365,14 @@ func DecodeRelay(data []byte) (Relay, error) {
 	return r, nil
 }
 func (r Relay) Clone() Relay {
+	if r.SetStatedMemory != nil {
+		p := r.SetStatedMemory.Clone()
+		r.SetStatedMemory = &p
+	}
+	if r.ClearStatedMemory != nil {
+		p := r.ClearStatedMemory.Clone()
+		r.ClearStatedMemory = &p
+	}
 	r.Request = r.Request.Clone()
 	if r.Inspect != nil {
 		q := *r.Inspect
@@ -414,6 +450,38 @@ func (p *Preview) UnmarshalJSON(data []byte) error {
 }
 
 func (r Relay) MarshalJSON() ([]byte, error) {
+	if r.Method == "set-stated-memory" || r.Method == "clear-stated-memory" || r.SetStatedMemory != nil || r.ClearStatedMemory != nil {
+		if !reflect.DeepEqual(r.Request, Request{}) || r.Inspect != nil {
+			return nil, fmt.Errorf("relay: memory profile request only")
+		}
+		switch r.Method {
+		case "set-stated-memory":
+			if r.SetStatedMemory == nil || r.ClearStatedMemory != nil {
+				return nil, fmt.Errorf("relay: set request required")
+			}
+			if err := r.SetStatedMemory.Validate(); err != nil {
+				return nil, err
+			}
+		case "clear-stated-memory":
+			if r.ClearStatedMemory == nil || r.SetStatedMemory != nil {
+				return nil, fmt.Errorf("relay: clear request required")
+			}
+			if err := r.ClearStatedMemory.Validate(); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("relay: unexpected memory profile request")
+		}
+	}
+	if (r.Method == "set-stated-memory" || r.Method == "clear-stated-memory") && reflect.DeepEqual(r.Request, Request{}) {
+		return json.Marshal(struct {
+			ID     string                                `json:"id"`
+			Method string                                `json:"method"`
+			Caller string                                `json:"caller,omitempty"`
+			Set    *modelconfig.SetStatedMemoryRequest   `json:"setStatedMemory,omitempty"`
+			Clear  *modelconfig.ClearStatedMemoryRequest `json:"clearStatedMemory,omitempty"`
+		}{r.ID, r.Method, r.Caller, r.SetStatedMemory, r.ClearStatedMemory})
+	}
 	// Keep the pre-existing settings request Go shape for its callers while
 	// making inspect a distinct correlated read, with no mutation payload.
 	if r.Method == "inspect" && reflect.DeepEqual(r.Request, Request{}) {
