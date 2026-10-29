@@ -401,7 +401,24 @@ func main() {
 		log.Fatalf("fake-engine listen %s: %v", addr, err)
 	}
 	fmt.Fprintf(os.Stderr, "fake-engine listening on %s\n", ln.Addr())
-	if err := http.Serve(ln, mux); err != nil {
+	allowed := map[string]string{
+		"/": http.MethodGet, "/api/version": http.MethodGet,
+		"/api/tags": http.MethodGet, "/api/ps": http.MethodGet,
+		"/v1/models": http.MethodGet, "/api/v1/models": http.MethodGet,
+		"/api/error": http.MethodGet, "/exit": http.MethodGet,
+		"/api/pull": http.MethodPost, "/api/generate": http.MethodPost,
+		"/v1/chat/completions": http.MethodPost,
+		"/testctl/tags-delay":  http.MethodPost, "/testctl/digest": http.MethodPost,
+		"/testctl/loaded": http.MethodPost, "/api/delete": http.MethodDelete,
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if allowed[r.URL.Path] != r.Method {
+			http.NotFound(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	if err := http.Serve(ln, handler); err != nil {
 		log.Fatalf("fake-engine serve: %v", err)
 	}
 }

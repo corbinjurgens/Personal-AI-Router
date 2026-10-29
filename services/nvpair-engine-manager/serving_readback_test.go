@@ -120,8 +120,46 @@ func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(status)
 		fmt.Fprint(w, props)
+	case "/models/load":
+		recordLoad()
+		w.WriteHeader(http.StatusNotFound)
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func TestLoadedServingFakeRequestAccounting(t *testing.T) {
+	tests := []struct {
+		name, method, path             string
+		status                         int
+		loads, gets, models, autoloads int32
+	}{
+		{name: "explicit load", method: http.MethodPost, path: "/models/load", status: http.StatusOK, loads: 1},
+		{name: "followed redirect", method: http.MethodGet, path: "/models/load", status: http.StatusNotFound, loads: 1},
+		{name: "safe props", method: http.MethodGet, path: "/props?autoload=false&model=medium", status: http.StatusOK, gets: 1},
+		{name: "implicit autoload", method: http.MethodGet, path: "/props?model=medium", status: http.StatusBadRequest, gets: 1, autoloads: 1},
+		{name: "wrong model", method: http.MethodGet, path: "/props?autoload=false&model=other", status: http.StatusBadRequest, gets: 1, autoloads: 1},
+		{name: "model list", method: http.MethodGet, path: "/models", status: http.StatusOK, models: 1},
+		{name: "unrelated GET", method: http.MethodGet, path: "/", status: http.StatusNotFound},
+		{name: "unrelated POST", method: http.MethodPost, path: "/props", status: http.StatusNotFound},
+		{name: "wrong load method", method: http.MethodPut, path: "/models/load", status: http.StatusNotFound},
+		{name: "wrong list method", method: http.MethodHead, path: "/models", status: http.StatusNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var hooks int32
+			server := &loadedLlamaFake{model: "medium", status: http.StatusOK, onLoad: func(r *http.Request) {
+				hooks++
+				if r.Method != tc.method || r.URL.RequestURI() != tc.path {
+					t.Errorf("load hook received %s %s", r.Method, r.URL.RequestURI())
+				}
+			}}
+			reply := httptest.NewRecorder()
+			server.ServeHTTP(reply, httptest.NewRequest(tc.method, tc.path, nil))
+			if reply.Code != tc.status || server.loads.Load() != tc.loads || server.gets.Load() != tc.gets || server.models.Load() != tc.models || server.autoloads.Load() != tc.autoloads || hooks != tc.loads {
+				t.Fatalf("status=%d loads=%d gets=%d models=%d autoloads=%d hooks=%d, want %+v", reply.Code, server.loads.Load(), server.gets.Load(), server.models.Load(), server.autoloads.Load(), hooks, tc)
+			}
+		})
 	}
 }
 

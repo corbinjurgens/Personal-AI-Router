@@ -855,7 +855,13 @@ func TestModelCopyControlStreamErrorStatesStayDistinct(t *testing.T) {
 			s := &controlServer{copyFromPeer: func(context.Context, copyRequest, func() error, func(copyProgress)) (copyModelResult, error) {
 				return copyModelResult{}, cause
 			}}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.handleCopy(w, r, "verified-controller") }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != controlCopyPath {
+					http.NotFound(w, r)
+					return
+				}
+				s.handleCopy(w, r, "verified-controller")
+			}))
 			defer server.Close()
 			client := &remoteClient{base: server.URL, controlHTTP: server.Client()}
 			_, err := client.copyModel(context.Background(), controlCopyRequest(), nil)
@@ -887,6 +893,10 @@ func TestModelCopyControlCapabilitiesBodyIsBounded(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			headers, closed := make(chan struct{}), make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != controlCopyCapabilitiesPath {
+					http.NotFound(w, r)
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				if _, err := io.WriteString(w, `{"version":`); err != nil {
 					t.Error(err)

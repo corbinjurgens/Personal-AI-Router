@@ -332,13 +332,17 @@ func preparedServingRuntime(st *engineState, rt Runtime) bool {
 }
 
 func compilePreparedServing(st *engineState, command launchCommand, rt Runtime, approved bool, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
+	return compilePreparedServingAccess(st, command, rt, approved, servingFileAccess{}, advisory...)
+}
+
+func compilePreparedServingAccess(st *engineState, command launchCommand, rt Runtime, approved bool, access servingFileAccess, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
 	if len(rt.ModelLoads) != 0 {
-		return compileTypedLlama(st, command, rt, approved, advisory...)
+		return compileTypedLlamaExpected(st, command, rt, approved, access, nil, advisory...)
 	}
 	if strataServingRuntime(st, rt.Serving) {
 		return compileStrataServing(command, rt, approved)
 	}
-	return compileLlamaServing(command, rt, approved)
+	return compileLlamaServingExpected(context.Background(), command, rt, approved, access, nil)
 }
 
 func preparedServingReadback(st *engineState, prepared *llamaServingLaunch) *engines.ServingReadback {
@@ -892,11 +896,35 @@ func strataExpertTable(table, native string, add func(path, role string) error) 
 }
 
 func recheckPreparedServing(st *engineState, launch launchCommand, rt Runtime, prepared *llamaServingLaunch) error {
-	current, err := compilePreparedServing(st, launch, rt, true)
+	return recheckPreparedServingAccess(st, launch, rt, prepared, servingFileAccess{})
+}
+
+func recheckPreparedServingAccess(st *engineState, launch launchCommand, rt Runtime, prepared *llamaServingLaunch, access servingFileAccess) error {
+	if prepared == nil {
+		return servingError("Missing prepared serving evidence.")
+	}
+	var current *llamaServingLaunch
+	var err error
+	if len(rt.ModelLoads) != 0 {
+		if prepared.evidence == nil || prepared.evidence.typed == nil {
+			return servingError("Missing prepared typed evidence.")
+		}
+		current, err = compileTypedLlamaExpected(st, launch, rt, true, access, prepared.evidence.typed)
+	} else if strataServingRuntime(st, rt.Serving) {
+		current, err = compileStrataServing(launch, rt, true)
+	} else {
+		if prepared.evidence == nil {
+			return servingError("Missing prepared serving evidence.")
+		}
+		current, err = compileLlamaServingExpected(context.Background(), launch, rt, true, access, prepared.evidence)
+	}
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(current, prepared) {
+	current.evidence = nil
+	copyPrepared := *prepared
+	copyPrepared.evidence = nil
+	if !reflect.DeepEqual(current, &copyPrepared) {
 		return servingError("Native serving inputs changed before spawn.")
 	}
 	return nil

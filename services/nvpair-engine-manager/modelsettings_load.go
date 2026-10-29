@@ -60,6 +60,10 @@ func (e *Executor) modelLoadContentRead(engine string) (func(), func() error, er
 // Typed presets share the serving generation owner, but do not declare serving
 // bounds or manufacture content hashes, memory assertions or qualification.
 func compileTypedLlama(st *engineState, command launchCommand, rt Runtime, approved bool, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
+	return compileTypedLlamaExpected(st, command, rt, approved, servingFileAccess{}, nil, advisory...)
+}
+
+func compileTypedLlamaExpected(st *engineState, command launchCommand, rt Runtime, approved bool, access servingFileAccess, expected *typedLlamaInputEvidence, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
 	if st.manifest.FamilyOrDefault() != "llamacpp" || rt.modeOrDefault() != "process" {
 		return nil, modelLoadError("", "engine", "Typed loads require an owned llama.cpp process.")
 	}
@@ -74,7 +78,7 @@ func compileTypedLlama(st *engineState, command launchCommand, rt Runtime, appro
 	defer release()
 	ctx, cancel := context.WithTimeout(context.Background(), modelInspectionBudget)
 	defer cancel()
-	prepared, err := compileTypedLlamaInputs(ctx, st, command, rt, approved, advisory...)
+	prepared, err := compileTypedLlamaInputsExpected(ctx, st, command, rt, approved, access, expected, advisory...)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +146,7 @@ type typedLlamaInputEvidence struct {
 	build     sourceEvidence
 	selectors []sourceEvidence
 	models    map[string]modelFileList
+	libraries map[string]sourceEvidence
 }
 
 func (e *typedLlamaInputEvidence) checkRecognition(ctx context.Context, owner *Executor) error {
@@ -164,6 +169,12 @@ func (e *typedLlamaInputEvidence) checkedAccess(ctx context.Context, access serv
 		return access, err
 	}
 	files := map[string]sourceEvidence{e.build.configured: e.build}
+	for _, library := range e.libraries {
+		if err := validateSource(library); err != nil {
+			return access, err
+		}
+		files[library.configured] = library
+	}
 	for _, selector := range e.selectors {
 		if err := validateSource(selector); err != nil {
 			return access, err
@@ -268,6 +279,9 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		return nil, modelLoadError("", "requested", "A valid complete typed model set is required.")
 	}
 	if expected != nil {
+		if expected.build.configured != command.Bin || validateSource(expected.build) != nil {
+			return nil, modelLoadError("", "nativeBuildId", "Prepared executable changed before compilation.")
+		}
 		if err := expected.checkRecognition(ctx, rt.modelLoadOwner); err != nil {
 			return nil, modelLoadError("", "artifacts", "Prepared native recognition changed before compilation.")
 		}
@@ -293,14 +307,19 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	}
 	buildID := modelLoadDigest(buildBytes)
 	manualBuildID := buildID
+	var libraries map[string]sourceEvidence
+	if expected != nil {
+		libraries = expected.libraries
+	}
 	reviewedSource := func(command launchCommand) (string, error) {
-		// The Auto owner currently reopens the executable itself. Preserve the
-		// original identity before entering it; checked-reader propagation at
-		// that owner belongs to the serving preparation change.
 		if command.Bin != buildEvidence.configured || validateSource(buildEvidence) != nil {
 			return "", modelLoadError("", "nativeBuildId", "Native executable changed during compilation.")
 		}
-		return modelReviewedNativeSource(ctx, st, command)
+		source, current, err := modelReviewedNativeSourceExpected(ctx, st, command, access, buildEvidence, libraries)
+		if err == nil {
+			libraries = current
+		}
+		return source, err
 	}
 	// Accepted/reviewed Auto binds the complete native source and effective
 	// environment. Manual and external-conversion builds retain their semantics.
@@ -526,7 +545,13 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 		if err != nil {
 			return nil, err
 		}
-		result, err = compileLlamaServingSections(declaredRT, false, "", data, nil, sections, nil, nil, capacity)
+		sectionEvidence := &llamaServingEvidence{artifacts: map[string]sourceEvidence{}}
+		for _, list := range lists {
+			for _, file := range list.Files {
+				sectionEvidence.artifacts[file.configured] = sourceEvidence{configured: file.configured, target: file.abs, info: file.info, size: file.Size, mtime: file.info.ModTime().UnixNano()}
+			}
+		}
+		result, err = compileLlamaServingSectionsExpected(ctx, declaredRT, false, "", data, nil, sections, nil, nil, capacity, access, sectionEvidence)
 		if err != nil {
 			return nil, err
 		}
@@ -617,6 +642,14 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	if _, err := modelconfig.CanonicalLoads(loads); err != nil {
 		return nil, err
 	}
+	if result.evidence == nil {
+		result.evidence = &llamaServingEvidence{}
+	}
+	inputs := &typedLlamaInputEvidence{build: buildEvidence, models: make(map[string]modelFileList, len(loads)), libraries: libraries}
+	for i, load := range loads {
+		inputs.models[load.ModelID] = lists[i]
+	}
+	result.evidence.typed = inputs
 	for _, output := range advisory {
 		if output != nil {
 			*output = estimates
@@ -1244,10 +1277,11 @@ func (e *Executor) validateTypedLlamaConversion(ctx context.Context, st *engineS
 		if convertedCommand.Bin != conversion.inputs.build.configured || validateSource(conversion.inputs.build) != nil {
 			return nil, modelLoadError(load.ModelID, "nativeBuildId", "Native executable changed during conversion.")
 		}
-		current, err := modelReviewedNativeSource(ctx, st, convertedCommand)
+		current, libraries, err := modelReviewedNativeSourceExpected(ctx, st, convertedCommand, servingFileAccess{}, conversion.inputs.build, conversion.inputs.libraries)
 		if err != nil || current != load.Resolved.NativeBuildID {
 			return nil, modelLoadError(load.ModelID, "conversion", "Reviewed native library/environment source changed.")
 		}
+		conversion.inputs.libraries = libraries
 	}
 	text, err := convertedCommand.argumentText(llamaServingBase(converted))
 	if err != nil {
@@ -1312,6 +1346,9 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 		}
 	}
 	inputs := &typedLlamaInputEvidence{models: map[string]modelFileList{}}
+	if expected != nil {
+		inputs.libraries = expected.libraries
+	}
 	inputs.build, err = captureSource(command.Bin, false)
 	if expected != nil {
 		inputs.build = expected.build
@@ -1442,6 +1479,7 @@ func (e *Executor) previewTypedLlamaConversionExpected(ctx context.Context, st *
 	if err != nil {
 		return typedLlamaConversion{}, err
 	}
+	inputs.libraries = prepared.evidence.typed.libraries
 	converted.ModelLoads, converted.Serving = prepared.ModelLoads, prepared.Config
 	after, err := access.bindingExpected(ctx, sourceFile.configured, sourceFile.target, sourceFile.info)
 	if err != nil || *after != *binding {

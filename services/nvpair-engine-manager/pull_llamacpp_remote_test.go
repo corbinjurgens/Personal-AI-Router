@@ -233,7 +233,11 @@ func TestModelDownloadRemoteDecoderRejectsWrongIdentity(t *testing.T) {
 			queued := modelDownloadRemoteTestFrame("progress", "1", modeldownload.PhaseQueued)
 			terminal := modelDownloadRemoteTestFrame("result", "2", modeldownload.PhaseComplete)
 			change(&terminal)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != controlPullPath {
+					http.NotFound(w, r)
+					return
+				}
 				encoder := json.NewEncoder(w)
 				for _, frame := range []streamFrame{queued, terminal} {
 					if err := encoder.Encode(frame); err != nil {
@@ -287,7 +291,11 @@ func TestModelDownloadRemoteDecoderPreservesTerminalState(t *testing.T) {
 			if phase == modeldownload.PhaseComplete {
 				terminal.DownloadState.Entries[0].Persistence = modeldownload.PersistenceUncertain
 			}
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != controlPullPath {
+					http.NotFound(w, r)
+					return
+				}
 				encoder := json.NewEncoder(w)
 				for _, frame := range []streamFrame{modelDownloadRemoteTestFrame("progress", "1", modeldownload.PhaseQueued), terminal} {
 					if err := encoder.Encode(frame); err != nil {
@@ -408,7 +416,11 @@ func TestModelDownloadPullFrameBoundDoesNotApplyToInstall(t *testing.T) {
 }
 
 func TestModelDownloadInstallDecoderKeepsExistingContract(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != controlInstallPath {
+			http.NotFound(w, r)
+			return
+		}
 		encoder := json.NewEncoder(w)
 		for _, frame := range []streamFrame{{Type: "progress", Stage: "installing"}, {Type: "result", Status: &EngineStatus{Installed: true}}} {
 			if err := encoder.Encode(frame); err != nil {

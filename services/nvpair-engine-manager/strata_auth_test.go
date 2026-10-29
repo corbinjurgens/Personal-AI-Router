@@ -179,6 +179,10 @@ func TestStrataAuthEngineRequestsCarryTheKey(t *testing.T) {
 	var keyedControls atomic.Int32
 	var unkeyed atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/redirect" || r.URL.Path == "/landing" || r.URL.Path == "/echo")) && !(r.Method == http.MethodPost && (r.URL.Path == "/v1/load" || r.URL.Path == "/v1/unload")) {
+			http.NotFound(w, r)
+			return
+		}
 		authorized := r.Header.Get("Authorization") == "Bearer "+strataAuthKey
 		switch r.URL.Path {
 		case "/v1/models", "/v1/load", "/v1/unload":
@@ -201,6 +205,8 @@ func TestStrataAuthEngineRequestsCarryTheKey(t *testing.T) {
 		case "/echo":
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"wrong key ` + strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") + `"}`))
+		default:
+			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(server.Close)
