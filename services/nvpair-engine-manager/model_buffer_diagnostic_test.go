@@ -83,8 +83,13 @@ func TestModelBufferCaptureCreationDiagnostics(t *testing.T) {
 	test("runtime snapshot", "runtime-snapshot", "missing pinned install", func(f *modelBufferTestFixture, _ **llamaServingLaunch, _ *launchCommand) {
 		f.load.st.plat.Install = nil
 	})
-	test("executable binding", "executable-binding", "*fs.PathError", func(_ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
-		c.Bin = filepath.Join(t.TempDir(), "missing")
+	missingExecutable := filepath.Join(t.TempDir(), "missing")
+	_, bindingErr := servingFileBinding(missingExecutable)
+	if bindingErr == nil {
+		t.Fatal("missing executable unexpectedly has a serving binding")
+	}
+	test("executable binding", "executable-binding", modelBufferDiagnosticError(bindingErr), func(_ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
+		c.Bin = missingExecutable
 	})
 	test("native environment", "native-environment", "Reviewed Auto native library search escapes its selected build.", func(_ *modelBufferTestFixture, _ **llamaServingLaunch, c *launchCommand) {
 		c.Env = map[string]string{"LD_LIBRARY_PATH": "private-missing-directory"}
