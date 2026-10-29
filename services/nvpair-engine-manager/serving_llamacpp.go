@@ -734,6 +734,69 @@ func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool
 	return compileLlamaServingExpected(context.Background(), command, rt, requireApproved, servingFileAccess{}, nil)
 }
 
+// Export checks only the selected declaration's dependencies. Launch approval
+// remains the complete compiler's responsibility, including its source digest.
+func llamaExportDeclaration(rt Runtime, model string) (*engines.ServingModel, error) {
+	if rt.Serving == nil {
+		return nil, nil
+	}
+	var selected *engines.ServingModel
+	for i := range rt.Serving.Models {
+		declaration := &rt.Serving.Models[i]
+		if declaration.ModelID == model {
+			if selected != nil {
+				return nil, errNoArtifactBinding
+			}
+			selected = declaration
+		}
+	}
+	return selected, nil
+}
+
+func llamaExportSelection(declaration *engines.ServingModel, paths, roles []string) error {
+	if declaration == nil {
+		return nil
+	}
+	if len(paths) != len(declaration.Artifacts) {
+		return errNoArtifactBinding
+	}
+	for i, path := range paths {
+		artifact := declaration.Artifacts[i]
+		file, err := captureSource(path, false)
+		if err != nil || artifact.Binding == nil || !llamaBindingMetadataMatches(artifact.Binding, file) {
+			return errModelInspectionChanged
+		}
+	}
+	return nil
+}
+
+func llamaBindingMetadataMatches(binding *engines.ServingBinding, file sourceEvidence) bool {
+	return binding.SourcePath == file.configured && binding.ResolvedTarget == file.target && binding.SizeBytes == file.size && binding.MtimeNS == strconv.FormatInt(file.mtime, 10)
+}
+
+func bindLlamaExportAssertions(declaration *engines.ServingModel, list *modelFileList) error {
+	if declaration == nil {
+		return nil
+	}
+	if len(declaration.Artifacts) != len(list.Files) {
+		return errNoArtifactBinding
+	}
+	for i, artifact := range declaration.Artifacts {
+		file := &list.Files[i]
+		binding := artifact.Binding
+		if binding == nil || !validSHA256(artifact.SHA256) ||
+			binding.SourcePath != file.configured || binding.ResolvedTarget != file.abs || binding.SizeBytes != file.Size ||
+			binding.MtimeNS != strconv.FormatInt(file.info.ModTime().UnixNano(), 10) || binding.SampleSHA256 != file.sample {
+			return errModelInspectionChanged
+		}
+		if file.asserted != "" && file.asserted != artifact.SHA256 {
+			return errModelInspectionChanged
+		}
+		file.asserted = artifact.SHA256
+	}
+	return nil
+}
+
 func compileLlamaServingExpected(ctx context.Context, command launchCommand, rt Runtime, requireApproved bool, access servingFileAccess, expected *llamaServingEvidence) (*llamaServingLaunch, error) {
 	if rt.Serving == nil {
 		return nil, servingError("A serving declaration is required by the external preset compiler.")
@@ -907,7 +970,7 @@ func compileLlamaServingSectionsExpected(ctx context.Context, rt Runtime, requir
 				return nil, servingError("A declared model or draft shard is missing or unstable.")
 			}
 			approved := model.Artifacts[ai].Binding
-			if approved != nil && (approved.SourcePath != file.configured || approved.ResolvedTarget != file.target || approved.SizeBytes != file.size || approved.MtimeNS != strconv.FormatInt(file.mtime, 10)) {
+			if approved != nil && !llamaBindingMetadataMatches(approved, file) {
 				return nil, servingError("Serving artifact binding changed; renewed verification is required.")
 			}
 			current, err := access.bindingExpected(ctx, file.configured, file.target, file.info)

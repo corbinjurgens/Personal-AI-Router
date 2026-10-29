@@ -154,10 +154,45 @@ func rememberCopyExport(st *engineState, list modelFileList) *issuedCopyExport {
 		}
 		issuedCopyExports.order = append(issuedCopyExports.order, key)
 	}
-	list.Files = append([]modelFile(nil), list.Files...)
+	list = cloneCopyList(list)
 	issued := &issuedCopyExport{list: list}
 	issuedCopyExports.entries[key] = issued
 	return issued
+}
+
+func cloneCopyList(list modelFileList) modelFileList {
+	list.Files = slices.Clone(list.Files)
+	if list.source == nil {
+		return list
+	}
+	source := *list.source
+	source.recognition = slices.Clone(source.recognition)
+	source.directories = slices.Clone(source.directories)
+	source.artifacts = slices.Clone(source.artifacts)
+	source.selectors = slices.Clone(source.selectors)
+	for i := range source.selectors {
+		source.selectors[i].bytes = slices.Clone(source.selectors[i].bytes)
+		if source.selectors[i].binding != nil {
+			binding := *source.selectors[i].binding
+			source.selectors[i].binding = &binding
+		}
+	}
+	if source.inventory != nil {
+		inventory := *source.inventory
+		inventory.raw = slices.Clone(inventory.raw)
+		inventory.models = slices.Clone(inventory.models)
+		inventory.candidates = slices.Clone(inventory.candidates)
+		inventory.ready = slices.Clone(inventory.ready)
+		if inventory.digests.models != nil {
+			inventory.digests.models = make(map[string]string, len(source.inventory.digests.models))
+			for k, v := range source.inventory.digests.models {
+				inventory.digests.models[k] = v
+			}
+		}
+		source.inventory = &inventory
+	}
+	list.source = &source
+	return list
 }
 
 func issuedCopyGeneration(st *engineState, model string) *issuedCopyExport {
@@ -207,9 +242,7 @@ func issuedCopyList(st *engineState, model, id string) (modelFileList, bool) {
 	if !ok || id == "" || issued.list.ExportID != id {
 		return modelFileList{}, false
 	}
-	list := issued.list
-	list.Files = append([]modelFile(nil), list.Files...)
-	return list, true
+	return cloneCopyList(issued.list), true
 }
 
 func nativeExportID(list modelFileList) (string, error) {
@@ -242,24 +275,14 @@ func (e *Executor) recheckCopyExport(ctx context.Context, list modelFileList) er
 }
 
 func (e *Executor) recheckCopyExportAccess(ctx context.Context, list modelFileList, access servingFileAccess) error {
-	var current modelFileList
-	var err error
-	if list.Layout == llamaArtifactsLayout {
-		var st *engineState
-		var store engineModelStore
-		st, store, err = e.modelStoreFor(list.Engine)
-		if err == nil {
-			current, err = e.llamaExportFilesBound(ctx, st, store, list.Model, access, &list)
-		}
-	} else {
-		current, err = e.modelSourceFilesWithAccess(ctx, list.Engine, list.Model, access)
-	}
-	if err != nil || current.Layout != list.Layout || current.binding != list.binding || len(current.Files) != len(list.Files) {
-		return fmt.Errorf("custom artifact binding changed during hashing")
+	current, err := e.modelSourceFilesExpected(ctx, list.Engine, list.Model, access, list)
+	if err != nil || current.Layout != list.Layout || current.Revision != list.Revision || current.binding != list.binding || len(current.Files) != len(list.Files) {
+		return fmt.Errorf("source binding changed")
 	}
 	for i, f := range current.Files {
-		if !sameCopyFile(f.info, list.Files[i].info) {
-			return fmt.Errorf("custom artifact file changed during hashing")
+		old := list.Files[i]
+		if f.Path != old.Path || f.Role != old.Role || f.Size != old.Size || f.configured != old.configured || f.abs != old.abs || f.asserted != old.asserted || !sameCopyFile(f.info, old.info) {
+			return fmt.Errorf("source file changed")
 		}
 	}
 	return nil
@@ -423,12 +446,29 @@ func (e *Executor) llamaExportFilesBound(ctx context.Context, st *engineState, s
 	if err != nil {
 		return modelFileList{}, errNoArtifactBinding
 	}
+	configuration, err := json.Marshal(struct {
+		Command launchCommand
+		Serving any
+		Loads   []modelconfig.ModelLoad
+	}{command, snapshot.plat.Runtime.Serving, snapshot.plat.Runtime.ModelLoads})
+	if err != nil || (expected != nil && expected.configuration != string(configuration)) {
+		return modelFileList{}, errModelInspectionChanged
+	}
 	checkConfiguration := func() error {
 		current, currentCommand, currentErr := copyLaunchSnapshot(st)
 		if currentErr != nil || !reflect.DeepEqual(command, currentCommand) || !snapshot.plat.Runtime.Serving.Equal(current.plat.Runtime.Serving) || !modelconfig.EqualLoads(snapshot.plat.Runtime.ModelLoads, current.plat.Runtime.ModelLoads) {
 			return fmt.Errorf("custom artifact configuration changed during export resolution")
 		}
 		return nil
+	}
+	if expected != nil && expected.source != nil && expected.source.inventory != nil {
+		if err := e.nativeSourceCurrent(ctx, st, store, *expected.source.inventory); err != nil {
+			return modelFileList{}, errModelInspectionChanged
+		}
+		observation, err := e.recognizeModelSource(ctx, store.engine, model)
+		if err != nil || e.nativeSourceCurrent(ctx, st, store, observation) != nil || expected.source.run != observation.runID || expected.source.configuration != observation.launchDigest || !bytes.Equal(expected.source.recognition, observation.raw) {
+			return modelFileList{}, errModelInspectionChanged
+		}
 	}
 	access.recognize = func(ctx context.Context, model string) (engineInventory, error) {
 		observation, err := e.recognizeModelSource(ctx, store.engine, model)
@@ -438,64 +478,18 @@ func (e *Executor) llamaExportFilesBound(ctx context.Context, st *engineState, s
 		if err := e.nativeSourceCurrent(ctx, st, store, observation); err != nil {
 			return engineInventory{}, err
 		}
+		if expected != nil && expected.source != nil && expected.source.inventory != nil &&
+			(expected.source.run != observation.runID || expected.source.configuration != observation.launchDigest || !bytes.Equal(expected.source.recognition, observation.raw)) {
+			return engineInventory{}, errModelInspectionChanged
+		}
 		return observation, checkConfiguration()
 	}
 	var list modelFileList
-	var presetSelected bool
-	if expected == nil {
-		list, presetSelected, err = resolveLlamaArtifacts(ctx, snapshot, command, store, model, access)
-	} else {
-		list, presetSelected, err = resolveLlamaArtifactsExpected(ctx, snapshot, command, store, model, access, *expected)
-	}
+	list, err = resolvePreparedExport(ctx, snapshot, command, store, model, access, expected)
 	if err != nil {
 		return modelFileList{}, err
 	}
-	// Approval and export hashing retain their existing owners. Inspection uses
-	// only the resolver below and never compiles every serving declaration.
-	typedSelected := slices.ContainsFunc(snapshot.plat.Runtime.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ModelID == model })
-	if (presetSelected || typedSelected) && snapshot.plat.Runtime.Serving != nil {
-		snapshot.plat.Runtime.modelLoadOwner = e
-		if list.source == nil {
-			return modelFileList{}, errNoArtifactBinding
-		}
-		original := access
-		files := map[string]sourceEvidence{}
-		for _, selector := range list.source.selectors {
-			files[selector.file.configured] = selector.file
-		}
-		for _, file := range list.source.artifacts {
-			if file.info == nil {
-				return modelFileList{}, errNoArtifactBinding
-			}
-			files[file.configured] = sourceEvidence{configured: file.configured, target: file.abs, info: file.info, size: file.Size, mtime: file.info.ModTime().UnixNano()}
-		}
-		access.open = func(path string) (servingArtifactFile, error) {
-			if file, ok := files[path]; ok {
-				return original.checkedOpen(ctx, file.configured, file.target, file.info)
-			}
-			return original.openFile(path)
-		}
-		compiled, err := compilePreparedServingContext(ctx, snapshot, command, snapshot.plat.Runtime, true, access)
-		if err != nil {
-			return modelFileList{}, fmt.Errorf("configured serving artifact binding failed: %w", err)
-		}
-		matched := false
-		for _, declared := range compiled.Config.Models {
-			if declared.ModelID != model {
-				continue
-			}
-			matched = true
-			if len(declared.Artifacts) != len(list.Files) {
-				return modelFileList{}, fmt.Errorf("configured artifact set changed during resolution")
-			}
-			for i, artifact := range declared.Artifacts {
-				list.Files[i].asserted = artifact.SHA256
-			}
-		}
-		if !matched {
-			return modelFileList{}, errNoArtifactBinding
-		}
-	}
+	list.configuration = string(configuration)
 	if err := checkConfiguration(); err != nil {
 		return modelFileList{}, err
 	}
@@ -623,6 +617,10 @@ func validateResolutionEvidence(ctx context.Context, source *sourceSnapshot) err
 }
 
 func resolveLlamaArtifactsBound(ctx context.Context, snapshot *engineState, command launchCommand, store engineModelStore, model string, access servingFileAccess, expected *modelFileList) (modelFileList, bool, error) {
+	return resolveLlamaArtifactsSelection(ctx, snapshot, command, store, model, access, expected, nil)
+}
+
+func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, command launchCommand, store engineModelStore, model string, access servingFileAccess, expected *modelFileList, checkSelection func([]string, []string) error) (modelFileList, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return modelFileList{}, false, err
 	}
@@ -713,6 +711,11 @@ func resolveLlamaArtifactsBound(ctx context.Context, snapshot *engineState, comm
 			paths, roles, pathErr := llamaConsumedPaths(source, options, model, maxCopyArtifacts)
 			if pathErr != nil {
 				return modelFileList{}, false, pathErr
+			}
+			if checkSelection != nil {
+				if err := checkSelection(paths, roles); err != nil {
+					return modelFileList{}, false, err
+				}
 			}
 			list := modelFileList{Engine: store.engine, Model: model, Layout: llamaArtifactsLayout}
 			for i, path := range paths {

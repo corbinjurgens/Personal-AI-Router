@@ -24,7 +24,140 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/durablefile"
+	"nvpair-shared/modelconfig"
 )
+
+func TestModelCopySelectedExport(t *testing.T) {
+	mutate := func(t *testing.T, path string, offset int64) {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := file.WriteAt([]byte("changed"), offset)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			t.Fatalf("mutation: write=%v close=%v", writeErr, closeErr)
+		}
+		if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("preset ignores unrelated mutation while launch refuses", func(t *testing.T) {
+		f := newLlamaServingFixture(t)
+		for i := range f.request.Settings.Serving.Models {
+			model := &f.request.Settings.Serving.Models[i]
+			data, err := os.ReadFile(filepath.Join(f.root, model.ModelID+".gguf"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			model.Artifacts[0].SHA256 = sha256Hex(data)
+		}
+		f.request.Settings.Serving.Models[0].Artifacts[0].Role = "model-shard"
+		applyLlamaServing(t, f, approveLlamaServing(t, f))
+		st := settingsState(t, f.ex)
+		st.modelsDir = f.root
+		mutate(t, filepath.Join(f.root, "weak.gguf"), 0)
+		command, err := launchForState(st, st.port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compilePreparedServing(st, command, st.plat.Runtime, true); err == nil {
+			t.Fatal("full serving accepted unrelated sampled mutation")
+		}
+		forbidden, selected := 0, 0
+		access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+			if path == filepath.Join(f.root, "weak.gguf") || path == command.Bin {
+				forbidden++
+				return nil, errors.New("unrelated input opened")
+			}
+			selected++
+			return os.Open(path)
+		}}
+		list, err := f.ex.llamaExportFilesWithAccess(context.Background(), st, engineModelStore{engine: "fake", adapter: "llamacpp", root: f.root}, "medium", access)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if forbidden != 0 || selected == 0 || len(list.Files) != 1 || list.Files[0].asserted == "" {
+			t.Fatalf("selected export: forbidden=%d selected=%d list=%+v", forbidden, selected, list)
+		}
+		if err := hashModelFiles(context.Background(), &list, func(string, int) {}); err != nil {
+			t.Fatal(err)
+		}
+		assertNoLlamaSpawn(t, f)
+	})
+	t.Run("typed exports after restart without native build reads", func(t *testing.T) {
+		f := newModelLoadFixture(t)
+		rt := convertModelLoadFixture(t, f)
+		f.st.plat.Runtime = rt
+		mutate(t, filepath.Join(f.root, "weak.gguf"), 0)
+		command := typedFixtureCommand(t, f, rt)
+		if _, err := compilePreparedServing(f.st, command, rt, true); err == nil {
+			t.Fatal("full typed launch accepted unrelated sampled mutation")
+		}
+		persisted, err := json.Marshal(rt.ModelLoads)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var loads []modelconfig.ModelLoad
+		if err := json.Unmarshal(persisted, &loads); err != nil {
+			t.Fatal(err)
+		}
+		cold := snapshotLlamaState(f.st)
+		cold.plat.Runtime.ModelLoads = loads
+		cold.plat.Runtime.modelLoadOwner = nil
+		cold.plat.Runtime.servingSnapshot = nil
+		missingBuild := filepath.Join(f.root, "missing-executable")
+		cold.binPath = missingBuild
+		cold.plat.Runtime.Bin = missingBuild
+		forbidden, selected := 0, 0
+		access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+			if path != filepath.Join(f.root, "medium.gguf") {
+				forbidden++
+				return nil, errors.New("non-selected input opened")
+			}
+			selected++
+			return os.Open(path)
+		}}
+		store := engineModelStore{engine: "fake", adapter: "llamacpp", root: f.root}
+		list, err := f.ex.llamaExportFilesWithAccess(context.Background(), cold, store, "medium-model", access)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if selected == 0 || forbidden != 0 || len(list.Files) != 1 {
+			t.Fatalf("typed export: selected=%d forbidden=%d list=%+v", selected, forbidden, list)
+		}
+		if _, err := f.ex.llamaExportFilesBound(context.Background(), cold, store, "medium-model", access, &list); err != nil {
+			t.Fatalf("selected recheck: %v", err)
+		}
+		mutate(t, filepath.Join(f.root, "medium.gguf"), 0)
+		if _, err := f.ex.llamaExportFilesWithAccess(context.Background(), cold, store, "medium-model", access); err == nil {
+			t.Fatal("selected sampled mutation accepted")
+		}
+	})
+	t.Run("selected full hash rejects mutation outside binding samples", func(t *testing.T) {
+		f := newLlamaServingFixture(t)
+		path := filepath.Join(f.root, "medium.gguf")
+		data := testBytes(300_000, 4)
+		writeTestFile(t, path, data)
+		f.request.Settings.Serving.Models[0].Artifacts[0].SHA256 = sha256Hex(data)
+		applyLlamaServing(t, f, approveLlamaServing(t, f))
+		st := settingsState(t, f.ex)
+		st.modelsDir = f.root
+		mutate(t, path, 150_000)
+		list, err := f.ex.modelSourceFiles(context.Background(), "fake", "medium")
+		if err != nil {
+			t.Fatalf("unchanged samples rejected before full hashing: %v", err)
+		}
+		if err := hashModelFiles(context.Background(), &list, func(string, int) {}); err == nil || !strings.Contains(err.Error(), "full SHA256 disagrees") {
+			t.Fatalf("selected full hash mismatch: %v", err)
+		}
+	})
+}
 
 const reportedCopyAlias = "tiel-coder-35b-a3b-msi-ctx32768"
 
