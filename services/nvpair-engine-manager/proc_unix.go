@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"nvpair-engine-manager/internal/artifactbinding"
+
 	"github.com/ebitengine/purego"
 )
 
@@ -27,7 +29,7 @@ import (
 const portLookupTimeout = 2 * time.Second
 
 func resolveExistingPath(path string) (string, error) {
-	return filepath.EvalSymlinks(path)
+	return artifactbinding.Resolve(path)
 }
 
 func managedInstallPath(binAbs, dirAbs string) bool {

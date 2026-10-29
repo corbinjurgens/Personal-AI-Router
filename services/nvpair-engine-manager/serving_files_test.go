@@ -5,15 +5,69 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"testing"
+
+	"nvpair-shared/modelconfig"
 )
 
 func writeServingFixture(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestServingFileBindingHistoricalProjection(t *testing.T) {
+	root := t.TempDir()
+	target, link, draft := filepath.Join(root, "target"), filepath.Join(root, "configured-link"), filepath.Join(root, "draft")
+	payload := []byte("synthetic historical binding")
+	writeServingFixture(t, target, payload)
+	writeServingFixture(t, draft, payload)
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	var bindings []modelconfig.ArtifactBinding
+	var want []modelconfig.ArtifactSummary
+	for i, path := range []string{link, draft} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := resolveExistingPath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sample := sha256.Sum256(payload)
+		role := "model"
+		if i == 1 {
+			role = "draft"
+		}
+		// Frozen pre-extraction wire projection, not a second production sampler.
+		b := modelconfig.ArtifactBinding{Role: role, Path: path, ResolvedTarget: resolved, Size: strconv.FormatInt(info.Size(), 10), MtimeNS: strconv.FormatInt(info.ModTime().UnixNano(), 10), SampleSHA256: hex.EncodeToString(sample[:])}
+		got, err := servingFileBinding(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.SourcePath != b.Path || got.ResolvedTarget != b.ResolvedTarget || got.SampleSHA256 != b.SampleSHA256 || strconv.FormatInt(got.SizeBytes, 10) != b.Size || got.MtimeNS != b.MtimeNS {
+			t.Fatalf("historical binding changed: %+v want %+v", got, b)
+		}
+		bindings = append(bindings, b)
+		data, err := json.Marshal(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data)
+		want = append(want, modelconfig.ArtifactSummary{Role: role, Size: b.Size, Identity: hex.EncodeToString(sum[:])})
+	}
+	if got := modelEstimateBindings(bindings); !reflect.DeepEqual(got, want) {
+		t.Fatalf("historical ordered summaries changed: %+v want %+v", got, want)
 	}
 }
 
