@@ -167,6 +167,10 @@ func newBindingEngine(t *testing.T, model string, inventoryRelease <-chan struct
 	t.Helper()
 	e := &bindingEngine{inventoryEntered: make(chan struct{}), inventoryRelease: inventoryRelease}
 	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodGet && (r.URL.Path == "/api/tags" || r.URL.Path == "/api/version" || r.URL.Path == "/v1/models")) && !(r.Method == http.MethodPost && (r.URL.Path == "/api/generate" || r.URL.Path == "/api/chat" || openAICompatibleInference[r.URL.Path])) {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
 			e.mu.Lock()

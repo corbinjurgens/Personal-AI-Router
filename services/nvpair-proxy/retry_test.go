@@ -36,10 +36,10 @@ func TestMain(m *testing.M) {
 //
 // The count comes back as a func so a caller cannot reset it, and reading it
 // while requests are still in flight is safe.
-func newCountingServer(t *testing.T, status int, body string) (serverURL string, hits func() int) {
+func newCountingServer(t *testing.T, method, path string, status int, body string) (serverURL string, hits func() int) {
 	t.Helper()
 	var n atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(method, path, func(w http.ResponseWriter, r *http.Request) {
 		n.Add(1)
 		w.WriteHeader(status)
 		io.WriteString(w, body)
@@ -238,7 +238,7 @@ func TestAttemptClaim_ExactlyOneWinnerUnderContention(t *testing.T) {
 func TestHandleHTTP_RetriesTheOnlyOwner(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		var hits atomic.Int32
-		flaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flaky := httptest.NewServer(fixtureRequestHandler(http.MethodPost, tc.inferencePath, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			if hits.Add(1) <= 2 {
 				w.WriteHeader(http.StatusServiceUnavailable)
@@ -277,7 +277,7 @@ func TestHandleHTTP_RetriesTheOnlyOwner(t *testing.T) {
 func TestHandleHTTP_StopsAtDispatchBudget(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		const upstreamBody = `{"error":"still loading"}`
-		brokenURL, hits := newCountingServer(t, http.StatusBadGateway, upstreamBody)
+		brokenURL, hits := newCountingServer(t, http.MethodPost, tc.inferencePath, http.StatusBadGateway, upstreamBody)
 
 		disc := NewDiscovery()
 		disc.AddManual(nodeForModel(t, "broken", brokenURL, tc.advertisedModel))
@@ -305,7 +305,7 @@ func TestHandleHTTP_StopsAtDispatchBudget(t *testing.T) {
 // dispatch.
 func TestHandleHTTP_NonInferenceIsNotRetriedBeyondItsCandidates(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		failingURL, hits := newCountingServer(t, http.StatusInternalServerError, `{"error":"pull failed"}`)
+		failingURL, hits := newCountingServer(t, http.MethodPost, tc.nonInferencePath, http.StatusInternalServerError, `{"error":"pull failed"}`)
 
 		disc := NewDiscovery()
 		disc.AddManual(nodeForModel(t, "only", failingURL, tc.advertisedModel))
@@ -342,8 +342,8 @@ func TestHandleHTTP_NonInferenceIsNotRetriedBeyondItsCandidates(t *testing.T) {
 func TestHandleHTTP_ReservationReleasedBetweenAttempts(t *testing.T) {
 	tc := anyCase(t)
 
-	firstURL, firstHits := newCountingServer(t, http.StatusServiceUnavailable, "")
-	secondURL, secondHits := newCountingServer(t, http.StatusServiceUnavailable, "")
+	firstURL, firstHits := newCountingServer(t, http.MethodPost, tc.inferencePath, http.StatusServiceUnavailable, "")
+	secondURL, secondHits := newCountingServer(t, http.MethodPost, tc.inferencePath, http.StatusServiceUnavailable, "")
 
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "broken-a", firstURL, tc.advertisedModel))
@@ -448,7 +448,7 @@ func TestHandleHTTP_DeadlineWithAnOwnerPresentSaysSo(t *testing.T) {
 	setForTest(t, &jobDeadline, 150*time.Millisecond)
 
 	tc := anyCase(t)
-	stalled := newStalledEngine(t)
+	stalled := newStalledEngine(t, http.MethodPost, tc.inferencePath)
 
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "slow", stalled.url, tc.advertisedModel))
@@ -495,7 +495,7 @@ func TestHandleHTTP_TargetLeavingDiscoveryAbortsAttempt(t *testing.T) {
 
 	tc := anyCase(t)
 
-	stalled := newStalledEngine(t)
+	stalled := newStalledEngine(t, http.MethodPost, tc.inferencePath)
 
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -561,7 +561,7 @@ func TestHandleHTTP_AbandonedRequestStopsRetrying(t *testing.T) {
 
 	tc := anyCase(t)
 
-	brokenURL, hits := newCountingServer(t, http.StatusServiceUnavailable, "")
+	brokenURL, hits := newCountingServer(t, http.MethodPost, tc.inferencePath, http.StatusServiceUnavailable, "")
 
 	rec := &recRW{}
 	disc := NewDiscovery()

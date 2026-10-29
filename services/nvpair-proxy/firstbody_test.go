@@ -358,14 +358,14 @@ type stalledEngine struct {
 	release func()
 }
 
-func newStalledEngine(t *testing.T) stalledEngine {
+func newStalledEngine(t *testing.T, method, path string) stalledEngine {
 	t.Helper()
 	var n atomic.Int32
 	releaseCh := make(chan struct{})
 	var once sync.Once
 	release := func() { once.Do(func() { close(releaseCh) }) }
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(method, path, func(w http.ResponseWriter, r *http.Request) {
 		n.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -398,7 +398,7 @@ func TestHandleHTTP_HeadersWithoutContentFailsOver(t *testing.T) {
 	setForTest(t, &firstBodyTimeout, testFirstBodyTimeout)
 
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		stalled := newStalledEngine(t)
+		stalled := newStalledEngine(t, http.MethodPost, tc.inferencePath)
 
 		var servedBody string
 		good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -443,8 +443,8 @@ func TestHandleHTTP_NoContentOnFinalAttemptTerminates(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		// Alternatives retain the per-attempt first-content cap, even when
 		// the final dispatch has no remaining attempt to fail over to.
-		stalled := newStalledEngine(t)
-		other := newStalledEngine(t)
+		stalled := newStalledEngine(t, http.MethodPost, tc.inferencePath)
+		other := newStalledEngine(t, http.MethodPost, tc.inferencePath)
 
 		disc := NewDiscovery()
 		disc.AddManual(nodeForModel(t, "silent", stalled.url, tc.advertisedModel))
@@ -457,6 +457,9 @@ func TestHandleHTTP_NoContentOnFinalAttemptTerminates(t *testing.T) {
 			defer close(done)
 			p.soleFacade().handleHTTP(rec, tc.inferenceRequest())
 		}()
+		waitForCond(t, time.Second, "first stalled dispatch", func() bool { return stalled.hits()+other.hits() > 0 })
+		assertFixtureRejectsProbe(t, stalled.url)
+		assertFixtureRejectsProbe(t, other.url)
 
 		select {
 		case <-done:
@@ -594,7 +597,7 @@ func TestHandleHTTP_NonInferenceCommitsOnHeaders(t *testing.T) {
 	setForTest(t, &firstBodyTimeout, testFirstBodyTimeout)
 
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		stalled := newStalledEngine(t)
+		stalled := newStalledEngine(t, http.MethodGet, tc.nonInferencePath)
 
 		disc := NewDiscovery()
 		disc.AddManual(nodeForModel(t, "stalled", stalled.url, tc.advertisedModel))

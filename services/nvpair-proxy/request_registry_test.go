@@ -454,7 +454,7 @@ func TestRequestRegistrySaturationRefusesBeforeEffects(t *testing.T) {
 
 func TestRequestRegistryTracksActualRequestAndFinalCleanup(t *testing.T) {
 	tc := anyCase(t)
-	engine := newStallingEngine(t)
+	engine := newStallingEngine(t, tc.inferencePath)
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "a", engine.URL, tc.advertisedModel))
 	w := &recordingWriter{}
