@@ -136,10 +136,10 @@ func TestBuildApplyProcess(t *testing.T) {
 		}
 		return result
 	}
-	initial := status("apply-status-before")
+	initial := status("822")
 	gui := buildapply.GUIFacts{PID: os.Getpid(), Executable: self}
 	t.Run("preview refuses a nonpackaged running layout", func(t *testing.T) {
-		frame := c.mustCall(t, "apply-preview", "service/build-apply-preview", mustMarshal(t, buildapply.PreviewRequest{CandidatePath: filepath.Join(f.dir, "absent-candidate"), GUI: gui}))
+		frame := c.mustCall(t, "823", "service/build-apply-preview", mustMarshal(t, buildapply.PreviewRequest{CandidatePath: filepath.Join(f.dir, "absent-candidate"), GUI: gui}))
 		var result buildapply.Result[buildapply.BuildApplyPreview]
 		if err := json.Unmarshal(frame.Result, &result); err != nil {
 			t.Fatal(err)
@@ -160,7 +160,7 @@ func TestBuildApplyProcess(t *testing.T) {
 		{"missing preview", buildapply.Consent{AllowInterruption: true, AllowEngineStop: true}, "stale_preview"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			frame := c.mustCall(t, "apply-start", "service/build-apply-start", mustMarshal(t, buildapply.StartRequest{PreviewID: strings.Repeat("a", 32), GUI: gui, Consent: tc.consent}))
+			frame := c.mustCall(t, "824", "service/build-apply-start", mustMarshal(t, buildapply.StartRequest{PreviewID: strings.Repeat("a", 32), GUI: gui, Consent: tc.consent}))
 			var result buildapply.Result[buildapply.BuildApplyOperation]
 			if err := json.Unmarshal(frame.Result, &result); err != nil {
 				t.Fatal(err)
@@ -171,7 +171,7 @@ func TestBuildApplyProcess(t *testing.T) {
 			assertSaved(t)
 		})
 	}
-	if got := status("apply-status-after"); !reflect.DeepEqual(initial, got) {
+	if got := status("825"); !reflect.DeepEqual(initial, got) {
 		t.Fatalf("refusal changed apply status: before=%+v after=%+v", initial, got)
 	}
 	after := serviceStatus(t, c)
