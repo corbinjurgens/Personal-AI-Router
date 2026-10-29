@@ -451,7 +451,27 @@ func (e *Executor) llamaExportFilesBound(ctx context.Context, st *engineState, s
 	typedSelected := slices.ContainsFunc(snapshot.plat.Runtime.ModelLoads, func(load modelconfig.ModelLoad) bool { return load.ModelID == model })
 	if (presetSelected || typedSelected) && snapshot.plat.Runtime.Serving != nil {
 		snapshot.plat.Runtime.modelLoadOwner = e
-		compiled, err := compilePreparedServing(snapshot, command, snapshot.plat.Runtime, true)
+		if list.source == nil {
+			return modelFileList{}, errNoArtifactBinding
+		}
+		original := access
+		files := map[string]sourceEvidence{}
+		for _, selector := range list.source.selectors {
+			files[selector.file.configured] = selector.file
+		}
+		for _, file := range list.source.artifacts {
+			if file.info == nil {
+				return modelFileList{}, errNoArtifactBinding
+			}
+			files[file.configured] = sourceEvidence{configured: file.configured, target: file.abs, info: file.info, size: file.Size, mtime: file.info.ModTime().UnixNano()}
+		}
+		access.open = func(path string) (servingArtifactFile, error) {
+			if file, ok := files[path]; ok {
+				return original.checkedOpen(ctx, file.configured, file.target, file.info)
+			}
+			return original.openFile(path)
+		}
+		compiled, err := compilePreparedServingAccess(snapshot, command, snapshot.plat.Runtime, true, access)
 		if err != nil {
 			return modelFileList{}, fmt.Errorf("configured serving artifact binding failed: %w", err)
 		}

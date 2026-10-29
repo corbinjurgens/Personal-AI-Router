@@ -137,6 +137,22 @@ func modelReviewedNativeSource(ctx context.Context, st *engineState, command lau
 }
 
 func modelReviewedNativeRuntimeSource(ctx context.Context, runtime modelDeviceRuntime, command launchCommand, fail func(string, error)) (string, error) {
+	return modelReviewedNativeRuntimeSourceExpected(ctx, runtime, command, fail, servingFileAccess{}, nil)
+}
+
+func modelReviewedNativeSourceExpected(ctx context.Context, st *engineState, command launchCommand, access servingFileAccess, executable sourceEvidence, expected map[string]sourceEvidence) (string, map[string]sourceEvidence, error) {
+	if command.Bin != executable.configured || validateSource(executable) != nil {
+		return "", nil, servingError("Native executable changed.")
+	}
+	runtime, libraries, err := modelDeviceRuntimeSnapshotBound(ctx, st, modelDevicesBuild, access, expected)
+	if err != nil {
+		return "", nil, servingError("Reviewed Auto native library source unavailable.")
+	}
+	source, err := modelReviewedNativeRuntimeSourceExpected(ctx, runtime, command, func(string, error) {}, access, &executable)
+	return source, libraries, err
+}
+
+func modelReviewedNativeRuntimeSourceExpected(ctx context.Context, runtime modelDeviceRuntime, command launchCommand, fail func(string, error), access servingFileAccess, expected *sourceEvidence) (string, error) {
 	entries, err := os.ReadDir(runtime.Root)
 	if err != nil {
 		fail("root-read", err)
@@ -152,7 +168,14 @@ func modelReviewedNativeRuntimeSource(ctx context.Context, runtime modelDeviceRu
 			return "", servingError("Reviewed Auto build root contains an unsupported driver library.")
 		}
 	}
-	executable, err := servingFileBinding(command.Bin)
+	var executable *engines.ServingBinding
+	if expected == nil {
+		executable, err = access.binding(ctx, command.Bin)
+	} else if command.Bin == expected.configured {
+		executable, err = access.bindingExpected(ctx, expected.configured, expected.target, expected.info)
+	} else {
+		err = servingError("Native executable changed.")
+	}
 	if err != nil {
 		fail("executable-binding", err)
 		return "", err
@@ -208,6 +231,13 @@ type llamaServingLaunch struct {
 	// server only through the child environment, never the snapshot, and is
 	// never serialized.
 	Credential string `json:"-"`
+	evidence   *llamaServingEvidence
+}
+
+type llamaServingEvidence struct {
+	source    sourceEvidence
+	artifacts map[string]sourceEvidence
+	typed     *typedLlamaInputEvidence
 }
 
 type llamaServingSnapshot struct {
@@ -701,6 +731,10 @@ func llamaArtifactPaths(path string) ([]string, error) {
 }
 
 func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool) (*llamaServingLaunch, error) {
+	return compileLlamaServingExpected(context.Background(), command, rt, requireApproved, servingFileAccess{}, nil)
+}
+
+func compileLlamaServingExpected(ctx context.Context, command launchCommand, rt Runtime, requireApproved bool, access servingFileAccess, expected *llamaServingEvidence) (*llamaServingLaunch, error) {
 	if rt.Serving == nil {
 		return nil, servingError("A serving declaration is required by the external preset compiler.")
 	}
@@ -738,7 +772,20 @@ func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool
 	if err != nil {
 		return nil, err
 	}
-	data, binding, err := servingSource(source)
+	var sourceFile sourceEvidence
+	if expected == nil {
+		sourceFile, err = captureSource(source, false)
+	} else {
+		sourceFile = expected.source
+		configured, absErr := filepath.Abs(source)
+		if absErr != nil || sourceFile.configured != configured {
+			return nil, servingError("Native preset changed.")
+		}
+	}
+	if err != nil {
+		return nil, servingError("Native preset is missing or unstable.")
+	}
+	data, binding, err := access.sourceExpected(ctx, sourceFile, servingSmallFileLimit, false)
 	if err != nil {
 		return nil, servingError("Native preset is missing, unstable or exceeds the small-file limit.")
 	}
@@ -746,19 +793,27 @@ func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool
 	if err != nil {
 		return nil, err
 	}
-	return compileLlamaServingSections(rt, requireApproved, source, data, binding, sections, cli, env, capacity)
+	result, err := compileLlamaServingSectionsExpected(ctx, rt, requireApproved, source, data, binding, sections, cli, env, capacity, access, expected)
+	if err == nil {
+		result.evidence.source = sourceFile
+	}
+	return result, err
 }
 
 // The declaration validator consumes either external source bytes or typed
 // compiler bytes. The latter are input bytes, never a generated output path.
 func compileLlamaServingSections(rt Runtime, requireApproved bool, source string, data []byte, binding *engines.ServingBinding, sections map[string]map[string]string, cli, env map[string]string, capacity int64) (*llamaServingLaunch, error) {
+	return compileLlamaServingSectionsExpected(context.Background(), rt, requireApproved, source, data, binding, sections, cli, env, capacity, servingFileAccess{}, nil)
+}
+
+func compileLlamaServingSectionsExpected(ctx context.Context, rt Runtime, requireApproved bool, source string, data []byte, binding *engines.ServingBinding, sections map[string]map[string]string, cli, env map[string]string, capacity int64, access servingFileAccess, expected *llamaServingEvidence) (*llamaServingLaunch, error) {
 	if len(servingDeclarationErrors(rt.Serving)) != 0 || rt.Serving == nil {
 		return nil, servingError("A valid existing serving declaration is required.")
 	}
 	if len(sections)-boolInt(sections["*"] != nil) != len(rt.Serving.Models) {
 		return nil, servingError("Preset models must exactly match the serving declaration.")
 	}
-	result := &llamaServingLaunch{Config: rt.Serving.Clone(), Source: source}
+	result := &llamaServingLaunch{Config: rt.Serving.Clone(), Source: source, evidence: &llamaServingEvidence{artifacts: map[string]sourceEvidence{}}}
 	var snapshot strings.Builder
 	// Finite adapter defaults are presets, never router envelope arguments.
 	snapshot.WriteString("[*]\nctx-size = 8192\nparallel = 1\nkv-unified = false\nfit = off\nsleep-idle-seconds = 300\ncache-ram = 512\nload-on-startup = false\n")
@@ -837,11 +892,28 @@ func compileLlamaServingSections(rt Runtime, requireApproved bool, source string
 			return nil, servingError("Declare every consumed model and draft shard exactly once, in native order.")
 		}
 		for ai, path := range paths {
-			current, err := servingFileBinding(path)
+			var file sourceEvidence
+			var err error
+			if expected == nil {
+				file, err = captureSource(path, false)
+			} else {
+				var ok bool
+				file, ok = expected.artifacts[path]
+				if !ok {
+					return nil, servingError("Missing prepared artifact evidence.")
+				}
+			}
 			if err != nil {
 				return nil, servingError("A declared model or draft shard is missing or unstable.")
 			}
 			approved := model.Artifacts[ai].Binding
+			if approved != nil && (approved.SourcePath != file.configured || approved.ResolvedTarget != file.target || approved.SizeBytes != file.size || approved.MtimeNS != strconv.FormatInt(file.mtime, 10)) {
+				return nil, servingError("Serving artifact binding changed; renewed verification is required.")
+			}
+			current, err := access.bindingExpected(ctx, file.configured, file.target, file.info)
+			if err != nil {
+				return nil, servingError("A declared model or draft shard is missing or unstable.")
+			}
 			if approved != nil && *approved != *current {
 				return nil, servingError("Serving artifact binding changed; renewed verification is required.")
 			}
@@ -849,6 +921,7 @@ func compileLlamaServingSections(rt Runtime, requireApproved bool, source string
 				return nil, servingError("Apply requires the reviewed artifact binding.")
 			}
 			model.Artifacts[ai].Binding = current
+			result.evidence.artifacts[path] = file
 		}
 		placement := []string{"kv-unified=" + unified}
 		for _, key := range []string{"kv-unified-per-slot", "gpu-layers", "split-mode", "tensor-split", "main-gpu", "device", "fit", "cache-ram", "batch-size", "ubatch-size", "cache-type-k", "cache-type-v", "flash-attn", "kv-offload", "op-offload"} {
@@ -1059,11 +1132,17 @@ func rejectUndeclaredServingLoad(config *engines.ServingConfig, field string, pa
 // recheckLlamaServing runs immediately before spawn. Do not reuse the preview's
 // stat cache: sample the artifacts and re-read the source on every check.
 func recheckLlamaServing(launch launchCommand, rt Runtime, prepared *llamaServingLaunch) error {
-	current, err := compileLlamaServing(launch, rt, true)
+	if prepared == nil || prepared.evidence == nil {
+		return servingError("Missing prepared serving evidence.")
+	}
+	current, err := compileLlamaServingExpected(context.Background(), launch, rt, true, servingFileAccess{}, prepared.evidence)
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(current, prepared) {
+	current.evidence = nil
+	preparedCopy := *prepared
+	preparedCopy.evidence = nil
+	if !reflect.DeepEqual(current, &preparedCopy) {
 		return servingError("Native serving inputs changed before spawn.")
 	}
 	return nil
