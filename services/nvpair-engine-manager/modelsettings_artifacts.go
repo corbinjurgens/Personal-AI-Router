@@ -367,18 +367,25 @@ func resolvedLoadArtifacts(ctx context.Context, store engineModelStore, model st
 		if !artifactPathSafe(artifact.Path) || !strings.HasSuffix(artifact.Path, ".gguf") || !artifactPathSafe(artifact.ResolvedTarget) {
 			return modelFileList{}, errNoArtifactBinding
 		}
-		binding, err := access.binding(ctx, artifact.Path)
+		// Serialized bindings authorize these exact metadata before any sample.
+		evidence, err := captureSource(artifact.Path, false)
+		if err != nil {
+			return modelFileList{}, err
+		}
+		if evidence.target != artifact.ResolvedTarget || strconv.FormatInt(evidence.size, 10) != artifact.Size || strconv.FormatInt(evidence.mtime, 10) != artifact.MtimeNS {
+			return modelFileList{}, errModelInspectionChanged
+		}
+		binding, err := access.bindingExpected(ctx, evidence.configured, evidence.target, evidence.info)
 		if err != nil {
 			return modelFileList{}, err
 		}
 		if binding.ResolvedTarget != artifact.ResolvedTarget || strconv.FormatInt(binding.SizeBytes, 10) != artifact.Size || binding.MtimeNS != artifact.MtimeNS || binding.SampleSHA256 != artifact.SampleSHA256 {
 			return modelFileList{}, errModelInspectionChanged
 		}
-		info, err := os.Stat(binding.ResolvedTarget)
-		if err != nil {
+		if err := validateSource(evidence); err != nil {
 			return modelFileList{}, err
 		}
-		list.Files = append(list.Files, modelFile{Role: artifact.Role, Path: artifact.Role + "/" + filepath.Base(artifact.Path), Size: binding.SizeBytes, abs: binding.ResolvedTarget, configured: binding.SourcePath, sample: binding.SampleSHA256, info: info})
+		list.Files = append(list.Files, modelFile{Role: artifact.Role, Path: artifact.Role + "/" + filepath.Base(artifact.Path), Size: binding.SizeBytes, abs: binding.ResolvedTarget, configured: binding.SourcePath, sample: binding.SampleSHA256, info: evidence.info})
 	}
 	if err := validateResolvedArtifacts(list); err != nil {
 		return modelFileList{}, err
