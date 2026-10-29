@@ -366,11 +366,11 @@ func TestLinkedModelTypedBinding(t *testing.T) {
 				return counted, nil
 			}
 			opens++
-			if opens != 3 {
+			if opens != 2 {
 				return counted, nil
 			}
-			// The source reader has completed its final identity check before
-			// closing this handle. Replace before resolver admission starts.
+			// The retained source reader closes after the final sampler and
+			// identity check. Replace before resolver admission starts.
 			return &typedBindingCloseFile{servingArtifactFile: counted, afterClose: func() {
 				if err := os.Rename(f.source, f.source+".old"); err != nil {
 					t.Fatal(err)
