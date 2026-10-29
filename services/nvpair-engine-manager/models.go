@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
@@ -140,6 +141,114 @@ func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
 // only bounds how long a change made outside PAIR takes to show up.
 const inventoryReconcileInterval = 60 * time.Second
 
+type inventoryMembership int
+
+const (
+	inventoryFailed inventoryMembership = iota
+	inventoryAbsent
+	inventoryAmbiguous
+	inventoryUnready
+	inventoryPresent
+)
+
+// engineInventory is a single fresh native observation, not the sweep cache.
+type engineInventory struct {
+	engine, runID, launchDigest, modelsDir, naming string
+	epoch                                          uint64
+	raw                                            json.RawMessage
+	err                                            error
+	models, candidates, ready                      []string
+	digests                                        observedDigests
+	ok                                             bool
+}
+
+func (r engineInventory) membership(model string) inventoryMembership {
+	if !r.ok || nodepolicy.ValidateModelIdentifier(model) != nil {
+		return inventoryFailed
+	}
+	key := engines.NormalizeModelName(model, r.naming)
+	count := 0
+	for _, name := range r.candidates {
+		if engines.NormalizeModelName(name, r.naming) == key {
+			count++
+		}
+	}
+	if count == 0 {
+		return inventoryAbsent
+	}
+	if count != 1 {
+		return inventoryAmbiguous
+	}
+	for _, name := range r.ready {
+		if engines.NormalizeModelName(name, r.naming) == key {
+			return inventoryPresent
+		}
+	}
+	return inventoryUnready
+}
+
+func (e *Executor) readEngineInventory(ctx context.Context, name string) engineInventory {
+	r := engineInventory{engine: name}
+	mf, ok := e.reg.Get(name)
+	if !ok {
+		return r
+	}
+	act, ok := mf.Actions["list_models"]
+	if !ok || act.Result == nil {
+		return r
+	}
+	st, err := e.state(name)
+	if err != nil {
+		return r
+	}
+	st.mu.Lock()
+	if !st.running {
+		st.mu.Unlock()
+		return r
+	}
+	r.runID, r.launchDigest, r.modelsDir = st.runID, st.launchDigest, st.modelsDir
+	st.mu.Unlock()
+	r.naming = mf.ModelNamingOrDefault()
+	e.inventoryMu.Lock()
+	r.epoch = e.inventoryDigests[name].epoch
+	e.inventoryMu.Unlock()
+	r.raw, r.err = e.Action(ctx, name, "list_models", nil)
+	if r.err != nil {
+		return r
+	}
+	r.candidates, ok = extractStringsResult(r.raw, act.Result)
+	if !ok {
+		return r
+	}
+	r.models, ok = extractReadyStringsResult(r.raw, act.Result, mf)
+	if !ok {
+		return r
+	}
+	r.digests = observedDigests{runID: r.runID, models: extractDigests(r.raw, act.Result), epoch: r.epoch}
+	listed := make(map[string]bool, len(r.models))
+	for _, model := range r.models {
+		listed[model] = true
+	}
+	for model := range r.digests.models {
+		if !listed[model] {
+			delete(r.digests.models, model)
+		}
+	}
+	e.inventoryMu.Lock()
+	current := e.inventoryObservationCurrent(name, r.digests)
+	if current && e.downloads != nil {
+		e.downloads.mu.Lock()
+		r.ready = e.readyModelNamesLocked(name, r.models, r.naming)
+		e.downloads.mu.Unlock()
+	}
+	e.inventoryMu.Unlock()
+	st.mu.Lock()
+	current = current && st.running && st.runID == r.runID && st.launchDigest == r.launchDigest && st.modelsDir == r.modelsDir
+	st.mu.Unlock()
+	r.ok = current && e.downloads != nil
+	return r
+}
+
 // modelsSweep is ModelsResult with control over the installed inventory. With
 // fullInventory false, an engine whose list_models is a separate request from
 // loaded_models reuses its last inventory instead of querying it again; an
@@ -211,29 +320,15 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 				listOK[i] = true
 				digests[i] = cachedObservations[name]
 			} else if listSpec != nil {
-				e.inventoryMu.Lock()
-				epoch := e.inventoryDigests[name].epoch
-				e.inventoryMu.Unlock()
-				run := e.engineRunID(name)
-				listRaw, listErr = e.Action(ctx, name, "list_models", nil)
+				observation := e.readEngineInventory(ctx, name)
+				listRaw, listErr = observation.raw, observation.err
 				if listErr != nil {
 					category, status := inventoryFailureCategory(listErr)
 					slog.Debug("engine:models list_models failed", "engine", name, "action", "list_models", "category", category, "status", status)
-				} else if models, ok := extractReadyStringsResult(listRaw, listSpec, mf); ok {
-					perEngine[i] = models
+				} else if observation.ok {
+					perEngine[i] = observation.models
 					listOK[i] = true
-					// Digests are labelled with the run read before the request,
-					// so a run that changed meanwhile never inherits them.
-					digests[i] = observedDigests{runID: run, models: extractDigests(listRaw, listSpec), epoch: epoch}
-					listed := make(map[string]bool, len(models))
-					for _, model := range models {
-						listed[model] = true
-					}
-					for model := range digests[i].models {
-						if !listed[model] {
-							delete(digests[i].models, model)
-						}
-					}
+					digests[i] = observation.digests
 				} else {
 					slog.Debug("engine:models list_models returned an invalid inventory", "engine", name)
 				}

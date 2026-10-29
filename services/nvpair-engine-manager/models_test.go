@@ -131,6 +131,102 @@ func modelInventoryObservation(t *testing.T, ex *Executor, engine string) observ
 	return observedDigests{runID: state.runID, epoch: ex.inventoryDigests[engine].epoch}
 }
 
+func TestLinkedModelInventory(t *testing.T) {
+	test := func(name, body, model string, want inventoryMembership) {
+		t.Run(name, func(t *testing.T) {
+			ex := modelDownloadInventoryExecutor(t)
+			calls := 0
+			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+				calls++
+				if request.Method != http.MethodGet || request.URL.Path != "/api/tags" {
+					t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
+				}
+				if body == "failure" {
+					return nil, fmt.Errorf("fixture failure")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			result := ex.readEngineInventory(context.Background(), "ollama")
+			if got := result.membership(model); got != want {
+				t.Fatalf("membership = %v, want %v", got, want)
+			}
+			if calls != 1 || result.engine != "ollama" || result.runID != "fixture-run" {
+				t.Fatalf("unexpected request or binding: calls=%d result=%+v", calls, result)
+			}
+		})
+	}
+	test("descriptor naming", `{"models":[{"name":"demo:latest"}]}`, "demo", inventoryPresent)
+	test("empty", `{"models":[]}`, "demo", inventoryAbsent)
+	test("duplicate aliases", `{"models":[{"name":"demo"},{"name":"demo:latest"}]}`, "demo", inventoryAmbiguous)
+	test("failed", "failure", "demo", inventoryFailed)
+	test("invalid response", `{"models":null}`, "demo", inventoryFailed)
+
+	t.Run("exact naming and unrelated engine", func(t *testing.T) {
+		ex := modelDownloadInventoryExecutor(t)
+		ex.engines["ollama"].manifest.ModelNaming = ""
+		other := &Manifest{Engine: "other", Actions: map[string]Action{"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/other"}, Result: &ActionResult{Array: "models", Field: "name"}}}}
+		ex.reg.engines["other"] = other
+		ex.engines["other"] = &engineState{manifest: other, running: true}
+		got := ex.readEngineInventory(context.Background(), "ollama")
+		if got.membership("demo") != inventoryAbsent || got.membership("demo:latest") != inventoryPresent {
+			t.Fatalf("exact naming: %+v", got)
+		}
+	})
+
+	t.Run("native and download readiness", func(t *testing.T) {
+		ex := modelDownloadInventoryExecutor(t)
+		ex.engines["ollama"].manifest.Actions["pull_model"] = Action{ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE}
+		ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":[{"name":"demo:latest","status":{"value":"downloading"}},{"name":"ready:latest","status":{"value":"loaded"}}]}`))}, nil
+		})
+		reserveModelDownload(t, ex.downloads, "ollama", "ready", engines.ModelNamingImpliedLatestTag)
+		got := ex.readEngineInventory(context.Background(), "ollama")
+		if got.membership("demo") != inventoryUnready || got.membership("ready") != inventoryUnready {
+			t.Fatalf("readiness: %+v", got)
+		}
+	})
+
+	for _, change := range []string{"run", "epoch", "configuration"} {
+		t.Run("rejects changed "+change, func(t *testing.T) {
+			ex := modelDownloadInventoryExecutor(t)
+			ex.inventoryDigests = make(map[string]observedDigests)
+			original := ex.client.Transport
+			ex.client.Transport = memoryModelsTransport(func(req *http.Request) (*http.Response, error) {
+				response, err := original.RoundTrip(req)
+				switch change {
+				case "run":
+					ex.engines["ollama"].mu.Lock()
+					ex.engines["ollama"].runID = "new-run"
+					ex.engines["ollama"].mu.Unlock()
+				case "configuration":
+					ex.engines["ollama"].mu.Lock()
+					ex.engines["ollama"].modelsDir = "changed"
+					ex.engines["ollama"].mu.Unlock()
+				case "epoch":
+					ex.inventoryMu.Lock()
+					observation := ex.inventoryDigests["ollama"]
+					observation.epoch++
+					ex.inventoryDigests["ollama"] = observation
+					ex.inventoryMu.Unlock()
+				}
+				return response, err
+			})
+			if got := ex.readEngineInventory(context.Background(), "ollama"); got.membership("demo") != inventoryFailed {
+				t.Fatalf("accepted changed evidence: %+v", got)
+			}
+		})
+	}
+	t.Run("caller holds operation lock", func(t *testing.T) {
+		ex := modelDownloadInventoryExecutor(t)
+		st := ex.engines["ollama"]
+		st.opMu.Lock()
+		defer st.opMu.Unlock()
+		if got := ex.readEngineInventory(context.Background(), "ollama"); got.membership("demo") != inventoryPresent {
+			t.Fatalf("recognition failed: %+v", got)
+		}
+	})
+}
+
 func TestModelDownloadInventoryMasksEquivalentKeys(t *testing.T) {
 	test := func(name, requestModel, listedModel, terminalPhase, reason string) {
 		t.Run(name, func(t *testing.T) {
