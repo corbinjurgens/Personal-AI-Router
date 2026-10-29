@@ -458,7 +458,7 @@ func ollamaSourceFilesBound(ctx context.Context, root, model string, access serv
 			return modelFileList{}, err
 		}
 	}
-	manifest, err := ollamaSourceArtifact(root, rel, "", expected)
+	manifest, err := selectedNativeSourceArtifact(root, rel, "", expected)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return modelFileList{}, fmt.Errorf("%w: Ollama has no model %q on this node", errModelNotFound, model)
@@ -511,7 +511,7 @@ func ollamaSourceFilesBound(ctx context.Context, root, model string, access serv
 			return modelFileList{}, err
 		}
 		brel := "blobs/sha256-" + b.Digest
-		file, err := ollamaSourceArtifact(root, brel, b.Digest, expected)
+		file, err := selectedNativeSourceArtifact(root, brel, b.Digest, expected)
 		if err != nil {
 			return modelFileList{}, fmt.Errorf("model %q is incomplete on this node (%s): %w", model, brel, err)
 		}
@@ -536,9 +536,9 @@ func ollamaSourceFilesBound(ctx context.Context, root, model string, access serv
 	return list, nil
 }
 
-// Only the selected manifest and its named blobs enter this source route.
-// Destination and other native adapters retain their own strict admission.
-func ollamaSourceArtifact(root, rel, digest string, expected *sourceSnapshot) (modelFile, error) {
+// Only files selected by a native adapter enter this source route. Destination
+// paths retain their strict admission.
+func selectedNativeSourceArtifact(root, rel, digest string, expected *sourceSnapshot) (modelFile, error) {
 	path := filepath.Join(root, filepath.FromSlash(rel))
 	if expected != nil {
 		for _, old := range expected.artifacts {
@@ -561,42 +561,6 @@ func ollamaSourceArtifact(root, rel, digest string, expected *sourceSnapshot) (m
 		return modelFile{}, errNoArtifactBinding
 	}
 	return modelFile{Path: rel, Size: evidence.size, SHA256: digest, configured: evidence.configured, abs: evidence.target, info: evidence.info}, nil
-}
-
-// Keep native file admission at the existing confinement owner. Rechecks look
-// up the old evidence before touching a newly selected path and never renew it.
-func nativeSourceArtifact(root, rel, digest string, expected *sourceSnapshot) (modelFile, error) {
-	path := filepath.Join(root, filepath.FromSlash(rel))
-	var old *modelFile
-	if expected != nil {
-		for i := range expected.artifacts {
-			if expected.artifacts[i].Path == rel {
-				old = &expected.artifacts[i]
-				break
-			}
-		}
-		if old == nil || old.configured != path || old.SHA256 != digest || old.info == nil ||
-			validateSource(sourceEvidence{configured: old.configured, target: old.abs, info: old.info,
-				size: old.Size, mtime: old.info.ModTime().UnixNano()}) != nil {
-			return modelFile{}, errModelInspectionChanged
-		}
-	}
-	real, info, err := confinedRegularFile(root, path)
-	if err != nil {
-		return modelFile{}, err
-	}
-	if old != nil {
-		if old.abs != real || !sameSource(old.info, info, false) {
-			return modelFile{}, errModelInspectionChanged
-		}
-		return *old, nil
-	}
-	evidence, err := captureSource(path, false)
-	if err != nil || evidence.target != real || !sameSource(evidence.info, info, false) {
-		return modelFile{}, errModelInspectionChanged
-	}
-	return modelFile{Path: rel, Size: evidence.size, SHA256: digest,
-		configured: evidence.configured, abs: evidence.target, info: evidence.info}, nil
 }
 
 func finishNativeSource(ctx context.Context, list *modelFileList, expected *sourceSnapshot) error {
@@ -1525,7 +1489,7 @@ func (e *Executor) lmstudioSourceFilesBound(ctx context.Context, st *engineState
 		budget = &modelArtifactScan{}
 	}
 	scan := &llamaCacheScan{budget: budget, access: access, snapshot: source, expected: old}
-	root, err := scan.directory(store.root)
+	_, err = scan.directory(store.root)
 	if err != nil {
 		return modelFileList{}, err
 	}
@@ -1552,7 +1516,7 @@ func (e *Executor) lmstudioSourceFilesBound(ctx context.Context, st *engineState
 		if len(list.Files) >= maxCopyArtifacts {
 			return errModelArtifactLimit
 		}
-		file, err := nativeSourceArtifact(store.root, rel, "", old)
+		file, err := selectedNativeSourceArtifact(store.root, rel, "", old)
 		if err != nil {
 			return err
 		}
@@ -1565,13 +1529,23 @@ func (e *Executor) lmstudioSourceFilesBound(ctx context.Context, st *engineState
 		if depth > 64 {
 			return errModelArtifactLimit
 		}
-		resolved, err := resolveExistingPath(dir)
-		if err != nil || !pathWithinRoot(root.target, resolved) {
-			return fmt.Errorf("unsafe native model directory")
-		}
 		return scan.enumerate(ctx, dir, func(entry os.DirEntry) error {
 			path := filepath.Join(dir, entry.Name())
-			if entry.IsDir() {
+			link, err := removalEntryIsLink(path, entry.Type())
+			if err != nil {
+				return errNoArtifactBinding
+			}
+			isDir := entry.IsDir()
+			if link {
+				info, err := os.Stat(path)
+				if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
+					return errNoArtifactBinding
+				}
+				isDir = info.IsDir()
+			} else if !isDir && !entry.Type().IsRegular() {
+				return errNoArtifactBinding
+			}
+			if isDir {
 				return walk(path, depth+1)
 			}
 			return add(path)
@@ -1583,17 +1557,22 @@ func (e *Executor) lmstudioSourceFilesBound(ctx context.Context, st *engineState
 		}
 		rel := normalizeSlashPath(entry.Path)
 		abs := filepath.Join(store.root, filepath.FromSlash(rel))
+		entryInfo, err := os.Lstat(abs)
+		if err != nil {
+			return modelFileList{}, fmt.Errorf("LM Studio model is not on disk: %w", err)
+		}
+		link, err := removalEntryIsLink(abs, entryInfo.Mode())
+		if err != nil || (!link && !entryInfo.IsDir() && !entryInfo.Mode().IsRegular()) {
+			return modelFileList{}, errNoArtifactBinding
+		}
 		info, err := os.Stat(abs)
 		if err != nil {
 			return modelFileList{}, fmt.Errorf("LM Studio model is not on disk: %w", err)
 		}
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			return modelFileList{}, errNoArtifactBinding
+		}
 		if info.IsDir() {
-			// WalkDir did not follow a selected directory symlink. Keep that
-			// admission boundary while replacing its unchecked enumeration.
-			entryInfo, err := os.Lstat(abs)
-			if err != nil || !entryInfo.IsDir() || entryInfo.Mode()&os.ModeSymlink != 0 {
-				return modelFileList{}, fmt.Errorf("unsupported native model directory link")
-			}
 			if err := walk(abs, 0); err != nil {
 				return modelFileList{}, err
 			}
