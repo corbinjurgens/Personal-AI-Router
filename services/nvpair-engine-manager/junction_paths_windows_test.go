@@ -230,6 +230,32 @@ func TestSafeRemoveUnderRootUnlinksOutsideJunction(t *testing.T) {
 	}
 }
 
+func TestSafeRemoveUnderRootDoesNotFollowChildJunction(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	modelDir := filepath.Join(root, "model")
+	outside := filepath.Join(base, "outside")
+	keep := victimDir(t, outside)
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(modelDir, "linked")
+	junction(t, link, outside)
+	if err := safeRemoveUnderRoot(root, modelDir); err != nil {
+		t.Fatalf("safeRemoveUnderRoot: %v", err)
+	}
+	if _, err := os.Lstat(modelDir); !os.IsNotExist(err) {
+		t.Fatalf("model directory remains or lstat failed: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("junction remains or lstat failed: %v", err)
+	}
+	data, err := os.ReadFile(keep)
+	if err != nil || string(data) != "x" {
+		t.Fatalf("outside file = %q, err = %v", data, err)
+	}
+}
+
 func TestJunctionRemovalBehavior(t *testing.T) {
 	for _, operation := range []struct {
 		name   string

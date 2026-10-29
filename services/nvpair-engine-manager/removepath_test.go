@@ -173,6 +173,43 @@ func TestSafeRemoveUnderRootUnlinksSymlink(t *testing.T) {
 	}
 }
 
+func TestSafeRemoveUnderRootDoesNotFollowChildSymlink(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	modelDir := filepath.Join(root, "model")
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(outside, "keep.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(modelDir, "linked")
+	if err := os.Symlink(outside, link); err != nil {
+		if runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(1314)) {
+			t.Skip("symlink creation requires Windows symlink privileges or Developer Mode")
+		}
+		t.Fatalf("create symlink: %v", err)
+	}
+	if err := safeRemoveUnderRoot(root, modelDir); err != nil {
+		t.Fatalf("safeRemoveUnderRoot: %v", err)
+	}
+	if _, err := os.Lstat(modelDir); !os.IsNotExist(err) {
+		t.Fatalf("model directory remains or lstat failed: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("symlink remains or lstat failed: %v", err)
+	}
+	data, err := os.ReadFile(keep)
+	if err != nil || string(data) != "keep" {
+		t.Fatalf("outside file = %q, err = %v", data, err)
+	}
+}
+
 func TestSafeRemoveUnderRootRejectsBrokenSymlink(t *testing.T) {
 	root := t.TempDir()
 	link := filepath.Join(root, "broken")
