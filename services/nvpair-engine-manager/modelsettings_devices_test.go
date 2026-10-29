@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -19,6 +20,42 @@ import (
 )
 
 const modelDevicesFixtureUUID = "GPU-12345678-1234-1234-1234-123456789abc"
+
+func TestModelSettingsDevicesBoundLibraryRead(t *testing.T) {
+	root, err := resolveExistingPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "libggml.dylib")
+	writeTestFile(t, path, []byte("original library"))
+	evidence, err := captureSource(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads, closes := 0, 0
+	access := servingFileAccess{open: func(name string) (servingArtifactFile, error) {
+		file, err := os.Open(name)
+		if err != nil {
+			return nil, err
+		}
+		return &countedLinkedFile{File: file, reads: &reads, closes: &closes}, nil
+	}}
+	if _, err := modelDeviceHashFileExpected(context.Background(), root, "libggml.dylib", access, evidence); err != nil || reads == 0 {
+		t.Fatalf("positive hash reads=%d error=%v", reads, err)
+	}
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, []byte("replacement library"))
+	reads = 0
+	if _, err := modelDeviceHashFileExpected(context.Background(), root, "libggml.dylib", access, evidence); err == nil {
+		t.Fatal("replacement library accepted")
+	}
+	if reads != 0 {
+		t.Fatalf("replacement library read %d times", reads)
+	}
+}
+
 const modelDevicesFixtureLUID = "luid_0x00000000_0x00001234_phys_0"
 
 func modelDevicesFixtureOperation() modelDeviceOperation {

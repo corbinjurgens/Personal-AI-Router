@@ -362,18 +362,24 @@ func modelDeviceEnvironment(input []string, uuid string) ([]string, error) {
 // The existing selected runtime/install owner supplies st, never public paths.
 // No engine is launched and no library is loaded in the manager process.
 func modelDeviceRuntimeSnapshot(ctx context.Context, st *engineState, build string) (modelDeviceRuntime, error) {
+	runtime, _, err := modelDeviceRuntimeSnapshotBound(ctx, st, build, servingFileAccess{}, nil)
+	return runtime, err
+}
+
+// Library identities are request-local and retained for Auto replay.
+func modelDeviceRuntimeSnapshotBound(ctx context.Context, st *engineState, build string, access servingFileAccess, expected map[string]sourceEvidence) (modelDeviceRuntime, map[string]sourceEvidence, error) {
 	if st == nil || build != modelDevicesBuild {
-		return modelDeviceRuntime{}, errors.New("unsupported native build")
+		return modelDeviceRuntime{}, nil, errors.New("unsupported native build")
 	}
 	st.mu.Lock()
 	root, bin := st.installDir, st.binPath
 	if st.plat == nil || st.manifest == nil || st.manifest.FamilyOrDefault() != "llamacpp" {
 		st.mu.Unlock()
-		return modelDeviceRuntime{}, errors.New("selected runtime is not llama.cpp")
+		return modelDeviceRuntime{}, nil, errors.New("selected runtime is not llama.cpp")
 	}
 	if st.plat.Install == nil {
 		st.mu.Unlock()
-		return modelDeviceRuntime{}, errors.New("missing pinned install")
+		return modelDeviceRuntime{}, nil, errors.New("missing pinned install")
 	}
 	rt := st.plat.Runtime
 	artifacts := append([]InstallArtifact(nil), st.plat.Install.Artifacts...)
@@ -386,52 +392,108 @@ func modelDeviceRuntimeSnapshot(ctx context.Context, st *engineState, build stri
 		}
 	}
 	if !pinned {
-		return modelDeviceRuntime{}, errors.New("selected runtime is not pinned b11146")
+		return modelDeviceRuntime{}, nil, errors.New("selected runtime is not pinned b11146")
 	}
 	if bin == "" {
 		var err error
 		bin, err = resolvePlaceholders(rt.Bin, vars)
 		if err != nil {
-			return modelDeviceRuntime{}, err
+			return modelDeviceRuntime{}, nil, err
 		}
 		bin = expandPath(bin)
 	}
 	if !isManagedInstallPath(bin, root) {
-		return modelDeviceRuntime{}, errors.New("native runtime is not managed")
+		return modelDeviceRuntime{}, nil, errors.New("native runtime is not managed")
 	}
 	root, err := resolveExistingPath(root)
 	if err != nil {
-		return modelDeviceRuntime{}, err
+		return modelDeviceRuntime{}, nil, err
 	}
 	r := modelDeviceRuntime{Build: build, Root: root}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return r, err
+		return r, nil, err
 	}
+	files := make(map[string]sourceEvidence)
 	for _, entry := range entries {
 		name := entry.Name()
 		if !modelDeviceLibraryName(name) {
 			continue
 		}
 		if len(r.Libraries) >= modelDevicesLimit || ctx.Err() != nil {
-			return r, errors.New("native library snapshot bound/cancellation")
+			return r, nil, errors.New("native library snapshot bound/cancellation")
 		}
-		digest, err := modelDeviceHashFile(ctx, root, name)
+		var file sourceEvidence
+		if expected == nil {
+			file, err = captureSource(filepath.Join(root, name), false)
+		} else {
+			var ok bool
+			file, ok = expected[name]
+			if !ok {
+				return r, nil, errors.New("native library set changed")
+			}
+		}
 		if err != nil {
-			return r, err
+			return r, nil, err
 		}
+		digest, err := modelDeviceHashFileExpected(ctx, root, name, access, file)
+		if err != nil {
+			return r, nil, err
+		}
+		files[name] = file
 		r.Libraries = append(r.Libraries, modelDeviceLibrary{Name: name, SHA256: digest})
 	}
 	if len(r.Libraries) == 0 {
-		return r, errors.New("selected runtime has no metadata libraries")
+		return r, nil, errors.New("selected runtime has no metadata libraries")
 	}
-	return r, nil
+	if expected != nil && len(files) != len(expected) {
+		return r, nil, errors.New("native library set changed")
+	}
+	return r, files, nil
 }
 func modelDeviceLibraryName(name string) bool {
 	n := strings.ToLower(name)
 	return (strings.HasSuffix(n, ".dll") || strings.HasSuffix(n, ".dylib") || strings.Contains(n, ".so")) && (strings.HasPrefix(n, "ggml") || strings.HasPrefix(n, "libggml") || strings.HasPrefix(n, "libllama") || strings.HasPrefix(n, "llama") || strings.HasPrefix(n, "cudart") || strings.HasPrefix(n, "cublas") || strings.HasPrefix(n, "libcudart") || strings.HasPrefix(n, "libcublas"))
 }
 func modelDeviceHashFile(ctx context.Context, root, name string) (string, error) {
+	if _, err := modelDeviceLibraryPath(root, name); err != nil {
+		return "", err
+	}
+	file, err := captureSource(filepath.Join(root, name), false)
+	if err != nil {
+		return "", err
+	}
+	return modelDeviceHashFileExpected(ctx, root, name, servingFileAccess{}, file)
+}
+
+func modelDeviceHashFileExpected(ctx context.Context, root, name string, access servingFileAccess, expected sourceEvidence) (string, error) {
+	p, err := modelDeviceLibraryPath(root, name)
+	if err != nil {
+		return "", err
+	}
+	if expected.configured != filepath.Join(root, name) || expected.target != p {
+		return "", errors.New("library identity changed")
+	}
+	f, err := access.checkedOpen(ctx, expected.configured, expected.target, expected.info)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 2<<30 {
+		return "", errors.New("invalid library file")
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, io.NewSectionReader(servingContextReaderAt{ctx: ctx, reader: f, expected: expected}, 0, info.Size())); err != nil {
+		return "", err
+	}
+	if validateSource(expected) != nil {
+		return "", errors.New("library identity changed")
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func modelDeviceLibraryPath(root, name string) (string, error) {
 	if filepath.Base(name) != name || !modelDeviceLibraryName(name) {
 		return "", errors.New("invalid selected library name")
 	}
@@ -443,35 +505,7 @@ func modelDeviceHashFile(ctx context.Context, root, name string) (string, error)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", errors.New("library escapes selected install")
 	}
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 2<<30 {
-		return "", errors.New("invalid library file")
-	}
-	h := sha256.New()
-	buffer := make([]byte, 64<<10)
-	for {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		n, e := f.Read(buffer)
-		if n > 0 {
-			if _, err := h.Write(buffer[:n]); err != nil {
-				return "", err
-			}
-		}
-		if e == io.EOF {
-			break
-		}
-		if e != nil {
-			return "", e
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return p, nil
 }
 
 type modelDeviceOutputBudget struct {
