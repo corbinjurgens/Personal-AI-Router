@@ -27,6 +27,7 @@ type loadedLlamaFake struct {
 	props   string
 	status  int
 	onProps func()
+	onLoad  func(*http.Request)
 	gets    atomic.Int32
 	loads   atomic.Int32
 	models  atomic.Int32
@@ -81,10 +82,16 @@ func TestLoadedServingInvalidationConcurrentAdoptedOperations(t *testing.T) {
 
 func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	loaded, props, status, hook := s.loaded, s.props, s.status, s.onProps
+	loaded, props, status, hook, onLoad := s.loaded, s.props, s.status, s.onProps, s.onLoad
 	s.mu.Unlock()
-	if r.Method != http.MethodGet {
+	recordLoad := func() {
 		s.loads.Add(1)
+		if onLoad != nil {
+			onLoad(r)
+		}
+	}
+	if r.Method != http.MethodGet {
+		recordLoad()
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -96,7 +103,7 @@ func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.gets.Add(1)
 		// Simulate llama's autoload default: an unsafe query records a load.
 		if r.URL.Query().Get("autoload") != "false" || r.URL.Query().Get("model") != s.model {
-			s.loads.Add(1)
+			recordLoad()
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -109,7 +116,7 @@ func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		fmt.Fprint(w, props)
 	default:
-		s.loads.Add(1)
+		recordLoad()
 		w.WriteHeader(http.StatusNotFound)
 	}
 }
@@ -376,6 +383,14 @@ func TestLoadedServingTransportFailureRecoversNextSweep(t *testing.T) {
 			for _, failure := range []string{"connection", "500", "timeout", "sweep timeout", "truncated body", "404", "redirect", "201 valid body", "204 empty body"} {
 				t.Run(failure, func(t *testing.T) {
 					f, server := loadedReadbackFixture(t, "medium")
+					var failureInjected atomic.Bool
+					server.mu.Lock()
+					server.onLoad = func(r *http.Request) {
+						t.Logf("load counter increment: failureInjected=%t method=%q path=%q autoloadDisabled=%t modelMatches=%t",
+							failureInjected.Load(), r.Method, r.URL.Path,
+							r.URL.Query().Get("autoload") == "false", r.URL.Query().Get("model") == "medium")
+					}
+					server.mu.Unlock()
 					f.ex.sweepLoaded(context.Background(), nil, false)
 					readbackProof(t, f, 1)
 					original := f.ex.client.Transport
@@ -423,6 +438,7 @@ func TestLoadedServingTransportFailureRecoversNextSweep(t *testing.T) {
 						ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
 						defer cancel()
 					}
+					failureInjected.Store(true)
 					f.ex.sweepLoaded(ctx, nil, false)
 					readbackProof(t, f, 0)
 					if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
