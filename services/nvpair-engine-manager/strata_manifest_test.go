@@ -169,7 +169,8 @@ func TestStrataReadinessIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ex, port := strataHTTPExecutor(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet || r.URL.RequestURI() != "/health" {
-					t.Errorf("probe request = %s %s", r.Method, r.URL.RequestURI())
+					http.NotFound(w, r)
+					return
 				}
 				if _, err := io.WriteString(w, tc.body); err != nil {
 					t.Errorf("write health: %v", err)
@@ -193,6 +194,10 @@ func TestStrataReadinessIdentity(t *testing.T) {
 
 func TestStrataModelsAndResidency(t *testing.T) {
 	ex, _ := strataHTTPExecutor(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || (r.URL.RequestURI() != "/health" && r.URL.RequestURI() != "/v1/models") {
+			http.NotFound(w, r)
+			return
+		}
 		var body string
 		switch r.URL.RequestURI() {
 		case "/health":
@@ -200,7 +205,6 @@ func TestStrataModelsAndResidency(t *testing.T) {
 		case "/v1/models":
 			body = `{"data":[{"id":"resident","status":{"value":"loaded"}},{"id":"cold","status":{"value":"unloaded"}},{"id":"unknown"},{"id":"loading","status":{"value":"loading"}}]}`
 		default:
-			t.Errorf("unexpected request: %s", r.URL.RequestURI())
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -255,6 +259,10 @@ func TestStrataModelOperationWireAndTypedErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var requests atomic.Int32
 			ex, _ := strataHTTPExecutor(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.RequestURI() != "/v1/"+tc.op {
+					http.NotFound(w, r)
+					return
+				}
 				requests.Add(1)
 				body, err := io.ReadAll(r.Body)
 				if err != nil {

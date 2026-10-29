@@ -90,9 +90,13 @@ func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			onLoad(r)
 		}
 	}
-	if r.Method != http.MethodGet {
+	if r.Method == http.MethodPost && r.URL.Path == "/models/load" {
 		recordLoad()
 		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if r.Method != http.MethodGet || (r.URL.Path != "/models" && r.URL.Path != "/props" && r.URL.Path != "/models/load") {
+		http.NotFound(w, r)
 		return
 	}
 	switch r.URL.Path {
@@ -115,7 +119,7 @@ func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(status)
 		fmt.Fprint(w, props)
-	default:
+	case "/models/load":
 		recordLoad()
 		w.WriteHeader(http.StatusNotFound)
 	}

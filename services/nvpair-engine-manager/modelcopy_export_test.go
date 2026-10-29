@@ -853,6 +853,10 @@ func TestModelCopyMetadataBounds(t *testing.T) {
 			t.Fatal(err)
 		}
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != controlModelFilesPath {
+				http.NotFound(w, r)
+				return
+			}
 			enc := json.NewEncoder(w)
 			for range 100 {
 				if err := enc.Encode(streamFrame{Type: "progress", Message: strings.Repeat("x", 20_000)}); err != nil {
@@ -876,7 +880,13 @@ func TestModelCopyMetadataBounds(t *testing.T) {
 	})
 	t.Run("progress frame bound", func(t *testing.T) {
 		line := `{"type":"progress","message":"` + strings.Repeat("x", maxCopyProgressFrame) + `"}` + "\n"
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, line) }))
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != controlModelFilesPath {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = io.WriteString(w, line)
+		}))
 		defer server.Close()
 		client := &remoteClient{base: server.URL, controlHTTP: server.Client()}
 		if _, err := client.modelFiles(context.Background(), "llamacpp", "alias", nil); err == nil {

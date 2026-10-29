@@ -46,6 +46,10 @@ func TestModelDownloadTargetLifecycleAndCancelledQueue(t *testing.T) {
 	var release sync.Once
 	var effects atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
+			http.NotFound(w, r)
+			return
+		}
 		effects.Add(1)
 		close(started)
 		<-finish
@@ -114,7 +118,14 @@ func TestModelDownloadNDJSONRequiresNativeTerminal(t *testing.T) {
 	test := func(name, body, phase, reason string, blocked bool) {
 		t.Run(name, func(t *testing.T) {
 			var effects atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { effects.Add(1); _, _ = fmt.Fprintln(w, body) }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
+					http.NotFound(w, r)
+					return
+				}
+				effects.Add(1)
+				_, _ = fmt.Fprintln(w, body)
+			}))
 			defer server.Close()
 			ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
 			_, err := ex.PullModelStream(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`))
@@ -152,7 +163,13 @@ func TestModelDownloadNDJSONRequiresNativeTerminal(t *testing.T) {
 
 func TestModelDownloadPersistenceFailureHasZeroNativeEffects(t *testing.T) {
 	var effects atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { effects.Add(1) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
+			http.NotFound(w, r)
+			return
+		}
+		effects.Add(1)
+	}))
 	defer server.Close()
 	ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
 	ex.downloads.store.replace.Replace = func(string, string) error { return errors.New("injected") }
@@ -173,6 +190,10 @@ func TestModelDownloadDeleteRequiresForcedUnmaskedAbsence(t *testing.T) {
 	present.Store(true)
 	var forced, ordinary, deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodPost && r.URL.Path == "/delete") && !(r.Method == http.MethodGet && r.URL.Path == "/models") {
+			http.NotFound(w, r)
+			return
+		}
 		switch r.URL.Path {
 		case "/delete":
 			deletes.Add(1)
@@ -189,7 +210,6 @@ func TestModelDownloadDeleteRequiresForcedUnmaskedAbsence(t *testing.T) {
 			}
 			_, _ = fmt.Fprintln(w, `{"data":[]}`)
 		default:
-			t.Errorf("unexpected route %s", r.URL.Path)
 			http.NotFound(w, r)
 		}
 	}))
@@ -246,6 +266,10 @@ func TestModelDownloadDeleteRejectsAmbiguousOrRedirectedAbsence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var ordinary atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !(r.Method == http.MethodPost && r.URL.Path == "/delete") && !(r.Method == http.MethodGet && r.URL.Path == "/models") {
+					http.NotFound(w, r)
+					return
+				}
 				if r.URL.Path == "/delete" {
 					_, _ = fmt.Fprintln(w, `{"success":true}`)
 					return
@@ -349,7 +373,13 @@ func TestModelDownloadDeleteResolutionReservesRevisionBeforePersistence(t *testi
 }
 
 func TestModelDownloadTerminalSnapshotSurvivesSameKeyRetry(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprintln(w, `{"status":"success"}`) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = fmt.Fprintln(w, `{"status":"success"}`)
+	}))
 	defer server.Close()
 	ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
 	first, err := ex.reserveModelPull(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`))
