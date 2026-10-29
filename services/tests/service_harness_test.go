@@ -90,6 +90,8 @@ type serviceFixture struct {
 	cleanupBins                          func()
 	servicePath, brokerPath, scannerPath string
 	proxyPath                            string
+	additionalBrokerArgs                 []string
+	defaultClusterProfile                bool
 	facadePort                           int
 	ports                                fixtureServicePorts
 	env                                  []string
@@ -317,8 +319,12 @@ func (f *serviceFixture) stageExecutable(mutate func() error) error {
 }
 
 func (f *serviceFixture) args() []string {
-	args := []string{"--broker-path", f.brokerPath, "--endpoint", f.endpoint, "--log-dir", filepath.Join(f.dir, "logs"), "--", "--scanner-path", f.scannerPath, "--cluster-dir", f.clusterDir}
+	args := []string{"--broker-path", f.brokerPath, "--endpoint", f.endpoint, "--log-dir", filepath.Join(f.dir, "logs"), "--", "--scanner-path", f.scannerPath}
+	if !f.defaultClusterProfile {
+		args = append(args, "--cluster-dir", f.clusterDir)
+	}
 	args = append(args, f.ports.args()...)
+	args = append(args, f.additionalBrokerArgs...)
 	if f.proxyPath != "" {
 		return append(args, "--proxy-path", f.proxyPath, "--proxy-engines", "llamacpp")
 	}
@@ -346,9 +352,22 @@ func (f *serviceFixture) startChild(args ...string) *serviceChild {
 	if err != nil {
 		f.t.Fatalf("service fixture launch: %v", err)
 	}
+	return f.launchChild(cmd)
+}
+
+// launchChild also owns fixed-path synthetic children. The inventory must know
+// the exact image before launch, and cleanup revalidates that child's image.
+func (f *serviceFixture) launchChild(cmd *exec.Cmd) *serviceChild {
+	f.t.Helper()
+	path, err := serviceExecutablePath(cmd.Path)
+	if err != nil || !f.inventory.owns(path) {
+		f.t.Fatalf("unregistered fixture child %q: %v", cmd.Path, err)
+	}
 	child := &serviceChild{cmd: cmd, done: make(chan struct{}), output: &serviceOutput{}}
 	child.cmd.Dir = f.dir
-	child.cmd.Env = f.env
+	if child.cmd.Env == nil {
+		child.cmd.Env = f.env
+	}
 	child.cmd.Stdout = child.output
 	child.cmd.Stderr = child.output
 	child.cmd.WaitDelay = 2 * time.Second
@@ -567,8 +586,9 @@ func (f *serviceFixture) cleanupChecked() error {
 			}
 			pid := int32(child.cmd.Process.Pid)
 			identity, known := f.inventory.known[pid]
-			if !known || identity.Path != f.servicePath {
-				failures = append(failures, fmt.Errorf("direct child pid %d lacks a recorded copied-service identity", pid))
+			path, pathErr := serviceExecutablePath(child.cmd.Path)
+			if !known || pathErr != nil || identity.Path != path || !f.inventory.owns(path) {
+				failures = append(failures, fmt.Errorf("direct child pid %d lacks its recorded fixed-image identity", pid))
 				continue
 			}
 		}

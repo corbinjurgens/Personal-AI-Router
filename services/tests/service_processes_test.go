@@ -5,22 +5,184 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
+	gnet "github.com/shirou/gopsutil/v4/net"
 	"github.com/shirou/gopsutil/v4/process"
+	"nvpair-shared/testbin"
 )
 
 type serviceProcessIdentity struct {
 	PID     int32
 	Path    string
 	Created int64
+}
+
+type installedServiceSnapshot struct {
+	Processes []serviceProcessIdentity
+	Listeners []string
+}
+
+type ownerFirewallRule struct {
+	Name      string   `json:"name"`
+	Enabled   string   `json:"enabled"`
+	Direction string   `json:"direction"`
+	Action    string   `json:"action"`
+	Profile   string   `json:"profile"`
+	Programs  []string `json:"programs"`
+}
+
+type ownerFirewallSnapshot struct {
+	RunID      string              `json:"runId"`
+	CapturedAt string              `json:"capturedAt"`
+	Rules      []ownerFirewallRule `json:"rules"`
+}
+
+func requireOwnerProcessEnvironment(t *testing.T, message string) {
+	t.Helper()
+	if runtime.GOOS != "windows" || !filepath.IsAbs(os.Getenv(testbin.EnvRoot)) || !strings.Contains(os.Getenv("GOFLAGS"), "nvpair-test-exec") {
+		t.Skip(message)
+	}
+}
+
+// PC3's outer serialized interval captures native firewall data before go test
+// (including TestMain builds) and again in finally after it exits, then compares
+// Rules. The test consumes the before capture so missing exact-image rules fail
+// before any fixture product starts. Querying Windows from a new helper child
+// here would violate this proof's enumerated-executable boundary.
+func readOwnerFirewallSnapshot(t *testing.T) ownerFirewallSnapshot {
+	t.Helper()
+	path := os.Getenv("NVPAIR_OWNER_FIREWALL_BEFORE")
+	runID := os.Getenv("NVPAIR_OWNER_INTERVAL")
+	if path == "" || runID == "" {
+		t.Skip("PC3 firewall before/after orchestration is required: set NVPAIR_OWNER_FIREWALL_BEFORE and NVPAIR_OWNER_INTERVAL")
+	}
+	if !filepath.IsAbs(path) {
+		t.Fatal("PC3 firewall before/after orchestration is required: set NVPAIR_OWNER_FIREWALL_BEFORE and NVPAIR_OWNER_INTERVAL")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var snapshot ownerFirewallSnapshot
+	decoder := json.NewDecoder(io.LimitReader(f, 16<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		t.Fatal("firewall capture contains trailing data")
+	}
+	when, err := time.Parse(time.RFC3339Nano, snapshot.CapturedAt)
+	if err != nil || when.After(time.Now()) || snapshot.RunID != runID || snapshot.Rules == nil {
+		t.Fatal("firewall capture is not bound to this preceding PC3 interval")
+	}
+	t.Logf("firewall_interval run=%s before=%q capturedAt=%s after_comparison=required_by_outer_interval screen_observation=unmonitored", runID, path, snapshot.CapturedAt)
+	return snapshot
+}
+
+func requireOwnerFirewallRules(t *testing.T, snapshot ownerFirewallSnapshot, images []string) {
+	t.Helper()
+	for _, image := range images {
+		expected, err := serviceExecutablePath(image)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, rule := range snapshot.Rules {
+			if rule.Enabled != "True" || rule.Direction != "Inbound" || rule.Action != "Block" || rule.Profile != "Any" {
+				continue
+			}
+			for _, program := range rule.Programs {
+				actual, err := serviceExecutablePath(program)
+				if err == nil && actual == expected {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("PC3 exact-path inbound block rule missing for %q; normal rule setup must precede execution", image)
+		}
+	}
+}
+
+// Read native tables without dialing an installed endpoint. This is a lifetime
+// comparison only; transient-contact proof belongs to fixture counters/config.
+// Firewall snapshots remain an external PC3 interval requirement.
+func snapshotInstalledServiceProcesses() (installedServiceSnapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	snapshot := installedServiceSnapshot{Processes: []serviceProcessIdentity{}, Listeners: []string{}}
+	root := os.Getenv(testbin.EnvRoot)
+	if !filepath.IsAbs(root) {
+		return snapshot, errors.New("installed snapshot requires the fixed testbin root")
+	}
+	pids, err := process.PidsWithContext(ctx)
+	if err != nil {
+		return snapshot, err
+	}
+	for _, pid := range pids {
+		p, err := process.NewProcessWithContext(ctx, pid)
+		if err != nil {
+			continue
+		}
+		name, err := p.NameWithContext(ctx)
+		if err != nil {
+			continue
+		} // Protected unrelated system processes are not owners.
+		name = strings.TrimSuffix(strings.ToLower(name), ".exe")
+		// LM Studio's app_processes are separate from its lms CLI (see the
+		// engine-manager lmstudio manifest). Observe identities without contact.
+		if !strings.HasPrefix(name, "nvpair-") && !slices.Contains([]string{"pair", "ollama", "llama-server", "lms", "lm studio", "lm-studio", "llmster", "strata"}, name) {
+			continue
+		}
+		identity, err := serviceProcessIdentityAt(ctx, pid)
+		if err != nil {
+			return snapshot, fmt.Errorf("installed %s pid %d: %w", name, pid, err)
+		}
+		rel, err := filepath.Rel(strings.ToLower(root), strings.ToLower(identity.Path))
+		if err != nil {
+			return snapshot, err
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			continue
+		}
+		snapshot.Processes = append(snapshot.Processes, identity)
+	}
+	connections, err := gnet.ConnectionsWithContext(ctx, "tcp")
+	if err != nil {
+		return snapshot, err
+	}
+	for _, connection := range connections {
+		if connection.Status == "LISTEN" {
+			if _, installed := installedServicePorts[int(connection.Laddr.Port)]; installed {
+				snapshot.Listeners = append(snapshot.Listeners, fmt.Sprintf("%s:%d pid=%d", connection.Laddr.IP, connection.Laddr.Port, connection.Pid))
+			}
+		}
+	}
+	slices.SortFunc(snapshot.Processes, func(a, b serviceProcessIdentity) int {
+		if a.PID < b.PID {
+			return -1
+		}
+		if a.PID > b.PID {
+			return 1
+		}
+		return 0
+	})
+	slices.Sort(snapshot.Listeners)
+	return snapshot, ctx.Err()
 }
 
 var errServiceProcessDeparted = errors.New("recorded fixture process departed")
