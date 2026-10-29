@@ -143,6 +143,7 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 	m.switchRelay.send = codec.NotifyContext
 	exec.switchParent = m.switchRelay.call
 	exec.settingsParent = m.settingsRelay.call
+	exec.memoryProfilesParent = m.settingsRelay.callRelay
 	m.policyRelay.send = codec.NotifyContext
 	exec.policyParent = m.policyRelay.call
 	m.modelMutation.send = codec.NotifyContext

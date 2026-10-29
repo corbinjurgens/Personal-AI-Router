@@ -238,7 +238,24 @@ export type Estimate = {
 }
 /** Engine uses the service routing ID, including descriptor-defined engines. */
 export type InspectModelRequest = { engine: string; nodeId?: string; modelId: string }
+export type ClearStatedMemoryRequest = InspectModelRequest & { configurationKey: string }
+export type SetStatedMemoryRequest = ClearStatedMemoryRequest & {
+    hostBytes?: string
+    deviceBytes?: string
+    sharedBytes?: string
+}
+export type MemoryProfile = {
+    configurationKey: string
+    kind: 'stated'
+    recordedAt: string
+    hostBytes?: string
+    deviceBytes?: string
+    sharedBytes?: string
+    current: boolean
+}
 export type InspectModelResult = {
+    memoryProfiles?: MemoryProfile[]
+    memoryProfilesUnavailable?: boolean
     engine: string
     nodeId?: string
     modelId: string

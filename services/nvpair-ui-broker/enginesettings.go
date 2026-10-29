@@ -885,6 +885,8 @@ func (b *Broker) handleSettingsRelay(source *engineManagerSource, raw json.RawMe
 			err = callerErr
 		} else if relay.Method == "inspect" {
 			result, err = b.inspectModelSettings(ctx, *relay.Inspect, relay.Caller)
+		} else if relay.Method == "set-stated-memory" || relay.Method == "clear-stated-memory" {
+			result, err = b.recordModelMemory(ctx, relay, relay.Caller)
 		} else {
 			result, err = b.dispatchEngineSettings(ctx, relay.Method, relay.Request, relay.Caller)
 		}

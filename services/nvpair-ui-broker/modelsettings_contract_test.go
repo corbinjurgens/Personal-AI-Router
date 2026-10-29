@@ -9,13 +9,139 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrusttest"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/modelconfig"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
+
+func TestModelSettingsStatedMemoryRemoteAuthorization(t *testing.T) {
+	for _, method := range []string{"set-stated-memory", "clear-stated-memory"} {
+		t.Run(method, func(t *testing.T) {
+			b := &Broker{nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}
+			clustertrusttest.Join(t, b.clusterDir, "cluster", "target", "peer")
+			set := modelconfig.SetStatedMemoryRequest{Engine: "llamacpp", ModelID: "model", ConfigurationKey: strings.Repeat("a", 64), HostBytes: "1"}
+			clear := modelconfig.ClearStatedMemoryRequest{Engine: set.Engine, ModelID: set.ModelID, ConfigurationKey: set.ConfigurationKey}
+			relay := settings.Relay{Method: method}
+			if method == "set-stated-memory" {
+				relay.SetStatedMemory = &set
+			} else {
+				relay.ClearStatedMemory = &clear
+			}
+			grantRemoteManagement(t, b.clusterDir, "cluster", "target", "peer", false)
+			if _, err := b.recordModelMemory(context.Background(), relay, "peer"); engineSettingsErrorCode(err) != -32012 {
+				t.Fatalf("denied: %v", err)
+			}
+			grantRemoteManagement(t, b.clusterDir, "cluster", "target", "peer", true)
+			r := b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.current.Availability = nodepolicy.Paused
+			r.mu.Unlock()
+			if _, err := b.recordModelMemory(context.Background(), relay, "peer"); engineSettingsErrorCode(err) != -32011 {
+				t.Fatalf("paused: %v", err)
+			}
+		})
+	}
+}
+
+func TestModelSettingsStatedMemoryLocalPausedEnvelope(t *testing.T) {
+	b := &Broker{nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.Availability = nodepolicy.Paused
+	r.mu.Unlock()
+	worker, codec := newTestRPCWorkerPipe(t)
+	b.setEngineMgr(worker)
+	done := make(chan error, 1)
+	go func() {
+		msg, err := codec.Read()
+		if err != nil {
+			done <- err
+			return
+		}
+		p, err := settings.DecodeWorkerRequest[modelconfig.SetStatedMemoryRequest](msg.Params)
+		if err != nil {
+			done <- err
+			return
+		}
+		if msg.Method != "engine:set-stated-memory" || p.NativeInitAllowed || p.RemoteMemoryRecord || p.Request.NodeID != "" {
+			done <- fmt.Errorf("wrong private envelope: %+v", p)
+			return
+		}
+		done <- codec.Respond(msg.ID, modelconfig.InspectResult{Engine: p.Request.Engine, ModelID: p.Request.ModelID, Status: "unavailable", Estimate: modelconfig.Estimate{Status: "unknown"}, MemoryProfilesUnavailable: true})
+	}()
+	set := modelconfig.SetStatedMemoryRequest{Engine: "llamacpp", ModelID: "model", ConfigurationKey: strings.Repeat("a", 64), HostBytes: "1"}
+	result, err := b.recordModelMemory(context.Background(), settings.Relay{Method: "set-stated-memory", SetStatedMemory: &set}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if result.NodeID != "target" || !result.MemoryProfilesUnavailable {
+		t.Fatalf("reply=%+v", result)
+	}
+}
+
+func TestModelSettingsStatedMemoryRemoteEngineLock(t *testing.T) {
+	for _, method := range []string{"set-stated-memory", "clear-stated-memory"} {
+		t.Run(method, func(t *testing.T) {
+			b := &Broker{nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}
+			clustertrusttest.Join(t, b.clusterDir, "cluster", "target", "peer")
+			grantRemoteManagement(t, b.clusterDir, "cluster", "target", "peer", true)
+			r := b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.current.Availability = nodepolicy.Available
+			r.mu.Unlock()
+			worker, codec := newTestRPCWorkerPipe(t)
+			b.setEngineMgr(worker)
+			done := make(chan error, 1)
+			go func() {
+				msg, err := codec.Read()
+				if err != nil {
+					done <- err
+					return
+				}
+				if msg.Method != "engine:"+method {
+					done <- fmt.Errorf("unexpected worker method: %s", msg.Method)
+					return
+				}
+				var envelope struct {
+					RemoteMemoryRecord bool `json:"remoteMemoryRecord"`
+					NativeInitAllowed  bool `json:"nativeInitAllowed"`
+				}
+				if err := json.Unmarshal(msg.Params, &envelope); err != nil {
+					done <- err
+					return
+				}
+				if !envelope.RemoteMemoryRecord || envelope.NativeInitAllowed {
+					done <- fmt.Errorf("remote lock owner bypassed")
+					return
+				}
+				done <- codec.RespondError(msg.ID, -32013, "Engine is locked on the target device.")
+			}()
+			set := modelconfig.SetStatedMemoryRequest{Engine: "llamacpp", ModelID: "model", ConfigurationKey: strings.Repeat("a", 64), HostBytes: "1"}
+			clear := modelconfig.ClearStatedMemoryRequest{Engine: set.Engine, ModelID: set.ModelID, ConfigurationKey: set.ConfigurationKey}
+			relay := settings.Relay{Method: method}
+			if method == "set-stated-memory" {
+				relay.SetStatedMemory = &set
+			} else {
+				relay.ClearStatedMemory = &clear
+			}
+			if _, err := b.recordModelMemory(context.Background(), relay, "peer"); engineSettingsErrorCode(err) != -32013 {
+				t.Fatalf("locked: %v", err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func TestModelSettingsContractInspectionInjectsOnlyTargetSelfMemory(t *testing.T) {
 	b := &Broker{nodeID: "target", telemetry: newTelemetryCache(), scannerSource: &scannerProcess{}}

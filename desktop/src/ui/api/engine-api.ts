@@ -35,7 +35,12 @@ import type {
     EngineSettingsPreview,
     EngineSettingsReceipt
 } from '@/shared/types/engine-settings'
-import type { InspectModelRequest, InspectModelResult } from '@/shared/types/model-config'
+import type {
+    InspectModelRequest,
+    InspectModelResult,
+    SetStatedMemoryRequest,
+    ClearStatedMemoryRequest
+} from '@/shared/types/model-config'
 
 export interface IEngineApi {
     /** Local saved intent; null when the bridge has no current authoritative readback. */
@@ -50,6 +55,8 @@ export interface IEngineApi {
     getSettings(target: EngineSettingsTarget): Promise<EngineSettingsSnapshot>
     /** Read target-owned model facts while Off, without starting or loading an engine. */
     inspectModel(request: InspectModelRequest): Promise<InspectModelResult>
+    setStatedMemory(request: SetStatedMemoryRequest): Promise<InspectModelResult>
+    clearStatedMemory(request: ClearStatedMemoryRequest): Promise<InspectModelResult>
     /**
      * Validate a draft against the owner without persisting or touching any
      * process: returns the normalized settings, per-field errors, any port
@@ -150,6 +157,8 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
         onSwitchChanged: cb => transport.subscribePush('engines:switch-changed', cb),
         getSettings: target => transport.invoke('engines:get-settings', target),
         inspectModel: request => transport.invoke('engines:inspect-model', request),
+        setStatedMemory: request => transport.invoke('engines:set-stated-memory', request),
+        clearStatedMemory: request => transport.invoke('engines:clear-stated-memory', request),
         previewSettings: request => transport.invoke('engines:preview-settings', request),
         applySettings: request =>
             transport.invoke('engines:apply-settings', request).then(result => {

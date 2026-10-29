@@ -17,6 +17,7 @@ import type {
     MemoryPlan,
     ModelImpact,
     ModelLoad,
+    MemoryProfile,
     RequestedLoad,
     ResolvedLoad
 } from '@/shared/types/model-config'
@@ -1402,7 +1403,9 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         'loadObservation',
         'configurationKey',
         'configurationKeyReason',
-        'configurationPools'
+        'configurationPools',
+        'memoryProfiles',
+        'memoryProfilesUnavailable'
     ])
     const engine = boundedText(row.engine, 40, true)
     if (!isValidRoutingEngineId(engine)) throw new Error('Invalid inspection engine.')
@@ -1432,6 +1435,11 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         )
     }
     const result: InspectModelResult = {
+        memoryProfiles:
+            row.memoryProfiles === undefined
+                ? undefined
+                : boundedArray(row.memoryProfiles, 8).map(memoryProfile),
+        memoryProfilesUnavailable: optionalFlag(row.memoryProfilesUnavailable),
         engine,
         nodeId: optionalText(row.nodeId, 256),
         modelId: modelId(row.modelId),
@@ -1481,6 +1489,27 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
                   )
     }
     const pools = result.configurationPools?.join(',')
+    const seenProfiles = new Set<string>()
+    for (const [index, profile] of (result.memoryProfiles ?? []).entries()) {
+        if (
+            seenProfiles.has(profile.configurationKey) ||
+            profile.current !== (profile.configurationKey === result.configurationKey) ||
+            (profile.current && index !== 0)
+        )
+            throw new Error('Invalid current memory profile.')
+        seenProfiles.add(profile.configurationKey)
+        if (profile.current) {
+            const fields = [
+                profile.hostBytes === undefined ? '' : 'host',
+                profile.deviceBytes === undefined ? '' : 'device',
+                profile.sharedBytes === undefined ? '' : 'shared'
+            ]
+                .filter(Boolean)
+                .join(',')
+            if (fields !== pools)
+                throw new Error('Memory profile pools do not match the applied configuration.')
+        }
+    }
     if (pools !== undefined && !['host', 'host,device', 'shared'].includes(pools))
         throw new Error('Invalid configuration pools.')
     if (result.configurationKey && (result.configurationKeyReason || !pools))
@@ -1496,6 +1525,41 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
     )
         throw new Error('Inspection memory plan identity mismatch.')
     return result
+}
+function memoryProfile(value: JsonValue): MemoryProfile {
+    const row = shape(value, [
+        'configurationKey',
+        'kind',
+        'recordedAt',
+        'hostBytes',
+        'deviceBytes',
+        'sharedBytes',
+        'current'
+    ])
+    const recordedAt = boundedText(row.recordedAt, 64, true)
+    if (
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(recordedAt) ||
+        !Number.isFinite(Date.parse(recordedAt))
+    )
+        throw new Error('Invalid memory profile timestamp.')
+    const profile: MemoryProfile = {
+        configurationKey: digest(row.configurationKey),
+        kind: choice(row.kind, ['stated']),
+        recordedAt,
+        current: flag(row.current),
+        hostBytes: row.hostBytes === undefined ? undefined : unsigned(row.hostBytes),
+        deviceBytes: row.deviceBytes === undefined ? undefined : unsigned(row.deviceBytes),
+        sharedBytes: row.sharedBytes === undefined ? undefined : unsigned(row.sharedBytes)
+    }
+    if (
+        (profile.hostBytes === undefined &&
+            profile.deviceBytes === undefined &&
+            profile.sharedBytes === undefined) ||
+        (profile.sharedBytes !== undefined &&
+            (profile.hostBytes !== undefined || profile.deviceBytes !== undefined))
+    )
+        throw new Error('Invalid memory profile pools.')
+    return profile
 }
 function option(value: JsonValue): NonNullable<InspectModelResult['options']>[number] {
     const row = shape(value, [

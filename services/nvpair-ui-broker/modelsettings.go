@@ -1252,6 +1252,105 @@ func (b *Broker) inspectModelSettings(ctx context.Context, p modelconfig.Inspect
 	return result, nil
 }
 
+func (b *Broker) recordModelMemory(ctx context.Context, relay settings.Relay, caller string) (modelconfig.InspectResult, error) {
+	var engine, model string
+	var request any
+	if relay.Method == "set-stated-memory" {
+		p := relay.SetStatedMemory.Clone()
+		if err := p.Validate(); err != nil {
+			return modelconfig.InspectResult{}, &invalidParamsError{err: err}
+		}
+		p.NodeID = ""
+		engine, model, request = p.Engine, p.ModelID, p
+	} else {
+		p := relay.ClearStatedMemory.Clone()
+		if err := p.Validate(); err != nil {
+			return modelconfig.InspectResult{}, &invalidParamsError{err: err}
+		}
+		p.NodeID = ""
+		engine, model, request = p.Engine, p.ModelID, p
+	}
+	ctx, cancel := context.WithTimeout(ctx, settings.CallBudget)
+	defer cancel()
+	b.settingsApplyMu.Lock()
+	defer b.settingsApplyMu.Unlock()
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	if err := b.authorizeSettingsCallerLocked(caller); err != nil {
+		return modelconfig.InspectResult{}, err
+	}
+	if err := b.authorizeRemoteManagement(caller, "settings", ""); err != nil {
+		return modelconfig.InspectResult{}, err
+	}
+	worker := b.getEngineMgr()
+	// The worker rechecks its durable engine lock and current Pause projection
+	// for this private remote marker, without status detection or native helpers.
+	envelope := settings.WorkerRequest[any]{Request: request, Memory: b.modelTargetMemory(), NativeInitAllowed: false, RemoteMemoryRecord: caller != ""}
+	var raw json.RawMessage
+	if err := modelSettingsCall(ctx, worker, "engine:"+relay.Method, envelope, &raw); err != nil {
+		return modelconfig.InspectResult{}, err
+	}
+	result, err := modelconfig.DecodeInspectResult(raw)
+	if err != nil {
+		return result, err
+	}
+	if result.Engine != engine || result.ModelID != model {
+		return modelconfig.InspectResult{}, fmt.Errorf("memory profile reply identity mismatch")
+	}
+	result.NodeID = b.nodeID
+	return result, result.Validate()
+}
+
+func (b *Broker) handleStatedMemory(msg *Message) {
+	relay := settings.Relay{}
+	var node string
+	var err error
+	if msg.Method == "engine:set-stated-memory" {
+		p, e := modelconfig.DecodeSetStatedMemoryRequest(msg.Params)
+		err = e
+		relay.Method, relay.SetStatedMemory, node = "set-stated-memory", &p, p.NodeID
+	} else {
+		p, e := modelconfig.DecodeClearStatedMemoryRequest(msg.Params)
+		err = e
+		relay.Method, relay.ClearStatedMemory, node = "clear-stated-memory", &p, p.NodeID
+	}
+	if err != nil {
+		_ = b.codec.RespondError(msg.ID, -32602, err.Error())
+		return
+	}
+	if node != "" && node != b.nodeID {
+		worker := b.getEngineMgr()
+		if worker == nil {
+			_ = b.codec.RespondError(msg.ID, -32000, "engine manager unavailable")
+			return
+		}
+		err = worker.RelayRequest("engine:remote-"+relay.Method, msg.Params, func(raw json.RawMessage, rpcErr *RPCError, err error) {
+			if err != nil {
+				_ = b.codec.RespondError(msg.ID, -32000, err.Error())
+			} else if rpcErr != nil {
+				_ = b.codec.RespondError(msg.ID, rpcErr.Code, rpcErr.Message)
+			} else {
+				result, e := modelconfig.DecodeInspectResult(raw)
+				if e != nil {
+					_ = b.codec.RespondError(msg.ID, -32000, e.Error())
+				} else {
+					_ = b.codec.Respond(msg.ID, result)
+				}
+			}
+		})
+		if err != nil {
+			_ = b.codec.RespondError(msg.ID, -32000, err.Error())
+		}
+		return
+	}
+	result, err := b.recordModelMemory(context.Background(), relay, "")
+	if err != nil {
+		_ = b.codec.RespondError(msg.ID, engineSettingsErrorCode(err), err.Error())
+	} else {
+		_ = b.codec.Respond(msg.ID, result)
+	}
+}
+
 func (b *Broker) handleModelInspection(msg *Message) {
 	p, err := modelconfig.DecodeInspectRequest(msg.Params)
 	if err != nil {

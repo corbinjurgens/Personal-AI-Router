@@ -5,6 +5,17 @@ SPDX-License-Identifier: Apache-2.0
 
 # Frontend API
 
+`pairApi.engines.setStatedMemory` and `clearStatedMemory` use
+`engines:set-stated-memory` and `engines:clear-stated-memory`. Supply the applied
+inspection's `configurationKey`, engine, model ID and optional target node ID.
+Set supplies canonical decimal byte strings for exactly `configurationPools`:
+`hostBytes`, `hostBytes` plus `deviceBytes`, or `sharedBytes`. Both return the
+target inspection with current-first `memoryProfiles` (at most 8) and optional
+`memoryProfilesUnavailable`. A stale key returns `-32010`: reinspect before
+retrying. These advisory records do not change estimates or routing budgets.
+Remote recording requires the target's management grant and unlocked engine and
+is refused while paused; local recording remains allowed while paused.
+
 `window.windowApi.buildApply` exposes `choosePreview`, `start`, `status` and
 `onChanged`. Electron owns the native picker and GUI facts; the service owns
 validation and transaction admission. Start uses the selected preview and

@@ -216,21 +216,23 @@ type Estimate struct {
 	Unknowns        []string            `json:"unknowns,omitempty"`
 }
 type InspectResult struct {
-	ConfigurationKey       string             `json:"configurationKey,omitempty"`
-	ConfigurationKeyReason string             `json:"configurationKeyReason,omitempty"`
-	ConfigurationPools     []string           `json:"configurationPools,omitempty"`
-	Engine                 string             `json:"engine"`
-	NodeID                 string             `json:"nodeId,omitempty"`
-	ModelID                string             `json:"modelId"`
-	Status                 string             `json:"status"`
-	Reason                 string             `json:"reason,omitempty"`
-	Source                 string             `json:"source,omitempty"`
-	Assurance              string             `json:"assurance,omitempty"`
-	Artifacts              []ArtifactSummary  `json:"artifacts,omitempty"`
-	Facts                  *Facts             `json:"facts,omitempty"`
-	Options                []OptionDescriptor `json:"options,omitempty"`
-	Estimate               Estimate           `json:"estimate"`
-	LoadObservation        *BufferObservation `json:"loadObservation,omitempty"`
+	MemoryProfiles            []MemoryProfile    `json:"memoryProfiles,omitempty"`
+	MemoryProfilesUnavailable bool               `json:"memoryProfilesUnavailable,omitempty"`
+	ConfigurationKey          string             `json:"configurationKey,omitempty"`
+	ConfigurationKeyReason    string             `json:"configurationKeyReason,omitempty"`
+	ConfigurationPools        []string           `json:"configurationPools,omitempty"`
+	Engine                    string             `json:"engine"`
+	NodeID                    string             `json:"nodeId,omitempty"`
+	ModelID                   string             `json:"modelId"`
+	Status                    string             `json:"status"`
+	Reason                    string             `json:"reason,omitempty"`
+	Source                    string             `json:"source,omitempty"`
+	Assurance                 string             `json:"assurance,omitempty"`
+	Artifacts                 []ArtifactSummary  `json:"artifacts,omitempty"`
+	Facts                     *Facts             `json:"facts,omitempty"`
+	Options                   []OptionDescriptor `json:"options,omitempty"`
+	Estimate                  Estimate           `json:"estimate"`
+	LoadObservation           *BufferObservation `json:"loadObservation,omitempty"`
 }
 
 // Impact represents unresolved owner choices without manufacturing a timeout,
@@ -764,6 +766,7 @@ func (a AutoProposal) Clone() AutoProposal {
 	return a
 }
 func (r InspectResult) Clone() InspectResult {
+	r.MemoryProfiles = slices.Clone(r.MemoryProfiles)
 	r.ConfigurationPools = slices.Clone(r.ConfigurationPools)
 	if r.LoadObservation != nil {
 		o := r.LoadObservation.Clone()
@@ -798,6 +801,24 @@ func DecodeInspectResult(data []byte) (InspectResult, error) {
 	return r, nil
 }
 func (r InspectResult) Validate() error {
+	if len(r.MemoryProfiles) > 8 {
+		return fmt.Errorf("inspect.memoryProfiles: history limit exceeded")
+	}
+	seenProfiles := map[string]bool{}
+	for i, p := range r.MemoryProfiles {
+		if err := p.Validate(); err != nil {
+			return err
+		}
+		if seenProfiles[p.ConfigurationKey] || p.Current != (r.ConfigurationKey != "" && p.ConfigurationKey == r.ConfigurationKey) || p.Current && i != 0 {
+			return fmt.Errorf("inspect.memoryProfiles: invalid current record or duplicate")
+		}
+		seenProfiles[p.ConfigurationKey] = true
+		if p.Current {
+			if err := p.ValidatePools(r.ConfigurationPools); err != nil {
+				return err
+			}
+		}
+	}
 	if r.ConfigurationKey != "" && (!digest(r.ConfigurationKey) || r.ConfigurationKeyReason != "" || len(r.ConfigurationPools) == 0) {
 		return fmt.Errorf("inspect.configurationKey: invalid identity or scope")
 	}

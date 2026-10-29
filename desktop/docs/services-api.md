@@ -27,10 +27,12 @@
 - ⚠️ nvpair-engine-manager → engine:logs
 - ⚠️ nvpair-engine-manager → engine:preview-launch
 - ⚠️ nvpair-engine-manager → engine:remote-apply-settings
+- ⚠️ nvpair-engine-manager → engine:remote-clear-stated-memory
 - ⚠️ nvpair-engine-manager → engine:remote-copy-model
 - ⚠️ nvpair-engine-manager → engine:remote-get-settings
 - ⚠️ nvpair-engine-manager → engine:remote-inspect-model
 - ⚠️ nvpair-engine-manager → engine:remote-preview-settings
+- ⚠️ nvpair-engine-manager → engine:remote-set-stated-memory
 - ⚠️ nvpair-engine-manager → engine:remote-switch
 - ⚠️ nvpair-engine-manager → engine:remote-switch-fence
 - ⚠️ nvpair-engine-manager → engine:remote-switch-status
@@ -149,6 +151,7 @@
 | `engine:active-model-copies` | request (we call) | ✅ yes |
 | `engine:cancel-model-copy` | request (we call) | ✅ yes |
 | `engine:catalog` | request (we call) | ✅ yes |
+| `engine:clear-stated-memory` | request (we call) | ✅ yes |
 | `engine:configure-launch` | request (we call) | ⚠️ not called |
 | `engine:configured-ports` | request (we call) | ⚠️ not called |
 | `engine:copy-model` | request (we call) | ✅ yes |
@@ -171,6 +174,7 @@
 | `engine:preview-launch` | request (we call) | ⚠️ not called |
 | `engine:reconcile-resident` | request (we call) | ➖ ignored |
 | `engine:remote-apply-settings` | request (we call) | ⚠️ not called |
+| `engine:remote-clear-stated-memory` | request (we call) | ⚠️ not called |
 | `engine:remote-copy-model` | request (we call) | ⚠️ not called |
 | `engine:remote-delete-model` | request (we call) | ✅ yes |
 | `engine:remote-get-installed` | request (we call) | ✅ yes |
@@ -181,6 +185,7 @@
 | `engine:remote-management-get` | request (we call) | ✅ yes |
 | `engine:remote-preview-settings` | request (we call) | ⚠️ not called |
 | `engine:remote-pull-model` | request (we call) | ✅ yes |
+| `engine:remote-set-stated-memory` | request (we call) | ⚠️ not called |
 | `engine:remote-start` | request (we call) | ✅ yes |
 | `engine:remote-stop` | request (we call) | ✅ yes |
 | `engine:remote-switch` | request (we call) | ⚠️ not called |
@@ -191,6 +196,7 @@
 | `engine:set-credential` | request (we call) | ✅ yes |
 | `engine:set-lock` | request (we call) | ✅ yes |
 | `engine:set-port` | request (we call) | ⚠️ not called |
+| `engine:set-stated-memory` | request (we call) | ✅ yes |
 | `engine:sleep` | request (we call) | ⚠️ not called |
 | `engine:start` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |
@@ -439,6 +445,7 @@
 | `discovery:subscribe` | request (we call) | ✅ yes |
 | `discovery:unsubscribe` | request (we call) | ⚠️ not called |
 | `engine:apply-settings` | request (we call) | ✅ yes |
+| `engine:clear-stated-memory` | request (we call) | ✅ yes |
 | `engine:get-settings` | request (we call) | ✅ yes |
 | `engine:inspect-model` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
@@ -447,6 +454,7 @@
 | `engine:preview-settings` | request (we call) | ✅ yes |
 | `engine:restart` | request (we call) | ⚠️ not called |
 | `engine:set-port` | request (we call) | ⚠️ not called |
+| `engine:set-stated-memory` | request (we call) | ✅ yes |
 | `engine:start` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |
 | `engine:stop` | request (we call) | ✅ yes |

@@ -1007,6 +1007,40 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
             throw new Error('Model inspection target identity mismatch.')
         return result
     },
+    'engines:set-stated-memory': async payload => {
+        const result = parseInspectModel(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'engine:set-stated-memory',
+                payload ? { ...payload } : undefined
+            )
+        )
+        if (
+            payload &&
+            (result.engine !== payload.engine ||
+                result.modelId !== payload.modelId ||
+                (payload.nodeId && result.nodeId !== payload.nodeId))
+        )
+            throw new Error('Memory profile target identity mismatch.')
+        return result
+    },
+    'engines:clear-stated-memory': async payload => {
+        const result = parseInspectModel(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'engine:clear-stated-memory',
+                payload ? { ...payload } : undefined
+            )
+        )
+        if (
+            payload &&
+            (result.engine !== payload.engine ||
+                result.modelId !== payload.modelId ||
+                (payload.nodeId && result.nodeId !== payload.nodeId))
+        )
+            throw new Error('Memory profile target identity mismatch.')
+        return result
+    },
     'engines:preview-settings': async payload =>
         parseEngineSettingsPreview(
             await getModularSupervisor().callProcess(
