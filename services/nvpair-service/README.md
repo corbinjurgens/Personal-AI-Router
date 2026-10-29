@@ -34,9 +34,9 @@ build stamp. Start accepts only the preview ID, interruption consent and native
 GUI facts. No method accepts a remote node/caller, command, renderer-selected
 endpoint or destination. GUI-ready acknowledges a new GUI; it is unavailable
 until the transaction owner independently checks the expected process and path.
-Early `--pair-build-apply=OPERATION_ID` currently exits unavailable before
-connector auto-start. Shortcut command registration similarly exits unavailable
-before ordinary single-instance, connector or updater work.
+The early `--pair-build-apply=OPERATION_ID` entry handles successor GUI
+acknowledgement before ordinary startup. Windows shortcut command mode likewise
+runs before ordinary single-instance, connector or updater work.
 
 The shared contract separates current GUI, bundled service, requested GUI and
 service, attached running service, measured SHA-256, source revision and dirty

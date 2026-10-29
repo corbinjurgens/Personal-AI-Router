@@ -12,9 +12,11 @@ roots with its profile roots before inspecting candidate or target packages.
 Unknown coverage, source replacement and changed root captures refuse. Only
 the envelope's public impact reaches the desktop's existing build-apply preview
 contract. The desktop bridge and TUI have no new private method or field.
-This read is evidence, not an atomic maintenance reservation: production start
-still requires the `WithLocked` owner and independent identity, worker, Pause
-and physical-stop proofs.
+This read is evidence, not an atomic maintenance reservation: production
+`buildApplyOwners` is nil and start refuses before Pause. Accepted transaction,
+helper, swap, restart, recovery and semantic-readback cases are unmet pending
+owner decision O1. Start still requires the `WithLocked` owner and independent
+identity, worker, Pause and physical-stop proofs.
 
 Model inspection is integrated as `engines:inspect-model` to
 `engine:inspect-model`, including the manager's pinned settings read route.

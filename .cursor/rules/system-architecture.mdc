@@ -13,9 +13,8 @@ Model configuration keeps policy intent at the broker and native load settings
 at engine-manager. Shared modelconfig is wire/portable validation only;
 enginesettings composes the settings/preview/readback contract without an import
 cycle. Derived facts/estimates and receipts never supply runtime authority.
-Model-settings apply must join apply-build's maintenance exclusion when that
-owner lands; the preparatory contract has no such reservation and refuses typed
-mutations before effects.
+Model-settings preview and apply use the broker's build-maintenance entry leases
+to exclude a conflicting build transaction at the authoritative owner.
 
 `docs/architecture.md` is the rendered current-state reference.
 
@@ -26,6 +25,9 @@ PAIR is an Electron application backed by the sibling `services/` tree.
 - Electron and `nvpair-tui` attach to `nvpair-service`, which owns
   `nvpair-ui-broker`; neither starts the broker itself.
 - The broker supervises every runtime worker.
+- A copied `nvpair-service` one-shot build-apply executor is a finite transaction
+  owner, not a runtime worker or supervisor. Production admission currently
+  refuses before Pause because `buildApplyOwners` is nil.
 - Backend processes communicate with their parent over stdio JSON-RPC.
 - Development binaries live in `cli-bin/`.
 - Packaged binaries live in `process.resourcesPath/cli-bin`.

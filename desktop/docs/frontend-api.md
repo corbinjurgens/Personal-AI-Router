@@ -5,6 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Frontend API
 
+`window.windowApi.buildApply` exposes `choosePreview`, `start`, `status` and
+`onChanged`. Electron owns the native picker and GUI facts; the service owns
+validation and transaction admission. Start uses the selected preview and
+explicit interruption consent. A stale or incomplete preview must be renewed;
+production start currently refuses before Pause because `buildApplyOwners` is
+nil. Operation status and uncertainty are retained rather than inferred from
+a disconnected request.
+
 `pairApi.engines.inspectModel({nodeId,engine,modelId})` invokes
 `engines:inspect-model` and returns the target's artifact status/source/assurance,
 bounded facts, option descriptors and advisory estimate. This is a read, usable
