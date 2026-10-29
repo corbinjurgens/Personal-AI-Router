@@ -113,6 +113,9 @@ func TestModelSettingsEstimateDenseAndGQA(t *testing.T) {
 			if err != nil || compute.Status != "partial" || bytes == 0 {
 				t.Fatalf("dense library graph cost unavailable: %+v, %v", compute, err)
 			}
+			if compute.Basis != "heuristic" || compute.LowBytes != strconv.FormatUint(bytes*3/4, 10) || compute.HighBytes != strconv.FormatUint((bytes*3+1)/2, 10) {
+				t.Fatalf("partial CPU portion lacks heuristic band: %+v", compute)
+			}
 			if out.Status != "partial" || len(out.Unknowns) == 0 || out.BuildID != in.BuildID {
 				t.Fatalf("lost partial/build disclosure: %+v", out)
 			}
@@ -655,6 +658,210 @@ func TestModelSettingsEstimateTargetCPUSharedPoolNeedsNoGPUMap(t *testing.T) {
 	if unknown.FreeFit != "unknown" || len(unknown.Components) != len(out.Components) {
 		t.Fatalf("invalid hop lost components: %+v", unknown)
 	}
+}
+
+func estimateTargetFixture(shared bool) modelEstimateInput {
+	in := estimateFixture("llama")
+	layers := int32(3)
+	in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+	in.Memory = autoTestMemory(time.Now())
+	uuid := autoTestDeviceBinding().DeviceID
+	in.Memory.Map.Binding = nil
+	in.Memory.Map.Devices = []modelNativeDevice{{Selector: "CUDA0", Kind: 1, UUID: uuid, Pool: "gpu"}}
+	fact := noderec.MemoryFact{Bytes: "8589934592", Source: "synthetic", SampledAt: time.Now().UTC(), Valid: true}
+	domains := []noderec.MemoryDomain{{ID: "host", Kind: "system", Total: fact, Free: fact}, {ID: "gpu", Kind: "dedicated", DeviceIDs: []string{uuid}, Total: fact, Free: fact}}
+	if shared {
+		in.Memory.Map.HostPool = "shared"
+		in.Memory.Map.Devices = nil
+		domains = []noderec.MemoryDomain{{ID: "shared", Kind: "shared", Total: fact, Free: fact}}
+	}
+	in.Memory.Target = &modelconfig.TargetMemory{HostID: "synthetic-host", ObservationID: "synthetic-observation", MapID: in.Memory.Map.ObservationID, Hop: noderec.NewMemoryHop("synthetic-broker", noderec.MemoryBootClock), Observation: &noderec.MemoryObservation{RunID: "synthetic-run", Domains: domains}}
+	return in
+}
+
+func TestModelSettingsEstimateRuntimeOverhead(t *testing.T) {
+	out := estimateFixtureResult(t, estimateTargetFixture(false))
+	c := estimateTestComponent(t, out, "runtime-overhead")
+	if c.Status != "unknown" || c.DomainID != "" || c.Bytes != "" || c.Reason != "backend context, driver and allocator costs not yet calibrated or measured" {
+		t.Fatalf("runtime overhead=%+v", c)
+	}
+	for _, d := range out.Domains {
+		if !slices.Contains(d.Unknowns, "not priced (any pool): runtime-overhead") {
+			t.Fatalf("missing overhead warning: %+v", d)
+		}
+	}
+}
+
+func TestModelSettingsEstimateAdvisorySoleFamilyGPU(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*modelEstimateInput)
+		want   string
+	}{
+		{"sole evidenced CUDA GPU", func(*modelEstimateInput) {}, "fits"},
+		{"absent map", func(in *modelEstimateInput) { in.Memory.Map = nil }, "unknown"},
+		{"absent family", func(in *modelEstimateInput) { in.Memory.Map.Devices = nil }, "unknown"},
+		{"unproved identity", func(in *modelEstimateInput) { in.Memory.Map.Devices[0].UUID = "" }, "unknown"},
+		{"unmatched map", func(in *modelEstimateInput) { in.Memory.Target.MapID = "different" }, "unknown"},
+		{"ambiguous family inventory", func(in *modelEstimateInput) {
+			in.Memory.Map.Devices = append(in.Memory.Map.Devices, in.Memory.Map.Devices[0])
+		}, "unknown"},
+		{"expired", func(in *modelEstimateInput) {
+			for i := range in.Memory.Target.Observation.Domains {
+				in.Memory.Target.Observation.Domains[i].Total.AgeMS = 6000
+				in.Memory.Target.Observation.Domains[i].Free.AgeMS = 6000
+			}
+		}, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateTargetFixture(false)
+			tc.change(&in)
+			before, err := json.Marshal(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := estimateFixtureResult(t, in)
+			if out.FreeFit != tc.want {
+				t.Fatalf("comparison=%+v want %s", out, tc.want)
+			}
+			if tc.want == "fits" && !slices.Contains(out.Domains[1].Unknowns, "device mapping assumed: only one GPU present") {
+				t.Fatalf("missing advisory warning: %+v", out)
+			}
+			after, err := json.Marshal(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) || in.Allocation.DeviceBinding != nil {
+				t.Fatal("advisory comparison changed launch inputs")
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateTargetUMACombinesRangesOnce(t *testing.T) {
+	in := estimateTargetFixture(true)
+	out := estimateFixtureResult(t, in)
+	if len(out.Domains) != 1 || out.Domains[0].Kind != "shared" || out.FreeFit != "fits" {
+		t.Fatalf("UMA comparison=%+v", out)
+	}
+	var expected, low, high uint64
+	for _, c := range out.Components {
+		if c.Bytes == "" || c.DomainID == "" {
+			continue
+		}
+		if c.DomainID != "shared" {
+			t.Fatalf("uncombined component: %+v", c)
+		}
+		for _, pair := range []struct {
+			text string
+			sum  *uint64
+		}{{c.Bytes, &expected}, {c.LowBytes, &low}, {c.HighBytes, &high}} {
+			n, err := strconv.ParseUint(pair.text, 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			*pair.sum += n
+		}
+	}
+	d := out.Domains[0]
+	if d.RequiredBytes != strconv.FormatUint(expected, 10) || d.RequiredLowBytes != strconv.FormatUint(low, 10) || d.RequiredHighBytes != strconv.FormatUint(high, 10) || out.HostBytes != "" || out.DeviceBytes != "" {
+		t.Fatalf("UMA charged incorrectly: %+v", out)
+	}
+	in.Memory.Map = nil
+	if got := estimateFixtureResult(t, in); got.FreeFit != "unknown" {
+		t.Fatalf("untrusted UMA fit: %+v", got)
+	}
+}
+
+func TestModelSettingsEstimateCalibratedSplitWeights(t *testing.T) {
+	key := modelEstimateCalibrationKey{"weights", "dense", "cuda"}
+	modelEstimateCalibrations[key] = modelEstimateCalibration{LowNum: 1, LowDen: 2, HighNum: 2, HighDen: 1, Provenance: []string{"synthetic-fit-a", "synthetic-fit-b", "synthetic-fit-c"}}
+	t.Cleanup(func() { delete(modelEstimateCalibrations, key) })
+	out := estimateFixtureResult(t, estimateTargetFixture(false))
+	parts := 0
+	for _, c := range out.Components {
+		if c.Name != "weights" {
+			continue
+		}
+		parts++
+		n, err := strconv.ParseUint(c.Bytes, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Basis != "calibrated" || c.LowBytes != strconv.FormatUint(n/2, 10) || c.HighBytes != strconv.FormatUint(n*2, 10) {
+			t.Fatalf("split weights=%+v", c)
+		}
+	}
+	if parts != 2 || out.FreeFit != "fits" {
+		t.Fatalf("split estimate=%+v", out)
+	}
+}
+
+func TestModelSettingsEstimateTargetUMAWithdrawsUntrustedEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*modelEstimateInput)
+	}{
+		{"missing map", func(in *modelEstimateInput) { in.Memory.Map = nil }},
+		{"invalid hop", func(in *modelEstimateInput) { in.Memory.Target.Hop = nil }},
+		{"unknown map", func(in *modelEstimateInput) { in.Memory.Map.Unknown = "untrusted topology" }},
+		{"expired capacity", func(in *modelEstimateInput) { in.Memory.Target.Observation.Domains[0].Total.AgeMS = 6000 }},
+		{"mixed topology", func(in *modelEstimateInput) {
+			in.Memory.Target.Observation.Domains = append(in.Memory.Target.Observation.Domains, noderec.MemoryDomain{ID: "gpu", Kind: "dedicated", DeviceIDs: []string{autoTestDeviceBinding().DeviceID}, Total: in.Memory.Target.Observation.Domains[0].Total})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateTargetFixture(true)
+			tc.change(&in)
+			out := estimateFixtureResult(t, in)
+			if out.CapacityFit != "unknown" || len(out.Components) == 0 {
+				t.Fatalf("untrusted UMA comparison=%+v", out)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateCalibrationBands(t *testing.T) {
+	if len(modelEstimateCalibrations) != 0 {
+		t.Fatal("calibration table must start empty")
+	}
+	t.Run("default rounds outward", func(t *testing.T) {
+		low, high, basis := modelEstimateBand("compute-workspace", "dense", "cpu", 5)
+		if low != 3 || high != 8 || basis != "heuristic" {
+			t.Fatalf("band=(%d,%d,%s)", low, high, basis)
+		}
+	})
+	t.Run("checked overflow", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != errModelEstimateOverflow {
+				t.Fatalf("overflow=%v", r)
+			}
+		}()
+		modelEstimateBand("compute-workspace", "dense", "cpu", math.MaxUint64)
+	})
+	t.Run("derived rows only change with matching evidence", func(t *testing.T) {
+		key := modelEstimateCalibrationKey{"weights", "dense", "cpu"}
+		modelEstimateCalibrations[key] = modelEstimateCalibration{LowNum: 1, LowDen: 2, HighNum: 2, HighDen: 1, Provenance: []string{"synthetic-fit-a", "synthetic-fit-b", "synthetic-fit-c"}}
+		t.Cleanup(func() { delete(modelEstimateCalibrations, key) })
+		in := estimateFixture("llama")
+		out := estimateFixtureResult(t, in)
+		weights := estimateTestComponent(t, out, "weights")
+		n, err := strconv.ParseUint(weights.Bytes, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if weights.Basis != "calibrated" || weights.LowBytes != strconv.FormatUint(n/2, 10) || weights.HighBytes != strconv.FormatUint(n*2, 10) {
+			t.Fatalf("calibrated weights=%+v", weights)
+		}
+		cache := estimateTestComponent(t, out, "attention-cache")
+		if cache.Basis != "derived" || cache.LowBytes != cache.Bytes || cache.HighBytes != cache.Bytes {
+			t.Fatalf("uncalibrated derived row widened: %+v", cache)
+		}
+		low, high, basis := modelEstimateBand("weights", "dense", "cuda", 5)
+		if low != 3 || high != 8 || basis != "heuristic" {
+			t.Fatalf("calibration leaked across family=(%d,%d,%s)", low, high, basis)
+		}
+	})
 }
 
 func TestModelSettingsEstimateTargetGPURequiresExactMapAndBinding(t *testing.T) {
