@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/modelconfig"
 )
 
 func TestLinkedModelHFBinding(t *testing.T) {
@@ -461,7 +462,7 @@ func TestLinkedModelHFBinding(t *testing.T) {
 		}
 	})
 
-	t.Run("outside source link remains refused", func(t *testing.T) {
+	t.Run("outside source link is bound", func(t *testing.T) {
 		store, original := fixture(t)
 		outside := filepath.Join(t.TempDir(), "outside.gguf")
 		writeTestFile(t, outside, []byte("outside"))
@@ -473,14 +474,50 @@ func TestLinkedModelHFBinding(t *testing.T) {
 			t.Skipf("symlink unavailable: %v", err)
 		}
 		list, err := boundedLlamaCacheArtifacts(context.Background(), store, model, servingFileAccess{})
-		assertEmpty(t, list, err)
+		if err != nil || len(list.Files) != 1 || list.Files[0].abs != outside {
+			t.Fatalf("outside artifact: files=%v err=%v", list.Files, err)
+		}
+		if _, err := boundedLlamaCacheArtifactsExpected(context.Background(), store, model, servingFileAccess{}, list); err != nil {
+			t.Fatal(err)
+		}
 	})
 
-	t.Run("directory links remain untraversed", func(t *testing.T) {
+	t.Run("linked ref and hardlinked artifact retain exact bindings", func(t *testing.T) {
+		store, original := fixture(t)
+		ref := original.source.selectors[0].file.configured
+		outside := filepath.Join(t.TempDir(), "ref")
+		writeTestFile(t, outside, []byte(commit))
+		if err := os.Remove(ref); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, ref); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		artifact := original.Files[0].configured
+		if err := os.Remove(artifact); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(original.Files[0].abs, artifact); err != nil {
+			t.Skipf("hardlink unavailable: %v", err)
+		}
+		list, err := boundedLlamaCacheArtifacts(context.Background(), store, model, servingFileAccess{})
+		if err != nil || len(list.Files) != 1 {
+			t.Fatalf("files=%v err=%v", list.Files, err)
+		}
+		if _, err := boundedLlamaCacheArtifactsExpected(context.Background(), store, model, servingFileAccess{}, list); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("directory links select companions", func(t *testing.T) {
 		store, original := fixture(t)
 		outside := t.TempDir()
+		writeTestFile(t, filepath.Join(outside, "model-Q4_K_M.gguf"), []byte("model"))
 		writeTestFile(t, filepath.Join(outside, "mmproj-Q4_K_M.gguf"), []byte("outside"))
-		link := filepath.Join(filepath.Dir(original.Files[0].configured), "external")
+		link := filepath.Dir(original.Files[0].configured)
+		if err := os.RemoveAll(link); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.Symlink(outside, link); err != nil {
 			t.Skipf("symlink unavailable: %v", err)
 		}
@@ -488,8 +525,146 @@ func TestLinkedModelHFBinding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(list.Files) != len(original.Files) || list.Files[0].Path != original.Files[0].Path {
-			t.Fatalf("directory link expanded selection: %v", list.Files)
+		if len(list.Files) != 2 || list.Files[1].Path != "nested/mmproj-Q4_K_M.gguf" {
+			t.Fatalf("linked companion selection: %v", list.Files)
+		}
+	})
+
+	t.Run("linked refs and snapshot bind old targets", func(t *testing.T) {
+		store, original := fixture(t)
+		repo := llamaRepoDir(store.root, "owner/model")
+		for _, path := range []string{filepath.Join(repo, "refs"), filepath.Join(repo, "snapshots", commit)} {
+			target := filepath.Join(t.TempDir(), "selected")
+			if err := os.Rename(path, target); err != nil {
+				t.Fatal(err)
+			}
+			if path == filepath.Join(repo, "snapshots", commit) {
+				artifact := filepath.Join(target, "nested", "model-Q4_K_M.gguf")
+				if err := os.Remove(artifact); err != nil {
+					t.Fatal(err)
+				}
+				writeTestFile(t, artifact, []byte("model"))
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+		}
+		list, err := boundedLlamaCacheArtifacts(context.Background(), store, model, servingFileAccess{})
+		if err != nil || len(list.Files) != len(original.Files) {
+			t.Fatalf("linked selection files=%v err=%v", list.Files, err)
+		}
+		if _, err := boundedLlamaCacheArtifactsExpected(context.Background(), store, model, servingFileAccess{}, list); err != nil {
+			t.Fatal(err)
+		}
+		ref := filepath.Join(repo, "refs")
+		if err := os.Remove(ref); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), ref); err != nil {
+			t.Fatal(err)
+		}
+		reads := 0
+		access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+			f, err := os.Open(path)
+			if err != nil {
+				return nil, err
+			}
+			return &linkedReadCounter{File: f, reads: &reads}, nil
+		}}
+		changed, err := boundedLlamaCacheArtifactsExpected(context.Background(), store, model, access, list)
+		assertEmpty(t, changed, err)
+		if reads != 0 {
+			t.Fatalf("retarget caused %d reads", reads)
+		}
+	})
+
+	t.Run("directory aliases and cycles refuse partial selection", func(t *testing.T) {
+		for _, kind := range []string{"alias", "cycle", "broken"} {
+			t.Run(kind, func(t *testing.T) {
+				store, original := fixture(t)
+				snap := filepath.Dir(filepath.Dir(original.Files[0].configured))
+				target := filepath.Join(snap, "nested")
+				if kind == "cycle" {
+					target = snap
+				}
+				if kind == "broken" {
+					target = filepath.Join(t.TempDir(), "missing")
+				}
+				if err := os.Symlink(target, filepath.Join(snap, "alias")); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+				list, err := boundedLlamaCacheArtifacts(context.Background(), store, model, servingFileAccess{})
+				assertEmpty(t, list, err)
+			})
+		}
+	})
+
+	t.Run("recognized linked cache compiles typed without serving declaration", func(t *testing.T) {
+		f := newModelLoadFixture(t)
+		model := "owner/repository:Q4_K_M"
+		commit := strings.Repeat("a", 40)
+		repo := llamaRepoDir(f.root, "owner/repository")
+		writeTestFile(t, filepath.Join(repo, "refs", "main"), []byte(commit))
+		outside := filepath.Join(t.TempDir(), "model.gguf")
+		writeInspectionGGUF(t, outside, "llama", 0.25, 4096)
+		artifact := filepath.Join(repo, "snapshots", commit, "model-Q4_K_M.gguf")
+		if err := os.MkdirAll(filepath.Dir(artifact), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, artifact); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		rt := f.rt
+		args := []string{"--models-max", "1"}
+		rt.LaunchArgs, rt.Serving = &args, nil
+		rt.ModelLoads = []modelconfig.ModelLoad{{ModelID: model}}
+		copyTestNativeModels(t, f.ex, "fake", model)
+		prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, false)
+		if err != nil || prepared == nil || prepared.Config != nil || len(prepared.ModelLoads) != 1 {
+			t.Fatalf("typed selected source: result=%+v err=%v", prepared, err)
+		}
+		if prepared.evidence == nil || prepared.evidence.typed == nil {
+			t.Fatal("missing typed review evidence")
+		}
+		binding, err := servingFileBinding(artifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(outside)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ram, vram := int64(4096), int64(0)
+		servingRT := rt
+		servingRT.ModelLoads = prepared.ModelLoads
+		servingRT.Serving = &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{
+			ModelID: model, MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram},
+			Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: sha256Hex(data), Binding: binding, Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}}},
+		}}}
+		if configured, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, servingRT), servingRT, false); err != nil || configured.Config == nil {
+			t.Fatalf("configured linked serving: result=%+v err=%v", configured, err)
+		}
+		replacement := filepath.Join(t.TempDir(), "replacement.gguf")
+		writeInspectionGGUF(t, replacement, "llama", 0.75, 4096)
+		if err := os.Remove(artifact); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(replacement, artifact); err != nil {
+			t.Fatal(err)
+		}
+		forbidden := 0
+		access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+			file, err := os.Open(path)
+			if err != nil {
+				return nil, err
+			}
+			if path == artifact {
+				return &linkedReadCounter{File: file, reads: &forbidden}, nil
+			}
+			return file, nil
+		}}
+		if _, err := compileTypedLlamaInputsExpected(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, false, access, prepared.evidence.typed); err == nil || forbidden != 0 {
+			t.Fatalf("stale typed review err=%v forbidden reads=%d", err, forbidden)
 		}
 	})
 

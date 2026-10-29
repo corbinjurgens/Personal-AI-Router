@@ -12,6 +12,8 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1126,15 +1128,69 @@ func TestModelSettingsArtifactsCacheSymlinkConfinement(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := inspectFixture(t, f)
+			if result.Status != "resolved" {
+				t.Fatalf("selected HF blob refused: %+v", result)
+			}
 			if scenario == "confined blob" {
-				if result.Status != "resolved" {
-					t.Fatalf("confined HF blob refused: %+v", result)
-				}
 				if result.Artifacts[0].Identity == filepath.Base(target) || !strings.Contains(result.Artifacts[0].Assurance, "not full") {
 					t.Fatal("asserted blob name became full verification")
 				}
-			} else if result.Status == "resolved" || f.ex.modelInspection.lastUsage.HeaderBytes != 0 {
-				t.Fatalf("escaping cache symlink decoded: %+v", result)
+			} else {
+				_, client := modelFileServer(t, f.ex, nil)
+				ctx := context.Background()
+				list, err := client.modelFiles(ctx, "llamacpp", f.request.ModelID, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(list.Files) != 1 {
+					t.Fatalf("files=%v", list.Files)
+				}
+				body, _, err := client.modelFile(ctx, "llamacpp", f.request.ModelID, list.Files[0].Path, list.ExportID, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := io.ReadAll(body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := body.Close(); err != nil {
+					t.Fatal(err)
+				}
+				want, err := os.ReadFile(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatal("outside-bound HTTP bytes differ")
+				}
+				counter := &linkedHashCounts{}
+				server := &controlServer{exec: f.ex, access: servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+					file, err := os.Open(path)
+					if err != nil {
+						return nil, err
+					}
+					return &linkedHashFile{File: file, counts: counter, forbidden: true}, nil
+				}}}
+				query := url.Values{"engine": {"llamacpp"}, "model": {f.request.ModelID}, "path": {"unlisted.gguf"}, "exportId": {list.ExportID}}
+				response := httptest.NewRecorder()
+				server.handleModelFile(response, httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+query.Encode(), nil))
+				if response.Code != http.StatusNotFound || counter.bytes.Load() != 0 {
+					t.Fatalf("unlisted status=%d reads=%d", response.Code, counter.bytes.Load())
+				}
+				replacement := filepath.Join(t.TempDir(), "replacement.gguf")
+				writeInspectionGGUF(t, replacement, "llama", 0.75, 4096)
+				if err := os.Remove(link); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(replacement, link); err != nil {
+					t.Fatal(err)
+				}
+				query.Set("path", list.Files[0].Path)
+				response = httptest.NewRecorder()
+				server.handleModelFile(response, httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+query.Encode(), nil))
+				if response.Code != http.StatusConflict || counter.bytes.Load() != 0 {
+					t.Fatalf("stale export status=%d reads=%d", response.Code, counter.bytes.Load())
+				}
 			}
 		})
 	}
