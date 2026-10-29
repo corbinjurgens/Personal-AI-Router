@@ -360,6 +360,110 @@ If you are changing PAIR rather than only running it, the checks to run before
 opening a pull request are in
 [CONTRIBUTING.md](../CONTRIBUTING.md#development-setup).
 
+## Measuring a released Windows GUI build
+
+The optional `scripts/profile-windows-gui-build.ps1` observer records an explicitly
+released build. It does not select a release revision, authorize a build or change
+the default build commands. Dot-sourcing it only defines functions. Its tests use
+tiny synthetic children, without building or starting PAIR:
+
+```powershell
+Invoke-Pester -Path scripts/tests/profile-windows-gui-build.Tests.ps1
+```
+
+For a required release, first obtain the exact source revision, serialized machine
+interval, portable toolchain provenance, output disposition and cache mode. Use a
+disposable clean source checkout and a new absolute evidence directory outside
+every repository and synced vault. Do not use an installed application or a
+retained accepted build as writable output. Never clear shared caches. A cold run
+uses task-local empty dependency/output/compiler caches; it does not mean cold OS
+disk cache. A warm run requires a later independently required release with the
+same inputs. Otherwise report warm results as unmeasured.
+
+Freeze an external UTF-8 JSON recipe and its SHA-256 before execution. Its fields
+are `expectedHead`, `cacheState` (declared cache directories and known/unknown
+warmth), `toolchain` (`node` and `npmCli` absolute portable paths), `inputs` (frozen
+external script/input `path` and `sha256` pairs), and an ordered `steps` array.
+Each step has a unique plain `name`, absolute `executable`, string-array
+`arguments`, absolute `cwd`, `environment` object containing only deliberate
+process-local changes, `timeoutSeconds` (at most 7200), and `requireCleanAfter`.
+Use empty objects and arrays explicitly. Do not put credentials in a recipe or
+environment delta, since both become evidence. The observer starts executables
+directly with Windows argument quoting, without interpolating a shell command.
+External gate scripts must also be frozen inputs. Paths below are operator-set
+variables, not default release destinations:
+
+```powershell
+. ./scripts/profile-windows-gui-build.ps1
+Invoke-WindowsGuiBuildProfile -Repository $cleanCheckout -Vault $vaultRoot `
+    -RecipePath $releasedRecipe -ExpectedRecipeSha256 $releasedRecipeHash `
+    -EvidencePath $newExternalEvidence
+```
+
+Retain the existing release owners and this order in the released recipe:
+
+1. Verify portable Node 26.8.1 and bundled npm 11.19.0, including the child's
+   `process.execPath`. Use their absolute executables and process-only PATH.
+   Run `npm ci` against the exact lock. Preserve warnings and executed lifecycle
+   script identities; a new identity or runtime mismatch stops dependent stages.
+2. Check clean source, then `verify:build-scripts`, forced
+   `build:modular-binaries:win:x64 -- --force`, and `build:collect-logs:win:x64`.
+   Freeze the complete output manifests and hashes. Read Go build information
+   statically with `go version -m`, requiring the released VCS revision and
+   `vcs.modified=false`. Never execute a product binary to inspect it.
+3. Run `generate:icons`, then an exact tracked-source check; run `licenses`, then
+   another exact check. Set `requireCleanAfter=true` on these recipe steps. A
+   generator mismatch requires a committed-source correction, not normalization
+   of the frozen checkout. Verify the pinned checked-in Kaizen CSS.
+4. Run the existing `electron-vite build` directly. Do not substitute `npm build`
+   with its live CSS prehook or Windows convenience scripts selecting NSIS.
+   Stage only the signed VC prerequisite through its existing owner. Freeze the
+   production dependency files before packaging, including hashes and namespaces.
+5. Use the existing electron-builder owner with
+   `--win --x64 --dir --publish never` and an explicit private external output.
+   Do not run NSIS, Squirrel, the installer, PAIR or its services. Reconcile the
+   final clean source, complete folder/ASAR inventories, packaged Go hashes,
+   notices and dependency bytes against the pre-package freeze. Explain every
+   output difference; a failed gate stops the chain without automatic retry.
+
+The observer verifies clean exact source before starting and checks portable
+Node/npm identity before each step. It records the source index fingerprint,
+lock and recipe hashes, argv/cwd/environment delta, UTC and monotonic duration,
+exit status, raw stream hashes and process observations. Canonical manifest,
+dependency, signature and byte-chain checks remain explicit release gate steps,
+not conclusions inferred from a successful child exit. No build or performance
+measurement is supplied by installing this observer.
+
+Each raw stdout/stderr stream is limited to 16 MiB. Overflow, a deadline, a
+capture failure or a nonzero exit retains diagnostics and stops dependent steps.
+Process sampling targets 250 ms and uses PID plus creation time, not PID alone.
+Children start suspended inside a kill-on-close Windows job before their first
+instruction. A surviving descendant fails the stage and is terminated through
+that job, independently of whether sampling observed its parent. Deliberate
+stage PATH values are preserved after the portable Node prefix, and toolchain
+probes receive the same effective environment. Reserved evidence names are
+rejected before any recipe stage starts. Recipes and toolchain text are decoded
+as UTF-8.
+Private bytes and working set peaks are sampled lower bounds; working sets can
+share physical pages. Missed short-lived processes, missing metrics, network/IO
+wait and sampling gaps remain unknown. Retain the gap and observer-overhead
+records. Reconstruct observed parent/creation edges and stage ordering from
+receipts; distinguish serial stage sum from wall duration, sampling overhead and
+human/coordinator gaps. Do not call a duration ranking a proven critical path or
+claim a speedup without comparable released before/after evidence. Split a costly
+composite at its existing owner only after its operation frequency, unit cost,
+cache/download behavior and unexplained residual have been established.
+CPU interval deltas retain creation identities, including competing processes;
+a first observation has unknown interval usage. CPU percentages use one core as
+100 percent. Host-process CPU deltas include the stream pumps and may include
+other work in that host. Toolchain probe time is recorded separately. Sample,
+identity and observation-count bounds also stop dependent work, rather than
+silently discarding evidence. Treat any such stopped run as diagnostic.
+A process-metric query failure, including permission denial, also stops the
+dependent chain while retaining the gap and failure receipts. A missing process
+observation invalidates its CPU baseline; a later appearance has unknown interval
+usage rather than a percentage calculated over the wrong window.
+
 ## Cleaning Up a Build from Source
 
 A source build has nothing to uninstall — deleting the checkout removes the
