@@ -44,6 +44,9 @@ const (
 // new bytes. errors.Is also continues to match the underlying failure.
 var ErrReplaced = errors.New("durablefile: replacement landed but durability is uncertain")
 
+// ErrDirectoryDurabilityUnsupported means created directory entries cannot be confirmed.
+var ErrDirectoryDurabilityUnsupported = errors.New("durablefile: directory durability unsupported")
+
 // File is the temporary file a Replacer writes, syncs and closes.
 type File interface {
 	io.Writer

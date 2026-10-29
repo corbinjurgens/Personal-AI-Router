@@ -137,6 +137,11 @@ func managerFixtureOverlay(dir string) (string, error) {
 		}
 	}`, bundle)
 	modified := filepath.Join(dir, "main.go")
+	const probeSite = "o, hostCopyBaselineQuiescence, durablefile.Replacer{}"
+	if strings.Count(string(data), probeSite) != 1 {
+		return "", fmt.Errorf("fixture quiescence probe site changed")
+	}
+	data = []byte(strings.Replace(string(data), probeSite, "o, func() error { return nil }, durablefile.Replacer{}", 1))
 	if err := os.WriteFile(modified, []byte(strings.Replace(string(data), site, replacement, 1)), 0o600); err != nil {
 		return "", err
 	}

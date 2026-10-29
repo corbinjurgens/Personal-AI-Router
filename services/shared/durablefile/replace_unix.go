@@ -5,7 +5,20 @@
 
 package durablefile
 
-import "os"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// SyncCreatedDir confirms the entry for an already-created directory.
+func (r Replacer) SyncCreatedDir(path string) error {
+	parent := filepath.Dir(path)
+	if err := r.withDefaults().SyncDir(parent); err != nil {
+		return fmt.Errorf("durablefile: sync directory %s: %w", parent, err)
+	}
+	return nil
+}
 
 func replaceFile(tmp, target string) error {
 	return os.Rename(tmp, target)

@@ -15,6 +15,16 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// SyncCreatedDir cannot confirm a newly created directory entry on Windows.
+func (r Replacer) SyncCreatedDir(path string) error {
+	if r.SyncDir != nil {
+		if err := r.SyncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("durablefile: sync directory %s: %w", filepath.Dir(path), err)
+		}
+	}
+	return ErrDirectoryDurabilityUnsupported
+}
+
 // fileRenameInfo matches FILE_RENAME_INFO, including HANDLE alignment on both
 // 32-bit and 64-bit Windows. Flags is the DWORD union used by FileRenameInfoEx.
 type fileRenameInfo struct {

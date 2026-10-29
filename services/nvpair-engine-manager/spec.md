@@ -2055,6 +2055,74 @@ content under `opMu`. Existing load dispatches and inference are not cancelled.
 No journal mechanism certifies historical vendor files, resumes downloads or
 implements a general job/history service.
 
+### Offline copy baseline
+
+The operator contract and ordered interval procedure are in
+[Offline copy baseline](README.md#offline-copy-baseline). Root coordinates as
+the profile owner. The standalone commands are:
+
+```text
+nvpair-engine-manager --initialize-fresh-profile
+nvpair-engine-manager --amend-copy-baseline --expected-journal-sha256=HEX --copy-baseline-disposition=complete-empty-history --attest-profile-quiescent
+```
+
+`HEX` is the lowercase SHA-256 of the exact reviewed current bytes. Amendment
+also requires `--previous-profile-reviewed` whenever the previous app exists,
+even without a journal. `--allow-empty-old-journal` applies only to a current
+version-1 object missing only `copyRecoveryRequired`, with empty arrays and a
+valid `copiesComplete` boolean. Current input instead requires strict empty
+arrays, `copiesComplete:false` and `copyRecoveryRequired:false`. The current
+version-1 journal requires both booleans; missing journals remain historically
+incomplete, old ordinary loads unreadable, and no ordinary constructor
+provisions or repairs them. The old amendment is one-off, not compatibility.
+
+The current app is `BASE/Nvidia Corporation/Personal AI Router`, the previous
+app `BASE/NVIDIA Corporation/PAIR`; organization parents can alias, so the
+app-level paths matter. On Windows both modes require a set, nonempty, absolute
+`LOCALAPPDATA` naming the profile owner's Local base before mutation. Fresh
+allocation refuses either existing app, imports no history and is deliberately
+non-idempotent. First launch may already create the profile; installation,
+empty inventories, deleted journals and recreated children do not prove it
+fresh. Failure preserves allocated and landed state. Unix success confirms file
+publication/readback and each newly created directory entry through the first
+pre-existing ancestor. Windows has no supported equivalent here: success is
+bounded to allocation and file publication/readback and reports
+`fresh-directory durability: UNVERIFIED (unsupported)`, not whole-profile
+durability. Keep this limitation in completion reports.
+
+Previous inspection accepts a definitely absent app or journal, a validated
+empty current journal, or the precisely empty old shape without the current-input
+old opt-in. Markers, unreadability, unsafe paths and inspection uncertainty
+refuse even with review attestation. Current retained downloads or copies,
+naming mismatch, recovery true, unreadable or unsupported old data remain
+blocked for separate review; replacement documents are unsupported. Actual
+machine coverage remains UNVERIFIED. Empty current state does not license
+ignoring retained previous markers after partial migration.
+
+Root reserves the interval, prevents restart and other users, closes GUI/TUI
+and stops service, broker and standalone owners by separately authorized
+procedures, then verifies controllers, destinations and downloads stopped. Root
+reviews exact bytes and historical evidence across both namespaces, records the
+digest and disposition, invokes the command once, checks backup bytes, hashes
+and strict state, and resolves failures before release. Empty live lists or
+markers do not establish history. The tool does not stop owners. Service locks,
+sockets, optional ports and process snapshots cannot prove exclusion; snapshots
+race startup and may miss renamed processes. Attestation is mandatory and a
+nonempty `NVPAIR_SERVICE_ENDPOINT` is refused. Rechecks are not atomic CAS.
+
+Amendment reserves a deterministic digest-named backup, refuses an existing
+backup and confirms exact bytes before publication. It rechecks hashes and
+reports observed landed state; refusal or uncertainty exits non-zero. There is
+no automatic cleanup, retry, restore, resume or persistent recovery protocol.
+Complete-looking bytes after a crash or uncertain write cannot reveal a prior
+durability error on ordinary read; preserve evidence and resolve it before
+restart. Root enforces exclusion after tool exit. After a separately authorized
+interval is released, ordinary startup may reread the confirmed journal and
+read-only evidence must show expected baseline/source and remaining blockers.
+Neither command establishes full owner evidence or build-apply eligibility; O1
+still refuses real starts, O2 external-root coverage remains separate, and O3
+does not certify predecessors or infer historical completion.
+
 ### Product integration
 
 The engine manager builds standalone (`go build ./...`) and is tested end to

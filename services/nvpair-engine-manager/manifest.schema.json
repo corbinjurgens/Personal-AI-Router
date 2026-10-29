@@ -22,6 +22,10 @@
     "model_naming": {
       "enum": ["exact", "implied-latest-tag"]
     },
+    "memory_plan": {
+      "type": "object", "additionalProperties": false, "required": ["adapter"],
+      "properties": { "adapter": { "const": "strata" } }
+    },
     "operations": {
       "type": "object",
       "additionalProperties": false,
@@ -42,6 +46,7 @@
         "properties": {
           "detect": { "$ref": "#/definitions/detectionPaths" },
           "detect_required": { "$ref": "#/definitions/detectionPaths" },
+          "memory_plan": { "$ref": "#/definitions/memoryPlanCommand" },
           "runtime": {
             "$ref": "#/definitions/runtime"
           }
@@ -59,6 +64,15 @@
     }
   }],
   "definitions": {
+    "memoryPlanCommand": {
+      "type": "object", "additionalProperties": false,
+      "required": ["command", "working_directory"],
+      "properties": {
+        "command": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "type": "string", "maxLength": 4096 } },
+        "working_directory": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      },
+      "description": "Engine-manager validates absolute platform paths, adapter and the exact private planning argument shape."
+    },
     "detectionPaths": {
       "type": "array",
       "items": { "type": "string", "pattern": "\\S" },

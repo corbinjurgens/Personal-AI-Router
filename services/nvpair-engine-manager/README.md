@@ -1502,14 +1502,118 @@ unmasked absence observation; llama.cpp requires a forced cache rescan. Failed
 cleanup, ordinary list absence and restart cannot clear a marker.
 
 The same file and journal writer retain unresolved controller and destination
-copies. The current version-1 shape requires `entries`, `copies` and
-`copiesComplete`; old shapes fail recovery rather than being interpreted as an
-empty copy history. A missing file preserves ordinary download admission, but
+copies. The current version-1 shape requires `entries`, `copies`,
+`copiesComplete` and `copyRecoveryRequired`; old shapes fail recovery rather
+than being interpreted as an empty copy history. A missing file preserves ordinary download admission, but
 copy safety remains unknown. Download writes preserve that unknown baseline
 with `copiesComplete:false`. ROOT must coordinate an explicitly quiescent
 current-format baseline or a fresh private profile with an explicit complete
 baseline. Startup does no peer contact, artifact scan, cleanup or expiry to
-manufacture one, and there is no copy recovery API.
+manufacture one, and there is no copy recovery API. Ordinary constructors do
+not provision missing journals or repair old ones; the explicit empty-old
+amendment below is not runtime compatibility.
+
+### Offline copy baseline
+
+These standalone operator commands run as the profile owner, with root acting
+as coordinator. They are not first-launch hooks. Reserve an exclusive offline
+interval for either command. On Windows, `LOCALAPPDATA` must be set, nonempty
+and absolute, and must be the profile owner's Local base; both modes refuse
+before mutation otherwise. The current app is `BASE/Nvidia Corporation/Personal AI Router`
+and the previous app is `BASE/NVIDIA Corporation/PAIR`, where `BASE` is the
+resolved per-user configuration base. Their organization parents can alias on
+case-insensitive filesystems: inspect the app directories, not the parent.
+
+For a genuinely new whole profile, before any GUI or headless launch:
+
+```text
+nvpair-engine-manager --initialize-fresh-profile
+```
+
+The command exclusively allocates the current profile only if both app paths
+are definitely absent, imports no history, and writes an empty complete
+baseline. It is deliberately non-idempotent. A first launch may already create
+the profile; installation, reinstallation, empty inventories, deleted journals
+or recreated children do not establish freshness. A failure leaves allocated
+directories and any landed bytes for review, exits non-zero and is not retried
+or cleaned up automatically. Unix success confirms file publication and strict
+readback, and every newly created directory entry through the first pre-existing
+ancestor. Boundary errors leave allocations and return non-zero. Windows has no
+supported equivalent for new-directory confirmation in this codebase: bounded
+success confirms allocation and file publication/readback and reports
+`fresh-directory durability: UNVERIFIED (unsupported)`. It does not confirm
+whole-profile durability; retain that limitation in completion reports until
+support is separately verified.
+
+For an existing profile, after the review below, the separate amendment is:
+
+```text
+nvpair-engine-manager --amend-copy-baseline --expected-journal-sha256=HEX --copy-baseline-disposition=complete-empty-history --attest-profile-quiescent
+```
+
+`HEX` is the 64-character lowercase SHA-256 of the exact reviewed current
+journal bytes. Add `--previous-profile-reviewed` whenever the previous app
+directory exists, even without a journal. Add `--allow-empty-old-journal` only
+when the current input is the precisely empty version-1 old object missing only
+`copyRecoveryRequired`, with a valid boolean `copiesComplete`. The ordinary
+current input must be strictly valid, with empty `entries` and `copies`,
+`copiesComplete:false` and `copyRecoveryRequired:false`. The old opt-in is
+refused for current input. No other runtime flags, positional arguments, false
+offline booleans, replacement document, force or profile override are accepted.
+
+Previous inspection accepts a definitely absent app or journal, a strictly
+valid empty current journal, or the precisely empty old shape. Current-format
+previous baseline flags do not certify history. The old opt-in concerns the
+current input, not previous-only inspection. Any previous marker, unreadability,
+unsafe path or inspection uncertainty refuses the amendment; the review flag
+never overrides refusal. Retained downloads or copies, naming mismatch, current
+recovery true, unreadable data and unsupported older shapes require separate
+review. Do not delete, merge or ignore previous markers, including after partial
+migration. General replacement documents are unsupported; actual machine
+journal coverage remains UNVERIFIED pending separate inventory and review.
+
+In order, root must:
+
+1. Reserve the machine interval, prevent autostart and restart, and exclude all
+   other profile users. Close GUI and TUI and stop service, broker and standalone
+   owners using separately authorized procedures. The tool does not do this.
+2. Verify controllers, destinations and downloads have stopped. Empty live
+   lists do not prove historical completion. Review exact journal bytes and
+   explicit history evidence for both current and known previous namespaces,
+   including partial migration. Inspect the previous app and journal before
+   attesting; preserve unsupported state for separate review.
+3. Record the expected digest and disposition, then invoke the appropriate
+   command once. For amendment, check the exact backup bytes, reported hashes
+   and strict resulting state. Resolve any failure before releasing the interval.
+
+Marker absence qualifies input only; it does not establish complete history.
+The amendment requires the operator's quiescence attestation. Service sockets
+and locks cover neither all profile users nor startup before listen, optional
+ports may be disabled, and process snapshots can miss renamed processes or race
+with startup. The tool refuses a nonempty `NVPAIR_SERVICE_ENDPOINT`: review and
+stop custom-endpoint instances before clearing it. Its conservative process and
+endpoint checks do not create a lease; repeated checks and hash comparisons are
+not atomic CAS against ordinary writers. The exclusive interval must remain in
+force after the tool exits until root releases it.
+
+The amendment exclusively reserves the deterministic backup basename
+`model-download-state.json.before-copy-baseline-SHA256.bak`, where `SHA256` is
+the reviewed digest, and confirms an exact-byte backup before publication. An
+existing backup, including a dangling link, refuses. It rechecks paths, previous
+state, owners and current bytes/hash before backup and publication. Refusals and
+uncertain writes exit non-zero; summaries report observed hashes, load and
+landed state when available, with unavailable values otherwise. There is no
+automatic cleanup, retry, restore, resume or persistent recovery protocol. A
+crash or uncertain write after backup can leave complete-looking new bytes; a
+later ordinary read cannot recover the earlier durability error. Preserve the
+evidence and resolve state and durability before restart.
+
+After a separately authorized real interval is released, ordinary startup may
+reread the confirmed journal; read-only evidence must show the expected baseline
+and source and remaining blockers. This guidance does not authorize that
+startup. Neither command establishes full owner evidence or build-apply
+eligibility: O1 still refuses real starts, O2 external-root coverage remains
+separate, and O3 does not certify predecessors or infer historical completion.
 
 Each retained copy binds its operation, engine, exact model and normalized
 content key/naming, expected export identity when supplied, controller or

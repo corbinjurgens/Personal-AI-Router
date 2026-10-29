@@ -162,6 +162,81 @@ build.bat
 Avoid building one component and then running an old staged bundle. Rebuild the
 complete bundle so `services/build/bin/` is consistent.
 
+## Offline copy baseline
+
+These standalone commands are operator procedures, not first-launch hooks. Root
+coordinates the exclusive interval while running as the profile owner. The full
+procedure and refusal conditions are in the
+[engine-manager reference](../services/nvpair-engine-manager/README.md#offline-copy-baseline).
+
+```text
+nvpair-engine-manager --initialize-fresh-profile
+```
+
+For a reviewed existing profile, use the separate amendment:
+
+```text
+nvpair-engine-manager --amend-copy-baseline --expected-journal-sha256=HEX --copy-baseline-disposition=complete-empty-history --attest-profile-quiescent
+```
+
+`HEX` is the lowercase SHA-256 of the exact reviewed journal bytes. Add
+`--previous-profile-reviewed` whenever the previous app exists, even without a
+journal. Add `--allow-empty-old-journal` only for a current version-1 object
+missing only `copyRecoveryRequired`, with empty arrays and a valid boolean
+`copiesComplete`. Strict current input requires empty arrays, incomplete
+history and false recovery. Ordinary version-1 journals require both
+`copiesComplete` and `copyRecoveryRequired`; missing journals remain
+historically incomplete, old ordinary loads unreadable, and constructors do not
+automatically provision or repair them. The old amendment is a one-off.
+
+The current app path is `BASE/Nvidia Corporation/Personal AI Router` and the
+previous app path is `BASE/NVIDIA Corporation/PAIR`. Their organization parents
+can alias, so inspect app paths rather than the parent. On Windows both modes
+require `LOCALAPPDATA` set, nonempty and absolute to the profile owner's Local
+base, before mutation. Fresh allocation refuses either existing app, imports no
+history and is non-idempotent. First GUI or headless launch can already create
+the profile. Installation, reinstallation, empty inventories, deleted journals
+and recreated children are not freshness evidence. Failure preserves allocated
+and landed state. Unix success confirms file publication/readback and every
+new directory entry through the first pre-existing ancestor. Windows has no
+supported new-directory confirmation here: bounded success confirms allocation
+and file publication/readback, reports `fresh-directory durability: UNVERIFIED (unsupported)`,
+and does not establish whole-profile durability. Retain that limitation in
+completion reports until support is separately verified.
+
+Previous inspection accepts a definitely absent app or journal, a validated
+empty current journal, or the precisely empty old shape without the current
+old-input opt-in. Any previous marker, unreadability or inspection uncertainty
+refuses even with the review flag. Preserve markers, including in partial
+migrations. Retained downloads/copies, naming mismatch, current recovery true,
+unreadable data and unsupported older shapes need separate review; replacement
+documents are unsupported. Actual machine journal coverage is UNVERIFIED.
+
+Root reserves the interval, prevents autostart/restart and other profile users,
+closes GUI/TUI and stops service, broker and standalone owners using separately
+authorized procedures. Root verifies controllers, destinations and downloads
+stopped, reviews exact bytes and historical evidence in both namespaces, records
+the digest and disposition, invokes the appropriate command once, checks backup
+bytes, reported hashes and strict state, and resolves failures before release.
+Empty live lists or markers do not establish history. The tool does not stop
+owners. Sockets, service locks, optional ports and process snapshots cannot prove
+quiescence; snapshots race startup and can miss renamed processes. Attestation is
+mandatory and a nonempty `NVPAIR_SERVICE_ENDPOINT` is refused. Rechecks are not
+atomic CAS against ordinary writers.
+
+Amendment reserves a deterministic digest-named exact-byte backup and refuses an
+existing backup. It rechecks hashes and reports observed landed state; refusal
+or uncertainty exits non-zero. There is no automatic cleanup, retry, restore,
+resume or persistent recovery protocol. A crash or uncertain write can leave
+complete-looking bytes whose earlier durability error a later read cannot
+recover. Preserve evidence and resolve state and durability before restart;
+root enforces exclusion after the tool exits. After a separately authorized
+interval is released, ordinary startup may reread the confirmed journal and
+read-only evidence must show the expected baseline/source and remaining
+blockers. Neither command establishes full owner evidence or build-apply
+eligibility; O1 still refuses real starts, O2 external-root coverage remains
+separate, and O3 does not certify predecessors or infer historical completion.
+
 ## Run Without the Desktop Application
 
 After you stage `build/bin/`, you have a complete, runnable PAIR node without

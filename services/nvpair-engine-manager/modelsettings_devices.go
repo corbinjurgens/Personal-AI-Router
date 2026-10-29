@@ -513,6 +513,7 @@ type modelDeviceOutputBudget struct {
 	used     int
 	cancel   context.CancelFunc
 	exceeded bool
+	limit    int
 }
 type modelDeviceBoundedWriter struct {
 	data   bytes.Buffer
@@ -522,7 +523,11 @@ type modelDeviceBoundedWriter struct {
 func (w *modelDeviceBoundedWriter) Write(p []byte) (int, error) {
 	w.budget.mu.Lock()
 	defer w.budget.mu.Unlock()
-	if len(p) > modelDevicesBytes-w.budget.used {
+	limit := w.budget.limit
+	if limit == 0 {
+		limit = modelDevicesBytes
+	}
+	if len(p) > limit-w.budget.used {
 		w.budget.exceeded = true
 		w.budget.cancel()
 		return 0, errors.New("device helper output bound")
