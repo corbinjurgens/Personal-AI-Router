@@ -235,14 +235,54 @@ The [estimate support matrix](spec.md#advisory-memory-estimate-support) describe
 dense/GQA, LFM2 recurrence, Qwen variants, SWA, mixed cache precision and tensor
 placement. Unsupported components stay independently Unknown. Companions have
 separate known storage and unsized runtime costs. Totals remain partial and
-uncalibrated, with no Fits claim. CPU and unmapped offload byte projections are
+uncalibrated rather than complete peak-allocation bounds. CPU and unmapped offload byte projections are
 not native device allocation readback. Inspection and explicit Recalculate use
 the target broker's existing self telemetry cache, including source retirement
 and suspend-aware aging. Missing input leaves comparisons Unknown with reason
-`target memory telemetry unavailable`. Current partial costs also remain Unknown.
+`target memory telemetry unavailable`. With fresh mapped capacity and priced
+weights, partial costs can produce advisory Fits or Tight with named omission
+warnings; these verdicts do not establish a complete peak-memory bound.
 The private owner-injected Auto selector consumes target-owned self evidence
 through the existing worker envelope. Its complete-cost cases remain synthetic;
 connected telemetry does not establish complete accounting.
+
+The following matrix records the current estimator implementation. Derived rows describe
+bounded tensor or native layout arithmetic. Compute rows are partial heuristic
+projections from the pinned parser, with an uncalibrated outward band of
+three quarters to three halves of the priced portion. They are neither native
+allocation bounds nor complete costs. No calibration evidence has been added.
+
+| Architecture class | Weights | Attention cache | Recurrent state | Compute workspace |
+| --- | --- | --- | --- | --- |
+| Dense llama/Qwen2/Qwen3 | Derived directory bytes | Derived mapped widths | Excluded | Heuristic CPU, full or partial single GPU, with complete conventional graph tensors |
+| Qwen2/Qwen3 MoE | Derived, all resident experts | Derived mapped widths | Excluded | Heuristic CPU/full/partial single GPU; validated routed and shared expert widths, active expert count |
+| DeepSeek2 MLA | Derived directory bytes | Derived only for the confirmed latent/rotary native layout | Excluded | Heuristic CPU/full/partial single GPU for the confirmed low-rank query and KV tensor layout, routed/shared experts |
+| LFM2 hybrid | Derived directory bytes | Derived attention layers | Derived mapped short-convolution state | Heuristic CPU/full/partial single GPU with explicit per-layer KV heads and short-convolution tensors |
+| LFM2MoE, Qwen3Next, Qwen3.5 variants | Derived directory bytes | Derived mapped attention layers; explicit Qwen recurrent masks remain Unknown | Derived for mapped short-convolution or R/S state layouts; otherwise Unknown | Unknown: graph workspace mapping deferred |
+| SWA/shared-KV/NextN variants | Derived directory bytes | Derived only for the supported native layouts | Independently mapped | Unknown: workspace layer/window mapping deferred |
+| Other or incomplete layouts | Known tensor bytes, partial if incomplete | Unknown unless independently mapped | Unknown unless independently mapped | Unknown with the missing graph input named |
+
+Compute uses only each library device's `Computation` fields, with compute and
+output sharing a maximum as in `Computation.Sum()`. Host portions stay on host;
+the single device portion stays on the device domain. At zero GPU layers the
+parser's hypothetical device scratch is excluded, never transferred to host.
+CPU requires explicit `op-offload=false`. GPU pricing requires one native
+CUDA or Metal inventory entry; unresolved inventory and multiple-device splits
+stay Unknown. Device byte projections do not establish a launch binding.
+Library panics become Unknown. Runtime/driver/allocator costs, native scratch
+residuals, mmap residency and transient peaks remain unpriced warnings.
+
+Source owners at llama.cpp `7fe450e19305b828c199d602c23a8337aaa1f03b` are
+`src/models/qwen2moe.cpp` and `qwen3moe.cpp` (expert tensor widths and native
+`n_ff/n_expert_used` fallback), `deepseek2.cpp` (query/KV low-rank and shared
+expert shapes), `lfm2.cpp` (attention versus convolution layers), and
+`src/llama-model.cpp` (output-first offload placement). Parser v0.27.0 owners
+are `file_architecture.go:transformerArchitecture` (retained metadata),
+`file_estimate__llamacpp.go:EstimateLLaMACppRun` (placement and computation),
+its flash/recurrent compute helpers (active-expert intermediate widths), and
+`LLaMACppComputationMemoryUsage.Sum`. Scalar dimensions and complete tensor
+shapes are required; unsupported per-layer expert widths, leading dense MoE
+blocks and query-projection variants remain deferred rather than inferred.
 Useful component estimates remain available. The
 [estimate support contract](spec.md#advisory-memory-estimate-support) records
 current accounting limits; synthetic costs do not enable production. MANIFEST
