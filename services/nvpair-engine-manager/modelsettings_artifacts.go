@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -395,8 +396,10 @@ func resolvedLoadArtifacts(ctx context.Context, store engineModelStore, model st
 }
 
 type inspectionHeaderReader struct {
-	ctx   context.Context
-	file  servingArtifactFile
+	ctx  context.Context
+	file interface {
+		ReadAt([]byte, int64) (int, error)
+	}
 	usage *servingReadUsage
 }
 
@@ -427,7 +430,7 @@ func decodeInspectionFacts(ctx context.Context, list modelFileList, access servi
 		if err := ctx.Err(); err != nil {
 			return gguffacts.Facts{}, err
 		}
-		file, err := access.openFile(f.configured)
+		file, err := access.checkedOpen(ctx, f.configured, f.abs, f.info)
 		if err != nil {
 			return gguffacts.Facts{}, err
 		}
@@ -442,7 +445,9 @@ func decodeInspectionFacts(ctx context.Context, list modelFileList, access servi
 		} else if f.Role == "companion" {
 			role = gguffacts.RoleCompanion
 		}
-		artifacts = append(artifacts, gguffacts.Artifact{Role: role, Reader: inspectionHeaderReader{ctx, file, access.usage}, Size: f.Size})
+		evidence := sourceEvidence{configured: f.configured, target: f.abs, info: f.info, size: f.info.Size(), mtime: f.info.ModTime().UnixNano()}
+		reader := servingContextReaderAt{ctx: ctx, reader: file, expected: evidence}
+		artifacts = append(artifacts, gguffacts.Artifact{Role: role, Reader: inspectionHeaderReader{ctx, reader, access.usage}, Size: f.Size})
 	}
 	facts, err := gguffacts.Decode(ctx, artifacts)
 	if err != nil {
@@ -518,6 +523,16 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	if err != nil {
 		return unavailable("unavailable", "Exact local model source is unavailable.")
 	}
+	access.recognize = func(ctx context.Context, model string) (engineInventory, error) {
+		observation, err := e.recognizeModelSource(ctx, p.Engine, model)
+		if err != nil {
+			return engineInventory{}, err
+		}
+		if err := e.nativeSourceCurrent(ctx, st, snapshot.store, observation); err != nil {
+			return engineInventory{}, err
+		}
+		return observation, nil
+	}
 	list, _, err := resolveLlamaArtifacts(ctx, snapshot.state, snapshot.command, snapshot.store, p.ModelID, access)
 	if err != nil {
 		switch {
@@ -555,7 +570,23 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	if err != nil || !snapshot.equal(current) {
 		return unavailable("busy", "Engine configuration changed during inspection.")
 	}
-	after, _, err := resolveLlamaArtifacts(ctx, current.state, current.command, current.store, p.ModelID, access)
+	if list.source.inventory != nil {
+		original := access.recognize
+		access.recognize = func(ctx context.Context, model string) (engineInventory, error) {
+			if err := e.nativeSourceCurrent(ctx, st, snapshot.store, *list.source.inventory); err != nil {
+				return engineInventory{}, err
+			}
+			observation, err := original(ctx, model)
+			if err != nil {
+				return engineInventory{}, err
+			}
+			if !bytes.Equal(observation.raw, list.source.recognition) || observation.runID != list.source.run || observation.launchDigest != list.source.configuration {
+				return engineInventory{}, errModelInspectionChanged
+			}
+			return observation, nil
+		}
+	}
+	after, _, err := resolveLlamaArtifactsExpected(ctx, current.state, current.command, current.store, p.ModelID, access, list)
 	if err != nil || list.binding != after.binding || len(list.Files) != len(after.Files) {
 		return unavailable("unknown", "Artifact sources changed during inspection.")
 	}
@@ -563,6 +594,9 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 		if !sameCopyFile(f.info, after.Files[i].info) {
 			return unavailable("unknown", "Artifact files changed during inspection.")
 		}
+	}
+	if list.source.inventory != nil && e.nativeSourceCurrent(ctx, st, snapshot.store, *list.source.inventory) != nil {
+		return unavailable("unknown", "Native model recognition changed during inspection.")
 	}
 	// Finish with a nonblocking configuration check after the last file I/O.
 	current, err = inspectionSnapshot(st, p.Engine)

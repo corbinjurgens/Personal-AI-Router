@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -145,6 +146,13 @@ func inspectFixture(t *testing.T, f inspectionFixture) modelconfig.InspectResult
 		t.Fatal(err)
 	}
 	return result
+}
+
+// Cache fixtures opt into exact native membership; configured preset, receipt
+// and typed sources continue to exercise their own authority with the engine off.
+func inspectionNativeMembership(t *testing.T, f inspectionFixture) *int {
+	t.Helper()
+	return copyTestNativeModels(t, f.ex, f.request.Engine, f.request.ModelID)
 }
 
 func TestModelSettingsArtifactsExactAliasOffAndNoApproval(t *testing.T) {
@@ -310,6 +318,216 @@ func TestModelSettingsFactsCacheDetachedAndSourceRechecked(t *testing.T) {
 	}
 }
 
+func TestLinkedModelInspectionBinding(t *testing.T) {
+	testReplacement := func(name, source, replace string, warm bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newInspectionFixture(t, 4096)
+			// Initial preset resolution samples, reads, resamples, then checks
+			// its binding after sampling the artifact. Replace at the next open,
+			// after final resolution has checked the original snapshot metadata.
+			selector, selectorOpensBeforeFinal := f.preset, 4
+			if source == "native cache" {
+				f.st.plat.Runtime.Args = nil
+				f.request.ModelID = "owner/repository:Q4_K_M"
+				commit := strings.Repeat("a", 40)
+				repo := llamaRepoDir(f.root, "owner/repository")
+				selector = filepath.Join(repo, "refs", "main")
+				writeTestFile(t, selector, []byte(commit))
+				f.model = filepath.Join(repo, "snapshots", commit, "model-Q4_K_M.gguf")
+				writeInspectionGGUF(t, f.model, "llama", 0.25, 4096)
+				inspectionNativeMembership(t, f)
+				// Initial HF resolution performs two complete checked ref reads.
+				selectorOpensBeforeFinal = 6
+			}
+			if warm {
+				if result := inspectFixture(t, f); result.Status != "resolved" {
+					t.Fatalf("cache warmup=%+v", result)
+				}
+			}
+			var reads []inspectionRead
+			opened, closed, selectorOpens, forbidden := 0, 0, 0, 0
+			replaced := false
+			replacedPath := selector
+			if replace == "artifact" {
+				replacedPath = f.model
+			}
+			f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+				if path == selector {
+					selectorOpens++
+					if selectorOpens == selectorOpensBeforeFinal+1 {
+						if err := os.Rename(replacedPath, replacedPath+".old"); err != nil {
+							t.Fatal(err)
+						}
+						if replace == "artifact" {
+							writeInspectionGGUF(t, replacedPath, "llama", 0.75, 4096)
+						} else if source == "native cache" {
+							writeTestFile(t, replacedPath, []byte(strings.Repeat("a", 40)))
+						} else {
+							writeTestFile(t, replacedPath, []byte("[exact-alias]\nmodel = main.gguf\n"))
+						}
+						replaced = true
+					}
+				}
+				file, err := os.Open(path)
+				if err != nil {
+					return nil, err
+				}
+				opened++
+				return &inspectionCountFile{File: file, reads: &reads, opened: &opened, closed: &closed, onRead: func(int64, int) {
+					if path == replacedPath && replaced {
+						forbidden++
+					}
+				}}, nil
+			}
+			if result := inspectFixture(t, f); result.Status == "resolved" || !replaced || forbidden != 0 || len(result.Artifacts) != 0 {
+				t.Fatalf("replacement binding: result=%+v replaced=%v forbidden=%d", result, replaced, forbidden)
+			}
+			if opened != closed {
+				t.Fatalf("handles opened=%d closed=%d", opened, closed)
+			}
+			if warm && f.ex.modelInspection.lastUsage.HeaderBytes != 0 {
+				t.Fatal("warm facts were decoded again")
+			}
+		})
+	}
+	testReplacement("cold preset replacement", "preset", "selector", false)
+	testReplacement("warm preset replacement", "preset", "selector", true)
+	testReplacement("cold preset artifact replacement", "preset", "artifact", false)
+	testReplacement("warm preset artifact replacement", "preset", "artifact", true)
+	testReplacement("cold ref replacement", "native cache", "selector", false)
+	testReplacement("warm ref replacement", "native cache", "selector", true)
+	testReplacement("cold cache artifact replacement", "native cache", "artifact", false)
+	testReplacement("warm cache artifact replacement", "native cache", "artifact", true)
+
+	testWithdrawal := func(name string, warm, beforeInitial bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newInspectionFixture(t, 4096)
+			f.st.plat.Runtime.Args = nil
+			f.request.ModelID = "owner/repository:Q4_K_M"
+			commit := strings.Repeat("a", 40)
+			repo := llamaRepoDir(f.root, "owner/repository")
+			writeTestFile(t, filepath.Join(repo, "refs", "main"), []byte(commit))
+			writeInspectionGGUF(t, filepath.Join(repo, "snapshots", commit, "model-Q4_K_M.gguf"), "llama", 0.25, 4096)
+			inspectionNativeMembership(t, f)
+			if warm {
+				if result := inspectFixture(t, f); result.Status != "resolved" {
+					t.Fatalf("cache warmup=%+v", result)
+				}
+			}
+			native := f.ex.client.Transport
+			calls, forbidden, opened, closed := 0, 0, 0, 0
+			withdrawn := false
+			f.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+				calls++
+				if beforeInitial || calls == 2 {
+					withdrawn = true
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":[]}`))}, nil
+				}
+				return native.RoundTrip(request)
+			})
+			var reads []inspectionRead
+			f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+				file, err := os.Open(path)
+				if err != nil {
+					return nil, err
+				}
+				opened++
+				return &inspectionCountFile{File: file, reads: &reads, opened: &opened, closed: &closed, onRead: func(int64, int) {
+					if withdrawn {
+						forbidden++
+					}
+				}}, nil
+			}
+			result := inspectFixture(t, f)
+			if result.Status == "resolved" || !withdrawn || forbidden != 0 || len(result.Artifacts) != 0 || opened != closed {
+				t.Fatalf("withdrawn recognition: result=%+v calls=%d withdrawn=%v forbidden=%d opens=%d closes=%d", result, calls, withdrawn, forbidden, opened, closed)
+			}
+			if beforeInitial && opened != 0 {
+				t.Fatalf("unrecognized source opened %d files", opened)
+			}
+			if !beforeInitial && warm && f.ex.modelInspection.lastUsage.HeaderBytes != 0 {
+				t.Fatal("warm facts were decoded again")
+			}
+		})
+	}
+	testWithdrawal("cold initial recognition withdrawal", false, true)
+	testWithdrawal("warm initial recognition withdrawal", true, true)
+	testWithdrawal("cold final recognition withdrawal", false, false)
+	testWithdrawal("warm final recognition withdrawal", true, false)
+
+	for _, warm := range []bool{false, true} {
+		name := "cold native exit during final resolution"
+		if warm {
+			name = "warm native exit during final resolution"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newInspectionFixture(t, 4096)
+			f.st.plat.Runtime.Args = nil
+			f.request.ModelID = "owner/repository:Q4_K_M"
+			commit := strings.Repeat("a", 40)
+			repo := llamaRepoDir(f.root, "owner/repository")
+			writeTestFile(t, filepath.Join(repo, "refs", "main"), []byte(commit))
+			f.model = filepath.Join(repo, "snapshots", commit, "model-Q4_K_M.gguf")
+			writeInspectionGGUF(t, f.model, "llama", 0.25, 4096)
+			inspectionNativeMembership(t, f)
+			if warm && inspectFixture(t, f).Status != "resolved" {
+				t.Fatal("cache warmup failed")
+			}
+			opens, target := 0, 3
+			if warm {
+				target = 2
+			}
+			f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+				if path == f.model {
+					opens++
+					if opens == target {
+						f.st.mu.Lock()
+						f.st.running, f.st.runID = false, ""
+						f.st.mu.Unlock()
+					}
+				}
+				return os.Open(path)
+			}
+			if result := inspectFixture(t, f); opens < target || result.Status == "resolved" || len(result.Artifacts) != 0 {
+				t.Fatalf("native exit: opens=%d result=%+v", opens, result)
+			}
+		})
+	}
+
+	t.Run("replacement at decoder open", func(t *testing.T) {
+		f := newInspectionFixture(t, 4096)
+		var reads []inspectionRead
+		opened, closed, modelOpens, forbidden := 0, 0, 0, 0
+		replaced := false
+		f.ex.modelInspection.open = func(path string) (servingArtifactFile, error) {
+			if path == f.model {
+				modelOpens++
+				if modelOpens == 2 {
+					if err := os.Rename(path, path+".old"); err != nil {
+						t.Fatal(err)
+					}
+					writeInspectionGGUF(t, path, "llama", 0.75, 4096)
+					replaced = true
+				}
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				return nil, err
+			}
+			opened++
+			return &inspectionCountFile{File: file, reads: &reads, opened: &opened, closed: &closed, onRead: func(int64, int) {
+				if path == f.model && replaced {
+					forbidden++
+				}
+			}}, nil
+		}
+		result := inspectFixture(t, f)
+		if result.Status == "resolved" || !replaced || forbidden != 0 || opened != closed || len(f.ex.modelInspection.entries) != 0 {
+			t.Fatalf("decoder replacement: result=%+v replaced=%v forbidden=%d opens=%d closes=%d", result, replaced, forbidden, opened, closed)
+		}
+	})
+}
+
 func TestModelSettingsFactsCacheLRUExpiryAndByteCap(t *testing.T) {
 	now := time.Unix(1000, 0)
 	s := modelInspectionState{now: func() time.Time { return now }}
@@ -374,6 +592,7 @@ func TestModelSettingsArtifactsMainDraftAndCompanion(t *testing.T) {
 		f := newInspectionFixture(t, 4096)
 		f.st.plat.Runtime.Args = nil
 		f.request.ModelID = "owner/repository:Q4_K_M"
+		inspectionNativeMembership(t, f)
 		commit := strings.Repeat("a", 40)
 		repo := llamaRepoDir(f.root, "owner/repository")
 		writeTestFile(t, filepath.Join(repo, "refs", "main"), []byte(commit))
@@ -482,6 +701,7 @@ func TestModelSettingsArtifactsSharedSourcesUseEngineWideFence(t *testing.T) {
 			case "companion":
 				f.st.plat.Runtime.Args = nil
 				f.request.ModelID = canonical
+				inspectionNativeMembership(t, f)
 				shared = filepath.Join(repo, "snapshots", commit, "mmproj-f16.gguf")
 				writeInspectionGGUF(t, shared, "clip", 0.25, 4096)
 				canonical = "shared-projector-alias"
@@ -822,6 +1042,7 @@ func TestModelSettingsArtifactsCanonicalCacheMissingShard(t *testing.T) {
 	f := newInspectionFixture(t, 4096)
 	f.st.plat.Runtime.Args = nil
 	f.request.ModelID = "owner/repository:Q4_K_M"
+	inspectionNativeMembership(t, f)
 	commit := strings.Repeat("a", 40)
 	repo := llamaRepoDir(f.root, "owner/repository")
 	writeTestFile(t, filepath.Join(repo, "refs", "main"), []byte(commit))
@@ -889,6 +1110,7 @@ func TestModelSettingsArtifactsCacheSymlinkConfinement(t *testing.T) {
 			f := newInspectionFixture(t, 4096)
 			f.st.plat.Runtime.Args = nil
 			f.request.ModelID = "owner/repository:Q4_K_M"
+			inspectionNativeMembership(t, f)
 			repo, commit := llamaRepoDir(f.root, "owner/repository"), strings.Repeat("a", 40)
 			writeTestFile(t, filepath.Join(repo, "refs", "main"), []byte(commit))
 			target := filepath.Join(repo, "blobs", strings.Repeat("b", 64))
@@ -1057,6 +1279,7 @@ func TestModelSettingsFactsCanonicalReadsAccounted(t *testing.T) {
 	f := newInspectionFixture(t, 4096)
 	f.st.plat.Runtime.Args = nil
 	f.request.ModelID = "owner/repository:Q4_K_M"
+	inspectionNativeMembership(t, f)
 	repo, commit := llamaRepoDir(f.root, "owner/repository"), strings.Repeat("a", 40)
 	writeTestFile(t, filepath.Join(repo, "refs", "main"), []byte(commit))
 	writeInspectionGGUF(t, filepath.Join(repo, "snapshots", commit, "model-Q4_K_M.gguf"), "llama", 0.25, 4096)
@@ -1076,8 +1299,10 @@ func TestModelSettingsFactsCanonicalReadsAccounted(t *testing.T) {
 	for _, read := range reads {
 		total += uint64(read.bytes)
 	}
-	if result.Status != "resolved" || opened != closed || usage.SourceBytes != 2*uint64(len(commit)) || total != usage.SourceBytes+usage.SampleBytes+usage.HeaderBytes || usage.HeaderBytes != uint64(f.directoryEnd) {
-		t.Fatalf("canonical reads=%+v usage=%+v actual=%d open=%d close=%d", result, usage, total, opened, closed)
+	// Each initial/final resolver reads the ref for selection and rechecks its
+	// exact bytes after collecting artifacts.
+	if result.Status != "resolved" || opened != closed || usage.SourceBytes != 4*uint64(len(commit)) || total != usage.SourceBytes+usage.SampleBytes+usage.HeaderBytes || usage.HeaderBytes != uint64(f.directoryEnd) {
+		t.Fatalf("canonical reads: status=%s usage=%+v actual=%d open=%d close=%d", result.Status, usage, total, opened, closed)
 	}
 }
 
