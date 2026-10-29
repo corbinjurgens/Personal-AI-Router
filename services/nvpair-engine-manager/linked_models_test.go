@@ -88,7 +88,7 @@ func TestLinkedModelReadBinding(t *testing.T) {
 }
 
 func TestLinkedModelResolution(t *testing.T) {
-	t.Run("exact Ollama blob may link outside the store", func(t *testing.T) {
+	t.Run("pre-widening Ollama blob outside the store is refused", func(t *testing.T) {
 		root := t.TempDir()
 		fixture := writeOllamaModel(t, root, "tiny", 128, 3)
 		for rel, data := range fixture.blobs {
@@ -102,12 +102,8 @@ func TestLinkedModelResolution(t *testing.T) {
 				t.Skipf("symlink unavailable: %v", err)
 			}
 		}
-		list, err := ollamaSourceFiles(root, "tiny")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(list.Files) != len(fixture.blobs)+1 {
-			t.Fatalf("unexpected selected files: %+v", list.Files)
+		if _, err := ollamaSourceFiles(root, "tiny"); err == nil {
+			t.Fatal("outside blob was accepted before source widening")
 		}
 	})
 }

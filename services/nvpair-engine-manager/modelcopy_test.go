@@ -195,7 +195,7 @@ func (w *truncatingWriter) Write(p []byte) (int, error) {
 	panic(http.ErrAbortHandler)
 }
 
-func TestCopyModelResumesWithRangeAfterInterruption(t *testing.T) {
+func TestLinkedModelNativeTransferToken(t *testing.T) {
 	plentyOfDisk(t)
 	fastRetries(t, 1)
 	srcDir, dstDir := t.TempDir(), t.TempDir()
@@ -209,11 +209,13 @@ func TestCopyModelResumesWithRangeAfterInterruption(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var ranges []string
+	var tokens []string
 	record := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == controlModelFilePath && r.URL.Query().Get("path") == weightsRel {
 				mu.Lock()
 				ranges = append(ranges, r.Header.Get("Range"))
+				tokens = append(tokens, r.URL.Query().Get("exportId"))
 				mu.Unlock()
 			}
 			next.ServeHTTP(w, r)
@@ -238,10 +240,23 @@ func TestCopyModelResumesWithRangeAfterInterruption(t *testing.T) {
 	}
 
 	// Second run (a retry or a restart) resumes from the partial.
-	if _, err := dst.CopyModelFrom(context.Background(), client, "ollama", "tiny", nil); err != nil {
+	var progress []copyProgress
+	result, err := dst.CopyModelFrom(context.Background(), client, "ollama", "tiny", func(p copyProgress) { progress = append(progress, p) })
+	if err != nil {
 		t.Fatal(err)
 	}
-	got, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(weightsRel)))
+	if result.Layout != "" || result.ExportID != "" || result.Durability != "" || result.RequiresConfiguration {
+		t.Fatalf("native result contains durable identity: %+v", result)
+	}
+	for _, p := range progress {
+		if p.ExportID != "" {
+			t.Fatalf("native progress contains export identity: %+v", p)
+		}
+	}
+	got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(weightsRel)))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bytes.Equal(got, fx.blobs[weightsRel]) {
 		t.Fatal("resumed blob does not match the source")
 	}
@@ -249,6 +264,9 @@ func TestCopyModelResumesWithRangeAfterInterruption(t *testing.T) {
 	defer mu.Unlock()
 	if len(ranges) != 2 || ranges[0] != "" || ranges[1] != "bytes="+itoa(info.Size())+"-" {
 		t.Fatalf("Range headers = %q, want none then bytes=%d-", ranges, info.Size())
+	}
+	if len(tokens) != 2 || tokens[0] == "" || tokens[0] != tokens[1] {
+		t.Fatalf("native transfer tokens = %q", tokens)
 	}
 	assertNoPartFiles(t, root)
 }

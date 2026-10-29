@@ -362,10 +362,13 @@ func TestModelCopyCustomAliasSecurity(t *testing.T) {
 	})
 	t.Run("preset rebinding invalidates learned export", func(t *testing.T) {
 		f := newCustomCopyFixture(t)
-		list := customCopyList(t, f)
+		_, client := modelFileServer(t, f.source, nil)
+		list, err := client.modelFiles(context.Background(), "llamacpp", reportedCopyAlias, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		writeTestFile(t, filepath.Join(filepath.Dir(f.preset), "replacement.gguf"), []byte("different model"))
 		writeTestFile(t, f.preset, []byte("["+reportedCopyAlias+"]\nmodel = replacement.gguf\n"))
-		_, client := modelFileServer(t, f.source, nil)
 		body, _, err := client.modelFile(context.Background(), "llamacpp", reportedCopyAlias, list.Files[0].Path, list.ExportID, 0)
 		if body != nil {
 			body.Close()
@@ -376,13 +379,16 @@ func TestModelCopyCustomAliasSecurity(t *testing.T) {
 	})
 	t.Run("source file swap invalidates learned export", func(t *testing.T) {
 		f := newCustomCopyFixture(t)
-		list := customCopyList(t, f)
+		_, client := modelFileServer(t, f.source, nil)
+		list, err := client.modelFiles(context.Background(), "llamacpp", reportedCopyAlias, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		replacement := f.artifact + ".new"
 		writeTestFile(t, replacement, []byte("changed source"))
 		if err := os.Rename(replacement, f.artifact); err != nil {
 			t.Fatal(err)
 		}
-		_, client := modelFileServer(t, f.source, nil)
 		body, _, err := client.modelFile(context.Background(), "llamacpp", reportedCopyAlias, list.Files[0].Path, list.ExportID, 0)
 		if body != nil {
 			body.Close()

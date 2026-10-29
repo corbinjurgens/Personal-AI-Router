@@ -262,7 +262,7 @@ func (e *Executor) copyModelFrom(ctx context.Context, src modelFileSource, engin
 	if err != nil {
 		return copyModelResult{}, err
 	}
-	if list.ExportID != "" {
+	if list.Layout == llamaArtifactsLayout && list.ExportID != "" {
 		emit(copyProgress{remoteProgress: remoteProgress{Stage: "checking"}, ExportID: list.ExportID})
 	}
 	// Listing the source and planning the copy are read-only. Installing the

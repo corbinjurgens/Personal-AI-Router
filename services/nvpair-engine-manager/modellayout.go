@@ -363,9 +363,9 @@ func ollamaSourceFiles(root, model string) (modelFileList, error) {
 			return modelFileList{}, fmt.Errorf("model %q is incomplete on this node: %s is %d bytes, manifest says %d", model, brel, binfo.Size(), b.Size)
 		}
 		// The blob's name is its sha256; the destination verifies it.
-		list.Files = append(list.Files, modelFile{Path: brel, Size: binfo.Size(), SHA256: b.Digest, abs: real})
+		list.Files = append(list.Files, modelFile{Path: brel, Size: binfo.Size(), SHA256: b.Digest, abs: real, configured: filepath.Join(root, filepath.FromSlash(brel)), info: binfo})
 	}
-	list.Files = append(list.Files, modelFile{Path: rel, Size: info.Size(), abs: manifestPath})
+	list.Files = append(list.Files, modelFile{Path: rel, Size: info.Size(), abs: manifestPath, configured: filepath.Join(root, filepath.FromSlash(rel)), info: info})
 	return list, nil
 }
 
@@ -995,7 +995,7 @@ func (e *Executor) lmstudioSourceFiles(ctx context.Context, store engineModelSto
 			return nil
 		}
 		added[rel] = true
-		list.Files = append(list.Files, modelFile{Path: rel, Size: info.Size(), abs: real})
+		list.Files = append(list.Files, modelFile{Path: rel, Size: info.Size(), abs: real, configured: abs, info: info})
 		return nil
 	}
 	for _, entry := range matched {

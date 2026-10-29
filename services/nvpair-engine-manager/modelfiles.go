@@ -340,6 +340,18 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer release()
+	st, err := s.exec.state(engine)
+	if err != nil {
+		http.Error(w, "model content unavailable", http.StatusConflict)
+		return
+	}
+	generation := issuedCopyGeneration(st, model)
+	issued := false
+	defer func() {
+		if !issued {
+			invalidateCopyGeneration(st, model, generation)
+		}
+	}()
 	list, err := s.exec.modelSourceFiles(ctx, engine, model)
 	if err != nil {
 		http.Error(w, err.Error(), modelLookupStatus(err))
@@ -354,12 +366,13 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 	enc := json.NewEncoder(w)
-	writeFrame := func(f streamFrame) {
+	writeFrame := func(f streamFrame) bool {
 		if err := enc.Encode(f); err != nil {
 			cancel()
-			return
+			return false
 		}
 		flusher.Flush()
+		return true
 	}
 	if err := hashModelFiles(ctx, &list, func(path string, pct int) {
 		writeFrame(streamFrame{Type: "progress", Engine: engine, Op: "copy", Stage: "hashing", Percent: pct, Message: path})
@@ -372,11 +385,12 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 			writeFrame(streamFrame{Type: "error", Message: err.Error()})
 			return
 		}
-		st, err := s.exec.state(engine)
+	} else {
+		list.ExportID, err = nativeExportID(list)
 		if err != nil {
+			writeFrame(streamFrame{Type: "error", Message: err.Error()})
 			return
 		}
-		rememberCopyExport(st, list)
 	}
 	res, err := json.Marshal(list)
 	if err != nil || len(res) > maxCopyManifest {
@@ -386,7 +400,11 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 		writeFrame(streamFrame{Type: "error", Engine: engine, Op: "copy", Message: err.Error()})
 		return
 	}
-	writeFrame(streamFrame{Type: "result", Engine: engine, Op: "copy", Result: res})
+	newGeneration := rememberCopyExport(st, list)
+	issued = writeFrame(streamFrame{Type: "result", Engine: engine, Op: "copy", Result: res})
+	if !issued {
+		invalidateCopyGeneration(st, model, newGeneration)
+	}
 }
 
 // hashProgressInterval spaces hashing progress frames.
@@ -453,17 +471,34 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
-	list, err := s.exec.modelSourceFiles(r.Context(), engine, model)
+	st, err := s.exec.state(engine)
 	if err != nil {
-		http.Error(w, err.Error(), modelLookupStatus(err))
+		http.Error(w, "export expired", http.StatusConflict)
+		return
+	}
+	list, ok := issuedCopyList(st, model, r.URL.Query().Get("exportId"))
+	if !ok {
+		http.Error(w, "export expired; list the model again", http.StatusConflict)
+		return
+	}
+	var selected modelFile
+	for _, f := range list.Files {
+		if f.Path == rel {
+			selected = f
+			break
+		}
+	}
+	if selected.abs == "" {
+		http.Error(w, "path is not a file of this model", http.StatusNotFound)
 		return
 	}
 	if list.Layout == llamaArtifactsLayout {
-		if err := hashModelFiles(r.Context(), &list, func(string, int) {}); err != nil {
+		current, err := s.exec.modelSourceFiles(r.Context(), engine, model)
+		if err != nil || hashModelFiles(r.Context(), &current, func(string, int) {}) != nil {
 			http.Error(w, "source artifact changed or unavailable", http.StatusConflict)
 			return
 		}
-		if r.URL.Query().Get("exportId") != list.ExportID {
+		if current.ExportID != list.ExportID {
 			http.Error(w, "export identity changed", http.StatusConflict)
 			return
 		}
@@ -471,25 +506,12 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "source binding changed", http.StatusConflict)
 			return
 		}
-		st, err := s.exec.state(engine)
-		if err != nil || !checkIssuedCopyExport(st, list) {
+		if !checkIssuedCopyExport(st, current) {
 			http.Error(w, "source binding changed or export expired; list the model again", http.StatusConflict)
 			return
 		}
 	}
-	var abs string
-	var selected modelFile
-	for _, f := range list.Files {
-		if f.Path == rel {
-			abs = f.abs
-			selected = f
-			break
-		}
-	}
-	if abs == "" {
-		http.Error(w, "path is not a file of this model", http.StatusNotFound)
-		return
-	}
+	abs := selected.abs
 	file, err := os.Open(abs)
 	if err != nil {
 		http.Error(w, "file unavailable", http.StatusNotFound)
