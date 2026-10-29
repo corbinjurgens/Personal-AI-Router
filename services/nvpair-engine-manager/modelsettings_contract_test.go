@@ -395,7 +395,7 @@ func modelSettingsContractExecutor(t *testing.T) *Executor {
 	root := t.TempDir()
 	m := &Manifest{Engine: "llamacpp"}
 	st := &engineState{manifest: m, plat: &Platform{Runtime: Runtime{Port: 45000}}, modelsDir: root, contentMu: make(chan struct{}, 1)}
-	return &Executor{engines: map[string]*engineState{"llamacpp": st}, baseDir: root, overrideDir: root, emit: func(method string, _ any) { t.Errorf("unexpected effect notification %s", method) }}
+	return &Executor{reg: &Registry{engines: map[string]*Manifest{"llamacpp": m}}, reporter: NewReporter(nil), engines: map[string]*engineState{"llamacpp": st}, baseDir: root, overrideDir: root, emit: func(method string, _ any) { t.Errorf("unexpected effect notification %s", method) }}
 }
 
 func TestModelSettingsContractInspectMissingArtifactsHasNoRuntimeEffects(t *testing.T) {
