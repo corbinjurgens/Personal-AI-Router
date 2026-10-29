@@ -128,6 +128,10 @@ func TestInstallCancellationRemovesDownloadedArtifacts(t *testing.T) {
 	firstPayload := []byte("server")
 	secondStarted := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || (r.URL.Path != "/server.zip" && r.URL.Path != "/cudart.zip") {
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path == "/server.zip" {
 			_, _ = w.Write(firstPayload)
 			return
@@ -151,6 +155,7 @@ func TestInstallCancellationRemovesDownloadedArtifacts(t *testing.T) {
 	progress := &installProgressRecorder{}
 	executor.emit = progress.emit
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		done <- executor.Install(ctx, manifest.Engine)
@@ -158,6 +163,7 @@ func TestInstallCancellationRemovesDownloadedArtifacts(t *testing.T) {
 
 	select {
 	case <-secondStarted:
+		assertFixtureRejectsProbe(t, server.URL)
 		cancel()
 	case <-time.After(5 * time.Second):
 		t.Fatal("second artifact download did not start")

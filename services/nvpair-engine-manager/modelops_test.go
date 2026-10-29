@@ -113,6 +113,10 @@ func modelOperationEngine(t *testing.T) (*Executor, func() []recordedRequest) {
 	var mu sync.Mutex
 	var seen []recordedRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !((r.Method == http.MethodPost && (r.URL.Path == "/v1/load" || r.URL.Path == "/v1/unload")) || (r.Method == http.MethodDelete && r.URL.Path == "/models")) {
+			http.NotFound(w, r)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		seen = append(seen, recordedRequest{r.Method, r.URL.Path, r.URL.RawQuery, string(body)})
@@ -222,7 +226,7 @@ func TestTypedModelOperationsAreDispatched(t *testing.T) {
 // A remote pull that names only a model gets its params from the pull binding.
 func TestPullWithoutParamsUsesThePullBinding(t *testing.T) {
 	bodies := make(chan string, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodPost, "/api/pull", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		bodies <- string(body)
 		_, _ = w.Write([]byte(`{"status":"success"}` + "\n"))

@@ -281,7 +281,14 @@ func modelFileServer(t *testing.T, exec *Executor, wrap func(http.Handler) http.
 	if wrap != nil {
 		h = wrap(mux)
 	}
-	srv := httptest.NewServer(h)
+	// Gate outside recording/interruption wrappers, before they can consume a request.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || (r.URL.Path != controlModelFilesPath && r.URL.Path != controlModelFilePath) {
+			http.NotFound(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	}))
 	t.Cleanup(srv.Close)
 	return srv, &remoteClient{controlHTTP: srv.Client(), base: srv.URL}
 }

@@ -185,6 +185,10 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 	f.node = noderec.DirectoryNode{HostUUID: "peer", ClusterUUID: "peer", IP: "localhost", Trusted: true,
 		Services: make(map[noderec.ServiceKey]noderec.ServiceStatus)}
 	info := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" {
+			http.NotFound(w, r)
+			return
+		}
 		f.infoCalls.Add(1)
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" || r.Host != net.JoinHostPort(f.node.IP, strconv.Itoa(f.node.Services[noderec.ServiceNodeInfo].Port)) {
 			t.Errorf("unexpected node-info request: %s %s host=%s", r.Method, r.URL.Path, r.Host)
@@ -222,6 +226,10 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 		writeScannerFixtureResponse(t, w, NodeInfoResponse{HostUUID: reportedHost, ClusterUUID: cluster, GPUs: []GPUInfo{{Name: gpuName, UtilizationPercent: 73}}, CPU: &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: 42}, Memory: &MemoryInfo{TotalBytes: 8192, UsedBytes: 2048}, TelemetryValid: true, MSSince: 100}, f.responseEnding.Load())
 	}))
 	models := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
 		f.modelCalls.Add(1)
 		if uuid, ok := peerMesh.VerifyClientPin(r); !ok || uuid != "self" {
 			t.Error("missing pinned inner TLS identity")

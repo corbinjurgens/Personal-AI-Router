@@ -112,6 +112,10 @@ func TestLocalEngineCredentialPairsWithPort(t *testing.T) {
 func TestEngineHealthProbeCarriesTheKey(t *testing.T) {
 	var landed atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || (r.URL.Path != "/v1/models" && r.URL.Path != "/redirect" && r.URL.Path != "/landing") {
+			http.NotFound(w, r)
+			return
+		}
 		switch r.URL.Path {
 		case "/v1/models":
 			if r.Header.Get("Authorization") != "Bearer "+brokerTestKey {

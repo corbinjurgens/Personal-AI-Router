@@ -81,6 +81,10 @@ func pauseHintStub(t *testing.T) (int, func(int, pauseHintInventory), *atomic.In
 	requests := &atomic.Int64{}
 	server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
 			t.Errorf("unexpected inventory request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 			return
@@ -96,6 +100,7 @@ func pauseHintStub(t *testing.T) (int, func(int, pauseHintInventory), *atomic.In
 	})}}
 	server.Start()
 	t.Cleanup(server.Close)
+	assertFixtureRejectsProbe(t, server.URL)
 	return listener.Addr().(*net.TCPAddr).Port, set, requests
 }
 

@@ -214,7 +214,7 @@ func TestRefreshNodeTelemetryEmitsFreshnessAndUtilization(t *testing.T) {
 		MSSince:        137,
 		HostUUID:       "node-a",
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(response)
 	}))
 	defer server.Close()
@@ -256,7 +256,7 @@ func TestRefreshNodeTelemetryEmitsFreshnessAndUtilization(t *testing.T) {
 }
 
 func TestRefreshNodeTelemetryRejectsMismatchedIdentity(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(NodeInfoResponse{
 			HostUUID:       "node-b",
 			TelemetryValid: true,
@@ -290,7 +290,7 @@ func TestRefreshNodeTelemetryRejectsMismatchedIdentity(t *testing.T) {
 // published list.
 func TestRefreshTelemetryFailsOverToAnAnsweringAddress(t *testing.T) {
 	var failedAttempts, successfulAttempts, serverReads atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		serverReads.Add(1)
 		if err := json.NewEncoder(w).Encode(NodeInfoResponse{
 			HostUUID:       "node-a",
@@ -485,7 +485,7 @@ func TestTelemetryRetryGateRemoveRediscoverPreservesActiveClaim(t *testing.T) {
 
 func TestRefreshTelemetrySkipsBackedOffPeerWithoutDelayingHealthyPeer(t *testing.T) {
 	var backedOffCalls atomic.Int32
-	backedOff := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	backedOff := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		backedOffCalls.Add(1)
 		_ = json.NewEncoder(w).Encode(NodeInfoResponse{HostUUID: "node-backed-off"})
 	}))
@@ -500,7 +500,7 @@ func TestRefreshTelemetrySkipsBackedOffPeerWithoutDelayingHealthyPeer(t *testing
 	}
 
 	var healthyCalls atomic.Int32
-	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	healthy := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		healthyCalls.Add(1)
 		_ = json.NewEncoder(w).Encode(NodeInfoResponse{HostUUID: "node-healthy"})
 	}))
@@ -554,7 +554,7 @@ func TestRefreshTelemetrySkipsBackedOffPeerWithoutDelayingHealthyPeer(t *testing
 
 func TestBrowseTXTUpdatePreservesTelemetryRetry(t *testing.T) {
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		_ = json.NewEncoder(w).Encode(NodeInfoResponse{HostUUID: "peer-uuid"})
 	}))
@@ -641,14 +641,14 @@ func TestBrowseRemovalClearsTelemetryRetry(t *testing.T) {
 func TestBrowseEndpointUpdateWaitsForOldTelemetryBeforeClaimingReplacement(t *testing.T) {
 	newEntered := make(chan struct{}, 1)
 	releaseNew := make(chan struct{}, 1)
-	newServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	newServer := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		newEntered <- struct{}{}
 		<-releaseNew
 		_ = json.NewEncoder(w).Encode(NodeInfoResponse{HostUUID: "peer-uuid"})
 	}))
 	oldEntered := make(chan struct{}, 1)
 	releaseOld := make(chan struct{}, 1)
-	oldServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	oldServer := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		oldEntered <- struct{}{}
 		<-releaseOld
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -741,7 +741,7 @@ func TestBrowseEndpointUpdateWaitsForOldTelemetryBeforeClaimingReplacement(t *te
 
 func TestTelemetryLoopKeepsHealthyNodeOnCadenceWhilePeerIsBlocked(t *testing.T) {
 	slowStarted := make(chan struct{}, 1)
-	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	slow := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(_ http.ResponseWriter, r *http.Request) {
 		select {
 		case slowStarted <- struct{}{}:
 		default:
@@ -760,7 +760,7 @@ func TestTelemetryLoopKeepsHealthyNodeOnCadenceWhilePeerIsBlocked(t *testing.T) 
 
 	healthyThird := make(chan struct{}, 1)
 	var healthyCalls atomic.Int32
-	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	healthy := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		if healthyCalls.Add(1) >= 3 {
 			select {
 			case healthyThird <- struct{}{}:
@@ -828,7 +828,7 @@ func TestTelemetryLoopDoesNotOverlapNodePolls(t *testing.T) {
 	var active atomic.Int32
 	var maxActive atomic.Int32
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, r *http.Request) {
 		current := active.Add(1)
 		defer active.Add(-1)
 		calls.Add(1)
@@ -891,7 +891,7 @@ func TestTelemetryLoopBoundsConcurrentWorkAcrossTicks(t *testing.T) {
 
 	for i := range nodeCount {
 		nodeID := "node-" + strconv.Itoa(i)
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 			current := active.Add(1)
 			defer active.Add(-1)
 			for {

@@ -34,7 +34,7 @@ import (
 // predates node-info reporting identity.
 func nodeInfoServer(t *testing.T, hostUUID string) (host string, port int) {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/node-info" {
 			w.WriteHeader(http.StatusNotFound)
 			return

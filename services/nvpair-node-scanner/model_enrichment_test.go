@@ -61,7 +61,7 @@ func TestModelDownloadRefreshFreshness(t *testing.T) {
 func TestModelDownloadInventoryExtensionParsing(t *testing.T) {
 	test := func(name, extension string, supported bool, current *bool) {
 		t.Run(name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/models", func(w http.ResponseWriter, r *http.Request) {
 				_, err := w.Write([]byte(`{"models":["ready"],"loadedByEngine":{"llamacpp":["resident"]}` + extension + `}`))
 				if err != nil {
 					t.Errorf("write inventory: %v", err)
@@ -315,7 +315,7 @@ func TestModelDownloadRefreshRetiresInFlightSource(t *testing.T) {
 	replacement.SourceID = strings.Repeat("c", 32)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		state := initial
 		switch calls.Add(1) {
 		case 2:
@@ -350,6 +350,10 @@ func TestModelDownloadRefreshRetiresInFlightSource(t *testing.T) {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("held read never entered")
+	}
+	assertFixtureRejectsProbe(t, srv.URL)
+	if calls.Load() != 2 {
+		t.Fatal("unrelated probe advanced the held inventory sequence")
 	}
 	if !d.refreshNodeModels("target", "127.0.0.1", port, "") {
 		t.Fatal("replacement source not published")

@@ -634,6 +634,10 @@ func TestModelBufferSweepSharesNonLoadingProps(t *testing.T) {
 	f.initial("medium-model", 31001)
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/props" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method != http.MethodGet || r.URL.Path != "/props" || r.URL.Query().Get("autoload") != "false" || r.Header.Get(engineIdentityProbeHeader) != "1" {
 			t.Error("observation changed non-loading boundary")
 			w.WriteHeader(http.StatusBadRequest)
@@ -643,6 +647,7 @@ func TestModelBufferSweepSharesNonLoadingProps(t *testing.T) {
 		fmt.Fprint(w, `{"build_info":"b11146-7fe450e","total_slots":2,"default_generation_settings":{"n_ctx":8192}}`)
 	}))
 	defer server.Close()
+	assertFixtureRejectsProbe(t, server.URL)
 	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
 	if err != nil {
 		t.Fatal(err)

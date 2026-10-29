@@ -76,6 +76,10 @@ func TestCredentialUseColdCommandStartLoadsSavedKey(t *testing.T) {
 	st.plat.Runtime.Ready.TimeoutS = 5
 	var keyed atomic.Int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer "+credentialTestKey {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -142,6 +146,10 @@ func TestCredentialUseColdCommandStartLoadsSavedKey(t *testing.T) {
 func TestCredentialUseFirstAdoptionLoadsSavedKey(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		requests.Add(1)
 		if r.Header.Get("Authorization") != "Bearer "+credentialTestKey {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -180,6 +188,10 @@ func TestCredentialUseFirstAdoptionLoadsSavedKey(t *testing.T) {
 
 func TestCredentialUseStatusAtPortUsesCandidatePort(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer "+credentialTestKey {
 			w.WriteHeader(http.StatusUnauthorized)
 		}
@@ -204,6 +216,10 @@ func TestCredentialUseStatusAtPortUsesCandidatePort(t *testing.T) {
 func TestCredentialUseProbeDiagnosisHealthAndAction(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/api/tags")) {
+			http.NotFound(w, r)
+			return
+		}
 		requests.Add(1)
 		if r.Header.Get("Authorization") != "Bearer "+credentialTestKey {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -269,6 +285,10 @@ func TestCredentialUseKnownAbsentAndRejectedDiagnosis(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var attached atomic.Bool
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/" {
+					http.NotFound(w, r)
+					return
+				}
 				attached.Store(r.Header.Get("Authorization") != "")
 				w.WriteHeader(http.StatusForbidden)
 			}))
@@ -324,6 +344,10 @@ func TestCredentialUseKnownAbsentAndRejectedDiagnosis(t *testing.T) {
 
 func TestCredentialUseUnavailableRetryWithoutRestart(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer "+credentialTestKey {
 			w.WriteHeader(http.StatusUnauthorized)
 		}
@@ -417,7 +441,13 @@ func TestCredentialUseExecutorRestartReloadsSharedStore(t *testing.T) {
 
 func TestCredentialUseInitialURLAndTransportRefusal(t *testing.T) {
 	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { requests.Add(1) }))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		requests.Add(1)
+	}))
 	defer srv.Close()
 	port := diagnosisServerPort(t, srv)
 	c := candidateCredential{key: credentialTestKey, port: port}
@@ -481,10 +511,20 @@ func TestCredentialUseUnkeyedActionPreservesPortAndTransport(t *testing.T) {
 
 func TestCredentialUseRedirectsNeverFollow(t *testing.T) {
 	var targetCalls, anonymous atomic.Int32
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { targetCalls.Add(1) }))
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/target" {
+			http.NotFound(w, r)
+			return
+		}
+		targetCalls.Add(1)
+	}))
 	defer target.Close()
 	var destination atomic.Value
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/target" || r.URL.Path == "/api/tags")) {
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path == "/target" {
 			targetCalls.Add(1)
 			return
@@ -519,12 +559,23 @@ func TestCredentialUseRedirectsNeverFollow(t *testing.T) {
 
 func TestCredentialUseProxyNeverReceivesKey(t *testing.T) {
 	var proxyCalls atomic.Int32
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { proxyCalls.Add(1); w.WriteHeader(http.StatusBadGateway) }))
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/api/tags")) {
+			http.NotFound(w, r)
+			return
+		}
+		proxyCalls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
 	defer proxy.Close()
 	t.Setenv("HTTP_PROXY", proxy.URL)
 	t.Setenv("HTTPS_PROXY", proxy.URL)
 	t.Setenv("NO_PROXY", "")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/api/tags")) {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer "+credentialTestKey {
 			w.WriteHeader(http.StatusUnauthorized)
 		}
@@ -570,6 +621,10 @@ func TestCredentialUseActionRedactsSuccessAndFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/api/tags" {
+					http.NotFound(w, r)
+					return
+				}
 				w.WriteHeader(tc.status)
 				if _, err := io.WriteString(w, tc.body); err != nil {
 					t.Error("write failed")
@@ -779,6 +834,10 @@ func TestCredentialUseAmbiguousMutationRequiresFreshEligibility(t *testing.T) {
 
 func TestCredentialUseHealthRetriesUnavailableStore(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer "+credentialTestKey {
 			w.WriteHeader(http.StatusUnauthorized)
 		}
@@ -866,7 +925,13 @@ func TestCredentialUseRunningEligibilitySurvivesNativeWait(t *testing.T) {
 	for _, scenario := range []string{"stopped export", "replacement run action"} {
 		t.Run(scenario, func(t *testing.T) {
 			var requests atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1) }))
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/" {
+					http.NotFound(w, r)
+					return
+				}
+				requests.Add(1)
+			}))
 			defer srv.Close()
 			ex, st, _, _ := credentialExecutor(t, srv.URL, diagnosisServerPort(t, srv), nil)
 			st.running, st.runID = true, "before"

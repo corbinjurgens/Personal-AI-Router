@@ -978,7 +978,7 @@ func TestPeerServiceClientAdmissionPublishedByFinalHandoff(t *testing.T) {
 	mesh, _ := meshDir(t, selfPEM, selfKey, map[string]string{"peer": string(peerPEM)})
 	var dispatches, reads atomic.Int32
 	var replaced atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(fixtureRequestHandler(http.MethodPost, "/", func(w http.ResponseWriter, _ *http.Request) {
 		dispatches.Add(1)
 		writeServiceResponse(t, w, "stale request")
 	}))
@@ -1021,7 +1021,7 @@ func TestPeerServiceClientAuthorityAtFirstApplicationWrite(t *testing.T) {
 	test := func(name string, plain, reverse bool) {
 		t.Run(name, func(t *testing.T) {
 			var dispatches atomic.Int32
-			handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			handler := fixtureRequestHandler(http.MethodPost, "/", func(w http.ResponseWriter, _ *http.Request) {
 				dispatches.Add(1)
 				writeServiceResponse(t, w, "stale request")
 			})
@@ -1615,7 +1615,7 @@ func TestPeerServiceClientPlainNodeInfoFallback(t *testing.T) {
 			peerPEM, _, _ := genLeaf(t, "peer")
 			mesh, _ := meshDir(t, selfPEM, selfKey, map[string]string{"peer": string(peerPEM)})
 			var directDispatch, reverseDispatch atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 				directDispatch.Add(1)
 				if partial {
 					w.Header().Set("Content-Length", "100")
@@ -1630,11 +1630,13 @@ func TestPeerServiceClientPlainNodeInfoFallback(t *testing.T) {
 				conn.Close()
 			}))
 			defer server.Close()
-			reverse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			reverse := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 				reverseDispatch.Add(1)
 				writeServiceResponse(t, w, "node-info")
 			}))
 			defer reverse.Close()
+			assertFixtureRejectsProbe(t, server.URL)
+			assertFixtureRejectsProbe(t, reverse.URL)
 			u, err := url.Parse(server.URL)
 			if err != nil {
 				t.Fatal(err)
@@ -1673,7 +1675,7 @@ func TestPeerServiceClientPlainReverseUsesRemainingHeaderBudget(t *testing.T) {
 	selfPEM, selfKey, _ := genLeaf(t, "self")
 	peerPEM, _, _ := genLeaf(t, "peer")
 	mesh, _ := meshDir(t, selfPEM, selfKey, map[string]string{"peer": string(peerPEM)})
-	reverse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	reverse := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, r *http.Request) {
 		timer := time.NewTimer(70 * time.Millisecond)
 		defer timer.Stop()
 		select {
@@ -1703,9 +1705,9 @@ func TestPeerServiceClientNegativeHeaderTimeoutStillFallsBack(t *testing.T) {
 	peerPEM, _, _ := genLeaf(t, "peer")
 	mesh, _ := meshDir(t, selfPEM, selfKey, map[string]string{"peer": string(peerPEM)})
 	var directDispatch, reverseDispatch atomic.Int32
-	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { directDispatch.Add(1); <-r.Context().Done() }))
+	direct := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/", func(w http.ResponseWriter, r *http.Request) { directDispatch.Add(1); <-r.Context().Done() }))
 	defer direct.Close()
-	reverse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	reverse := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/", func(w http.ResponseWriter, _ *http.Request) {
 		reverseDispatch.Add(1)
 		writeServiceResponse(t, w, "reverse node-info")
 	}))
@@ -2363,7 +2365,7 @@ func TestPeerServiceClientReusableProtocolChange(t *testing.T) {
 	test := func(name string, reverse bool) {
 		t.Run(name, func(t *testing.T) {
 			var dispatches atomic.Int32
-			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := fixtureRequestHandler(http.MethodPost, "/", func(w http.ResponseWriter, r *http.Request) {
 				dispatches.Add(1)
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
 					t.Error(err)
@@ -2373,7 +2375,7 @@ func TestPeerServiceClientReusableProtocolChange(t *testing.T) {
 			f := newServiceClientFixture(t, handler)
 			f.adapter.opts.ReuseConnections = true
 			f.routes[noderec.ServiceNodeInfo] = f.routes[noderec.ServiceCluster]
-			plain := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			plain := httptest.NewUnstartedServer(fixtureRequestHandler(http.MethodPost, "/", func(w http.ResponseWriter, r *http.Request) {
 				if !f.recordDispatch(t, r) {
 					http.Error(w, "missing connection identity", http.StatusInternalServerError)
 					return

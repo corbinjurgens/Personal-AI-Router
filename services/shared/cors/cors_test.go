@@ -134,6 +134,10 @@ func TestFanoutStripsCredentials(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer private")
 	request.Header.Set("Cookie", "session=private")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodOptions || r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
 			t.Error("fan-out shared caller credentials")
 		}
@@ -160,6 +164,10 @@ func TestPreflightResponses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodOptions || r.URL.Path != "/api/chat" {
+					http.NotFound(w, r)
+					return
+				}
 				calls.Add(1)
 				if r.Header.Get("Origin") != "http://app.test" || r.URL.RawQuery != "test=1" || r.Header.Get("Access-Control-Request-Method") != "PUT" {
 					t.Error("request changed")

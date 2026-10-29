@@ -240,6 +240,10 @@ func TestStopAllStopsDetachedDaemonWhileCommandStartIsPending(t *testing.T) {
 	releaseStart := make(chan struct{})
 	var stopCalls atomic.Int32
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || (r.URL.Path != "/start" && r.URL.Path != "/stop") {
+			http.NotFound(w, r)
+			return
+		}
 		switch r.URL.Path {
 		case "/start":
 			ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
