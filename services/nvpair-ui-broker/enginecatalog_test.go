@@ -195,7 +195,7 @@ func TestDynamicEngineFacadeEnableCarriesTheDescriptor(t *testing.T) {
 // When it stops, the registration is withdrawn.
 func TestDynamicEngineAdvertisementRegistersAndWithdraws(t *testing.T) {
 	isolateOllamaHostTestConfig(t)
-	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	engine := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			t.Errorf("health probe path = %s", r.URL.Path)
 		}

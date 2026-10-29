@@ -51,7 +51,7 @@ func TestLMStudioAdvertisementUsesLocalCredential(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			logs := captureCredentialLogs(t)
 			var requests, authenticated atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/models", func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
 				if r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "Bearer "+brokerTestKey {
 					w.WriteHeader(http.StatusUnauthorized)
@@ -140,7 +140,7 @@ func TestLMStudioAdvertisementUsesLocalCredentialExcludesProxyPort(t *testing.T)
 		}
 		t.Run(name, func(t *testing.T) {
 			var hits atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/models", func(w http.ResponseWriter, r *http.Request) {
 				hits.Add(1)
 				if r.Header.Get("Authorization") != "Bearer "+brokerTestKey {
 					w.WriteHeader(http.StatusUnauthorized)
@@ -182,7 +182,7 @@ func TestLMStudioAdvertisementUsesLocalCredentialExcludesProxyPort(t *testing.T)
 
 func TestLMStudioAdvertisementUsesLocalCredentialPreservesManagedFacade(t *testing.T) {
 	h := newBindingOfferHarness(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	t.Cleanup(server.Close)
@@ -221,14 +221,14 @@ func TestLMStudioAdvertisementUsesLocalCredentialPreservesManagedFacade(t *testi
 
 func TestLMStudioAdvertisementUsesLocalCredentialRefusesRedirect(t *testing.T) {
 	var targetHits, targetHeaders, originAuthenticated atomic.Int32
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	target := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/", func(w http.ResponseWriter, r *http.Request) {
 		targetHits.Add(1)
 		if r.Header.Get("Authorization") != "" {
 			targetHeaders.Add(1)
 		}
 	}))
 	t.Cleanup(target.Close)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "Bearer "+brokerTestKey {
 			originAuthenticated.Add(1)
 		}
@@ -237,6 +237,7 @@ func TestLMStudioAdvertisementUsesLocalCredentialRefusesRedirect(t *testing.T) {
 	t.Cleanup(server.Close)
 	port := server.Listener.Addr().(*net.TCPAddr).Port
 	b, _ := newPolicyBroker(t)
+	assertFixtureRejectsProbe(t, server.URL)
 	b.engineSettingsLoaded = true
 	b.regCache = relay.NewRegistrationCache()
 	updates := attachAdvertiserProxy(t, b, lmstudioProxyProfile, 25001)

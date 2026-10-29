@@ -39,10 +39,18 @@ func newLlamaCPPPullFixture(t *testing.T) *llamaCPPPullFixture {
 	t.Helper()
 	f := &llamaCPPPullFixture{started: make(chan struct{}), endStream: make(chan struct{})}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/models/sse", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/models/sse" {
+			http.NotFound(w, r)
+			return
+		}
 		if f.stream != nil {
 			f.stream(w, r)
 			return
@@ -97,10 +105,14 @@ func newLlamaCPPPullFixture(t *testing.T) *llamaCPPPullFixture {
 				t.Errorf("write inventory: %v", err)
 			}
 		default:
-			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			http.NotFound(w, r)
 		}
 	})
 	mux.HandleFunc("/models/unload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/models/unload" {
+			http.NotFound(w, r)
+			return
+		}
 		f.unloads.Add(1)
 		var body struct {
 			Model string `json:"model"`

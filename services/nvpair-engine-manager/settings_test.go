@@ -244,7 +244,14 @@ func TestSettingsServingDuplicateRejectedBeforeEffects(t *testing.T) {
 	stopMarker := filepath.Join(t.TempDir(), "stop-marker")
 	st.plat.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}}
 	var probes atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { probes.Add(1); w.WriteHeader(http.StatusOK) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		probes.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
 	t.Cleanup(server.Close)
 	st.plat.Runtime.Ready = &Probe{HTTP: server.URL}
 	p := settingsRequest(t, e)

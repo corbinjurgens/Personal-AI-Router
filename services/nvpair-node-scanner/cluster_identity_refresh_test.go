@@ -39,7 +39,7 @@ func (s *nodeInfoStub) set(status int, body string) {
 
 func (s *nodeInfoStub) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/node-info" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" {
 			http.NotFound(w, r)
 			return
 		}

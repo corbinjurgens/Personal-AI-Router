@@ -95,7 +95,11 @@ func TestEngineHTTPClientsBoundResponseHeaders(t *testing.T) {
 // The response budget a manifest binds to an operation belongs to the action,
 // so it applies to engine:action calls too, and to no other action or engine.
 func TestBoundOperationBudgetAppliesOnlyToItsAction(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !((r.Method == http.MethodPost && r.URL.Path == "/api/generate") || (r.Method == http.MethodDelete && r.URL.Path == "/api/delete")) {
+			http.NotFound(w, r)
+			return
+		}
 		time.Sleep(100 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"done":true}`))
@@ -165,7 +169,7 @@ func TestHTTPActionSendsStringParamsInQuery(t *testing.T) {
 	}
 
 	observed := make(chan observedRequest, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodDelete, "/models", func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		observed <- observedRequest{
 			method:      r.Method,
@@ -506,7 +510,7 @@ func TestInstallAdoptsExternalServiceWithoutDownloading(t *testing.T) {
 	enginePort, _ := strconv.Atoi(engineURL.Port())
 
 	var downloads atomic.Int32
-	downloadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	downloadSrv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/", func(w http.ResponseWriter, r *http.Request) {
 		downloads.Add(1)
 		_, _ = w.Write([]byte("must-not-download"))
 	}))
@@ -566,7 +570,7 @@ func TestInstallDoesNotOverwriteUnknownListener(t *testing.T) {
 	port, _ := strconv.Atoi(u.Port())
 
 	var downloads atomic.Int32
-	downloadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	downloadSrv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/", func(w http.ResponseWriter, r *http.Request) {
 		downloads.Add(1)
 		_, _ = w.Write([]byte("must-not-download"))
 	}))
@@ -728,6 +732,10 @@ func TestAdoptedExternalLivenessIsTruthful(t *testing.T) {
 func TestProxyFacadeCannotIdentifyAsOllama(t *testing.T) {
 	var probes atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/api/version" && r.URL.Path != "/api/tags") {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Header.Get(engineIdentityProbeHeader) == "1" {
 			probes.Add(1)
 			http.Error(w, "proxy facade", http.StatusConflict)

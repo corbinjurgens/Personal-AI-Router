@@ -60,6 +60,10 @@ func TestRemoteClientModelFilesUseOrdinaryHeaderBudget(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			release := make(chan struct{})
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !(r.Method == http.MethodGet && (r.URL.Path == controlModelFilesPath || r.URL.Path == controlModelFilePath)) {
+					http.NotFound(w, r)
+					return
+				}
 				select {
 				case <-release:
 				case <-r.Context().Done():
@@ -97,7 +101,11 @@ func TestRemoteClientModelFilesUseOrdinaryHeaderBudget(t *testing.T) {
 }
 
 func TestRemoteStartUsesReadinessHeaderBudget(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodPost && (r.URL.Path == controlStartPath || r.URL.Path == controlStopPath)) {
+			http.NotFound(w, r)
+			return
+		}
 		time.Sleep(100 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"engine":"remote-only","running":true,"healthy":true}`))
@@ -124,7 +132,11 @@ func TestRemoteStartUsesReadinessHeaderBudget(t *testing.T) {
 // Both need the longer response-header budget; other model calls remain bounded.
 // The load budget comes from the bundled manifests' load bindings.
 func TestRemoteSlowModelOperationsUseReadinessHeaderBudget(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodPost && (r.URL.Path == controlLoadPath || r.URL.Path == controlDeletePath || r.URL.Path == controlUnloadPath)) {
+			http.NotFound(w, r)
+			return
+		}
 		time.Sleep(100 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -186,7 +198,11 @@ func TestRemoteReadinessBudgetCoversEngineStartupAllowance(t *testing.T) {
 
 func TestRemoteStartHeaderWaitRemainsBounded(t *testing.T) {
 	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodPost && r.URL.Path == controlStartPath) {
+			http.NotFound(w, r)
+			return
+		}
 		<-release
 		_, _ = w.Write([]byte(`{"engine":"ollama"}`))
 	}))

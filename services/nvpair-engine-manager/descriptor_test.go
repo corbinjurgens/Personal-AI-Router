@@ -191,7 +191,7 @@ func TestForkManifestGetsItsFamilyBehavior(t *testing.T) {
 	t.Run("catalog", func(t *testing.T) {
 		srv, _ := llamaCPPServer(t, "")
 		c := newCatalogService()
-		c.baseURL = srv.URL
+		c.baseURL = srv.URL + "/catalog"
 		if _, err := c.Catalog(context.Background(), "llamacpp-custom", "", "", ""); err == nil {
 			t.Fatal("an unresolved fork ID found a catalogue by name")
 		}

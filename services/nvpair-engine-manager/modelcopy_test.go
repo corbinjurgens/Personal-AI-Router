@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -225,7 +226,9 @@ func TestLinkedModelNativeTransferToken(t *testing.T) {
 		})
 	}
 	cut := interruptAfter(weightsRel, 200_000)
-	_, client := modelFileServer(t, srcExec, func(h http.Handler) http.Handler { return record(cut(h)) })
+	server, client := modelFileServer(t, srcExec, func(h http.Handler) http.Handler { return record(cut(h)) })
+	assertFixtureRejectsProbe(t, server.URL)
+	assertFixtureRejectsRequest(t, server.URL, http.MethodPost, controlModelFilePath+"?path="+url.QueryEscape(weightsRel))
 	dst := copyTestExecutor(t, "ollama", dstDir, true)
 	root := filepath.Join(dstDir, "models")
 	part := filepath.Join(root, filepath.FromSlash(weightsRel)) + ".part"

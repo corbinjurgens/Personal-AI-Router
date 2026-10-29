@@ -119,6 +119,10 @@ func TestPullModelLlamaCPPSSESubscribesBeforeStarting(t *testing.T) {
 	var postBeforeSubscribe atomic.Bool
 	mux := http.NewServeMux()
 	mux.HandleFunc("/models/sse", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/models/sse" {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		close(subscribed)
 		_, _ = fmt.Fprint(w, ": ready\n\n")
@@ -149,6 +153,10 @@ func TestPullModelLlamaCPPSSESubscribesBeforeStarting(t *testing.T) {
 		write(map[string]any{"model": model, "event": "download_finished", "data": map[string]any{}})
 	})
 	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
 		select {
 		case <-subscribed:
 		default:
@@ -218,7 +226,11 @@ func TestPullModelOllamaAdvancingProgressRefreshesTimeout(t *testing.T) {
 		progressUpdates = 6
 	)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/pull", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/pull", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
+			http.NotFound(w, r)
+			return
+		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Error("test response does not support flushing")
@@ -275,6 +287,10 @@ func TestPullModelLlamaCPPAdvancingProgressRefreshesTimeout(t *testing.T) {
 	started := make(chan struct{})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/models/sse", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/models/sse" {
+			http.NotFound(w, r)
+			return
+		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Error("test response does not support flushing")
@@ -303,7 +319,11 @@ func TestPullModelLlamaCPPAdvancingProgressRefreshesTimeout(t *testing.T) {
 		_, _ = fmt.Fprintf(w, "data: {\"model\":%q,\"event\":\"download_finished\",\"data\":{}}\n\n", model)
 		flusher.Flush()
 	})
-	mux.HandleFunc("/models", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
 		close(started)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"success":true}`)
@@ -339,6 +359,10 @@ func TestPullModelDuplicateProgressDoesNotRefreshTimeout(t *testing.T) {
 	const idleTimeout = 150 * time.Millisecond
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/pull", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
+			http.NotFound(w, r)
+			return
+		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			t.Error("test response does not support flushing")

@@ -763,7 +763,7 @@ func TestLockStoreFailuresFailClosed(t *testing.T) {
 		t.Run(document, func(t *testing.T) {
 			ex := newTestExecutor(t, lockLoadManifest())
 			var loads atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			server := httptest.NewServer(fixtureRequestHandler(http.MethodPost, "/api/generate", func(w http.ResponseWriter, _ *http.Request) {
 				loads.Add(1)
 				_, _ = w.Write([]byte(`{"ok":true}`))
 			}))

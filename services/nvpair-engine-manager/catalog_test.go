@@ -120,15 +120,18 @@ func TestOllamaCatalogFitsInAFrame(t *testing.T) {
 func TestLmStudioCatalogCoalescesConcurrentCallers(t *testing.T) {
 	var requests atomic.Int32
 	release := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/catalog", func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		<-release // hold the request open so the callers genuinely overlap
 		_, _ = w.Write([]byte(`[{"id":"lmstudio-community/Model-GGUF","downloads":5}]`))
 	}))
 	defer srv.Close()
+	defer unblock()
 
 	c := newCatalogService()
-	c.baseURL = srv.URL
+	c.baseURL = srv.URL + "/catalog"
 
 	const callers = 8
 	var wg sync.WaitGroup
@@ -145,7 +148,8 @@ func TestLmStudioCatalogCoalescesConcurrentCallers(t *testing.T) {
 
 	// Let the callers pile up behind the one in flight, then answer.
 	time.Sleep(50 * time.Millisecond)
-	close(release)
+	assertFixtureRejectsProbe(t, srv.URL)
+	unblock()
 	wg.Wait()
 
 	if got := requests.Load(); got != 1 {
@@ -167,7 +171,7 @@ func TestLmStudioCatalogCoalescesConcurrentCallers(t *testing.T) {
 func TestLmStudioCatalogBacksOffAfterFailure(t *testing.T) {
 	var requests atomic.Int32
 	fail := true
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/catalog", func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		if fail {
 			w.WriteHeader(http.StatusBadGateway)
@@ -178,7 +182,8 @@ func TestLmStudioCatalogBacksOffAfterFailure(t *testing.T) {
 	defer srv.Close()
 
 	c := newCatalogService()
-	c.baseURL = srv.URL
+	c.baseURL = srv.URL + "/catalog"
+	assertFixtureRejectsProbe(t, srv.URL)
 
 	// Seed a good list, then start failing.
 	fail = false
@@ -214,14 +219,15 @@ func TestLmStudioCatalogBacksOffAfterFailure(t *testing.T) {
 // browser, each in turn.
 func TestLmStudioCatalogBacksOffWithNothingCached(t *testing.T) {
 	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/catalog", func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer srv.Close()
 
 	c := newCatalogService()
-	c.baseURL = srv.URL
+	c.baseURL = srv.URL + "/catalog"
+	assertFixtureRejectsProbe(t, srv.URL)
 
 	for i := range 3 {
 		if _, _, err := c.lmStudio.get(context.Background()); err == nil {
@@ -508,7 +514,7 @@ func llamaCPPServer(t *testing.T, failAuthor string) (*httptest.Server, func() [
 	t.Helper()
 	var mu sync.Mutex
 	var requests []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/catalog", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		mu.Lock()
 		requests = append(requests, r.URL.RawQuery)
@@ -530,6 +536,7 @@ func llamaCPPServer(t *testing.T, failAuthor string) (*httptest.Server, func() [
 		_ = json.NewEncoder(w).Encode(rows)
 	}))
 	t.Cleanup(srv.Close)
+	assertFixtureRejectsProbe(t, srv.URL)
 	return srv, func() []string {
 		mu.Lock()
 		defer mu.Unlock()
@@ -542,7 +549,7 @@ func llamaCPPServer(t *testing.T, failAuthor string) (*httptest.Server, func() [
 func TestLlamaCPPCatalogReadsEveryPublisher(t *testing.T) {
 	srv, _ := llamaCPPServer(t, "")
 	c := newCatalogService()
-	c.baseURL = srv.URL
+	c.baseURL = srv.URL + "/catalog"
 
 	res, err := c.Catalog(context.Background(), "llama.cpp", "linux", "arm64", "")
 	if err != nil {
@@ -566,7 +573,7 @@ func TestLlamaCPPCatalogReadsEveryPublisher(t *testing.T) {
 func TestLlamaCPPCatalogFailsWhole(t *testing.T) {
 	srv, _ := llamaCPPServer(t, "bartowski")
 	c := newCatalogService()
-	c.baseURL = srv.URL
+	c.baseURL = srv.URL + "/catalog"
 
 	if res, err := c.Catalog(context.Background(), "llamacpp", "", "", ""); err == nil {
 		t.Errorf("a failed publisher still produced a list of %d", len(res.Models))
@@ -579,7 +586,7 @@ func TestLlamaCPPCatalogFailsWhole(t *testing.T) {
 func TestLlamaCPPSearch(t *testing.T) {
 	srv, requests := llamaCPPServer(t, "")
 	c := newCatalogService()
-	c.baseURL = srv.URL
+	c.baseURL = srv.URL + "/catalog"
 
 	res, err := c.Catalog(context.Background(), "llamacpp", "", "", "  Gemma 3  ")
 	if err != nil {
@@ -616,7 +623,7 @@ func TestFailedSearchDoesNotRevealTheQuery(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	srv.Close() // every request now fails to connect
 	c := newCatalogService()
-	c.baseURL = srv.URL
+	c.baseURL = srv.URL + "/catalog"
 
 	_, err := c.Catalog(context.Background(), "llamacpp", "", "", "private model name")
 	if err == nil {
@@ -635,7 +642,7 @@ func TestFailedSearchDoesNotRevealTheQuery(t *testing.T) {
 func TestOverLongSearchIsRefused(t *testing.T) {
 	srv, requests := llamaCPPServer(t, "")
 	c := newCatalogService()
-	c.baseURL = srv.URL
+	c.baseURL = srv.URL + "/catalog"
 
 	query := strings.TrimSpace(strings.Repeat("private ", maxCatalogQuery/len("private ")+1))
 	_, err := c.Catalog(context.Background(), "llamacpp", "", "", query)
@@ -656,7 +663,7 @@ func TestOverLongSearchIsRefused(t *testing.T) {
 func TestSearchAtTheLengthLimitIsAnswered(t *testing.T) {
 	srv, requests := llamaCPPServer(t, "")
 	c := newCatalogService()
-	c.baseURL = srv.URL
+	c.baseURL = srv.URL + "/catalog"
 
 	query := strings.Repeat("a", maxCatalogQuery)
 	res, err := c.Catalog(context.Background(), "llamacpp", "", "", "  "+query+"  ")

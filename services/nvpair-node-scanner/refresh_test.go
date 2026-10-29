@@ -350,7 +350,7 @@ func (s *modelsStub) set(status int, body map[string]any) {
 
 func (s *modelsStub) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
 			http.NotFound(w, r)
 			return
 		}
@@ -867,6 +867,10 @@ func TestRefreshOnceConcurrentSlowPeers(t *testing.T) {
 	entered := make(chan struct{}, peers)
 	release := make(chan struct{})
 	handler := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
 		entered <- struct{}{}
 		<-release // hold until both peers are concurrently in-flight
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": []string{"m"}})

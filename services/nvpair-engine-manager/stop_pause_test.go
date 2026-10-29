@@ -56,6 +56,10 @@ func TestStopPauseOwnershipExternalEnginesHaveNoCleanupEffects(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var unloads atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !((r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/loaded")) || (r.Method == http.MethodPost && r.URL.Path == "/unload")) {
+					http.NotFound(w, r)
+					return
+				}
 				if r.URL.Path == "/unload" {
 					unloads.Add(1)
 				}
@@ -123,6 +127,10 @@ func TestStopPauseOwnershipCommandResidencyProof(t *testing.T) {
 			resident.Store(true)
 			var unloads, stops atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !((r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/loaded")) || (r.Method == http.MethodPost && r.URL.Path == "/unload")) {
+					http.NotFound(w, r)
+					return
+				}
 				switch r.URL.Path {
 				case "/loaded":
 					rows := []map[string]string{}
@@ -151,7 +159,11 @@ func TestStopPauseOwnershipCommandResidencyProof(t *testing.T) {
 				}
 			}))
 			t.Cleanup(server.Close)
-			control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/" {
+					http.NotFound(w, r)
+					return
+				}
 				stops.Add(1)
 				if resident.Load() {
 					t.Error("server stop ran before empty residency proof")
@@ -196,7 +208,13 @@ func TestStopPauseOwnershipCommandResidencyProof(t *testing.T) {
 }
 
 func TestStopPauseOwnershipUnknownListenerRefuses(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
 	t.Cleanup(server.Close)
 	parsed, err := url.Parse(server.URL)
 	if err != nil {
@@ -743,7 +761,13 @@ func TestStopPauseOwnershipStoppedLMStudioNativeReadback(t *testing.T) {
 func TestStopPauseOwnershipExternalListenerClosureNeedsPIDExit(t *testing.T) {
 	test := func(name string, known, exited bool) {
 		t.Run(name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/" {
+					http.NotFound(w, r)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
 			t.Cleanup(server.Close)
 			parsed, err := url.Parse(server.URL)
 			if err != nil {
@@ -895,7 +919,11 @@ func TestStopPauseOwnershipCommandWaitDoesNotHoldProjectionGate(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
 	defer unblock()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		close(entered)
 		<-release
 		w.WriteHeader(http.StatusOK)
@@ -1010,7 +1038,13 @@ func TestStopPauseOwnershipNativeDispatchRechecksFinalFence(t *testing.T) {
 func TestStopPauseOwnershipExternalLMStudioOwnerShutdownAllowsRetry(t *testing.T) {
 	test := func(name, readback string, readErr error, wantStopped bool) {
 		t.Run(name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/" {
+					http.NotFound(w, r)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
 			t.Cleanup(server.Close)
 			unloadMarker, stopMarker := filepath.Join(t.TempDir(), "external-unload"), filepath.Join(t.TempDir(), "external-stop")
 			ex := commandStopTestExecutor(t, server.URL, []string{fakeEngineBin, "touch", stopMarker}, 1, true)

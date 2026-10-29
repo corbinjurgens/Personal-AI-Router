@@ -159,7 +159,7 @@ func TestPublishSelfEnrichesOverLoopback(t *testing.T) {
 		CPU:    &CPUInfo{Name: "AMD Ryzen 7 9800X3D", Cores: 8},
 		Memory: &MemoryInfo{TotalBytes: 68719476736},
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/node-info" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -232,7 +232,7 @@ func TestPeerStillAgesOut(t *testing.T) {
 // lastInfo, else TCP to node-info / engine-manager, then identity when
 // conclusive. Never treat ol/lm alone as proof of life.
 func TestReachableAntiFlap(t *testing.T) {
-	niSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	niSrv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/node-info" {
 			http.NotFound(w, r)
 			return
@@ -335,7 +335,7 @@ func TestReachableAntiFlap(t *testing.T) {
 
 func TestEnrichFallsBackToASecondPublishedAddress(t *testing.T) {
 	const hostUUID = "host-enrich-failover"
-	niSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	niSrv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(NodeInfoResponse{
 			HostUUID: hostUUID,
 			GPUs:     []GPUInfo{{Name: "GPU from reachable address"}},
@@ -385,6 +385,10 @@ func TestReachableSelfDialsLoopback(t *testing.T) {
 			Listener: listener,
 			Config: &http.Server{
 				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" {
+						http.NotFound(w, r)
+						return
+					}
 					if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" {
 						t.Errorf("unexpected request to %s: %s %s", uuid, r.Method, r.URL.Path)
 						http.NotFound(w, r)

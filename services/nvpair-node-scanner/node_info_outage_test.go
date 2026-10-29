@@ -164,7 +164,7 @@ func TestNodeInfoTransportBoundsConnectionsPerHost(t *testing.T) {
 func TestNodeInfoConcurrentFetchesGetIndependentRequestBudgets(t *testing.T) {
 	const responseDelay = 200 * time.Millisecond
 	var requests atomic.Int32
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewUnstartedServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		time.Sleep(responseDelay)
 		_ = json.NewEncoder(w).Encode(NodeInfoResponse{HostUUID: "peer-uuid"})
@@ -238,7 +238,7 @@ func TestNodeInfoOriginGateHonorsCanceledWaiter(t *testing.T) {
 
 func TestNodeInfoErrorBodyIsDrainedForConnectionReuse(t *testing.T) {
 	var requests atomic.Int32
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewUnstartedServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
 		if requests.Add(1) == 1 {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte("temporarily unavailable"))

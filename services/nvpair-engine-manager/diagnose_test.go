@@ -150,7 +150,13 @@ func TestDiagnoseConnection(t *testing.T) {
 			port := diagnosisRefusedPort(t)
 			endpoint := fmt.Sprintf("http://127.0.0.1:%d/", port)
 			if tc.status != 0 {
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.status) }))
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != http.MethodGet || r.URL.Path != "/" {
+						http.NotFound(w, r)
+						return
+					}
+					w.WriteHeader(tc.status)
+				}))
 				defer srv.Close()
 				endpoint, port = srv.URL, diagnosisServerPort(t, srv)
 			}
@@ -222,7 +228,13 @@ func TestStartDiagnosisUnavailableKeepsOriginalError(t *testing.T) {
 }
 
 func TestProcessPresenceNeverMakesEngineReady(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
 	ex, _, _, stopped := newDiagnosisExecutor(t, srv.URL, diagnosisServerPort(t, srv))
 	closeDiagnosisServerOnStop(t, srv, stopped)
 	if err := ex.Start(context.Background(), "fake"); err == nil {
@@ -238,7 +250,11 @@ func TestHealthFailureNamesAuthRequirement(t *testing.T) {
 	var response atomic.Int32
 	response.Store(http.StatusOK)
 	var started string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		if !fileExists(started) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -270,6 +286,10 @@ func TestAdoptedHealthFailureReportedAfterStatusRead(t *testing.T) {
 	// Hold the failed health response until Status has changed st.healthy.
 	healthEntered, releaseHealth := make(chan struct{}), make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !(r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/health")) {
+			http.NotFound(w, r)
+			return
+		}
 		if r.URL.Path == "/health" {
 			select {
 			case <-healthEntered:
@@ -327,7 +347,11 @@ func TestWaitReadyAuthConfirmations(t *testing.T) {
 	t.Run("non auth response resets consecutive count", func(t *testing.T) {
 		responses := []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable, http.StatusUnauthorized, http.StatusForbidden, http.StatusUnauthorized}
 		var calls atomic.Int32
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
 			i := int(calls.Add(1)) - 1
 			if i >= len(responses) {
 				i = len(responses) - 1
@@ -345,7 +369,13 @@ func TestWaitReadyAuthConfirmations(t *testing.T) {
 		}
 	})
 	t.Run("undeclared auth status keeps timeout", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
 		defer srv.Close()
 		ex, st, _, _ := newDiagnosisExecutor(t, srv.URL, diagnosisServerPort(t, srv))
 		err := ex.waitReady(context.Background(), st.plat.Runtime.Ready, st.port, nil, candidateCredential{port: st.port})
@@ -389,6 +419,10 @@ func TestProbeStatusPreservesIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var identityHeader atomic.Bool
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/" {
+					http.NotFound(w, r)
+					return
+				}
 				identityHeader.Store(r.Header.Get(engineIdentityProbeHeader) == "1")
 				w.WriteHeader(tc.status)
 				if _, err := w.Write([]byte(tc.body)); err != nil {
@@ -418,7 +452,13 @@ func TestProbeStatusPreservesIdentity(t *testing.T) {
 }
 
 func TestProbeStatusWithoutHTTPResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
 	defer srv.Close()
 	port := diagnosisServerPort(t, srv)
 	ex, _, _, _ := newDiagnosisExecutor(t, srv.URL, port)
@@ -449,7 +489,13 @@ func TestProbeStatusWithoutHTTPResponse(t *testing.T) {
 func TestHealthDiagnosisDiscardsStaleRun(t *testing.T) {
 	for _, scenario := range []string{"new generation", "stopped", "cancelled"} {
 		t.Run(scenario, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/" {
+					http.NotFound(w, r)
+					return
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
 			defer srv.Close()
 			ex, st, _, _ := newDiagnosisExecutor(t, srv.URL, diagnosisServerPort(t, srv))
 			entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
