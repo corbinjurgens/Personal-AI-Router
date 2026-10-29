@@ -38,11 +38,11 @@ func TestNativeSourceFinalPathThroughJunction(t *testing.T) {
 	nativeSourceDirectoryLink(t, link, target)
 	test := func(name, suffix string) {
 		t.Run(name, func(t *testing.T) {
-			want, err := resolveNativeSourcePath(filepath.Join(target, suffix))
+			want, err := resolveExistingPath(filepath.Join(target, suffix))
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := resolveNativeSourcePath(filepath.Join(link, suffix))
+			got, err := resolveExistingPath(filepath.Join(link, suffix))
 			if err != nil || got != want {
 				t.Fatalf("resolved path = %q, %v; want %q", got, err, want)
 			}
@@ -63,7 +63,7 @@ func TestNativeSourceFinalPathThroughJunction(t *testing.T) {
 	test("junction ancestor of directory", "install")
 	test("junction ancestor of executable", filepath.Join("install", "server.exe"))
 	t.Run("missing descendant fails closed", func(t *testing.T) {
-		if _, err := resolveNativeSourcePath(filepath.Join(link, "missing")); err == nil {
+		if _, err := resolveExistingPath(filepath.Join(link, "missing")); err == nil {
 			t.Fatal("missing source resolved successfully")
 		}
 	})
@@ -96,7 +96,7 @@ func TestModelDeviceJunctionRuntimeSource(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRoot, err := resolveNativeSourcePath(install)
+			wantRoot, err := resolveExistingPath(install)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,7 +111,7 @@ func TestModelDeviceJunctionRuntimeSource(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantBin, err := resolveNativeSourcePath(filepath.Join(install, "server.exe"))
+			wantBin, err := resolveExistingPath(filepath.Join(install, "server.exe"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -129,7 +129,7 @@ func TestModelDeviceJunctionLibraryEscape(t *testing.T) {
 	// A directory named like a library must fail containment before the later
 	// regular-file check. Junctions work without file-symlink privileges.
 	nativeSourceDirectoryLink(t, filepath.Join(root, "ggml.dll"), t.TempDir())
-	resolvedRoot, err := resolveNativeSourcePath(root)
+	resolvedRoot, err := resolveExistingPath(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestModelDeviceLibrarySymlinkContainment(t *testing.T) {
 			if err := os.Symlink(target, filepath.Join(root, "ggml.dll")); err != nil {
 				t.Skipf("file symlink creation unavailable: %v", err)
 			}
-			resolvedRoot, err := resolveNativeSourcePath(root)
+			resolvedRoot, err := resolveExistingPath(root)
 			if err != nil {
 				t.Fatal(err)
 			}

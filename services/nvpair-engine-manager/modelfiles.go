@@ -27,7 +27,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -122,11 +121,11 @@ func validSHA256(s string) bool {
 // a regular file inside root (itself resolved). It returns the resolved path and
 // its FileInfo.
 func confinedRegularFile(root, abs string) (string, os.FileInfo, error) {
-	realRoot, err := filepath.EvalSymlinks(root)
+	realRoot, err := resolveExistingPath(root)
 	if err != nil {
 		return "", nil, err
 	}
-	real, err := filepath.EvalSymlinks(abs)
+	real, err := resolveExistingPath(abs)
 	if err != nil {
 		return "", nil, err
 	}
@@ -421,7 +420,7 @@ func hashModelFiles(ctx context.Context, list *modelFileList, progress func(path
 		}
 		if f.info != nil {
 			after, err := os.Stat(f.abs)
-			resolved, resolveErr := filepath.EvalSymlinks(f.configured)
+			resolved, resolveErr := resolveExistingPath(f.configured)
 			if err != nil || resolveErr != nil || resolved != f.abs || !sameCopyFile(f.info, after) {
 				return fmt.Errorf("source artifact changed for %s", f.Path)
 			}
@@ -503,7 +502,7 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if selected.info != nil {
-		resolved, err := filepath.EvalSymlinks(selected.configured)
+		resolved, err := resolveExistingPath(selected.configured)
 		current, statErr := os.Stat(selected.configured)
 		if err != nil || statErr != nil || resolved != abs || !sameCopyFile(selected.info, info) || !sameCopyFile(info, current) {
 			http.Error(w, "source artifact changed", http.StatusConflict)

@@ -37,7 +37,7 @@ var strataRuntimeHashes = struct {
 }{files: map[string]strataRuntimeHash{}}
 
 func strataTarget(path string) (string, error) {
-	target, err := filepath.EvalSymlinks(path)
+	target, err := resolveExistingPath(path)
 	if runtime.GOOS == "windows" {
 		target = strings.ToLower(target)
 	}

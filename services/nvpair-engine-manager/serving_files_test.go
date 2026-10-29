@@ -64,7 +64,7 @@ func TestServingFileBindingKeepsHFSymlink(t *testing.T) {
 	}
 	// The temp root may itself sit under a symlink (macOS /var -> /private/var),
 	// so compare against the blob's fully resolved path.
-	resolvedBlob, err := resolveNativeSourcePath(blob)
+	resolvedBlob, err := resolveExistingPath(blob)
 	if err != nil {
 		t.Fatal(err)
 	}
