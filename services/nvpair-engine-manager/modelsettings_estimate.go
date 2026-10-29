@@ -635,7 +635,7 @@ func modelEstimateCacheType(value *string) (gguf.GGMLType, bool) {
 func modelEstimateRecurrent(m modelEstimateModel, in modelEstimateInput) modelconfig.EstimateComponent {
 	u := unknownEstimateComponent("recurrent-state", "recurrent dimensions or per-layer native mapping unavailable")
 	if m.arch != "lfm2" && m.arch != "lfm2moe" {
-		if !slices.Contains([]string{"llama", "qwen2", "qwen2moe", "qwen3", "qwen3moe", "mistral", "gemma2", "gemma3", "gemma4", "deepseek2", "deepseek3"}, m.arch) {
+		if !slices.Contains([]string{"llama", "llama4", "gpt-oss", "qwen2", "qwen2moe", "qwen3", "qwen3moe", "mistral", "gemma2", "gemma3", "gemma4", "deepseek2", "deepseek3"}, m.arch) {
 			return u
 		}
 		for _, field := range []string{"attention.recurrent_layers", "full_attention_interval", "shortconv.l_cache", "ssm.state_size", "ssm.conv_kernel", "wkv.head_size"} {
@@ -695,6 +695,12 @@ func modelEstimateRecurrent(m modelEstimateModel, in modelEstimateInput) modelco
 // Explicit support matrix, using native hparams contracts referenced by the
 // pinned MIT library. Family names never substitute for recurrent/MLA mappings.
 func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEstimateInput) (attention, state modelconfig.EstimateComponent) {
+	return modelEstimateCachesForLayers(ctx, m, in, false)
+}
+
+// deviceOnly selects native layers, never a fraction of aggregate cache bytes.
+// llama-model.cpp:1521-1546 and llama-kv-cache.cpp:214-220 at 7fe450e1.
+func modelEstimateCachesForLayers(ctx context.Context, m modelEstimateModel, in modelEstimateInput, deviceOnly bool) (attention, state modelconfig.EstimateComponent) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			reason := "pinned library cache panic"
@@ -710,7 +716,8 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 	hybrid := slices.Contains([]string{"lfm2", "lfm2moe", "qwen3next", "qwen35", "qwen35moe"}, m.arch)
 	mla := m.arch == "deepseek2"
 	shared := m.arch == "gemma4"
-	dense := slices.Contains([]string{"llama", "qwen2", "qwen2moe", "qwen3", "qwen3moe", "mistral", "gemma2", "gemma3", "deepseek2", "gemma4"}, m.arch)
+	// llama-arch.cpp:127 names LLM_ARCH_OPENAI_MOE as canonical "gpt-oss".
+	dense := slices.Contains([]string{"llama", "llama4", "gpt-oss", "qwen2", "qwen2moe", "qwen3", "qwen3moe", "mistral", "gemma2", "gemma3", "deepseek2", "gemma4"}, m.arch)
 	if !dense && !hybrid {
 		kv.Reason = "architecture unmapped; MLA/compressed caches are not dense KV"
 		return kv, recurrent
@@ -825,6 +832,13 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 		cacheLayers -= count
 	}
 	window, hasWindow := m.number("attention.sliding_window")
+	// models/llama4.cpp:8-19 selects chunked iSWA and overrides a
+	// nonzero (or absent) window with 8192. Malformed is not absent.
+	if m.arch == "llama4" {
+		if _, exists := m.numeric[m.arch+".attention.sliding_window"]; !exists || hasWindow && window > 0 {
+			window, hasWindow = 8192, true
+		}
+	}
 	if mla && (window > 0 || m.numeric[m.arch+".attention.sliding_window_pattern"].Array != nil) {
 		kv.Reason = "MLA SWA combination unmapped"
 		return kv, recurrent
@@ -833,11 +847,21 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 		kv.Reason = "shared-KV SWA window unavailable"
 		return kv, recurrent
 	}
+	if m.arch == "gpt-oss" && (!hasWindow || window == 0) {
+		// models/openai-moe.cpp:6-9 requires a scalar window and keeps
+		// standard iSWA even for zero. Neither case is ordinary dense KV.
+		kv.Reason = "GPT-OSS native SWA window missing or zero; iSWA mapping unconfirmed"
+		return kv, recurrent
+	}
 	if _, exists := m.numeric[m.arch+".attention.sliding_window"]; exists && !hasWindow {
 		kv.Reason = "malformed SWA window"
+		if m.numeric[m.arch+".attention.sliding_window"].Array != nil {
+			kv.Reason = "per-layer SWA window lengths unsupported by pinned scalar n_swa"
+		}
 		return kv, recurrent
 	}
 	_, hasPattern := m.numeric[m.arch+".attention.sliding_window_pattern"]
+	swaLayers := make([]bool, layers)
 	swaKey, swaValue := key, value
 	hasWidths := false
 	for _, field := range []string{"attention.key_length_swa", "attention.value_length_swa"} {
@@ -866,7 +890,7 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 		if shared {
 			// Bounded Task3 subset: full cache with equal global/SWA widths.
 			// llama-kv-cache-iswa.cpp:74-81 makes both cache sizes identical.
-			// Task4 owns compact SWA, variable widths and per-layer placement.
+			// Compact shared-KV and unequal widths remain unconfirmed here.
 			pattern, exists := m.numeric[m.arch+".attention.sliding_window_pattern"]
 			if !exists || len(pattern.Array) != int(layers) || in.SWAFull == nil || !*in.SWAFull || key != value || swaKey != key || swaValue != value {
 				kv.Reason = "shared-KV requires full cache and equal widths; SWA variant mapping deferred"
@@ -911,7 +935,17 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 			// Uniform full-size caches do not depend on the SWA layer mask.
 			window = 0
 		} else {
-			if _, exists := m.numeric[m.arch+".attention.sliding_window_pattern"]; !exists && m.arch != "lfm2" && m.arch != "lfm2moe" {
+			// models/lfm2moe.cpp does not enable SWA, unlike lfm2.cpp:26-30.
+			// Do not reuse LFM2's all-attention-layer mapping for that family.
+			if !slices.Contains([]string{"gemma2", "gemma3", "llama4", "gpt-oss", "lfm2"}, m.arch) {
+				kv.Reason = "SWA native architecture mapping unconfirmed"
+				return kv, recurrent
+			}
+			if hasPattern && m.arch == "lfm2" {
+				kv.Reason = "LFM2 SWA pattern override mapping unconfirmed; native marks every attention layer"
+				return kv, recurrent
+			}
+			if _, exists := m.numeric[m.arch+".attention.sliding_window_pattern"]; !exists && m.arch != "lfm2" {
 				kv.Reason = "SWA per-layer pattern unavailable"
 				return kv, recurrent
 			}
@@ -924,15 +958,64 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 				return kv, recurrent
 			}
 			if pattern, exists := m.numeric[m.arch+".attention.sliding_window_pattern"]; exists {
-				period, ok := modelEstimateUint(pattern)
-				if !ok || period > layers {
-					kv.Reason = "SWA declared pattern malformed or unmapped"
-					return kv, recurrent
+				// llama-model.cpp:3308-3314 reads arrays before scalars;
+				// llama-model-loader.cpp:365-380 accepts bool/u32/i32.
+				if pattern.Array != nil {
+					if len(pattern.Array) != int(layers) || pattern.Type != 7 && pattern.Type != 4 && pattern.Type != 5 {
+						kv.Reason = "SWA native per-layer pattern length or element type unsupported"
+						return kv, recurrent
+					}
+					for i, bit := range pattern.Array {
+						if bit > 1 {
+							kv.Reason = "SWA native per-layer pattern malformed"
+							return kv, recurrent
+						}
+						swaLayers[i] = bit == 1
+					}
+				} else {
+					period, valid := modelEstimateUint(pattern)
+					if !valid || period > layers {
+						kv.Reason = "SWA declared pattern malformed or unmapped"
+						return kv, recurrent
+					}
+					// llama-hparams.cpp:8-21, dense_first=false.
+					for i := range swaLayers {
+						swaLayers[i] = period == 0 || uint64(i)%period < period-1
+					}
 				}
+			} else {
+				// models/lfm2.cpp:26-30: all attention layers use SWA.
+				for i := range swaLayers {
+					swaLayers[i] = true
+				}
+			}
+			if !slices.Contains(swaLayers, true) {
+				kv.Reason = "SWA pattern has no windowed layer; native iSWA assertion would fail"
+				return kv, recurrent
 			}
 		}
 	}
-	arch := m.file.Architecture()
+	// Native transposed V pads to the maximum GQA width across all layers,
+	// including layers filtered into the other iSWA cache (kv-cache.cpp:209).
+	if *a.Options.FlashAttention == "off" {
+		variable := window > 0 && swaValue != value
+		if isArray {
+			var first uint64
+			for _, h := range perHeads.Array {
+				if h == 0 && hybrid {
+					continue
+				}
+				if first == 0 {
+					first = h
+				}
+				variable = variable || h != first
+			}
+		}
+		if variable {
+			kv.Reason = "transposed V padding for variable per-layer widths unconfirmed"
+			return kv, recurrent
+		}
+	}
 	var cacheBytes uint64
 	for i := uint64(0); i < cacheLayers; i++ {
 		if ctx.Err() != nil {
@@ -963,13 +1046,22 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 		}
 		cells := uint64(a.TotalContext)
 		k, v := key, value
-		if window > 0 && i < uint64(len(arch.AttentionSlidingWindowLayers)) && arch.AttentionSlidingWindowLayers[i] {
+		if window > 0 && swaLayers[i] {
 			perStream := uint64(a.PerSlotContext)
 			if !*in.SWAFull {
 				perStream = gguf.GGMLPadding(min(perStream, modelEstimateAdd(window, uint64(*a.Options.UBatchSize))), 256)
 			}
 			cells = modelEstimateMul(perStream, uint64(a.Slots))
 			k, v = swaKey, swaValue
+		}
+		if *a.Options.FlashAttention == "on" {
+			// llama-context.cpp:3792-3809 checks block alignment per head.
+			_, validK := modelEstimateRow(kt, k)
+			_, validV := modelEstimateRow(vt, v)
+			if !validK || !validV {
+				kv.Reason = "per-head cache precision incompatible with native block size"
+				return kv, recurrent
+			}
 		}
 		kb, validK := modelEstimateRow(kt, modelEstimateMul(k, h), cells)
 		vb, validV := modelEstimateRow(vt, modelEstimateMul(v, h), cells)
@@ -984,7 +1076,9 @@ func modelEstimateCaches(ctx context.Context, m modelEstimateModel, in modelEsti
 			kv.Reason = "K/V row width incompatible with cache block size"
 			return kv, recurrent
 		}
-		cacheBytes = modelEstimateAdd(cacheBytes, modelEstimateAdd(kb, vb))
+		if !deviceOnly || a.GPU.Mode == "layers" && a.GPU.Layers != nil && *a.GPU.Layers > 0 && i >= layers+1-uint64(*a.GPU.Layers) {
+			cacheBytes = modelEstimateAdd(cacheBytes, modelEstimateAdd(kb, vb))
+		}
 	}
 	kv = estimateComponent("attention-cache", cacheBytes, "per-layer native head widths; independently block-sized K/V; total context already includes slots")
 	if mla {
@@ -1183,8 +1277,9 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 			continue
 		}
 		if c.Name == "weights" {
-			// Pinned native output-first layer convention. Tensor placement is a
-			// projection; embeddings and unclassified tensors remain on host.
+			// llama-model.cpp:1521-1546 at 7fe450e1: start = blocks+1-ngl;
+			// output has index blocks. Thus ngl=1 selects output, then trailing
+			// blocks. Embeddings and unclassified tensors remain on host.
 			gpuLayers := uint64(*a.GPU.Layers)
 			var offloadBlocks uint64
 			if gpuLayers > 0 {
@@ -1245,6 +1340,26 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 			if a.Options.KVOffload != nil && !*a.Options.KVOffload {
 				c.DomainID = "host"
 				host = modelEstimateAdd(host, n)
+			} else if c.Name == "attention-cache" && a.Options.KVOffload != nil {
+				part, _ := modelEstimateCachesForLayers(context.Background(), m, in, true)
+				d, err := strconv.ParseUint(part.Bytes, 10, 64)
+				if err != nil || part.Status != "estimated" || d > n {
+					out.Unknowns = append(out.Unknowns, "attention-cache: native per-layer device placement unavailable")
+					continue
+				}
+				h := n - d
+				host, device = modelEstimateAdd(host, h), modelEstimateAdd(device, d)
+				c.DomainID, c.Bytes = "host", strconv.FormatUint(h, 10)
+				c.LowBytes, c.HighBytes = c.Bytes, c.Bytes
+				if h == 0 {
+					c.DomainID, c.Bytes = "offload-unmapped", strconv.FormatUint(d, 10)
+					c.LowBytes, c.HighBytes = c.Bytes, c.Bytes
+				} else if d > 0 {
+					part := *c
+					part.DomainID, part.Bytes = "offload-unmapped", strconv.FormatUint(d, 10)
+					part.LowBytes, part.HighBytes = part.Bytes, part.Bytes
+					out.Components = append(out.Components, part)
+				}
 			} else if a.Options.KVOffload != nil && uint64(*a.GPU.Layers) == layers+1 {
 				c.DomainID = "offload-unmapped"
 				device = modelEstimateAdd(device, n)

@@ -449,6 +449,153 @@ func TestModelSettingsEstimateSWA(t *testing.T) {
 	assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "unknown", "")
 }
 
+func TestModelSettingsEstimateSWANativeLayerPatterns(t *testing.T) {
+	for _, arch := range []string{"gemma3", "gpt-oss", "llama4"} {
+		t.Run(arch, func(t *testing.T) {
+			in := estimateFixture(arch)
+			in.Allocation.PerSlotContext, in.Allocation.TotalContext = 16384, 16384
+			in.Facts.Shards[0].Numeric[arch+".attention.sliding_window"] = gguffacts.Numeric{Type: 4, Bits: 256}
+			in.Facts.Shards[0].Numeric[arch+".attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 7, Array: []uint64{0, 1}}
+			// Native arrays mark global then SWA. Each F16 K+V cell is
+			// 2 * 32 * 2 * 2 = 256 bytes. Llama4 overrides the window to
+			// 8192, so its chunked layer has pad(8192+32,256)=8448 cells.
+			want := "4325376" // (16384 + 512) * 256
+			if arch == "llama4" {
+				want = "6356992" // (16384 + 8448) * 256
+			}
+			assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "estimated", want)
+			if arch == "gpt-oss" {
+				// Sinks are learned F32 per-head weights, not extra KV cells:
+				// models/openai-moe.cpp:42 and llama-kv-cache.cpp:229-234.
+				in.Facts.Shards[0].Tensors = append(in.Facts.Shards[0].Tensors, gguffacts.Tensor{Name: "blk.0.attn_sinks.weight", Type: 0, Dimensions: []uint64{4}, Bytes: 16})
+				out := estimateFixtureResult(t, in)
+				assertEstimateBytes(t, out, "weights", "estimated", "327952")
+				assertEstimateBytes(t, out, "attention-cache", "estimated", want)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateSWANativePatternCountercases(t *testing.T) {
+	for _, pattern := range []gguffacts.Numeric{
+		{Type: 6, Array: []uint64{0, 1}}, // float array is not a native bool/integer array
+		{Type: 7, Array: []uint64{1}},
+		{Type: 4, Array: []uint64{0, 2}},
+		{Type: 4, Array: []uint64{0, 0}},
+		{Type: 4, Bits: 1}, // no SWA layers would fail the native assertion
+	} {
+		in := estimateFixture("gemma3")
+		in.Facts.Shards[0].Numeric["gemma3.attention.sliding_window"] = gguffacts.Numeric{Type: 4, Bits: 256}
+		in.Facts.Shards[0].Numeric["gemma3.attention.sliding_window_pattern"] = pattern
+		assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "unknown", "")
+	}
+	in := estimateFixture("gemma3")
+	// The pin has a scalar n_swa, not per-layer window lengths. Do not
+	// reinterpret a window array as a pattern or use parser defaults.
+	in.Facts.Shards[0].Numeric["gemma3.attention.sliding_window"] = gguffacts.Numeric{Type: 4, Array: []uint64{256, 512}}
+	assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "unknown", "")
+}
+
+func TestModelSettingsEstimateSWANativeArchitectureGuards(t *testing.T) {
+	t.Run("noncanonical architecture", func(t *testing.T) {
+		in := estimateFixture("openai-moe")
+		in.Facts.Shards[0].Numeric["openai-moe.attention.sliding_window"] = gguffacts.Numeric{Type: 4, Bits: 256}
+		in.Facts.Shards[0].Numeric["openai-moe.attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 7, Array: []uint64{0, 1}}
+		assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "unknown", "")
+	})
+	for _, tc := range []struct {
+		name    string
+		present bool
+	}{
+		{"GPT-OSS missing window", false},
+		{"GPT-OSS zero window", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateFixture("gpt-oss")
+			if tc.present {
+				in.Facts.Shards[0].Numeric["gpt-oss.attention.sliding_window"] = gguffacts.Numeric{Type: 4, Bits: 0}
+			}
+			c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+			if c.Status != "unknown" || c.Reason == "" {
+				t.Fatalf("cache=%+v, want named window unknown", c)
+			}
+		})
+	}
+	t.Run("LFM2-MoE does not select SWA", func(t *testing.T) {
+		in := estimateFixture("lfm2moe")
+		in.Facts.Shards[0].Numeric["lfm2moe.attention.head_count_kv"] = gguffacts.Numeric{Type: 4, Array: []uint64{0, 2}}
+		in.Facts.Shards[0].Numeric["lfm2moe.attention.sliding_window"] = gguffacts.Numeric{Type: 4, Bits: 256}
+		c := estimateTestComponent(t, estimateFixtureResult(t, in), "attention-cache")
+		// models/lfm2moe.cpp does not enable SWA, unlike models/lfm2.cpp.
+		if c.Status != "unknown" || !strings.Contains(c.Reason, "SWA") {
+			t.Fatalf("cache=%+v, want named SWA unknown", c)
+		}
+	})
+}
+
+func TestModelSettingsEstimateSWANativeWidthsAndPlacement(t *testing.T) {
+	in := estimateFixture("gemma3")
+	in.Facts.Shards[0].Numeric["gemma3.attention.sliding_window"] = gguffacts.Numeric{Type: 4, Bits: 256}
+	in.Facts.Shards[0].Numeric["gemma3.attention.sliding_window_pattern"] = gguffacts.Numeric{Type: 4, Array: []uint64{0, 1}}
+	layers, offload := int32(2), true
+	in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+	in.Allocation.Options.KVOffload = &offload
+	out := estimateFixtureResult(t, in)
+	var rows []modelconfig.EstimateComponent
+	for _, c := range out.Components {
+		if c.Name == "attention-cache" {
+			rows = append(rows, c)
+		}
+	}
+	// Layer 0 is global on host, layer 1 is SWA on device. Splitting by a
+	// layer fraction would incorrectly charge 196608 bytes to each pool.
+	if len(rows) != 2 || rows[0].DomainID != "host" || rows[0].Bytes != "262144" || rows[1].DomainID != "offload-unmapped" || rows[1].Bytes != "131072" {
+		t.Fatalf("unequal native per-layer split: %+v", rows)
+	}
+	in.Allocation.GPU = modelconfig.GPU{Mode: "cpu"}
+	in.Facts.Shards[0].Numeric["gemma3.attention.key_length_swa"] = gguffacts.Numeric{Type: 4, Bits: 64}
+	in.Facts.Shards[0].Numeric["gemma3.attention.value_length_swa"] = gguffacts.Numeric{Type: 4, Bits: 96}
+	fa := "on"
+	in.Allocation.Options.FlashAttention = &fa
+	// 1024*(32+32)*2*2 + 512*(64+96)*2*2 = 589824.
+	assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "estimated", "589824")
+	fa = "off"
+	assertEstimateBytes(t, estimateFixtureResult(t, in), "attention-cache", "unknown", "")
+}
+
+func TestModelSettingsEstimateCachePartialLayerSplit(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		layers               int32
+		offload              bool
+		wantHost, wantDevice string
+	}{
+		{"output only", 1, true, "524288", "0"},
+		{"last block", 2, true, "262144", "262144"},
+		{"all blocks", 3, true, "0", "524288"},
+		{"disabled KV offload", 2, false, "524288", "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateFixture("llama")
+			in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &tc.layers}
+			in.Allocation.Options.KVOffload = &tc.offload
+			out := estimateFixtureResult(t, in)
+			amounts := map[string]string{"host": "0", "offload-unmapped": "0"}
+			for _, c := range out.Components {
+				if c.Name == "attention-cache" {
+					if c.Basis != "derived" || c.LowBytes != c.Bytes || c.HighBytes != c.Bytes || c.DomainID == "" {
+						t.Fatalf("cache placement/range: %+v", c)
+					}
+					amounts[c.DomainID] = c.Bytes
+				}
+			}
+			if amounts["host"] != tc.wantHost || amounts["offload-unmapped"] != tc.wantDevice {
+				t.Fatalf("cache amounts=%v, want %s/%s", amounts, tc.wantHost, tc.wantDevice)
+			}
+		})
+	}
+}
+
 func TestModelSettingsEstimateIncompleteSWAIsUnknown(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -627,12 +774,12 @@ func TestModelSettingsEstimateCachePlacementBoundary(t *testing.T) {
 	in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
 	in.Allocation.Options.KVOffload = &offload
 	partial := estimateFixtureResult(t, in)
-	assertEstimateBytes(t, partial, "attention-cache", "estimated", "524288")
-	if c := estimateTestComponent(t, partial, "attention-cache"); c.DomainID != "" {
-		t.Fatalf("partial cache placement was guessed: %+v", c)
+	assertEstimateBytes(t, partial, "attention-cache", "estimated", "262144")
+	if c := estimateTestComponent(t, partial, "attention-cache"); c.DomainID != "host" {
+		t.Fatalf("first layer cache belongs on host: %+v", c)
 	}
-	if partial.DeviceBytes != "164096" {
-		t.Fatalf("unmapped partial cache was charged by layer fraction: %s", partial.DeviceBytes)
+	if partial.DeviceBytes != "426240" {
+		t.Fatalf("last layer cache plus weights: %s", partial.DeviceBytes)
 	}
 	offload = false
 	host := estimateFixtureResult(t, in)
