@@ -70,6 +70,16 @@ between engines or between differently named models. Overlapping matching sets,
 including implied-latest overlaps, are rejected even across engines. Reserved
 tier aliases cannot be bound as native models.
 
+Linked files do not create a new inventory entry: the engine must recognize the
+model through its native mechanisms, or an exact local llama.cpp preset, typed
+binding or receipt must select the custom artifacts. PAIR can copy the selected
+bound files even when supported links resolve outside its store. Artifact
+inspection of selected files is available for llama.cpp.
+Peers request logical names from an issued listing, never host paths. Copying
+validates that selected set; it does not approve an engine launch or change the
+existing management permissions. See the
+[engine-manager source and copy contract](../services/nvpair-engine-manager/README.md#linked-model-sources).
+
 The list permits at most 256 entries. Model identifiers must be nonempty valid
 UTF-8, at most 512 bytes, without C0, DEL or C1 control characters. Each encoded
 `{engine, model}` reference is additionally limited to 256 JSON bytes, including

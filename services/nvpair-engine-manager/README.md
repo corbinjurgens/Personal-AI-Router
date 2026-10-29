@@ -1126,7 +1126,7 @@ partial's current length and checks the completed file's hash; transport does
 not invent a second resume policy.
 
 On the source, `GET /v1/models/files` resolves the model's files from the
-engine's on-disk layout and lists them as paths relative to the engine's store,
+engine's on-disk layout and lists logical paths relative to that layout's root,
 with size and sha256. Hashes are computed when first asked for, by streaming
 the file, and cached by absolute path, size and modification time. Files whose
 name is already their sha256 (Ollama blobs, llama.cpp blobs behind snapshot
@@ -1134,40 +1134,89 @@ links) are not re-read on the source; the destination still verifies them. The
 listing is an NDJSON stream in the shape of the other streaming routes:
 `{"type":"progress","stage":"hashing","message":<path>,"percent"?}` frames
 while files are hashed, then one `{"type":"result","result":{engine, model,
-revision?, files:[{path, size, sha256}]}}` or `{"type":"error"}` frame, so the
+revision?, exportId, files:[{path, size, sha256}]}}` or `{"type":"error"}` frame, so the
 first hash of a large model does not run into the 30-second response-header
 budget. `GET /v1/models/file` serves one file with `http.ServeContent`, so
 `Range` requests work. It only serves a path that is exactly one of the
 model's listed files; a malformed path (`..`, absolute, backslashes, drive
-letters) is a `400`, anything else not in the list is a `404`. For native
-layouts, every listed file must resolve, after symlinks, inside the engine's
-store; custom bindings use the exact local allowlist described below.
+letters) is a `400`, anything else not in the list is a `404`. Native sources
+can resolve outside the store when they belong to the exact selected model
+binding described below. A peer never supplies a host path.
 
 Custom llama.cpp names are resolved separately from catalog identifiers. An
 exact configured native preset section supplies the local model and optional
-draft GGUF shards, in native order. Applied serving declarations must compile
-against their approved bindings and their asserted full SHA256 values must
-match streamed full-file hashes. Without a declaration, the same bounded preset
+draft GGUF shards, in native order. Persisted resolved typed model loads can
+also select exact artifacts without `Runtime.Serving` or a running engine.
+Export checks the selected configuration,
+bindings and applicable asserted full SHA256 values against streamed full-file
+hashes. It does not recompile the whole engine for copy or grant launch
+approval. Full launch and apply retain their separate review checks. Without a declaration, the same bounded preset
 parser and effective launch options select the exact section; relative paths
 are resolved against that preset. Projectors, adapters, includes and source URLs
 are explicitly refused on this custom path. Only these exact configured files
 may be exported outside `LLAMA_CACHE`; peers cannot provide host paths. A custom
 name with no unique binding is refused without guessing a Hugging Face repo.
 Committed custom-copy receipts can also supply an exact local binding. Different
-configured and receipt artifact sets for the same alias are ambiguous.
+preset, typed or receipt artifact sets for the same alias are ambiguous.
 
 Custom listings add `layout:"llama-artifacts-v1"`, `exportId`, and `role` on
 each file. Paths are synthetic `model/<GGUF basename>` and
 `draft/<GGUF basename>` entries; host paths and serving settings are absent.
 The export ID binds the exact model name and ordered role/path/size/full-SHA256
 manifest (canonical versioned JSON is specified beside `artifactExportID`). Each
-file GET must carry this `exportId`. The source re-resolves and checks the issued
-configuration and regular-file identity before opening the file. Source-local
-issued bindings are bounded; restart or eviction requires a fresh listing.
+file GET must carry this `exportId`. Native listings also issue an `exportId`
+for the transfer, while retaining their native layout and result fields; it is
+not a durable native receipt. Every GET or HEAD, including Range, requires a
+prior listing and its issued ID. The source rechecks the stored selection and
+opened regular-file identity before serving. Source-local issued bindings are
+bounded; restart or eviction requires a fresh listing. Relisting unchanged bytes
+may issue the same ID with newly checked evidence.
 Listing results are bounded to 1 MiB, artifact sets to 1024 entries and progress
 frames to 64 KiB independently of the stream's total length. Shared hashing
 waiters cancel independently; cancellation of a producer lets a live waiter
 retry under its own context.
+
+### Linked model sources
+
+PAIR uses the engine's recognized model inventory, rather than importing loose
+files. For a recognized llama.cpp Hugging Face cache model it binds the selected
+ref, snapshot, GGUF shards and chosen projector. For Ollama it binds the
+selected manifest and only the blobs named by it. For LM Studio it binds the
+selected native row group: a GGUF and its configured-namespace projector, or
+the selected MLX tree, including empty sidecars. Supported source file and
+directory symlinks, Windows junctions, and ordinary file hard links may point
+outside the configured store. Filesystem permissions still apply. Directory
+hard links are unsupported.
+
+The listing freezes the ordered logical file set and its selector, directory
+and opened-object evidence. Reads recheck that evidence; a replaced or retargeted
+source requires a fresh listing. A linked directory does not authorize later
+unlisted descendants, and LM Studio companion selection does not search the
+resolved target's parent. Peer file requests use only engine, model, logical
+name and issued ID. For llama.cpp, peer inspection exposes path-free facts for
+the selected model under existing authorization; artifact inspection is not
+available for the other engines. Existing settings administration and
+removal behavior are unchanged; destination paths remain confined. File hard
+links share mutable bytes with their other names.
+
+Identity and sampled bindings do not detect every same-stat middle-of-file
+mutation, and a native engine can open a path later after PAIR's check. Local
+writers are trusted; these checks do not isolate hostile writers. Copy validates
+the selected export, not the whole launch, and does not establish publisher
+authenticity. Destination full-hash verification checks transfer integrity.
+
+The composed linked-model selector passed on macOS at integration source
+`3300897f`, with 441 test and subtest results passing and no skips or failures
+in each plain and race run. These are synthetic fixtures: fake native rows and
+responses exercise PAIR's selection, checks and transport, not actual vendor
+recognition or inference. Windows execution remains pending. The separate
+Windows test source has not been integrated or executed; its cross-compiled
+binary was not run, UNC lacks an isolated share fixture, and unknown vendor
+reparse behavior is represented only by injected type cases. Native acceptance
+and the linked-model isolated-process task remain pending. Component reader
+counters prove the instrumented read boundaries, not the absence of every
+process-wide filesystem attempt. See the existing
+[controller COPY process limits](#controller-copy-process-verification).
 
 On the destination, the copy:
 

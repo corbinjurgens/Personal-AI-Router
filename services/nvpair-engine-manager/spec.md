@@ -1441,6 +1441,9 @@ family/class, decision, permission revision and reason, without request content.
 
 With `--control-port` and a clustered `--cluster-dir`, engine-manager serves a cluster-scoped remote-control surface over pin-based mTLS (`nvpair-shared/clustertrust`): it presents this node's cluster leaf, requires a client cert, and `403`s any caller that isn't a byte-for-byte pinned cluster peer. The listener is bound whenever `--control-port` is set and admits callers by live membership — its leaf is resolved per handshake, so an unclustered node presents none and every handshake is refused — so no restart is needed on `cluster:identity-changed`; the broker registers `ec` whenever a cluster dir is configured. Routes under `/v1`: `GET /engines`, streaming `POST /engines/install` and `/models/pull` (chunked NDJSON — zero+ `{"type":"progress"}` frames then one terminal `{"type":"result"}`/`{"type":"error"}` frame), non-streaming `POST /models/{load,unload,delete}`, non-streaming `POST /engines/{start,stop}` returning `EngineStatus`, and the model-copy source routes `GET /models/files?engine=&model=` (NDJSON: `hashing` progress frames, then a result frame carrying `{engine, model, revision?, files:[{path, size, sha256}]}`) and `GET /models/file?engine=&model=&path=` (one listed file, Range supported). The node-policy routes `POST /node-policy/get`, `POST /node-policy/set` and `POST /node-availability/set` (bodies `{}`, `{policy, expectedPersistedRevision}`, `{state}`; at most 256 KiB; unknown fields refused; the revision is the compare-and-set precondition of a policy set, forwarded unchanged for the broker to enforce) are pin-gated with the caller's identity, clear any `nodeId` so no further hop is possible, and relay to the local broker as `policy:request` carrying the authenticated `caller`; the broker owns and re-authorizes the call. `engine:remote-policy-get` / `-set` and `engine:remote-availability-set` are their client half, addressed by `nodeId`.
 
+The model-file listing result includes the issued `exportId`; file GET or HEAD
+also supplies it as a query parameter as specified in section 7.3.
+
 The broker's `policy:reply {id, result, error?, errorCode?}` carries a JSON-RPC
 `errorCode` on every failure. Invalid parameters, including missing or malformed
 `expectedPersistedRevision`, invalid policy and invalid availability, use
@@ -1601,13 +1604,30 @@ Requirements:
   interrupted file attempt ends; the copy owner issues a new Range request and
   verifies the final hash under the transfer rules below.
 
-- **Source listing.** `GET /v1/models/files` resolves exactly the model's files from the engine's on-disk layout, as slash-separated paths relative to the engine's store, with size and sha256. Hashes are computed lazily by streaming the file and cached by absolute path, size and mtime; a file named by its sha256 (Ollama blobs, llama.cpp LFS blobs behind snapshot links) uses that name. Native-layout files must resolve, after symlinks, to regular files inside the store; custom artifacts use the exact local bindings below.
-- **Source serving.** `GET /v1/models/file` serves a path only when it is exactly one of the model's listed files (`400` for a malformed path, `404` otherwise), through `http.ServeContent` for Range support.
+- **Source listing.** `GET /v1/models/files` binds the exact selected model's
+  ordered files as logical slash-separated names with size and sha256. Native
+  sources require engine recognition: llama.cpp HF ref/snapshot and selected
+  GGUF shards/projector, Ollama selected manifest and named blobs, or the LM
+  Studio selected row group (GGUF and configured-namespace projector, or an
+  MLX tree). Supported file and directory links can resolve outside the store;
+  no link grants access to arbitrary descendants or a resolved parent. Hashes
+  are computed lazily and cached; a file named by its sha256 uses that name,
+  with the destination still verifying the complete bytes.
+- **Source serving.** Each list issues an `exportId` for its frozen selection.
+  GET and HEAD, including Range, require that ID and exact engine, model and
+  listed logical name (`400` for malformed paths, `404` for unlisted names).
+  Rechecks retain the old selection and use a checked opened handle through
+  `http.ServeContent`. Missing, stale, evicted or restarted issued state
+  requires relisting; unchanged content can receive the same ID. Native IDs
+  are transfer tokens, not durable native receipts or native result fields.
 - **Custom llama.cpp identity.** Before interpreting an ID as an HF locator,
-  resolve exact configured preset/serving candidates and committed copy receipts.
-  Applied declarations must compile against the snapshot of the effective launch
-  configuration and approved artifact bindings; compilation and binding I/O run
-  outside lifecycle/state locks, followed by a snapshot recheck. Undeclared
+  resolve exact configured preset, persisted resolved typed-load and committed
+  copy-receipt candidates. Typed bindings can select artifacts without
+  `Runtime.Serving` or a running engine. Disagreeing candidates are ambiguous.
+  Export checks the selected effective configuration, artifact bindings and
+  applicable full hash assertions, followed by a snapshot recheck. It does not
+  recompile or approve the whole launch. Full launch and apply retain their
+  separate review checks. Undeclared
   presets use the same parser and effective launch-option precedence, resolving
   relative paths against the preset. Export all consumed model then draft GGUF
   shards, in native order. Unknown/ambiguous bindings, declaration/preset drift,
@@ -1620,11 +1640,18 @@ Requirements:
   SHA256 of version-1 canonical JSON containing the exact requested ModelID and
   ordered role/path/size/full-SHA256 tuples; the serialization is normative in
   `artifactExportID`. Sampled serving-binding hashes never substitute for full
-  file hashes, and asserted full serving hashes must match. GET adds
-  `exportId` and checks the source's issued binding snapshot, current manifest,
+  file hashes, and asserted full serving hashes must match. GET or HEAD adds
+  `exportId` and checks the source's issued binding snapshot, current selection,
   symlink-resolved identity and the opened regular file. A source restart or
   bounded issuance-cache eviction requires relisting; unchanged listings retain
   their binding. Neither host paths nor launch/serving configuration is exported.
+- **Link and evidence limits.** Ordinary file hard links share changes with
+  their other names; directory hard links are unsupported. Filesystem permissions
+  apply. Identity checks and samples do not prove detection of every same-stat
+  middle mutation or prevent a later native engine open from racing. Existing
+  peer settings administration, caller grants, removal and strict destination
+  containment are unchanged. Selected-copy validation does not establish whole
+  launch approval or publisher authenticity.
 - **Bounds and cancellation.** Listing manifests are at most 1 MiB; progress
   frames are at most 64 KiB each, with no cumulative hash-stream byte limit.
   Result frames exceeding 64 KiB use the canonical stream envelope with `type`
