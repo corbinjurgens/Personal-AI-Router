@@ -21,6 +21,21 @@ const memoryPlanOutputLimit = 8 << 20
 const memoryPlanBudget = 5 * time.Second
 const memoryPlanCleanupBudget = 500 * time.Millisecond
 
+var errMemoryPlanCleanup = errors.New("memory plan cleanup unconfirmed")
+
+// Startup can fail after a process exists but before containment is assigned.
+// A failed kill must not turn its reap into an unbounded synchronous wait.
+func reapMemoryPlanStartFailure(ctx context.Context, wait func() error) error {
+	done := make(chan struct{})
+	go func() { _ = wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return errMemoryPlanCleanup
+	}
+}
+
 // runMemoryPlanCommand is private to the inspection owner. It admits at most
 // one query per executor and shares inspection's existing non-queuing gate.
 func (e *Executor) runMemoryPlanCommand(ctx context.Context, command memoryPlanCommand, request []byte) (json.RawMessage, error) {
@@ -46,7 +61,7 @@ func (e *Executor) runMemoryPlanCommand(ctx context.Context, command memoryPlanC
 	if ctx.Err() != nil || time.Until(deadline) <= memoryPlanCleanupBudget {
 		return nil, errors.New("memory plan deadline exhausted")
 	}
-	work, err := os.MkdirTemp("", "pair-memory-plan-*")
+	work, err := makeMemoryPlanTempDir()
 	if err != nil {
 		return nil, errors.New("memory plan temporary directory unavailable")
 	}
@@ -66,7 +81,7 @@ func (e *Executor) runMemoryPlanCommand(ctx context.Context, command memoryPlanC
 	args[len(args)-1] = requestPath
 	cmd := exec.Command(command.Command[0], args...)
 	cmd.Dir = command.WorkingDirectory
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "SYSTEMROOT=" + os.Getenv("SYSTEMROOT"), "TEMP=" + work, "TMP=" + work, "HOME=" + work}
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "SYSTEMROOT=" + os.Getenv("SYSTEMROOT"), "TEMP=" + work, "TMP=" + work, "TMPDIR=" + work, "HOME=" + work}
 	cmd.WaitDelay = memoryPlanCleanupBudget
 	budget := &modelDeviceOutputBudget{limit: memoryPlanOutputLimit, cancel: cancel}
 	stdout := &modelDeviceBoundedWriter{budget: budget}
@@ -75,8 +90,15 @@ func (e *Executor) runMemoryPlanCommand(ctx context.Context, command memoryPlanC
 	if runCtx.Err() != nil {
 		return nil, errors.New("memory plan deadline exhausted")
 	}
-	cleanup, err := startMemoryPlanProcess(cmd)
+	cleanupCtx, cleanupCancel := context.WithDeadline(context.Background(), deadline)
+	defer cleanupCancel()
+	cleanup, err := startMemoryPlanProcess(cleanupCtx, cmd)
 	if err != nil {
+		if errors.Is(err, errMemoryPlanCleanup) {
+			remove = false
+			releaseAdmission = false
+			return nil, errMemoryPlanCleanup
+		}
 		return nil, errors.New("memory plan process unavailable")
 	}
 	done := make(chan error, 1)
@@ -88,8 +110,6 @@ func (e *Executor) runMemoryPlanCommand(ctx context.Context, command memoryPlanC
 		waited = true
 	case <-runCtx.Done():
 	}
-	cleanupCtx, cleanupCancel := context.WithDeadline(context.Background(), deadline)
-	defer cleanupCancel()
 	if err := cleanup(cleanupCtx); err != nil {
 		remove = false
 		releaseAdmission = false

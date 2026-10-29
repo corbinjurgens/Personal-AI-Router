@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"os"
 	"os/exec"
@@ -111,12 +112,45 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 	}
 }
 
+// Restrict the directory before writing the request, independent of inherited
+// temp-root ACLs. Only the current user and SYSTEM receive access.
+func makeMemoryPlanTempDir() (string, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", err
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + user.User.Sid.String() + ")")
+	if err != nil {
+		return "", err
+	}
+	attrs := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	for i := 0; i < 10; i++ {
+		dir := filepath.Join(os.TempDir(), "pair-memory-plan-"+rand.Text())
+		name, err := windows.UTF16PtrFromString(dir)
+		if err != nil {
+			return "", err
+		}
+		err = windows.CreateDirectory(name, &attrs)
+		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+	return "", errors.New("private temporary directory unavailable")
+}
+
 // startMemoryPlanProcess contains a query before its primary thread executes.
 // The caller owns cmd.Wait after success and must call cleanup even when the
 // parent exits normally: its descendants may still hold the output pipes.
 // A manager crash between Start and job assignment can leave a suspended
 // process; exec.Cmd does not expose atomic PROC_THREAD_ATTRIBUTE_JOB_LIST.
-func startMemoryPlanProcess(cmd *exec.Cmd) (func(context.Context) error, error) {
+func startMemoryPlanProcess(ctx context.Context, cmd *exec.Cmd) (func(context.Context) error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, err
@@ -144,8 +178,8 @@ func startMemoryPlanProcess(cmd *exec.Cmd) (func(context.Context) error, error) 
 			killErr = nil
 		}
 		closeErr := windows.CloseHandle(job)
-		_ = cmd.Wait() // A killed/suspended process's exit status is expected.
-		return nil, errors.Join(err, killErr, closeErr)
+		reapErr := reapMemoryPlanStartFailure(ctx, cmd.Wait)
+		return nil, errors.Join(err, killErr, closeErr, reapErr)
 	}
 	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
 	if err != nil {

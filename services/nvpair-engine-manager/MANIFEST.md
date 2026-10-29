@@ -9,6 +9,47 @@ An engine manifest is a single JSON file that tells `nvpair-engine-manager`
 how to detect, install, run, probe, and act on one inference engine. The
 runner is engine-agnostic: **adding an engine is a manifest, not code.**
 
+## Private memory planning capability
+
+A manifest may select `"memory_plan": {"adapter": "strata"}`. Each supported
+platform declares its own `memory_plan` object with `command` and
+`working_directory`. There is no inherited invocation or cross-platform
+fallback. An invocation without an adapter is invalid; an absent invocation on
+the selected platform leaves planning unavailable.
+
+The command is exactly an absolute interpreter followed by
+`-B -s -m serve.server --estimate-memory --memory-plan-request {memory_plan_request}`.
+The working directory is an absolute, bound package root. Engine-manager alone
+substitutes the private request file. This capability is internal to model
+inspection, not an action, public executable interface or launch prerequisite.
+No bundled engine enables it yet. The provider interface consumes a detached
+prepared request and returns a neutral plan. Failed reports remain Unknown;
+they do not select another estimation source.
+
+Requests are at most 1 MiB. Combined stdout/stderr is at most 8 MiB and stdout
+must contain exactly one JSON value. Errors exclude raw output, argv and paths.
+One subprocess is admitted per executor through the inspection gate, without
+queueing or holding lifecycle locks. The earlier of the parent deadline and
+five seconds bounds execution, with 500 ms reserved inside it for cleanup.
+Cancellation, overflow or timeout refuses the result without retry.
+
+The request is written in a private OS temporary directory (Unix 0700, request
+0600; Windows protected current-user/SYSTEM ACL). HOME, TEMP, TMP and TMPDIR
+refer to that directory. The exact environment otherwise retains only PATH and
+SYSTEMROOT. Credentials, proxies, PYTHON variables, preload hooks, STRATA
+variables and CUDA controls are excluded. This is environment isolation, not
+an OS network sandbox; reviewed interpreter/system site hooks remain trusted.
+
+Query containment extends the platform process owner: a retained Unix process
+group, or a Windows kill-on-close Job assigned while the child is suspended,
+before resuming it. Cleanup also runs after normal parent exit to terminate
+pipe-holding descendants. Unconfirmed cleanup returns a distinct failure and
+retains admission and temporary files, rather than declaring success or
+removing files while a child may still use them. A manager crash in the Windows
+Start-to-assignment interval can leave a suspended process; no query code has
+run in that interval. Windows Job and ACL execution acceptance remains Task 6;
+cross-vet alone does not establish it.
+
 ## Typed model load contract and option matrix
 
 `runtime.modelLoads` is an ordered collection of exact `modelId` records with

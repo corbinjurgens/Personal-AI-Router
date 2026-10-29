@@ -56,9 +56,16 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+func makeMemoryPlanTempDir() (string, error) {
+	return os.MkdirTemp("", "pair-memory-plan-*")
+}
+
 // startMemoryPlanProcess retains the query's process group even if its leader
 // exits first, so cleanup addresses descendants that still hold the pipes.
-func startMemoryPlanProcess(cmd *exec.Cmd) (func(context.Context) error, error) {
+func startMemoryPlanProcess(ctx context.Context, cmd *exec.Cmd) (func(context.Context) error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	configureSysProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err

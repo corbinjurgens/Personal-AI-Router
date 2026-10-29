@@ -4,10 +4,24 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"nvpair-shared/modelconfig"
 	"path"
 	"strings"
 )
+
+// memoryPlanInput is a detached, immutable request prepared by the adapter at
+// the target. It is never decoded from a public command or used for launch.
+type memoryPlanInput struct {
+	request string
+}
+
+// A provider owns preparation-specific validation and neutral translation.
+// Errors remain Unknown at the estimate owner; they never select a fallback.
+type memoryPlanProvider interface {
+	plan(context.Context, memoryPlanInput) (modelconfig.MemoryPlan, error)
+}
 
 type memoryPlanAdapter struct {
 	Adapter string `json:"adapter"`
