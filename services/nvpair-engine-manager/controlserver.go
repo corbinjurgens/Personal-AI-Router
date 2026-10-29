@@ -64,6 +64,7 @@ func (e *Executor) completeSwitchRecovery(incarnation string) error {
 // controlServer holds the dependencies the ec handlers share.
 type controlServer struct {
 	exec         *Executor
+	access       servingFileAccess
 	mesh         *clustertrust.Mesh
 	copyFromPeer func(context.Context, copyRequest, func() error, func(copyProgress)) (copyModelResult, error)
 }
@@ -149,8 +150,10 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 		request, method := r, r.Method
 		if method == http.MethodHead && route.class == controlRead && route.method == http.MethodGet {
 			// HEAD is a read of a registered read route; handlers only know GET.
-			request = r.Clone(r.Context())
-			request.Method = http.MethodGet
+			if route.path != controlModelFilePath {
+				request = r.Clone(r.Context())
+				request.Method = http.MethodGet
+			}
 			method = http.MethodGet
 		}
 		if method != route.method {

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -200,6 +201,10 @@ func (c *hashCache) sumBound(ctx context.Context, e sourceEvidence, onBytes func
 }
 
 func (c *hashCache) sumBoundKey(ctx context.Context, e sourceEvidence, abs string, onBytes func(int64)) (string, error) {
+	return c.sumBoundKeyAccess(ctx, e, abs, onBytes, c.access)
+}
+
+func (c *hashCache) sumBoundKeyAccess(ctx context.Context, e sourceEvidence, abs string, onBytes func(int64), access servingFileAccess) (string, error) {
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -251,7 +256,7 @@ func (c *hashCache) sumBoundKey(ctx context.Context, e sourceEvidence, abs strin
 		c.inflight[key] = call
 		c.mu.Unlock()
 
-		call.sum, call.err = c.hashBound(ctx, e, onBytes)
+		call.sum, call.err = c.hashBoundAccess(ctx, e, onBytes, access)
 		c.mu.Lock()
 		delete(c.inflight, key)
 		if ctx.Err() != nil {
@@ -304,13 +309,17 @@ func hashFile(ctx context.Context, abs string, onBytes func(int64)) (string, err
 }
 
 func (c *hashCache) hashBound(ctx context.Context, e sourceEvidence, onBytes func(int64)) (string, error) {
+	return c.hashBoundAccess(ctx, e, onBytes, c.access)
+}
+
+func (c *hashCache) hashBoundAccess(ctx context.Context, e sourceEvidence, onBytes func(int64), access servingFileAccess) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	if e.directory || validateSource(e) != nil {
 		return "", fmt.Errorf("invalid hash source evidence")
 	}
-	f, err := c.access.checkedOpen(ctx, e.configured, e.target, e.info)
+	f, err := access.checkedOpen(ctx, e.configured, e.target, e.info)
 	if err != nil {
 		return "", err
 	}
@@ -423,7 +432,7 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 			invalidateCopyGeneration(st, model, generation)
 		}
 	}()
-	list, err := s.exec.modelSourceFiles(ctx, engine, model)
+	list, err := s.exec.modelSourceFilesWithAccess(ctx, engine, model, s.access)
 	if err != nil {
 		http.Error(w, err.Error(), modelLookupStatus(err))
 		return
@@ -445,14 +454,14 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 		flusher.Flush()
 		return true
 	}
-	if err := hashModelFiles(ctx, &list, func(path string, pct int) {
+	if err := fileHashes.hashModelFilesAccess(ctx, &list, func(path string, pct int) {
 		writeFrame(streamFrame{Type: "progress", Engine: engine, Op: "copy", Stage: "hashing", Percent: pct, Message: path})
-	}); err != nil {
+	}, s.access); err != nil {
 		writeFrame(streamFrame{Type: "error", Engine: engine, Op: "copy", Message: err.Error()})
 		return
 	}
 	if list.Layout == llamaArtifactsLayout {
-		if err := s.exec.recheckCopyExport(ctx, list); err != nil {
+		if err := s.exec.recheckCopyExportAccess(ctx, list, s.access); err != nil {
 			writeFrame(streamFrame{Type: "error", Message: err.Error()})
 			return
 		}
@@ -488,6 +497,10 @@ func hashModelFiles(ctx context.Context, list *modelFileList, progress func(path
 }
 
 func (c *hashCache) hashModelFiles(ctx context.Context, list *modelFileList, progress func(path string, pct int)) error {
+	return c.hashModelFilesAccess(ctx, list, progress, c.access)
+}
+
+func (c *hashCache) hashModelFilesAccess(ctx context.Context, list *modelFileList, progress func(path string, pct int), access servingFileAccess) error {
 	for i := range list.Files {
 		f := &list.Files[i]
 		if err := ctx.Err(); err != nil {
@@ -510,7 +523,7 @@ func (c *hashCache) hashModelFiles(ctx context.Context, list *modelFileList, pro
 			continue
 		}
 		var last time.Time
-		sum, err := c.sumBound(ctx, evidence, func(done int64) {
+		sum, err := c.sumBoundKeyAccess(ctx, evidence, evidence.target, func(done int64) {
 			if time.Since(last) < hashProgressInterval || f.Size <= 0 {
 				return
 			}
@@ -518,7 +531,7 @@ func (c *hashCache) hashModelFiles(ctx context.Context, list *modelFileList, pro
 			if progress != nil {
 				progress(f.Path, copyPercent(done, f.Size))
 			}
-		})
+		}, access)
 		if err != nil {
 			if list.Layout == llamaArtifactsLayout {
 				return fmt.Errorf("hash source artifact %s failed or changed", f.Path)
@@ -582,8 +595,8 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if list.Layout == llamaArtifactsLayout {
-		current, err := s.exec.modelSourceFiles(r.Context(), engine, model)
-		if err != nil || hashModelFiles(r.Context(), &current, func(string, int) {}) != nil {
+		current, err := s.exec.modelSourceFilesWithAccess(r.Context(), engine, model, s.access)
+		if err != nil || fileHashes.hashModelFilesAccess(r.Context(), &current, nil, s.access) != nil {
 			http.Error(w, "source artifact changed or unavailable", http.StatusConflict)
 			return
 		}
@@ -591,7 +604,7 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "export identity changed", http.StatusConflict)
 			return
 		}
-		if err := s.exec.recheckCopyExport(r.Context(), list); err != nil {
+		if err := s.exec.recheckCopyExportAccess(r.Context(), list, s.access); err != nil {
 			http.Error(w, "source binding changed", http.StatusConflict)
 			return
 		}
@@ -600,10 +613,13 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	abs := selected.abs
-	file, err := os.Open(abs)
+	evidence := sourceEvidence{configured: selected.configured, target: selected.abs, info: selected.info, size: selected.Size}
+	if selected.info != nil {
+		evidence.mtime = selected.info.ModTime().UnixNano()
+	}
+	file, err := s.access.checkedOpen(r.Context(), evidence.configured, evidence.target, evidence.info)
 	if err != nil {
-		http.Error(w, "file unavailable", http.StatusNotFound)
+		http.Error(w, "source artifact changed", http.StatusConflict)
 		return
 	}
 	defer file.Close()
@@ -612,14 +628,10 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "file unavailable", http.StatusNotFound)
 		return
 	}
-	if selected.info != nil {
-		resolved, err := resolveExistingPath(selected.configured)
-		current, statErr := os.Stat(selected.configured)
-		if err != nil || statErr != nil || resolved != abs || !sameCopyFile(selected.info, info) || !sameCopyFile(info, current) {
-			http.Error(w, "source artifact changed", http.StatusConflict)
-			return
-		}
-	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeContent(w, r, "", info.ModTime(), file)
+	http.ServeContent(w, r, "", info.ModTime(), io.NewSectionReader(servingContextReaderAt{ctx: r.Context(), reader: file, expected: evidence}, 0, evidence.size))
+	final, statErr := file.Stat()
+	if statErr != nil || !sameSource(evidence.info, final, false) || validateSource(evidence) != nil {
+		slog.Warn("model source changed during file response")
+	}
 }

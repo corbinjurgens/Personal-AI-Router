@@ -64,6 +64,10 @@ func compileTypedLlama(st *engineState, command launchCommand, rt Runtime, appro
 }
 
 func compileTypedLlamaExpected(st *engineState, command launchCommand, rt Runtime, approved bool, access servingFileAccess, expected *typedLlamaInputEvidence, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
+	return compileTypedLlamaExpectedContext(context.Background(), st, command, rt, approved, access, expected, advisory...)
+}
+
+func compileTypedLlamaExpectedContext(ctx context.Context, st *engineState, command launchCommand, rt Runtime, approved bool, access servingFileAccess, expected *typedLlamaInputEvidence, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
 	if st.manifest.FamilyOrDefault() != "llamacpp" || rt.modeOrDefault() != "process" {
 		return nil, modelLoadError("", "engine", "Typed loads require an owned llama.cpp process.")
 	}
@@ -76,7 +80,7 @@ func compileTypedLlamaExpected(st *engineState, command launchCommand, rt Runtim
 		return nil, modelLoadError("", "artifacts", "Model content is busy or unsafe.")
 	}
 	defer release()
-	ctx, cancel := context.WithTimeout(context.Background(), modelInspectionBudget)
+	ctx, cancel := context.WithTimeout(ctx, modelInspectionBudget)
 	defer cancel()
 	prepared, err := compileTypedLlamaInputsExpected(ctx, st, command, rt, approved, access, expected, advisory...)
 	if err != nil {
