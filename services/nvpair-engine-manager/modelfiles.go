@@ -141,6 +141,11 @@ func confinedRegularFile(root, abs string) (string, os.FileInfo, error) {
 	if !info.Mode().IsRegular() {
 		return "", nil, fmt.Errorf("%s is not a regular file", abs)
 	}
+	// Windows Stat loads identity lazily. Pin it while this native binding
+	// still names the captured object, before any later cache validation.
+	if !os.SameFile(info, info) {
+		return "", nil, fmt.Errorf("%s file identity is unavailable", abs)
+	}
 	return real, info, nil
 }
 
@@ -151,6 +156,7 @@ type hashCache struct {
 	mu       sync.Mutex
 	done     map[string]hashEntry
 	inflight map[hashEntry]*hashCall
+	access   servingFileAccess
 }
 
 type hashEntry struct {
@@ -180,86 +186,145 @@ func (c *hashCache) sum(ctx context.Context, abs string, onBytes func(int64)) (s
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	info, err := os.Stat(abs)
+	e, err := captureSource(abs, false)
 	if err != nil {
 		return "", err
 	}
-	key := hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano()}
-	c.mu.Lock()
-	if e, ok := c.done[abs]; ok && e.size == key.size && e.mtime == key.mtime && e.info != nil && os.SameFile(e.info, info) {
-		c.mu.Unlock()
-		return e.sum, nil
-	}
-	if call, ok := c.inflight[key]; ok {
-		c.mu.Unlock()
-		if call.info != nil && !os.SameFile(info, call.info) {
-			return "", fmt.Errorf("hash source changed")
-		}
-		if call.onWait != nil {
-			call.onWait()
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-call.done:
-			if (errors.Is(call.err, context.Canceled) || errors.Is(call.err, context.DeadlineExceeded)) && ctx.Err() == nil {
-				return c.sum(ctx, abs, onBytes)
-			}
-			return call.sum, call.err
-		}
-	}
-	call := &hashCall{done: make(chan struct{}), info: info}
-	c.inflight[key] = call
-	c.mu.Unlock()
+	return c.sumBound(ctx, e, onBytes)
+}
 
-	call.sum, call.err = hashFile(ctx, abs, onBytes)
-	c.mu.Lock()
-	delete(c.inflight, key)
-	if call.err == nil {
-		// Store only if the file did not change while it was being read.
-		if after, err := os.Stat(abs); err == nil && sameCopyFile(info, after) {
-			key.sum = call.sum
-			key.info = after
-			c.done[abs] = key
-		} else {
-			call.err = fmt.Errorf("hash source changed")
+// sumBound retains the requesting object's authority across cache hits, waits
+// and retries. Only the path-based wrappers may capture a current object.
+func (c *hashCache) sumBound(ctx context.Context, e sourceEvidence, onBytes func(int64)) (string, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
+		if e.directory || validateSource(e) != nil {
+			return "", fmt.Errorf("invalid hash source evidence")
+		}
+		abs, info := e.target, e.info
+		key := hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano()}
+		c.mu.Lock()
+		if cached, ok := c.done[abs]; ok && cached.size == key.size && cached.mtime == key.mtime && cached.info != nil && os.SameFile(cached.info, info) {
+			c.mu.Unlock()
+			if err := validateSource(e); err != nil {
+				return "", err
+			}
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			return cached.sum, nil
+		}
+		if call, ok := c.inflight[key]; ok {
+			c.mu.Unlock()
+			if call.info != nil && !os.SameFile(info, call.info) {
+				return "", fmt.Errorf("hash source changed")
+			}
+			if call.onWait != nil {
+				call.onWait()
+			}
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-call.done:
+				if err := ctx.Err(); err != nil {
+					return "", err
+				}
+				if err := validateSource(e); err != nil {
+					return "", err
+				}
+				if errors.Is(call.err, context.Canceled) || errors.Is(call.err, context.DeadlineExceeded) {
+					continue
+				}
+				return call.sum, call.err
+			}
+		}
+		call := &hashCall{done: make(chan struct{}), info: info}
+		if c.inflight == nil {
+			c.inflight = make(map[hashEntry]*hashCall)
+		}
+		c.inflight[key] = call
+		c.mu.Unlock()
+
+		call.sum, call.err = c.hashBound(ctx, e, onBytes)
+		c.mu.Lock()
+		delete(c.inflight, key)
+		if call.err == nil && ctx.Err() != nil {
+			call.sum, call.err = "", ctx.Err()
+		}
+		if call.err == nil {
+			// Store the original pinned identity, never a later path stat.
+			if err := validateSource(e); err == nil {
+				key.sum = call.sum
+				key.info = info
+				if c.done == nil {
+					c.done = make(map[string]hashEntry)
+				}
+				c.done[abs] = key
+			} else {
+				call.sum, call.err = "", fmt.Errorf("hash source changed")
+			}
+		}
+		c.mu.Unlock()
+		close(call.done)
+		return call.sum, call.err
 	}
-	c.mu.Unlock()
-	close(call.done)
-	return call.sum, call.err
 }
 
 // remember records a digest the caller just verified, such as a downloaded file
 // before its rename, so the next already-present check need not re-read it.
 func (c *hashCache) remember(abs, sum string) {
-	info, err := os.Stat(abs)
+	e, err := captureSource(abs, false)
 	if err != nil {
 		return
 	}
 	c.mu.Lock()
-	c.done[abs] = hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano(), sum: sum, info: info}
+	if c.done == nil {
+		c.done = make(map[string]hashEntry)
+	}
+	c.done[e.target] = hashEntry{path: e.target, size: e.size, mtime: e.mtime, sum: sum, info: e.info}
 	c.mu.Unlock()
 }
 
 // hashFile streams abs through sha256 without holding it in memory.
 func hashFile(ctx context.Context, abs string, onBytes func(int64)) (string, error) {
-	f, err := os.Open(abs)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	e, err := captureSource(abs, false)
+	if err != nil {
+		return "", err
+	}
+	return fileHashes.hashBound(ctx, e, onBytes)
+}
+
+func (c *hashCache) hashBound(ctx context.Context, e sourceEvidence, onBytes func(int64)) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if e.directory || validateSource(e) != nil {
+		return "", fmt.Errorf("invalid hash source evidence")
+	}
+	f, err := c.access.checkedOpen(ctx, e.configured, e.target, e.info)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	before, err := f.Stat()
-	if err != nil || !before.Mode().IsRegular() {
-		return "", fmt.Errorf("hash source is not a regular file")
-	}
 	h := sha256.New()
-	if _, err := copyWithContext(ctx, h, f, onBytes); err != nil {
+	n, err := copyWithContext(ctx, h, io.NewSectionReader(servingContextReaderAt{ctx: ctx, reader: f, expected: e}, 0, e.size), onBytes)
+	if err != nil {
 		return "", err
 	}
-	after, err := os.Stat(abs)
-	if err != nil || !sameCopyFile(before, after) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	after, err := f.Stat()
+	if n != e.size || err != nil || !sameSource(e.info, after, false) || validateSource(e) != nil {
 		return "", fmt.Errorf("hash source changed")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -415,18 +480,40 @@ var hashProgressInterval = 500 * time.Millisecond
 // hashModelFiles fills in every missing sha256 in list, reporting progress per
 // file at most every hashProgressInterval.
 func hashModelFiles(ctx context.Context, list *modelFileList, progress func(path string, pct int)) error {
+	return fileHashes.hashModelFiles(ctx, list, progress)
+}
+
+func (c *hashCache) hashModelFiles(ctx context.Context, list *modelFileList, progress func(path string, pct int)) error {
 	for i := range list.Files {
 		f := &list.Files[i]
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if f.info == nil {
+			return fmt.Errorf("missing source evidence for %s", f.Path)
+		}
+		evidence := sourceEvidence{configured: f.configured, target: f.abs, info: f.info, size: f.Size, mtime: f.info.ModTime().UnixNano()}
+		if err := validateSource(evidence); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if f.SHA256 != "" {
+			if f.asserted != "" && f.asserted != f.SHA256 {
+				return fmt.Errorf("full SHA256 disagrees with the configured artifact for %s", f.Path)
+			}
 			continue
 		}
 		var last time.Time
-		sum, err := fileHashes.sum(ctx, f.abs, func(done int64) {
+		sum, err := c.sumBound(ctx, evidence, func(done int64) {
 			if time.Since(last) < hashProgressInterval || f.Size <= 0 {
 				return
 			}
 			last = time.Now()
-			progress(f.Path, copyPercent(done, f.Size))
+			if progress != nil {
+				progress(f.Path, copyPercent(done, f.Size))
+			}
 		})
 		if err != nil {
 			if list.Layout == llamaArtifactsLayout {
@@ -434,17 +521,13 @@ func hashModelFiles(ctx context.Context, list *modelFileList, progress func(path
 			}
 			return fmt.Errorf("hash %s: %w", f.Path, err)
 		}
-		f.SHA256 = sum
 		if f.asserted != "" && f.asserted != sum {
 			return fmt.Errorf("full SHA256 disagrees with the configured artifact for %s", f.Path)
 		}
-		if f.info != nil {
-			after, err := os.Stat(f.abs)
-			resolved, resolveErr := resolveExistingPath(f.configured)
-			if err != nil || resolveErr != nil || resolved != f.abs || !sameCopyFile(f.info, after) {
-				return fmt.Errorf("source artifact changed for %s", f.Path)
-			}
+		if err := validateSource(evidence); err != nil {
+			return fmt.Errorf("source artifact changed for %s", f.Path)
 		}
+		f.SHA256 = sum
 	}
 	if list.Layout == llamaArtifactsLayout {
 		var err error

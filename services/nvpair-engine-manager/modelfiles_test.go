@@ -87,7 +87,7 @@ func TestModelDownloadExportReaderHoldsThroughHashing(t *testing.T) {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{})
-	call := &hashCall{done: make(chan struct{}), sum: sha256Hex(fixture.manifest), onWait: func() { close(entered) }}
+	call := &hashCall{done: make(chan struct{}), info: info, sum: sha256Hex(fixture.manifest), onWait: func() { close(entered) }}
 	key := hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano()}
 	fileHashes.mu.Lock()
 	fileHashes.inflight[key] = call
@@ -449,12 +449,12 @@ func TestHashCacheReusesAndInvalidates(t *testing.T) {
 	e.sum = "cached"
 	c.done[path] = e
 	c.mu.Unlock()
-	if got, _ := c.sum(context.Background(), path, nil); got != "cached" {
-		t.Fatalf("unchanged file was re-hashed: %q", got)
+	if got, err := c.sum(context.Background(), path, nil); err != nil || got != "cached" {
+		t.Fatalf("unchanged file was re-hashed: sum=%q error=%v", got, err)
 	}
 	writeTestFile(t, path, []byte("changed!"))
-	if got, _ := c.sum(context.Background(), path, nil); got != sha256Hex([]byte("changed!")) {
-		t.Fatalf("changed file kept a stale hash: %q", got)
+	if got, err := c.sum(context.Background(), path, nil); err != nil || got != sha256Hex([]byte("changed!")) {
+		t.Fatalf("changed file kept a stale hash: sum=%q error=%v", got, err)
 	}
 }
 
