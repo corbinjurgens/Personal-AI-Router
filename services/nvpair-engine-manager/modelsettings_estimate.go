@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-engine-manager/internal/artifactbinding"
+
 	gguf "github.com/gpustack/gguf-parser-go"
 	"nvpair-shared/gguffacts"
 	"nvpair-shared/modelconfig"
@@ -42,15 +44,7 @@ type modelEstimateInput struct {
 }
 
 func modelEstimateBindings(bindings []modelconfig.ArtifactBinding) []modelconfig.ArtifactSummary {
-	ordered := make([]modelconfig.ArtifactSummary, 0, len(bindings))
-	for _, binding := range bindings {
-		data, err := json.Marshal(binding)
-		if err != nil {
-			return nil
-		}
-		ordered = append(ordered, modelconfig.ArtifactSummary{Role: binding.Role, Identity: modelLoadDigest(data), Size: binding.Size})
-	}
-	return ordered
+	return artifactbinding.Summaries(bindings)
 }
 
 // Internal future broker input, never accepted from worker RPC callers. One

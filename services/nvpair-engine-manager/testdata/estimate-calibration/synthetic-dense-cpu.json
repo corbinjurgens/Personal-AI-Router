@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "role": "synthetic",
+  "class": "dense",
+  "backend": "cpu",
+  "nativePin": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "configurationKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "facts": {
+    "Shards": [{
+      "Role": "main", "Version": 3, "Architecture": "llama", "Alignment": 32, "DataOffset": 384,
+      "Numeric": {
+        "llama.block_count": {"Type": 4, "Bits": 2},
+        "llama.embedding_length": {"Type": 4, "Bits": 128},
+        "llama.feed_forward_length": {"Type": 4, "Bits": 256},
+        "llama.attention.head_count": {"Type": 4, "Bits": 4},
+        "llama.attention.head_count_kv": {"Type": 4, "Bits": 2},
+        "llama.vocab_size": {"Type": 4, "Bits": 256}
+      },
+      "Tensors": [{"Name": "token_embd.weight", "Type": 1, "Dimensions": [128, 256], "Offset": 0, "Bytes": 65536}]
+    }]
+  },
+  "artifacts": [{"role": "model", "identity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": "1048576", "assurance": "sampled-local-binding"}],
+  "allocation": {
+    "perSlotContext": 1024, "totalContext": 1024, "slots": 1, "gpu": {"mode": "cpu"},
+    "options": {"cacheTypeK": "f16", "cacheTypeV": "f16", "flashAttention": "off", "batchSize": 64, "ubatchSize": 32, "cacheRAM": 1, "kvOffload": false, "opOffload": false},
+    "swaFull": false
+  },
+  "sample": {
+    "configurationKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "artifacts": [{"role": "model", "identity": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "size": "1048576", "assurance": "sampled-local-binding"}]
+  },
+  "observed": [
+    {"correspondence": "supported", "comparison": {"component": "weights", "status": "compatible", "lowerBytes": "57671", "upperBytes": "68158"}},
+    {"correspondence": "diagnostic", "comparison": {"component": "attention-cache", "status": "unknown", "lowerBytes": "250000", "upperBytes": "270000"}},
+    {"correspondence": "diagnostic", "comparison": {"component": "compute-workspace", "status": "unknown", "lowerBytes": "1000000", "upperBytes": "1100000"}}
+  ],
+  "poolPeaks": [{"pool": "host", "bytes": "9000000", "correspondence": "diagnostic"}],
+  "provenance": {"machine": "synthetic", "date": "2026-10-30", "build": "b11146-7fe450e"}
+}

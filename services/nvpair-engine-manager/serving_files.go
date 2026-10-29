@@ -6,27 +6,22 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
+
+	"nvpair-engine-manager/internal/artifactbinding"
 
 	"nvpair-shared/engines"
 )
 
 const servingSmallFileLimit = 1 << 20
-const servingSampleSize = 64 << 10
+const servingSampleSize = artifactbinding.SampleSize
 
 // servingFileAccess is instance-owned. All artifact reads, including binding
 // samples, go through the same opener; the default never starts native work.
-type servingArtifactFile interface {
-	io.ReaderAt
-	Stat() (os.FileInfo, error)
-	Close() error
-}
+type servingArtifactFile = artifactbinding.File
 
 type servingReadUsage struct {
 	SampleBytes uint64
@@ -75,6 +70,10 @@ type sourceSnapshot struct {
 }
 
 func captureSource(path string, directory bool) (sourceEvidence, error) {
+	if !directory {
+		e, err := artifactbinding.Capture(path)
+		return sourceEvidence{configured: e.Configured, target: e.Target, info: e.Info, size: e.Size, mtime: e.Mtime}, err
+	}
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return sourceEvidence{}, err
@@ -87,7 +86,7 @@ func captureSource(path string, directory bool) (sourceEvidence, error) {
 	if err != nil {
 		return sourceEvidence{}, err
 	}
-	if (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
+	if !info.IsDir() {
 		return sourceEvidence{}, fmt.Errorf("unexpected source type")
 	}
 	// Windows Stat loads the file ID lazily. Freeze it while capturing the
@@ -96,20 +95,29 @@ func captureSource(path string, directory bool) (sourceEvidence, error) {
 		return sourceEvidence{}, fmt.Errorf("source identity is unavailable")
 	}
 	return sourceEvidence{configured: path, target: target, info: info,
-		directory: directory, size: info.Size(), mtime: info.ModTime().UnixNano()}, nil
+		directory: true, size: info.Size(), mtime: info.ModTime().UnixNano()}, nil
 }
 
 func sameSource(a, b os.FileInfo, directory bool) bool {
-	if a == nil || b == nil || a.IsDir() != directory || b.IsDir() != directory {
-		return false
+	return artifactbinding.Same(a, b, directory)
+}
+
+func regularSourceEvidence(e sourceEvidence) artifactbinding.Evidence {
+	return artifactbinding.Evidence{Configured: e.configured, Target: e.target, Info: e.info, Size: e.size, Mtime: e.mtime}
+}
+
+func (a servingFileAccess) bindingAccess() artifactbinding.Access {
+	var counter *uint64
+	if a.usage != nil {
+		counter = &a.usage.SampleBytes
 	}
-	if !directory && (!a.Mode().IsRegular() || !b.Mode().IsRegular()) {
-		return false
-	}
-	return os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime() == b.ModTime()
+	return artifactbinding.Access{Open: a.openFile, SampleBytes: counter}
 }
 
 func validateSource(e sourceEvidence) error {
+	if !e.directory {
+		return artifactbinding.Validate(regularSourceEvidence(e))
+	}
 	if e.info == nil || !filepath.IsAbs(e.configured) || !filepath.IsAbs(e.target) ||
 		!sameSource(e.info, e.info, e.directory) || e.size < 0 ||
 		e.info.Size() != e.size || e.info.ModTime().UnixNano() != e.mtime {
@@ -184,14 +192,7 @@ type servingContextReaderAt struct {
 }
 
 func (r servingContextReaderAt) ReadAt(p []byte, offset int64) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	opened, err := r.reader.Stat()
-	if err != nil || !sameSource(r.expected.info, opened, false) || validateSource(r.expected) != nil {
-		return 0, fmt.Errorf("serving source changed before reading")
-	}
-	return r.reader.ReadAt(p, offset)
+	return (artifactbinding.Reader{Context: r.ctx, File: r.reader, Expected: regularSourceEvidence(r.expected)}).ReadAt(p, offset)
 }
 
 func (a servingFileAccess) openFile(path string) (servingArtifactFile, error) {
@@ -214,24 +215,11 @@ func (a servingFileAccess) checkedOpen(ctx context.Context, path, target string,
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if expected == nil || !expected.Mode().IsRegular() {
+	if expected == nil {
 		return nil, fmt.Errorf("missing expected source evidence")
 	}
-	e := sourceEvidence{configured: path, target: target, info: expected,
-		size: expected.Size(), mtime: expected.ModTime().UnixNano()}
-	if err := validateSource(e); err != nil {
-		return nil, err
-	}
-	f, err := a.openFile(path)
-	if err != nil {
-		return nil, err
-	}
-	opened, statErr := f.Stat()
-	if statErr != nil || !sameSource(expected, opened, false) || validateSource(e) != nil || ctx.Err() != nil {
-		f.Close()
-		return nil, fmt.Errorf("opened serving source changed")
-	}
-	return f, nil
+	e := sourceEvidence{configured: path, target: target, info: expected, size: expected.Size(), mtime: expected.ModTime().UnixNano()}
+	return a.bindingAccess().CheckedOpen(ctx, regularSourceEvidence(e))
 }
 
 // servingSource reads only small launch inputs. Model artifacts use the bounded
@@ -332,58 +320,8 @@ func (a servingFileAccess) sampleExpected(ctx context.Context, path, expectedTar
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve serving artifact")
 	}
-	e := sourceEvidence{configured: source, target: expectedTarget, info: expected,
-		size: expected.Size(), mtime: expected.ModTime().UnixNano()}
-	if !expected.Mode().IsRegular() || (!allowEmpty && e.size <= 0) {
-		return nil, fmt.Errorf("serving artifact must be a nonempty regular file")
-	}
-	if err := validateSource(e); err != nil {
-		return nil, fmt.Errorf("serving source changed before sampling")
-	}
-	f, err := a.checkedOpen(ctx, source, expectedTarget, expected)
-	if err != nil {
-		return nil, fmt.Errorf("cannot open serving artifact")
-	}
-	defer f.Close()
-	before, err := f.Stat()
-	if err != nil || !sameSource(expected, before, false) {
-		return nil, fmt.Errorf("serving artifact must be a nonempty regular file")
-	}
-	h := sha256.New()
-	sample := func(offset, size int64) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, err := io.Copy(h, io.NewSectionReader(servingContextReaderAt{ctx: ctx, reader: f, expected: e}, offset, size))
-		if a.usage != nil {
-			a.usage.SampleBytes += uint64(n)
-		}
-		if err == nil && n != size {
-			return io.ErrUnexpectedEOF
-		}
-		return err
-	}
-	if before.Size() <= 2*servingSampleSize {
-		err = sample(0, before.Size())
-	} else {
-		err = sample(0, servingSampleSize)
-		if err == nil {
-			err = sample(before.Size()-servingSampleSize, servingSampleSize)
-		}
-	}
-	if err != nil {
-		return nil, fmt.Errorf("cannot sample serving artifact")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	after, err := f.Stat()
-	if err != nil || !sameSource(expected, after, false) || validateSource(e) != nil {
-		return nil, fmt.Errorf("serving artifact changed while sampling")
-	}
-	return &engines.ServingBinding{SourcePath: source, ResolvedTarget: expectedTarget,
-		SizeBytes: before.Size(), MtimeNS: strconv.FormatInt(before.ModTime().UnixNano(), 10),
-		SampleSHA256: hex.EncodeToString(h.Sum(nil))}, nil
+	e := sourceEvidence{configured: source, target: expectedTarget, info: expected, size: expected.Size(), mtime: expected.ModTime().UnixNano()}
+	return a.bindingAccess().Sample(ctx, regularSourceEvidence(e), allowEmpty)
 }
 
 // Each process gets a private generation. Recovery regenerates identical bytes

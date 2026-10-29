@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "role": "synthetic",
+  "class": "moe",
+  "backend": "cuda",
+  "nativePin": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "configurationKey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "facts": {
+    "Shards": [{
+      "Role": "main", "Version": 3, "Architecture": "qwen2moe", "Alignment": 32, "DataOffset": 480,
+      "Numeric": {
+        "qwen2moe.block_count": {"Type": 4, "Bits": 2},
+        "qwen2moe.embedding_length": {"Type": 4, "Bits": 128},
+        "qwen2moe.feed_forward_length": {"Type": 4, "Bits": 256},
+        "qwen2moe.attention.head_count": {"Type": 4, "Bits": 4},
+        "qwen2moe.attention.head_count_kv": {"Type": 4, "Bits": 2},
+        "qwen2moe.vocab_size": {"Type": 4, "Bits": 256},
+        "qwen2moe.expert_count": {"Type": 4, "Bits": 8},
+        "qwen2moe.expert_used_count": {"Type": 4, "Bits": 2}
+      },
+      "Tensors": [{"Name": "blk.0.ffn_gate_exps.weight", "Type": 1, "Dimensions": [128, 256, 8], "Offset": 0, "Bytes": 524288, "Layer": 0}]
+    }]
+  },
+  "artifacts": [{"role": "model", "identity": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": "1048576", "assurance": "sampled-local-binding"}],
+  "allocation": {
+    "perSlotContext": 1024, "totalContext": 1024, "slots": 1, "gpu": {"mode": "layers", "layers": 3},
+    "options": {"cacheTypeK": "f16", "cacheTypeV": "f16", "flashAttention": "off", "batchSize": 64, "ubatchSize": 32, "cacheRAM": 1, "kvOffload": true, "opOffload": true},
+    "swaFull": false
+  },
+  "sample": {
+    "configurationKey": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "artifacts": [{"role": "model", "identity": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "size": "1048576", "assurance": "sampled-local-binding"}]
+  },
+  "observed": [
+    {"correspondence": "diagnostic", "comparison": {"component": "weights", "status": "unknown", "lowerBytes": "520000", "upperBytes": "540000"}},
+    {"correspondence": "diagnostic", "comparison": {"component": "attention-cache", "status": "unknown", "lowerBytes": "250000", "upperBytes": "270000"}},
+    {"correspondence": "diagnostic", "comparison": {"component": "compute-workspace", "status": "unknown", "lowerBytes": "1000000", "upperBytes": "1100000"}}
+  ],
+  "poolPeaks": [{"pool": "device", "bytes": "9000000", "correspondence": "diagnostic"}],
+  "provenance": {"machine": "synthetic", "date": "2026-10-30", "build": "b11146-7fe450e"}
+}
