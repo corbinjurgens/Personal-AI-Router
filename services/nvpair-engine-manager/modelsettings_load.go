@@ -630,6 +630,19 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	if _, err := modelConstrainCommand(command, loads); err != nil {
 		return nil, err
 	}
+	// b11146 common/common.h initializes swa_full to false. Only the existing
+	// file-verified pinned native source can supply that advisory default.
+	if estimates != nil {
+		constrained, constrainErr := modelConstrainCommand(command, loads)
+		_, sourceErr := reviewedSource(constrained)
+		if constrainErr == nil && sourceErr == nil {
+			for model, input := range estimates {
+				full := sections[model]["swa-full"] == "true"
+				input.SWAFull = &full
+				estimates[model] = input
+			}
+		}
+	}
 	for _, load := range loads {
 		if !modelLoadHasAuto(load.Requested) {
 			continue

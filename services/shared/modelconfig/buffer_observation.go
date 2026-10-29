@@ -16,6 +16,7 @@ import (
 // BufferObservation is optional diagnostic evidence, never allocation authority.
 // Byte endpoints enclose a rounded report; they are not exact native bytes.
 type BufferObservation struct {
+	ConfigurationKey  string             `json:"configurationKey,omitempty"`
 	Status            string             `json:"status"`
 	Reason            string             `json:"reason,omitempty"`
 	SampleID          string             `json:"sampleId,omitempty"`
@@ -195,7 +196,7 @@ func (o BufferObservation) Validate() error {
 	if o.Persistence != "" && !slices.Contains([]string{"pending", "saved", "uncertain", "failed", "history-unavailable"}, o.Persistence) {
 		return fmt.Errorf("loadObservation: invalid persistence")
 	}
-	for _, id := range []string{o.SampleID, o.InputIdentity, o.SourceIdentity, o.OptionsIdentity, o.TopologyIdentity} {
+	for _, id := range []string{o.ConfigurationKey, o.SampleID, o.InputIdentity, o.SourceIdentity, o.OptionsIdentity, o.TopologyIdentity} {
 		if id != "" && !digest(id) {
 			return fmt.Errorf("loadObservation: expected opaque SHA256 identity")
 		}

@@ -218,6 +218,33 @@ function withoutField(value: JsonValue, field: string): JsonValue {
 }
 
 describe('unified settings bridge', () => {
+    it('decodes configuration scope independently of a domainless estimate and captured key', () => {
+        const key = 'a'.repeat(64)
+        const result = parseInspectModel({
+            ...memoryPlanInspectionFixture(),
+            configurationKey: key,
+            configurationPools: ['host', 'device'],
+            estimate: { status: 'unknown' },
+            loadObservation: { status: 'unknown', current: false, configurationKey: key }
+        })
+        expect(result.configurationKey).toBe(key)
+        expect(result.configurationPools).toEqual(['host', 'device'])
+        expect(result.loadObservation?.configurationKey).toBe(key)
+        expect(() =>
+            parseInspectModel({
+                ...memoryPlanInspectionFixture(),
+                configurationKey: key,
+                configurationKeyReason: 'not-finite',
+                configurationPools: ['host']
+            })
+        ).toThrow('identity scope')
+        expect(() =>
+            parseInspectModel({
+                ...memoryPlanInspectionFixture(),
+                configurationPools: ['device', 'host']
+            })
+        ).toThrow('configuration pools')
+    })
     it('preserves exact component and domain ranges', () => {
         const parsed = parseInspectModel({
             ...memoryPlanInspectionFixture(),

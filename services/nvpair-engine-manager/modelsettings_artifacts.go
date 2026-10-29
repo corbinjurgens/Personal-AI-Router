@@ -470,7 +470,7 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 			*output = modelEstimateInput{}
 		}
 	}
-	result := modelconfig.InspectResult{Engine: p.Engine, ModelID: p.ModelID}
+	result := modelconfig.InspectResult{Engine: p.Engine, ModelID: p.ModelID, ConfigurationKeyReason: "artifacts-unavailable"}
 	unavailable := func(status, reason string) (modelconfig.InspectResult, error) {
 		if err := ctx.Err(); err != nil {
 			return modelconfig.InspectResult{}, err
@@ -522,6 +522,13 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	}
 	if err != nil {
 		return unavailable("unavailable", "Exact local model source is unavailable.")
+	}
+	result.ConfigurationKeyReason = "not-applied"
+	for _, load := range snapshot.state.plat.Runtime.ModelLoads {
+		if load.ModelID == p.ModelID && load.Resolved != nil {
+			result.ConfigurationKeyReason = "artifacts-unavailable"
+			break
+		}
 	}
 	access.recognize = func(ctx context.Context, model string) (engineInventory, error) {
 		observation, err := e.recognizeModelSource(ctx, p.Engine, model)
@@ -640,11 +647,40 @@ func (e *Executor) inspectModelArtifacts(ctx context.Context, p modelconfig.Insp
 	if err := ctx.Err(); err != nil {
 		return modelconfig.InspectResult{}, err
 	}
+	input := modelEstimateInput{Facts: facts, Bindings: slices.Clone(result.Artifacts), BuildID: "unverified-launch-snapshot:" + exportBinding(list, snapshot.command)}
+	if result.ConfigurationKeyReason != "not-applied" {
+		result.ConfigurationKeyReason = "not-finite"
+		var compiled map[string]modelEstimateInput
+		prepared, compileErr := compileTypedLlamaInputs(ctx, snapshot.state, snapshot.command, snapshot.state.plat.Runtime, false, &compiled)
+		if compileErr == nil && prepared != nil {
+			if finite, ok := compiled[p.ModelID]; ok && finite.Allocation != nil {
+				input = finite
+				if op, ok := ctx.Value(modelAutoOperationKey{}).(modelAutoOperation); ok && op.Memory != nil {
+					input.Memory, _ = op.Memory.ModelAutoMemory(ctx)
+				}
+				result.ConfigurationPools = modelConfigurationPools(input)
+				command, commandErr := modelConstrainCommand(snapshot.command, prepared.ModelLoads)
+				source, sourceErr := modelReviewedNativeSource(ctx, snapshot.state, command)
+				if commandErr == nil && sourceErr == nil {
+					optionsID := modelConfigurationOptionsID(modelConfigurationOptions(*input.Allocation), prepared.Snapshot)
+					result.ConfigurationKey = modelConfigurationKey(input, source, optionsID)
+					if result.ConfigurationKey != "" {
+						result.ConfigurationKeyReason = ""
+					}
+				} else {
+					result.ConfigurationKeyReason = "artifacts-unavailable"
+				}
+			}
+		}
+		current, err := inspectionSnapshot(st, p.Engine)
+		if err != nil || !snapshot.equal(current) {
+			result.ConfigurationKey, result.ConfigurationKeyReason, result.ConfigurationPools = "", "not-finite", nil
+			input = modelEstimateInput{}
+		}
+	}
 	for _, output := range advisory {
 		if output != nil {
-			// This is a launch snapshot, not a freshly sampled executable binding.
-			// No effective allocation/build support is asserted by inspection.
-			*output = modelEstimateInput{Facts: facts, Bindings: slices.Clone(result.Artifacts), BuildID: "unverified-launch-snapshot:" + exportBinding(list, snapshot.command)}
+			*output = input
 		}
 	}
 	var observedArtifacts []modelconfig.ArtifactSummary

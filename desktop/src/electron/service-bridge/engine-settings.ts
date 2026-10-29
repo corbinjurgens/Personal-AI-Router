@@ -1217,6 +1217,7 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
         'sourceIdentity',
         'optionsIdentity',
         'topologyIdentity',
+        'configurationKey',
         'loadPhase',
         'perSlotContext',
         'slots',
@@ -1258,6 +1259,7 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
         sourceIdentity: optionalDigest(row.sourceIdentity),
         optionsIdentity: optionalDigest(row.optionsIdentity),
         topologyIdentity: optionalDigest(row.topologyIdentity),
+        configurationKey: optionalDigest(row.configurationKey),
         loadPhase:
             row.loadPhase === undefined ? undefined : choice(row.loadPhase, ['initial', 'wakeup']),
         perSlotContext: optionalInteger(row.perSlotContext, 0),
@@ -1397,7 +1399,10 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         'facts',
         'options',
         'estimate',
-        'loadObservation'
+        'loadObservation',
+        'configurationKey',
+        'configurationKeyReason',
+        'configurationPools'
     ])
     const engine = boundedText(row.engine, 40, true)
     if (!isValidRoutingEngineId(engine)) throw new Error('Invalid inspection engine.')
@@ -1458,8 +1463,28 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         },
         options: row.options === undefined ? undefined : boundedArray(row.options, 256).map(option),
         estimate: estimate(row.estimate),
-        loadObservation: loadObservation(row.loadObservation)
+        loadObservation: loadObservation(row.loadObservation),
+        configurationKey: optionalDigest(row.configurationKey),
+        configurationKeyReason:
+            row.configurationKeyReason === undefined
+                ? undefined
+                : choice(row.configurationKeyReason, [
+                      'not-applied',
+                      'not-finite',
+                      'artifacts-unavailable'
+                  ]),
+        configurationPools:
+            row.configurationPools === undefined
+                ? undefined
+                : boundedArray(row.configurationPools, 2).map(value =>
+                      choice(value, ['host', 'device', 'shared'])
+                  )
     }
+    const pools = result.configurationPools?.join(',')
+    if (pools !== undefined && !['host', 'host,device', 'shared'].includes(pools))
+        throw new Error('Invalid configuration pools.')
+    if (result.configurationKey && (result.configurationKeyReason || !pools))
+        throw new Error('Invalid configuration identity scope.')
     if (result.status === 'resolved' || result.artifacts?.length)
         orderedSummaryArtifacts(result.artifacts ?? [])
     if (new Set(result.options?.map(item => item.field)).size !== (result.options?.length ?? 0))

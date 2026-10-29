@@ -216,18 +216,21 @@ type Estimate struct {
 	Unknowns        []string            `json:"unknowns,omitempty"`
 }
 type InspectResult struct {
-	Engine          string             `json:"engine"`
-	NodeID          string             `json:"nodeId,omitempty"`
-	ModelID         string             `json:"modelId"`
-	Status          string             `json:"status"`
-	Reason          string             `json:"reason,omitempty"`
-	Source          string             `json:"source,omitempty"`
-	Assurance       string             `json:"assurance,omitempty"`
-	Artifacts       []ArtifactSummary  `json:"artifacts,omitempty"`
-	Facts           *Facts             `json:"facts,omitempty"`
-	Options         []OptionDescriptor `json:"options,omitempty"`
-	Estimate        Estimate           `json:"estimate"`
-	LoadObservation *BufferObservation `json:"loadObservation,omitempty"`
+	ConfigurationKey       string             `json:"configurationKey,omitempty"`
+	ConfigurationKeyReason string             `json:"configurationKeyReason,omitempty"`
+	ConfigurationPools     []string           `json:"configurationPools,omitempty"`
+	Engine                 string             `json:"engine"`
+	NodeID                 string             `json:"nodeId,omitempty"`
+	ModelID                string             `json:"modelId"`
+	Status                 string             `json:"status"`
+	Reason                 string             `json:"reason,omitempty"`
+	Source                 string             `json:"source,omitempty"`
+	Assurance              string             `json:"assurance,omitempty"`
+	Artifacts              []ArtifactSummary  `json:"artifacts,omitempty"`
+	Facts                  *Facts             `json:"facts,omitempty"`
+	Options                []OptionDescriptor `json:"options,omitempty"`
+	Estimate               Estimate           `json:"estimate"`
+	LoadObservation        *BufferObservation `json:"loadObservation,omitempty"`
 }
 
 // Impact represents unresolved owner choices without manufacturing a timeout,
@@ -761,6 +764,7 @@ func (a AutoProposal) Clone() AutoProposal {
 	return a
 }
 func (r InspectResult) Clone() InspectResult {
+	r.ConfigurationPools = slices.Clone(r.ConfigurationPools)
 	if r.LoadObservation != nil {
 		o := r.LoadObservation.Clone()
 		r.LoadObservation = &o
@@ -794,6 +798,15 @@ func DecodeInspectResult(data []byte) (InspectResult, error) {
 	return r, nil
 }
 func (r InspectResult) Validate() error {
+	if r.ConfigurationKey != "" && (!digest(r.ConfigurationKey) || r.ConfigurationKeyReason != "" || len(r.ConfigurationPools) == 0) {
+		return fmt.Errorf("inspect.configurationKey: invalid identity or scope")
+	}
+	if r.ConfigurationKeyReason != "" && !slices.Contains([]string{"not-applied", "not-finite", "artifacts-unavailable"}, r.ConfigurationKeyReason) {
+		return fmt.Errorf("inspect.configurationKeyReason: invalid value")
+	}
+	if len(r.ConfigurationPools) != 0 && !slices.Equal(r.ConfigurationPools, []string{"host"}) && !slices.Equal(r.ConfigurationPools, []string{"host", "device"}) && !slices.Equal(r.ConfigurationPools, []string{"shared"}) {
+		return fmt.Errorf("inspect.configurationPools: invalid pools")
+	}
 	if r.LoadObservation != nil {
 		if err := r.LoadObservation.Validate(); err != nil {
 			return err

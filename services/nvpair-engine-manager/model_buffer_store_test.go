@@ -67,6 +67,24 @@ func TestModelBufferStoreRetention(t *testing.T) {
 	}
 }
 
+func TestModelBufferStoreConfigurationKeyRoundtrip(t *testing.T) {
+	for _, key := range []string{"", strings.Repeat("c", 64)} {
+		t.Run("key="+key, func(t *testing.T) {
+			s, sample := modelBufferStoreFixture(t)
+			sample.Observation.ConfigurationKey = key
+			if got := s.publish(sample); got != "saved" {
+				t.Fatalf("publish=%s", got)
+			}
+			reopened := newModelBufferStore(filepath.Dir(s.path))
+			reopened.now = s.now
+			got := reopened.newest(sample.ModelIdentity)
+			if got.SampleID != sample.Observation.SampleID || got.ConfigurationKey != key {
+				t.Fatalf("reopened sample=%+v", got)
+			}
+		})
+	}
+}
+
 func TestModelBufferStorePrivacy(t *testing.T) {
 	s, sample := modelBufferStoreFixture(t)
 	sample.ModelIdentity = "/private/model.gguf"
