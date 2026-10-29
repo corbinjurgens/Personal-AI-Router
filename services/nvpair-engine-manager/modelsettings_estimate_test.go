@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"math"
 	"os"
@@ -21,6 +23,271 @@ import (
 	"nvpair-shared/modelconfig"
 	"nvpair-shared/noderec"
 )
+
+func recurrentFixture(arch string) modelEstimateInput {
+	in := estimateFixture(arch)
+	for _, field := range []string{"block_count", "embedding_length"} {
+		n := in.Facts.Shards[0].Numeric[arch+"."+field]
+		n.Type = 4 // Native scalar hparams load these fields as GGUF uint32.
+		in.Facts.Shards[0].Numeric[arch+"."+field] = n
+	}
+	for key, value := range map[string]uint64{"ssm.conv_kernel": 4, "ssm.inner_size": 256, "ssm.state_size": 16, "ssm.time_step_rank": 8, "ssm.group_count": 2, "wkv.head_size": 32} {
+		in.Facts.Shards[0].Numeric[arch+"."+key] = gguffacts.Numeric{Type: 4, Bits: value}
+	}
+	// Families must not borrow dimensions belonging to another native branch.
+	if arch == "rwkv6" || arch == "rwkv7" {
+		for key := range in.Facts.Shards[0].Numeric {
+			if strings.Contains(key, ".ssm.") {
+				delete(in.Facts.Shards[0].Numeric, key)
+			}
+		}
+	} else {
+		delete(in.Facts.Shards[0].Numeric, arch+".wkv.head_size")
+	}
+	if arch == "mamba" {
+		delete(in.Facts.Shards[0].Numeric, arch+".ssm.group_count")
+	}
+	if slices.Contains([]string{"qwen3next", "qwen35", "qwen35moe"}, arch) {
+		in.Facts.Shards[0].Numeric[arch+".ssm.time_step_rank"] = gguffacts.Numeric{Type: 4, Bits: 16}
+	}
+	return in
+}
+
+func TestModelSettingsEstimateRecurrentFamilies(t *testing.T) {
+	for _, tc := range []struct{ arch, want string }{{"mamba", "38912"}, {"mamba2", "40448"}, {"rwkv6", "34816"}, {"rwkv7", "34816"}, {"qwen3next", "40448"}, {"qwen35", "40448"}, {"qwen35moe", "40448"}} {
+		t.Run(tc.arch, func(t *testing.T) {
+			c := estimateTestComponent(t, estimateFixtureResult(t, recurrentFixture(tc.arch)), "recurrent-state")
+			if c.Status != "estimated" || c.Bytes != tc.want || c.Basis != "derived" {
+				t.Fatalf("state=%+v, want %s derived", c, tc.want)
+			}
+			if slices.Contains([]string{"mamba", "mamba2", "rwkv6", "rwkv7"}, tc.arch) {
+				assertEstimateBytes(t, estimateFixtureResult(t, recurrentFixture(tc.arch)), "attention-cache", "excluded", "")
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateRecurrentSlotsAndPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		layers       int32
+		offload      bool
+		host, device string
+	}{
+		{"output only", 1, true, "121344", ""},
+		{"trailing dense layer", 2, true, "121344", ""},
+		{"trailing recurrent and dense", 3, true, "80896", "40448"},
+		{"all blocks", 5, true, "", "121344"},
+		{"offload disabled", 3, false, "121344", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := recurrentFixture("qwen35")
+			in.Allocation.Slots, in.Allocation.TotalContext = 2, 2048
+			in.Facts.Shards[0].Numeric["qwen35.block_count"] = gguffacts.Numeric{Type: 4, Bits: 4}
+			in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &tc.layers}
+			in.Allocation.Options.KVOffload = &tc.offload
+			var host, device string
+			for _, c := range estimateFixtureResult(t, in).Components {
+				if c.Name == "recurrent-state" && c.Bytes != "0" {
+					if c.DomainID == "host" {
+						host = c.Bytes
+					} else if c.DomainID == "offload-unmapped" {
+						device = c.Bytes
+					}
+				}
+			}
+			if host != tc.host || device != tc.device {
+				t.Fatalf("host=%s device=%s, want %s %s", host, device, tc.host, tc.device)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateRecurrentMasksAndMainContext(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*modelEstimateInput)
+		want string
+	}{
+		{"slots without context padding", func(in *modelEstimateInput) { in.Allocation.Slots = 3; in.Allocation.TotalContext = 3072 }, "121344"},
+		{"boolean mask precedence", func(in *modelEstimateInput) {
+			in.Facts.Shards[0].Numeric["qwen35.attention.recurrent_layers"] = gguffacts.Numeric{Type: 7, Array: []uint64{0, 1}}
+		}, "20224"},
+		{"integer mask precedence", func(in *modelEstimateInput) {
+			in.Facts.Shards[0].Numeric["qwen35.attention.recurrent_layers"] = gguffacts.Numeric{Type: 4, Array: []uint64{0, 1}}
+		}, "20224"},
+		{"scalar integer mask", func(in *modelEstimateInput) {
+			in.Facts.Shards[0].Numeric["qwen35.attention.recurrent_layers"] = gguffacts.Numeric{Type: 4, Bits: 1}
+		}, "40448"},
+		{"nondefault interval", func(in *modelEstimateInput) {
+			in.Facts.Shards[0].Numeric["qwen35.full_attention_interval"] = gguffacts.Numeric{Type: 4, Bits: 2}
+		}, "20224"},
+		{"NextN excluded", func(in *modelEstimateInput) {
+			in.Facts.Shards[0].Numeric["qwen35.nextn_predict_layers"] = gguffacts.Numeric{Type: 4, Bits: 1}
+		}, "20224"},
+		{"NextN explicit mask excluded", func(in *modelEstimateInput) {
+			in.Facts.Shards[0].Numeric["qwen35.nextn_predict_layers"] = gguffacts.Numeric{Type: 4, Bits: 1}
+			in.Facts.Shards[0].Numeric["qwen35.attention.recurrent_layers"] = gguffacts.Numeric{Type: 7, Array: []uint64{1, 0}}
+		}, "20224"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := recurrentFixture("qwen35")
+			tc.edit(&in)
+			assertEstimateBytes(t, estimateFixtureResult(t, in), "recurrent-state", "estimated", tc.want)
+		})
+	}
+}
+
+func TestModelSettingsEstimateRecurrentExplicitMaskPlacement(t *testing.T) {
+	in := recurrentFixture("qwen35")
+	in.Facts.Shards[0].Numeric["qwen35.block_count"] = gguffacts.Numeric{Type: 4, Bits: 4}
+	in.Facts.Shards[0].Numeric["qwen35.attention.recurrent_layers"] = gguffacts.Numeric{Type: 7, Array: []uint64{0, 1, 0, 1}}
+	layers, offload := int32(2), true
+	in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &layers}
+	in.Allocation.Options.KVOffload = &offload
+	var domains []string
+	for _, c := range estimateFixtureResult(t, in).Components {
+		if c.Name == "recurrent-state" {
+			if c.Bytes != "20224" || c.Status != "estimated" {
+				t.Fatalf("state=%+v", c)
+			}
+			domains = append(domains, c.DomainID)
+		}
+	}
+	if !reflect.DeepEqual(domains, []string{"host", "offload-unmapped"}) {
+		t.Fatalf("domains=%v", domains)
+	}
+}
+
+func TestModelSettingsEstimateRecurrentRejectsUnsupportedDimensions(t *testing.T) {
+	for _, tc := range []struct {
+		name, arch, key string
+		value           gguffacts.Numeric
+	}{
+		{"missing state", "mamba2", "ssm.state_size", gguffacts.Numeric{}},
+		{"zero conv", "mamba2", "ssm.conv_kernel", gguffacts.Numeric{Type: 4}},
+		{"array state", "mamba2", "ssm.state_size", gguffacts.Numeric{Type: 4, Array: []uint64{16}}},
+		{"native width overflow", "mamba2", "ssm.inner_size", gguffacts.Numeric{Type: 10, Bits: math.MaxUint32}},
+		{"indivisible groups", "mamba2", "ssm.group_count", gguffacts.Numeric{Type: 4, Bits: 3}},
+		{"malformed shift", "rwkv6", "token_shift_count", gguffacts.Numeric{Type: 7, Bits: 1}},
+		{"signed conv", "mamba2", "ssm.conv_kernel", gguffacts.Numeric{Type: 5, Bits: 4}},
+		{"signed inner width", "mamba2", "ssm.inner_size", gguffacts.Numeric{Type: 5, Bits: 256}},
+		{"wide state scalar", "qwen35", "ssm.state_size", gguffacts.Numeric{Type: 10, Bits: 16}},
+		{"signed interval", "qwen35", "full_attention_interval", gguffacts.Numeric{Type: 5, Bits: 2}},
+		{"small head scalar", "rwkv7", "wkv.head_size", gguffacts.Numeric{Type: 0, Bits: 32}},
+		{"wide NextN scalar", "qwen35", "nextn_predict_layers", gguffacts.Numeric{Type: 10, Bits: 1}},
+		{"zero head", "rwkv7", "wkv.head_size", gguffacts.Numeric{Type: 4}},
+		{"incomplete mask", "qwen35", "attention.recurrent_layers", gguffacts.Numeric{Type: 7, Array: []uint64{1}}},
+		{"invalid interval", "qwen35", "full_attention_interval", gguffacts.Numeric{Type: 4}},
+		{"mismatched value heads", "qwen35", "ssm.time_step_rank", gguffacts.Numeric{Type: 4, Bits: 8}},
+		{"NextN recurrent mask", "qwen35", "nextn_predict_layers", gguffacts.Numeric{Type: 4, Bits: 2}},
+		{"boolean scalar is not native uint32 mask", "qwen35", "attention.recurrent_layers", gguffacts.Numeric{Type: 7, Bits: 1}},
+		{"oversized mask bit", "qwen35", "attention.recurrent_layers", gguffacts.Numeric{Type: 4, Array: []uint64{1, 2}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := recurrentFixture(tc.arch)
+			in.Facts.Shards[0].Numeric[tc.arch+"."+tc.key] = tc.value
+			c := estimateTestComponent(t, estimateFixtureResult(t, in), "recurrent-state")
+			if c.Status != "unknown" || c.Bytes != "" || c.Reason == "" {
+				t.Fatalf("state=%+v", c)
+			}
+		})
+	}
+	t.Run("unconfirmed family", func(t *testing.T) {
+		assertEstimateBytes(t, estimateFixtureResult(t, recurrentFixture("jamba")), "recurrent-state", "unknown", "")
+	})
+}
+
+func TestModelSettingsEstimateRecurrentDecodedTokenShift(t *testing.T) {
+	for _, arch := range []string{"rwkv6", "rwkv7"} {
+		t.Run(arch, func(t *testing.T) {
+			for _, tc := range []struct {
+				name     string
+				explicit bool
+				typ      gguffacts.ValueType
+				status   string
+				want     string
+			}{
+				{"native absent default", false, 4, "estimated", "34816"},
+				{"decoded override", true, 4, "estimated", "35840"},
+				{"decoded signed override", true, 5, "unknown", ""},
+				{"decoded wide override", true, 10, "unknown", ""},
+				{"decoded small override", true, 0, "unknown", ""},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					var b bytes.Buffer
+					write := func(v interface{}) {
+						t.Helper()
+						if err := binary.Write(&b, binary.LittleEndian, v); err != nil {
+							t.Fatal(err)
+						}
+					}
+					str := func(s string) { write(uint64(len(s))); b.WriteString(s) }
+					b.WriteString("GGUF")
+					write(uint32(3))
+					write(uint64(0))
+					count := uint64(4)
+					if tc.explicit {
+						count++
+					}
+					write(count)
+					str("general.architecture")
+					write(uint32(8))
+					str(arch)
+					for _, item := range []struct {
+						key string
+						v   uint32
+					}{{"block_count", 2}, {"embedding_length", 128}, {"wkv.head_size", 32}} {
+						str(arch + "." + item.key)
+						write(uint32(4))
+						write(item.v)
+					}
+					if tc.explicit {
+						str(arch + ".token_shift_count")
+						write(tc.typ)
+						switch tc.typ {
+						case 0:
+							write(uint8(3))
+						case 5:
+							write(int32(3))
+						case 10:
+							write(uint64(3))
+						default:
+							write(uint32(3))
+						}
+					}
+					facts, err := gguffacts.Decode(context.Background(), []gguffacts.Artifact{{Role: gguffacts.RoleMain, Reader: bytes.NewReader(b.Bytes()), Size: int64((b.Len() + 31) / 32 * 32)}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if tc.explicit && facts.Shards[0].Numeric[arch+".token_shift_count"].Bits != 3 {
+						t.Fatal("decoder lost override")
+					}
+					if tc.explicit && facts.Shards[0].Numeric[arch+".token_shift_count"].Type != tc.typ {
+						t.Fatal("decoder changed numeric type")
+					}
+					in := estimateFixture(arch)
+					in.Facts.Shards[0].Numeric = facts.Shards[0].Numeric
+					assertEstimateBytes(t, estimateFixtureResult(t, in), "recurrent-state", tc.status, tc.want)
+				})
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateRecurrentExplicitMaskKeepsAttentionUnknown(t *testing.T) {
+	in := recurrentFixture("qwen35")
+	in.Facts.Shards[0].Numeric["qwen35.full_attention_interval"] = gguffacts.Numeric{Type: 4, Bits: 2}
+	in.Facts.Shards[0].Numeric["qwen35.attention.recurrent_layers"] = gguffacts.Numeric{Type: 4, Array: []uint64{0, 0}}
+	out := estimateFixtureResult(t, in)
+	c := estimateTestComponent(t, out, "attention-cache")
+	// Native qwen35.cpp:17-21 gives this mask priority over the interval.
+	// Do not price one attention layer when the explicit mask selects two.
+	if c.Status != "unknown" || !strings.Contains(c.Reason, "explicit recurrent") {
+		t.Fatalf("attention=%+v, want named explicit-mask unknown", c)
+	}
+	assertEstimateBytes(t, out, "recurrent-state", "estimated", "0")
+}
 
 func estimateFixture(arch string) modelEstimateInput {
 	numeric := map[string]gguffacts.Numeric{}

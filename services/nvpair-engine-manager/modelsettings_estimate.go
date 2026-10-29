@@ -633,9 +633,17 @@ func modelEstimateCacheType(value *string) (gguf.GGMLType, bool) {
 // Recurrent state does not depend on attention precision or context length.
 // Size it independently so an unresolved KV option cannot erase known state.
 func modelEstimateRecurrent(m modelEstimateModel, in modelEstimateInput) modelconfig.EstimateComponent {
+	return modelEstimateRecurrentForLayers(m, in, false)
+}
+
+func modelEstimateRecurrentForLayers(m modelEstimateModel, in modelEstimateInput, deviceOnly bool) modelconfig.EstimateComponent {
 	u := unknownEstimateComponent("recurrent-state", "recurrent dimensions or per-layer native mapping unavailable")
+	if slices.Contains([]string{"mamba", "mamba2", "rwkv6", "rwkv7", "qwen3next", "qwen35", "qwen35moe"}, m.arch) {
+		return modelEstimateNativeRecurrent(m, in, deviceOnly)
+	}
 	if m.arch != "lfm2" && m.arch != "lfm2moe" {
 		if !slices.Contains([]string{"llama", "llama4", "gpt-oss", "qwen2", "qwen2moe", "qwen3", "qwen3moe", "mistral", "gemma2", "gemma3", "gemma4", "deepseek2", "deepseek3"}, m.arch) {
+			u.Reason = "native recurrent layer mapping unconfirmed for architecture " + m.arch
 			return u
 		}
 		for _, field := range []string{"attention.recurrent_layers", "full_attention_interval", "shortconv.l_cache", "ssm.state_size", "ssm.conv_kernel", "wkv.head_size"} {
@@ -666,16 +674,19 @@ func modelEstimateRecurrent(m modelEstimateModel, in modelEstimateInput) modelco
 		return u
 	}
 	var count uint64
-	for _, bits := range mask.Array {
+	for i, bits := range mask.Array {
 		v, ok := modelEstimateUint(gguffacts.Numeric{Type: mask.Type, Bits: bits})
 		if !ok {
 			return u
 		}
-		if v == 0 {
+		if v == 0 && (!deviceOnly || modelEstimateLayerOnDevice(in, layers, uint64(i))) {
 			count++
 		}
 	}
 	if count == 0 {
+		if deviceOnly {
+			return estimateComponent("recurrent-state", 0, "no recurrent layers on device")
+		}
 		return absentEstimateComponent("recurrent-state")
 	}
 	length, ok := m.number("shortconv.l_cache")
@@ -690,6 +701,133 @@ func modelEstimateRecurrent(m modelEstimateModel, in modelEstimateInput) modelco
 		bytes, _ = modelEstimateRow(gguf.GGMLTypeF32, elements)
 	}
 	return estimateComponent("recurrent-state", modelEstimateMul(bytes, count), "LFM2 short-convolution state per recurrent layer and slot; no dense KV for those layers")
+}
+
+// Reuse Task 4's output-first layer owner for both cache kinds.
+func modelEstimateLayerOnDevice(in modelEstimateInput, layers, layer uint64) bool {
+	a := in.Allocation
+	return a != nil && a.GPU.Mode == "layers" && a.GPU.Layers != nil && *a.GPU.Layers > 0 && uint64(*a.GPU.Layers) <= layers+1 && layer >= layers+1-uint64(*a.GPU.Layers)
+}
+
+func modelEstimateNativeRecurrent(m modelEstimateModel, in modelEstimateInput, deviceOnly bool) modelconfig.EstimateComponent {
+	u := unknownEstimateComponent("recurrent-state", "native recurrent dimensions, mask or main-context mapping unavailable")
+	if in.Allocation == nil || in.Support != modelEstimatorSupport || in.BuildID == "" || in.Allocation.Slots < 1 {
+		return u
+	}
+	// Native hparams widths are uint32_t, not arbitrary precision dimensions.
+	number := func(key string) (uint64, bool) {
+		// llama-model-loader.cpp:122,167 requires GGUF uint32 for these
+		// scalar hparams; a numerically equal signed/wider type is not valid.
+		n := m.numeric[m.arch+"."+key]
+		v, ok := m.number(key)
+		return v, ok && n.Type == 4 && n.Array == nil && v > 0 && v <= math.MaxUint32
+	}
+	layers, lok := number("block_count")
+	emb, eok := number("embedding_length")
+	if !lok || layers > modelEstimateLayers || !eok {
+		return u
+	}
+	hybrid := slices.Contains([]string{"qwen3next", "qwen35", "qwen35moe"}, m.arch)
+	trunk := layers
+	if n, exists := m.numeric[m.arch+".nextn_predict_layers"]; exists {
+		next, ok := modelEstimateUint(n)
+		if n.Type != 4 || n.Array != nil || !ok || next >= layers || next > 0 && !hybrid {
+			return u
+		}
+		trunk -= next
+	}
+	var r, s uint64
+	if m.arch == "rwkv6" || m.arch == "rwkv7" {
+		head, ok := number("wkv.head_size")
+		shift := uint64(2) // llama-hparams.h:143; only absent keys use this default.
+		if _, exists := m.numeric[m.arch+".token_shift_count"]; exists {
+			var valid bool
+			shift, valid = number("token_shift_count")
+			if !valid {
+				return u
+			}
+		}
+		if !ok || emb%head != 0 {
+			return u
+		}
+		r, s = modelEstimateMul(shift, emb), modelEstimateMul(emb, head)
+	} else {
+		conv, cok := number("ssm.conv_kernel")
+		inner, iok := number("ssm.inner_size")
+		state, sok := number("ssm.state_size")
+		rank, rok := number("ssm.time_step_rank")
+		group := uint64(0) // Mamba loader leaves ssm_n_group at its native zero.
+		if m.arch != "mamba" {
+			var gok bool
+			group, gok = number("ssm.group_count")
+			if !gok {
+				return u
+			}
+		}
+		if !cok || !iok || !sok || !rok || m.arch == "mamba" && inner != 2*emb || m.arch != "mamba" && inner%rank != 0 {
+			return u
+		}
+		if m.arch != "mamba" && (inner%group != 0 || rank%group != 0) {
+			return u
+		}
+		// Qwen tensor loaders use value_dim=state*rank, and grouped value
+		// heads must divide by key heads (models/qwen35.cpp:55-60,439).
+		if hybrid && inner != modelEstimateMul(state, rank) {
+			return u
+		}
+		// llama-hparams.cpp:208-261: R=(conv-1)*(inner+2*group*state),
+		// S=state*inner, also for Qwen gated delta-net at this pin.
+		channels := modelEstimateAdd(inner, modelEstimateMul(2, modelEstimateMul(group, state)))
+		if channels > math.MaxUint32 {
+			return u
+		}
+		r = modelEstimateMul(conv-1, channels)
+		s = modelEstimateMul(state, inner)
+	}
+	if r > math.MaxUint32 || s > math.MaxUint32 {
+		return u
+	}
+	mask, explicit := m.numeric[m.arch+".attention.recurrent_layers"]
+	interval := uint64(4)
+	if hybrid && !explicit {
+		if _, exists := m.numeric[m.arch+".full_attention_interval"]; exists {
+			var ok bool
+			interval, ok = number("full_attention_interval")
+			if !ok {
+				return u
+			}
+		}
+	}
+	if explicit && (!hybrid || mask.Type != 4 && !(mask.Type == 7 && mask.Array != nil) || mask.Array != nil && len(mask.Array) != int(layers)) {
+		return u
+	}
+	var count uint64
+	for i := uint64(0); i < layers; i++ {
+		recurrent := i < trunk
+		if hybrid {
+			if explicit {
+				bit := mask.Bits
+				if mask.Array != nil {
+					bit = mask.Array[i]
+				}
+				if bit > 1 || i >= trunk && bit != 0 {
+					return u
+				}
+				recurrent = recurrent && bit == 1
+			} else {
+				recurrent = recurrent && (i+1)%interval != 0
+			}
+		}
+		if recurrent && (!deviceOnly || modelEstimateLayerOnDevice(in, layers, i)) {
+			count++
+		}
+	}
+	// llama-model.cpp:2547-2648 passes F32 R/S, max(1,n_seq_max),
+	// n_rs_seq (default zero, llama-context.cpp:3701). No context padding:
+	// recurrent.cpp:101-103 uses rows=mem_size*(1+n_rs_seq). Backend buffer
+	// alignment/context overhead remains in the unpriced runtime-overhead row.
+	bytes := modelEstimateMul(modelEstimateMul(modelEstimateAdd(r, s), 4), uint64(in.Allocation.Slots))
+	return estimateComponent("recurrent-state", modelEstimateMul(bytes, count), "pinned native F32 R/S recurrent tensors per main-context layer and sequence slot; no rollback planes in supported allocation")
 }
 
 // Explicit support matrix, using native hparams contracts referenced by the
@@ -713,7 +851,18 @@ func modelEstimateCachesForLayers(ctx context.Context, m modelEstimateModel, in 
 	}()
 	kv := unknownEstimateComponent("attention-cache", "architecture or effective allocation unmapped")
 	recurrent := modelEstimateRecurrent(m, in)
+	if slices.Contains([]string{"mamba", "mamba2", "rwkv6", "rwkv7"}, m.arch) && recurrent.Status == "estimated" {
+		return absentEstimateComponent("attention-cache"), recurrent
+	}
 	hybrid := slices.Contains([]string{"lfm2", "lfm2moe", "qwen3next", "qwen35", "qwen35moe"}, m.arch)
+	if slices.Contains([]string{"qwen3next", "qwen35", "qwen35moe"}, m.arch) {
+		if _, explicit := m.numeric[m.arch+".attention.recurrent_layers"]; explicit {
+			// models/qwen35.cpp:17-21 gives this mask precedence over
+			// the interval. Keep attention unpriced until its mapping joins.
+			kv.Reason = "attention cache explicit recurrent layer mapping unconfirmed"
+			return kv, recurrent
+		}
+	}
 	mla := m.arch == "deepseek2"
 	shared := m.arch == "gemma4"
 	// llama-arch.cpp:127 names LLM_ARCH_OPENAI_MOE as canonical "gpt-oss".
@@ -1076,7 +1225,7 @@ func modelEstimateCachesForLayers(ctx context.Context, m modelEstimateModel, in 
 			kv.Reason = "K/V row width incompatible with cache block size"
 			return kv, recurrent
 		}
-		if !deviceOnly || a.GPU.Mode == "layers" && a.GPU.Layers != nil && *a.GPU.Layers > 0 && i >= layers+1-uint64(*a.GPU.Layers) {
+		if !deviceOnly || modelEstimateLayerOnDevice(in, layers, i) {
 			cacheBytes = modelEstimateAdd(cacheBytes, modelEstimateAdd(kb, vb))
 		}
 	}
@@ -1340,11 +1489,16 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 			if a.Options.KVOffload != nil && !*a.Options.KVOffload {
 				c.DomainID = "host"
 				host = modelEstimateAdd(host, n)
-			} else if c.Name == "attention-cache" && a.Options.KVOffload != nil {
-				part, _ := modelEstimateCachesForLayers(context.Background(), m, in, true)
+			} else if a.Options.KVOffload != nil {
+				var part modelconfig.EstimateComponent
+				if c.Name == "recurrent-state" {
+					part = modelEstimateRecurrentForLayers(m, in, true)
+				} else {
+					part, _ = modelEstimateCachesForLayers(context.Background(), m, in, true)
+				}
 				d, err := strconv.ParseUint(part.Bytes, 10, 64)
 				if err != nil || part.Status != "estimated" || d > n {
-					out.Unknowns = append(out.Unknowns, "attention-cache: native per-layer device placement unavailable")
+					out.Unknowns = append(out.Unknowns, c.Name+": native per-layer device placement unavailable")
 					continue
 				}
 				h := n - d
@@ -1360,9 +1514,6 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 					part.LowBytes, part.HighBytes = part.Bytes, part.Bytes
 					out.Components = append(out.Components, part)
 				}
-			} else if a.Options.KVOffload != nil && uint64(*a.GPU.Layers) == layers+1 {
-				c.DomainID = "offload-unmapped"
-				device = modelEstimateAdd(device, n)
 			} else {
 				out.Unknowns = append(out.Unknowns, c.Name+": per-layer device placement unresolved; no layer-fraction approximation used")
 			}
