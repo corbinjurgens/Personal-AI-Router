@@ -1918,6 +1918,14 @@ func TestRoutingListener_InferencePartialResponseNeverFallsBack(t *testing.T) {
 
 func TestRoutingListener_InferenceHealthyStreamSurvivesActivationAndFormerWriteTimeout(t *testing.T) {
 	fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
+	// The pinned TLS peer retains the recorder's handler. This test replaces
+	// its HTTP data path below, so the unused recorder must not keep listening.
+	fx.eng["peer"].Close()
+	tlsPeers := fx.p.soleFacade().discovery.Nodes()
+	if len(tlsPeers) != 1 {
+		t.Fatalf("fixture TLS peers=%d, want one", len(tlsPeers))
+	}
+	tlsProbeURL := "http://" + net.JoinHostPort(tlsPeers[0].Addresses[0], strconv.Itoa(tlsPeers[0].Port))
 	release := make(chan struct{})
 	finish := sync.OnceFunc(func() { close(release) })
 	defer finish()
@@ -1927,7 +1935,9 @@ func TestRoutingListener_InferenceHealthyStreamSurvivesActivationAndFormerWriteT
 		err    error
 	}
 	done := make(chan completion, 1)
+	var hits atomic.Int32
 	inferencePeerHandler(t, fx, "peer", fixtureRequestHandler(http.MethodPost, routeChatCompletions, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
 		t.Logf("stream peer request: %s %s", r.Method, r.URL.Path)
 		report := func(err error) { done <- completion{r.Method, r.URL.Path, err} }
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1952,7 +1962,7 @@ func TestRoutingListener_InferenceHealthyStreamSurvivesActivationAndFormerWriteT
 	if len(peer) != 1 {
 		t.Fatalf("fixture peers=%d, want one", len(peer))
 	}
-	assertFixtureRejectsProbe(t, "http://"+net.JoinHostPort(peer[0].Addresses[0], strconv.Itoa(peer[0].Port)))
+	peerProbeURL := "http://" + net.JoinHostPort(peer[0].Addresses[0], strconv.Itoa(peer[0].Port))
 	port := inferenceListener(t, fx)
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
 		"http://127.0.0.1:"+strconv.Itoa(port)+routeChatCompletions, strings.NewReader(`{"model":"weak","stream":true}`))
@@ -1971,6 +1981,17 @@ func TestRoutingListener_InferenceHealthyStreamSurvivesActivationAndFormerWriteT
 	}
 	if len(fx.p.activeRoutingRequests()) != 1 {
 		t.Fatal("committed stream is missing its canonical owner")
+	}
+	assertFixtureRejectsProbe(t, peerProbeURL)
+	assertFixtureProbeStatus(t, tlsProbeURL, http.StatusBadRequest)
+	assertFixtureRejectsProbe(t, "http://127.0.0.1:"+strconv.Itoa(port))
+	if hits.Load() != 1 || fx.eng["peer"].hits() != 0 {
+		t.Fatalf("probes changed inference counts: stream=%d recording peer=%d", hits.Load(), fx.eng["peer"].hits())
+	}
+	select {
+	case result := <-done:
+		t.Fatalf("probe ended stream: %s %s: %v", result.method, result.path, result.err)
+	default:
 	}
 	pol := fx.p.admission.currentPolicy()
 	pol.Revision = "2"
@@ -1996,6 +2017,9 @@ func TestRoutingListener_InferenceHealthyStreamSurvivesActivationAndFormerWriteT
 	}
 	if result := <-done; result.err != nil {
 		t.Fatalf("stream completion: %s %s: %v", result.method, result.path, result.err)
+	}
+	if hits.Load() != 1 || fx.eng["peer"].hits() != 0 {
+		t.Fatalf("completed stream dispatch counts: stream=%d recording peer=%d", hits.Load(), fx.eng["peer"].hits())
 	}
 	waitInferenceDrained(t, fx.p)
 }
