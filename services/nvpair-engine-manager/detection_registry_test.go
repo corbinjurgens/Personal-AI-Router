@@ -124,6 +124,14 @@ func TestDetectRequiredUserOverrideVersion(t *testing.T) {
 				t.Fatal(err)
 			}
 			m, ok := reg.Get("ollama")
+			if wantVersion == 1 {
+				// Invalid overrides now disable the engine instead of retaining
+				// a bundled manifest that silently ignores detect_required.
+				if ok || reg.invalid["ollama"] == nil || !strings.Contains(reg.invalid["ollama"].Error(), "requires manifest_version 2") {
+					t.Fatalf("invalid override = %v, %v", m, reg.invalid["ollama"])
+				}
+				return
+			}
 			if !ok || m.ManifestVersion != wantVersion {
 				t.Fatalf("loaded manifest = %+v", m)
 			}

@@ -1410,9 +1410,9 @@ func (e *Executor) Restart(ctx context.Context, engine string) error {
 func (e *Executor) StopAll() {
 	e.shuttingDown.Store(true)
 	e.mu.Lock()
-	names := make([]string, 0, len(e.engines))
-	for n := range e.engines {
-		names = append(names, n)
+	states := make(map[string]*engineState, len(e.engines))
+	for name, st := range e.engines {
+		states[name] = st
 	}
 	e.mu.Unlock()
 	// Stop engines concurrently. Each doStop can wait up to the manifest grace
@@ -1423,11 +1423,9 @@ func (e *Executor) StopAll() {
 	// ~one grace and guarantees every engine gets its stop signal immediately.
 	// Each engine still serializes on its own opMu, so this is safe.
 	var wg sync.WaitGroup
-	for _, n := range names {
-		st, err := e.state(n)
-		if err != nil {
-			continue
-		}
+	for n, st := range states {
+		// Cleanup retains authority over already-owned processes even when
+		// invalid configuration now refuses all new engine admission.
 		wg.Add(1)
 		go func(st *engineState, n string) {
 			defer wg.Done()

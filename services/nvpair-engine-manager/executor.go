@@ -261,6 +261,13 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 	}
 	naming := make(map[string]string)
 	for _, engine := range reg.Names() {
+		if err := reg.invalid[engine]; err != nil {
+			e.reporter.report(serviceError{ID: "engine-manager:manifest:" + engine, Message: err.Error(), Severity: "error", Action: "none", EngineType: engine, Operation: "validation"})
+		} else {
+			// The errors worker can outlive this manager. Clear its stable
+			// validation ID even when this fresh reporter has no local entry.
+			e.reporter.clear("engine-manager:manifest:" + engine)
+		}
 		if manifest, ok := reg.Get(engine); ok {
 			naming[engine] = manifest.ModelNamingOrDefault()
 		}
@@ -360,12 +367,24 @@ func (e *Executor) notify(method string, params any) {
 func (e *Executor) state(engine string) (*engineState, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if st, ok := e.engines[engine]; ok {
-		return st, nil
+	if err := e.reg.invalid[engine]; err != nil {
+		e.reporter.report(serviceError{ID: "engine-manager:manifest:" + engine, Message: err.Error(), Severity: "error", Action: "none", EngineType: engine, Operation: "validation"})
+		return nil, err
+	}
+	for _, problem := range e.reporter.snapshot() {
+		if problem.ID == "engine-manager:manifest:"+engine {
+			e.reporter.clear(problem.ID)
+			break
+		}
 	}
 	m, ok := e.reg.Get(engine)
 	if !ok {
 		return nil, fmt.Errorf("unknown engine %q", engine)
+	}
+	if st, ok := e.engines[engine]; ok {
+		// Existing process ownership and derived inputs remain intact. Runtime
+		// override reload is not supported; repaired input uses a fresh manager.
+		return st, nil
 	}
 	plat, ok := m.HostPlatform()
 	if !ok {

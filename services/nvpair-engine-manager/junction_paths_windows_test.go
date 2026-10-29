@@ -19,6 +19,44 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestModelCopyDestinationJunctions(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "store")
+	inside := filepath.Join(root, "inside")
+	outside := filepath.Join(base, "outside")
+	writeTestFile(t, filepath.Join(inside, "file"), []byte("inside"))
+	writeTestFile(t, filepath.Join(outside, "sentinel"), []byte("keep"))
+	rootAlias := filepath.Join(base, "root-alias")
+	junction(t, rootAlias, root)
+	junction(t, filepath.Join(root, "inside-link"), inside)
+	junction(t, filepath.Join(root, "outside-link"), outside)
+	if err := safeCopyDestination(rootAlias, filepath.Join(rootAlias, "new", "file")); err != nil {
+		t.Fatalf("trusted root junction: %v", err)
+	}
+	for _, name := range []string{"inside-link", "outside-link"} {
+		t.Run(name, func(t *testing.T) {
+			if err := safeCopyDestination(root, filepath.Join(root, name, "file.part")); err == nil {
+				t.Fatal("accepted child junction")
+			}
+		})
+	}
+	t.Run("download through junction", func(t *testing.T) {
+		data := []byte("model")
+		src := &fakeModelSource{data: map[string][]byte{"file": data}}
+		f := plannedFile{modelFile: modelFile{Path: "file", Size: int64(len(data)), SHA256: sha256Hex(data)}, root: root, dest: filepath.Join(root, "outside-link", "file")}
+		if _, _, err := downloadPlannedFile(context.Background(), src, "llamacpp", "model", f, func(int64) {}); err == nil {
+			t.Fatal("download accepted child junction")
+		}
+		if _, err := os.Stat(filepath.Join(outside, "file")); !os.IsNotExist(err) {
+			t.Fatalf("outside file exists or stat failed: %v", err)
+		}
+	})
+	data, err := os.ReadFile(filepath.Join(outside, "sentinel"))
+	if err != nil || string(data) != "keep" {
+		t.Fatalf("sentinel = %q, error = %v", data, err)
+	}
+}
+
 func TestConfinedRegularFileResolvesModelStoreJunction(t *testing.T) {
 	base := t.TempDir()
 	store := filepath.Join(base, "store")

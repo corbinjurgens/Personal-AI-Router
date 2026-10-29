@@ -1357,6 +1357,82 @@ func TestPeerServiceClientPartialResponseNeverReplays(t *testing.T) {
 	}
 }
 
+func TestPeerServiceClientBodyAbortKeepsDirectHealthy(t *testing.T) {
+	for _, reuse := range []bool{false, true} {
+		name := "fresh"
+		if reuse {
+			name = "reusable"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Length", "100")
+				writeServiceResponse(t, w, "partial")
+				w.(http.Flusher).Flush()
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if err := conn.Close(); err != nil {
+					t.Error(err)
+				}
+			}))
+			f.adapter.opts.ReuseConnections = reuse
+			ctx := context.Background()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url, strings.NewReader("request"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := f.adapter.Client("peer", noderec.ServiceCluster).Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			if string(body) != "partial" || !errors.Is(readErr, io.ErrUnexpectedEOF) || closeErr != nil || ctx.Err() != nil {
+				t.Fatalf("body=%q read=%v close=%v context=%v", body, readErr, closeErr, ctx.Err())
+			}
+			f.adapter.mu.Lock()
+			unhealthy := !f.adapter.entries[peerServiceKey{"peer", noderec.ServiceCluster}].nextProbe.IsZero()
+			f.adapter.mu.Unlock()
+			if unhealthy {
+				t.Fatal("body abort after response headers marked direct unhealthy")
+			}
+		})
+	}
+}
+
+func TestPeerServiceClientNoReverseSessionDoesNotSkipDirect(t *testing.T) {
+	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeServiceResponse(t, w, "direct")
+	}))
+	dial := f.direct
+	var attempts atomic.Int32
+	f.direct = func(ctx context.Context, service noderec.ServiceKey) (net.Conn, error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("direct temporarily unavailable")
+		}
+		return dial(ctx, service)
+	}
+	f.reverse = func(context.Context, noderec.ServiceKey) (net.Conn, error) {
+		return nil, ErrReverseNoSession
+	}
+	client := f.adapter.Client("peer", noderec.ServiceCluster)
+	response, err := client.Get(f.url)
+	if response != nil {
+		response.Body.Close()
+	}
+	if !errors.Is(err, ErrReverseNoSession) {
+		t.Fatalf("first request error = %v, want no reverse session", err)
+	}
+	if got := serviceClientGet(t, client, f.url); got != "direct" {
+		t.Fatalf("second response = %q, want direct", got)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("direct attempts = %d, want 2 within probe interval", got)
+	}
+}
+
 func TestPeerServiceClientMutationRedirectIsExposed(t *testing.T) {
 	var dispatched atomic.Int32
 	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2412,13 +2488,13 @@ func TestPeerServiceClientReusableCanceledIdleProbeRecovers(t *testing.T) {
 	key := peerServiceKey{"peer", noderec.ServiceCluster}
 	f.adapter.mu.Lock()
 	h := f.adapter.entries[key]
-	idle, unhealthy := len(h.idle), !h.nextProbe.IsZero()
+	idle := len(h.idle)
 	idleDirect := idle == 1 && h.idle[0].direct
 	due := time.Now().Add(-time.Second)
 	h.nextProbe = due
 	f.adapter.mu.Unlock()
-	if !unhealthy || !idleDirect {
-		t.Fatalf("probe setup: unhealthy=%v idle=%d direct=%v, want failed health with one idle direct connection", unhealthy, idle, idleDirect)
+	if !idleDirect {
+		t.Fatalf("probe setup: idle=%d direct=%v, want one idle direct connection", idle, idleDirect)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2553,15 +2629,17 @@ func TestPeerServiceClientReusableCancellationPreservesConcurrentProbe(t *testin
 			if string(body) != "partial" || !errors.Is(readErr, io.ErrUnexpectedEOF) || closeErr != nil {
 				t.Fatalf("failed direct response: body=%q read=%v close=%v", body, readErr, closeErr)
 			}
+			// Seed the outcome of a separate pre-response failure. A body abort
+			// no longer retires the old probe; this case tests generation ownership.
+			f.adapter.mu.Lock()
+			previousHealth := f.adapter.entries[key]
+			f.adapter.mu.Unlock()
+			f.adapter.outcome(previousHealth, false)
 			f.adapter.mu.Lock()
 			h := f.adapter.entries[key]
-			unhealthy := !h.nextProbe.IsZero()
 			due := time.Now().Add(-time.Second)
 			h.nextProbe = due
 			f.adapter.mu.Unlock()
-			if !unhealthy {
-				t.Fatal("direct response failure did not mark health failed")
-			}
 			probeEntered := make(chan struct{})
 			release := make(chan struct{})
 			var releaseOnce, probeOnce sync.Once

@@ -246,7 +246,7 @@ func buildBundledRegistry() *Registry {
 
 // buildRegistry loads the embedded manifests then overlays user
 // manifests. A bad bundled manifest is a build defect (fatal); a bad
-// user manifest is logged and skipped so it can't brick startup.
+// user manifest disables that engine and is reported through engine errors.
 func buildRegistry(userManifestDir string) *Registry {
 	reg := buildBundledRegistry()
 	if userManifestDir != "" {
@@ -254,7 +254,7 @@ func buildRegistry(userManifestDir string) *Registry {
 		// than wholesale replace) so a persisted port override pins only
 		// runtime.port and keeps inheriting the rest. See registry.go.
 		if err := reg.LoadOverrideDir(userManifestDir); err != nil {
-			slog.Warn("skipping user manifests after load error", "dir", userManifestDir, "err", err)
+			slog.Warn("engine manifests unavailable after override load error", "dir", userManifestDir, "err", err)
 		}
 	}
 	return reg

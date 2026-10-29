@@ -362,7 +362,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	var tlsState atomic.Pointer[tls.ConnectionState]
 	if plain {
 		var connectedDirect bool
-		conn, connectedDirect, err = p.connect(req, req.Context(), key, identity, cfg, h, direct, budget)
+		conn, connectedDirect, err = p.connect(req, req.Context(), key, identity, cfg, h, direct, true, budget)
 		usedDirect.Store(connectedDirect)
 		if err != nil {
 			release()
@@ -392,7 +392,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 			tr.DialTLSContext = func(context.Context, string, string) (net.Conn, error) {
 				// DialTLSContext bypasses Transport's TLS configuration and
 				// handshake timeout. Complete both explicitly in this hook.
-				secure, connectedDirect, err := p.connect(req, req.Context(), key, identity, cfg, h, direct, budget)
+				secure, connectedDirect, err := p.connect(req, req.Context(), key, identity, cfg, h, direct, true, budget)
 				usedDirect.Store(connectedDirect)
 				if err != nil {
 					return nil, err
@@ -420,7 +420,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 			tr.CloseIdleConnections()
 			conn.Close()
 			var connectedDirect bool
-			conn, connectedDirect, err = p.connect(req, req.Context(), key, identity, cfg, h, false, budget)
+			conn, connectedDirect, err = p.connect(req, req.Context(), key, identity, cfg, h, false, false, budget)
 			usedDirect.Store(connectedDirect)
 			if err == nil {
 				tr = newTransport(conn, false)
@@ -442,17 +442,16 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 		}
 		return nil, unavailableOver(key.uuid, routeOf(usedDirect.Load(), replayed), err)
 	}
+	if usedDirect.Load() {
+		p.outcome(h, true)
+	}
 	// Preserve TLS response metadata on Go versions whose Transport only
 	// recognizes a concrete *tls.Conn from DialTLSContext.
 	if !plain && response.TLS == nil {
 		response.TLS = tlsState.Load()
 	}
 	response.Body = &peerServiceBody{ReadCloser: response.Body, ctx: req.Context(), finish: func() { tr.CloseIdleConnections(); release() },
-		failed: func() {
-			if usedDirect.Load() && reverseDialContextError(req.Context()) == nil {
-				p.outcome(h, false)
-			}
-		},
+		failed: func() {},
 	}
 	return response, nil
 }
@@ -538,7 +537,7 @@ func (p *PeerServiceClient) reusableRoundTrip(req *http.Request, key peerService
 		// finishes a response. Setup still observes the caller's cancellation.
 		lifetime, cancel := context.WithCancel(context.WithoutCancel(req.Context()))
 		stop := context.AfterFunc(req.Context(), cancel)
-		conn, usedDirect, err := p.connect(req.WithContext(lifetime), req.Context(), key, identity, cfg, h, direct, budget)
+		conn, usedDirect, err := p.connect(req.WithContext(lifetime), req.Context(), key, identity, cfg, h, direct, true, budget)
 		stop()
 		if err != nil || req.Context().Err() != nil {
 			cancel()
@@ -602,11 +601,7 @@ func (p *PeerServiceClient) reusableRoundTrip(req *http.Request, key peerService
 		state := c.conn.ConnectionState()
 		response.TLS = &state
 	}
-	body := &peerServiceBody{ReadCloser: response.Body, ctx: req.Context(), failed: func() {
-		if c.direct && req.Context().Err() == nil {
-			p.outcome(h, false)
-		}
-	}}
+	body := &peerServiceBody{ReadCloser: response.Body, ctx: req.Context(), failed: func() {}}
 	body.finish = func() {
 		current := p.current(key, identity) == nil
 		p.mu.Lock()
@@ -668,7 +663,7 @@ func (c *peerServiceAuthorizedConn) ConnectionState() tls.ConnectionState {
 // connection that resets or stalls on its first TLS data is a direct failure.
 // setupContext remains the caller's context when a reusable connection has a
 // detached lifetime, so cancellation cannot race a direct-to-reverse fallback.
-func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Context, key peerServiceKey, identity peerServiceIdentity, cfg *tls.Config, h *peerServiceHealth, direct bool, budget time.Duration) (net.Conn, bool, error) {
+func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Context, key peerServiceKey, identity peerServiceIdentity, cfg *tls.Config, h *peerServiceHealth, direct, retryDirect bool, budget time.Duration) (net.Conn, bool, error) {
 	if err := reverseDialContextError(setupContext); err != nil {
 		return nil, false, err
 	}
@@ -693,8 +688,7 @@ func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Cont
 		}
 		return conn, nil
 	}
-	var directErr error
-	if direct {
+	tryDirect := func() (net.Conn, error) {
 		setup, cancel := context.WithTimeout(setupContext, budget)
 		conn, err := p.opts.DialContext(setup, "tcp", identity.route.Address)
 		if err == nil {
@@ -703,12 +697,23 @@ func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Cont
 		cancel()
 		if err == nil {
 			p.outcome(h, true)
-			return conn, true, nil
+			return conn, nil
 		}
-		directErr = err
 		if setupContext.Err() == nil {
 			p.outcome(h, false)
 		} else {
+			return nil, setupContext.Err()
+		}
+		return nil, err
+	}
+	var directErr error
+	if direct {
+		conn, err := tryDirect()
+		if err == nil {
+			return conn, true, nil
+		}
+		directErr = err
+		if setupContext.Err() != nil {
 			return nil, false, setupContext.Err()
 		}
 	}
@@ -727,6 +732,22 @@ func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Cont
 		cancel()
 	}
 	if err != nil {
+		// A refusal is authoritative at dial time, including when a session
+		// disappeared after backoff was selected. No request was dispatched.
+		if !direct && retryDirect && errors.Is(err, ErrReverseNoSession) && reverseDialContextError(setupContext) == nil {
+			if currentErr := p.current(key, identity); currentErr != nil {
+				return nil, false, currentErr
+			}
+			conn, directErr := tryDirect()
+			if directErr == nil {
+				return conn, true, nil
+			}
+			if setupContext.Err() != nil {
+				return nil, false, setupContext.Err()
+			}
+			return nil, false, &ReverseUnavailableError{PeerUUID: key.uuid, Route: ReverseRoute("reverse, then direct"),
+				Cause: fmt.Errorf("reverse: %w; direct: %w", routeCause(err), directErr)}
+		}
 		if directErr == nil {
 			return nil, false, unavailableOver(key.uuid, RouteReverse, err)
 		}
