@@ -193,8 +193,8 @@ type modelDownloads struct {
 	authorityGeneration uint64
 	authorityHeld       uint64
 	authorityUncertain  bool
-	// Current-run marker additions reserve their eventual removal in both
-	// revision domains. Loaded markers retain their original provenance.
+	// Current-run copy additions reserve removal in the authority generation,
+	// independently of the public download revision. Loaded markers retain provenance.
 	copyRetirements      map[string]bool
 	unsafeOrigins        map[downloadContentKey]string
 	recoveryRequired     bool
@@ -531,6 +531,42 @@ func (d *modelDownloads) resolveMarker(key downloadContentKey, id string) bool {
 	return true
 }
 
+// The Manager has already bound one live claimant to this normalized tuple.
+// Selecting retained evidence performs no journal write or provenance adoption.
+func (d *modelDownloads) retainedCopyMarker(marker modelCopyMarker) (modelCopyMarker, bool, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.recoveryRequired || d.copyRecoveryRequired || marker.ManagerIncarnation != d.source {
+		return marker, false, errDownloadRecovery
+	}
+	var matching modelCopyMarker
+	found := false
+	for _, retained := range d.copies {
+		sameContent := retained.Role == marker.Role && retained.SourceNodeID == marker.SourceNodeID && retained.DestinationNodeID == marker.DestinationNodeID && retained.Engine == marker.Engine && retained.ContentKey == marker.ContentKey
+		if !sameContent {
+			if retained.OpID == marker.OpID {
+				return marker, false, errDownloadBusy
+			}
+			continue
+		}
+		matching, found = retained, true
+	}
+	if !found {
+		return marker, false, nil
+	}
+	if matching.ManagerIncarnation != d.source || matching.Phase != "unsafe" || matching.OwnerNodeID != marker.OwnerNodeID || matching.Naming != marker.Naming {
+		return marker, false, errDownloadRecovery
+	}
+	// A known original must pin the retry before effects. An alias-only retry
+	// could otherwise leave another export's partials under this marker.
+	if matching.ExpectedExportID != "" && matching.ExpectedExportID != marker.ExpectedExportID {
+		return marker, false, copyConflict("copy retry differs from retained export identity")
+	}
+	// Reuse the original provenance without rewriting its operation or
+	// incarnation. Only a matching positive terminal may retire it.
+	return matching, true, nil
+}
+
 // The same journalMu orders every copy and download writer. Capture both
 // collections only after taking it, and release mu before the durable write.
 // Retained copies are not outcomes and are never evicted by live retirement.
@@ -555,16 +591,11 @@ func (d *modelDownloads) changeCopyMarker(marker modelCopyMarker, remove bool) e
 	if !remove {
 		steps = 2
 	}
-	if !reservedRetirement && (math.MaxUint64-d.revision < d.reservedRevisionsLocked() || math.MaxUint64-d.revision-d.reservedRevisionsLocked() < steps) {
-		d.mu.Unlock()
-		return errDownloadCapacity
-	}
 	if !reservedRetirement {
 		if !d.reserveAuthorityLocked(steps) {
 			d.mu.Unlock()
 			return errDownloadCapacity
 		}
-		d.heldRevisions += steps
 	}
 	next, downloads, copiesComplete, copyRecoveryRequired := maps.Clone(d.copies), maps.Clone(d.unsafe), d.copiesComplete, d.copyRecoveryRequired
 	if next == nil {
@@ -580,7 +611,6 @@ func (d *modelDownloads) changeCopyMarker(marker modelCopyMarker, remove bool) e
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if landed {
-		d.heldRevisions--
 		d.advanceAuthorityLocked()
 		d.copies = next
 		if remove {
@@ -599,9 +629,7 @@ func (d *modelDownloads) changeCopyMarker(marker modelCopyMarker, remove bool) e
 				d.copies[marker.OpID] = marker
 			}
 		}
-		d.revision++
 	} else if !reservedRetirement {
-		d.heldRevisions -= steps
 		d.authorityHeld -= steps
 	}
 	return err

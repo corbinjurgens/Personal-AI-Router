@@ -753,11 +753,11 @@ func safeCopyDestinationBounded(ctx context.Context, root, dest string, scan *mo
 			return fmt.Errorf("copy destination parent is not a directory")
 		}
 	}
-	realRoot, err := filepath.EvalSymlinks(nearestExistingDir(root))
+	realRoot, err := resolveExistingPath(nearestExistingDir(root))
 	if err != nil {
 		return fmt.Errorf("cannot resolve copy store")
 	}
-	realDest, err := filepath.EvalSymlinks(nearestExistingDir(filepath.Dir(dest)))
+	realDest, err := resolveExistingPath(nearestExistingDir(filepath.Dir(dest)))
 	if err != nil || (!pathWithinRoot(realRoot, realDest) && realRoot != realDest) {
 		return fmt.Errorf("copy destination escapes resolved model store")
 	}

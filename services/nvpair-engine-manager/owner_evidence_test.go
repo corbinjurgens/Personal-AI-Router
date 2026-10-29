@@ -511,7 +511,7 @@ func TestOwnerEvidenceReservations(t *testing.T) {
 	gateSaturation("reader release survives saturation", false)
 	gateSaturation("writer release survives saturation", true)
 
-	t.Run("copy marker reserves content and notification retirement before publication", func(t *testing.T) {
+	t.Run("copy marker reserves authority retirement independently of download revision", func(t *testing.T) {
 		m, d, p := setup(t)
 		d.authorityGeneration, d.revision = math.MaxUint64-2, math.MaxUint64-2
 		marker := modelCopyMarker{OpID: p.OpID, Engine: p.Engine, Model: p.Model, ContentKey: p.Model, Naming: engines.ModelNamingExact, Role: "controller", OwnerNodeID: "controller", SourceNodeID: p.SourceNodeID, DestinationNodeID: p.DestinationNodeID, ManagerIncarnation: d.source, Phase: "unsafe"}
@@ -526,7 +526,7 @@ func TestOwnerEvidenceReservations(t *testing.T) {
 		}
 		r := m.ownerReservations()
 		clear(t, r)
-		if d.authorityHeld != 0 || d.heldRevisions != 0 || r.Token.ContentGeneration != math.MaxUint64 || r.Token.DownloadRevision != math.MaxUint64 {
+		if d.authorityHeld != 0 || d.heldRevisions != 0 || r.Token.ContentGeneration != math.MaxUint64 || r.Token.DownloadRevision != math.MaxUint64-2 {
 			t.Fatalf("marker retirement wrapped or leaked: %+v", r.Token)
 		}
 	})
