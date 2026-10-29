@@ -34,7 +34,12 @@ func init() {
 	}
 	switch request.Scenario {
 	case "grandchild":
-		if err := os.WriteFile(request.PIDFile, []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		// Publish readiness only after the complete PID has been closed. File
+		// creation alone races cancellation against the PID write.
+		if err := os.WriteFile(request.PIDFile+".pending", []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+			os.Exit(2)
+		}
+		if err := os.Rename(request.PIDFile+".pending", request.PIDFile); err != nil {
 			os.Exit(2)
 		}
 		time.Sleep(30 * time.Second)
@@ -180,15 +185,18 @@ func testMemoryPlanProcessTrees(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 			defer cancel()
+			cancelledWhenReady := make(chan bool, 1)
 			if scenario == "tree-cancel" {
 				go func() {
 					for {
 						if _, err := os.Stat(pidFile); err == nil {
 							cancel()
+							cancelledWhenReady <- true
 							return
 						}
 						select {
 						case <-ctx.Done():
+							cancelledWhenReady <- false
 							return
 						case <-time.After(time.Millisecond):
 						}
@@ -197,6 +205,9 @@ func testMemoryPlanProcessTrees(t *testing.T) {
 			}
 			started := time.Now()
 			_, runErr := new(Executor).runMemoryPlanCommand(ctx, memoryPlanTestCommand(t), request)
+			if scenario == "tree-cancel" && !<-cancelledWhenReady {
+				t.Fatalf("cancellation never observed descendant readiness (run: %v)", runErr)
+			}
 			raw, err := os.ReadFile(pidFile)
 			if err != nil {
 				t.Fatalf("child never started: %v (run: %v)", err, runErr)
