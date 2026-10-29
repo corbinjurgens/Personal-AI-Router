@@ -62,6 +62,8 @@ type modelFileList struct {
 	Layout   string `json:"layout,omitempty"`
 	ExportID string `json:"exportId,omitempty"`
 	binding  string
+	// source retains request-local selection evidence, never peer-visible paths.
+	source *sourceSnapshot
 	// Revision is the snapshot a llama.cpp model's files were listed from (the
 	// Hugging Face commit in its cache). Empty for other engines.
 	Revision string      `json:"revision,omitempty"`
