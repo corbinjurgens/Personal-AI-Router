@@ -32,8 +32,10 @@ func TestHandleHTTP_SoleOwnerWaitsForFirstContent(t *testing.T) {
 	setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
 	tc := anyCase(t)
 	var hits atomic.Int32
-	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	started := make(chan struct{})
+	engine := httptest.NewServer(fixtureRequestHandler(http.MethodPost, tc.inferencePath, func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
+		close(started)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.(http.Flusher).Flush()
@@ -55,7 +57,17 @@ func TestHandleHTTP_SoleOwnerWaitsForFirstContent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	rec := httptest.NewRecorder()
-	p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+	done := make(chan struct{})
+	go func() { defer close(done); p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx)) }()
+	select {
+	case <-started:
+	case <-done:
+		t.Fatal("handler returned before dispatch")
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for dispatch")
+	}
+	assertFixtureRejectsProbe(t, engine.URL)
+	<-done
 	if rec.Code != http.StatusOK || hits.Load() != 1 {
 		t.Fatalf("sole slow owner: status %d, engine hits %d; want 200 and exactly one inference dispatch", rec.Code, hits.Load())
 	}
@@ -486,7 +498,7 @@ func TestUnifiedDispatchBodyPreparationDeadline(t *testing.T) {
 	for _, stage := range []string{"initial allocation", "growth", "EOF probe", "parser allowance"} {
 		t.Run(stage, func(t *testing.T) {
 			writer := &recordingWriter{}
-			engine := newRecordingEngine(t, http.StatusOK)
+			engine := newRecordingEngineForRequest(t, http.StatusOK, http.MethodPost, routeChatCompletions)
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
 			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(writer), discovery, 0)
@@ -520,6 +532,12 @@ func TestUnifiedDispatchBodyPreparationDeadline(t *testing.T) {
 			defer cancel()
 			rec, done := httptest.NewRecorder(), make(chan struct{})
 			go func() { defer close(done); p.soleFacade().handleHTTP(rec, r.WithContext(ctx)) }()
+			waitForCond(t, time.Second, "body preparation waiter", func() bool {
+				p.buffers.mu.Lock()
+				defer p.buffers.mu.Unlock()
+				return p.buffers.waiters.Len() == 1
+			})
+			assertFixtureRejectsProbe(t, engine.URL)
 			select {
 			case <-done:
 			case <-time.After(time.Second):
@@ -2033,7 +2051,7 @@ func TestUnifiedDispatchHybridPreOutputDeadline(t *testing.T) {
 	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
 	pol.TierPolicy.AllowStronger = false
 	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"slow": {"q:1b"}}, nil)
-	stalled := newStallingEngine(t)
+	stalled := newStallingEngine(t, routeChatCompletions)
 	defer stalled.doRelease()
 	n := nodeFor(t, "slow", stalled.URL)
 	n.Models = []string{"q:1b"}

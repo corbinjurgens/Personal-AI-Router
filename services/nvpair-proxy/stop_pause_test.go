@@ -32,10 +32,10 @@ type stopPauseEngine struct {
 	once               sync.Once
 }
 
-func newStopPauseEngine(t *testing.T, media, first string) *stopPauseEngine {
+func newStopPauseEngine(t *testing.T, path, media, first string) *stopPauseEngine {
 	t.Helper()
 	e := &stopPauseEngine{entered: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
-	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	e.Server = httptest.NewServer(fixtureRequestHandler(http.MethodPost, path, func(w http.ResponseWriter, r *http.Request) {
 		e.hits.Add(1)
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
 			t.Errorf("read engine request: %v", err)
@@ -71,7 +71,7 @@ func TestStopPauseRouting(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			w := &recordingWriter{}
 			p := performanceProxyWithCodec(t, "ollama", NewCodec(w))
-			e := newStopPauseEngine(t, media, first)
+			e := newStopPauseEngine(t, path, media, first)
 			f := p.soleFacade()
 			setBackend(t, f, e.URL, true)
 			alternate := newRecordingEngine(t, http.StatusOK)
@@ -191,7 +191,7 @@ func TestStopPauseRouting(t *testing.T) {
 
 	precommit := func(name string, hybrid, alternate, peer bool) {
 		t.Run(name, func(t *testing.T) {
-			e := newStopPauseEngine(t, "", "")
+			e := newStopPauseEngine(t, routeChatCompletions, "", "")
 			w := &recordingWriter{}
 			p := performanceProxyWithCodec(t, "ollama", NewCodec(w))
 			f := p.soleFacade()
@@ -523,7 +523,7 @@ func stopPauseRegistration(t *testing.T) {
 }
 
 func stopPauseRemote(t *testing.T) {
-	e := newStopPauseEngine(t, "text/event-stream", continuitySSEEvent)
+	e := newStopPauseEngine(t, routeChatCompletions, "text/event-stream", continuitySSEEvent)
 	fx := newContinuityFixture(t, e.URL, time.Second)
 	rec := &strictFirstByteWriter{ResponseRecorder: httptest.NewRecorder(), first: make(chan struct{})}
 	done := make(chan struct{})
@@ -543,7 +543,7 @@ func stopPauseRemote(t *testing.T) {
 }
 
 func stopPausePeerFailure(t *testing.T) {
-	e := newStopPauseEngine(t, "text/event-stream", continuitySSEEvent)
+	e := newStopPauseEngine(t, routeChatCompletions, "text/event-stream", continuitySSEEvent)
 	peer := newProxyReverseFixture(t, "ollama", e.Config.Handler)
 	peer.directHealthy.Store(true)
 	w := &recordingWriter{}
@@ -579,7 +579,7 @@ func stopPausePeerFailure(t *testing.T) {
 func stopPauseRaw(t *testing.T) {
 	test := func(name, body, media, first string) {
 		t.Run(name, func(t *testing.T) {
-			e := newStopPauseEngine(t, media, first)
+			e := newStopPauseEngine(t, routeChatCompletions, media, first)
 			w := &recordingWriter{}
 			p := performanceProxyWithCodec(t, "ollama", NewCodec(w))
 			setBackend(t, p.soleFacade(), e.URL, true)

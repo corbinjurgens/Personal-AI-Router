@@ -1334,7 +1334,7 @@ func TestPerformanceRequestCancellationOutcome(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			upstreamDone := make(chan struct{})
-			u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u := httptest.NewServer(fixtureRequestHandler(http.MethodPost, routeChatCompletions, func(w http.ResponseWriter, r *http.Request) {
 				defer close(upstreamDone)
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
 					t.Error(err)
@@ -1463,7 +1463,7 @@ func TestPerformanceUnobservedCopyOutcome(t *testing.T) {
 			if scenario == "headers then stall" {
 				// Exercise the failover cap with an alternative. A sole
 				// owner's prefill instead waits for the job deadline.
-				alternateURL, alternateHits := newCountingServer(t, http.StatusServiceUnavailable, "")
+				alternateURL, alternateHits := newCountingServer(t, http.MethodPost, routeChatCompletions, http.StatusServiceUnavailable, "")
 				p.soleFacade().discovery.AddManual(nodeForModel(t, "alternate", alternateURL, "m"))
 				p.SetPriority([]string{"destination", "alternate"})
 				t.Cleanup(func() {

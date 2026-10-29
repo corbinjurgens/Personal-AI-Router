@@ -28,7 +28,7 @@ import (
 
 func strictHTTPFixture(t *testing.T) (*Proxy, *recordingEngine) {
 	t.Helper()
-	return strictHTTPFixtureWithEngine(t, newRecordingEngine(t, http.StatusOK))
+	return strictHTTPFixtureWithEngine(t, newRecordingEngineForRequest(t, http.StatusOK, http.MethodPost, routeChatCompletions))
 }
 
 func strictHTTPFixtureWithEngine(t *testing.T, e *recordingEngine) (*Proxy, *recordingEngine) {
@@ -146,7 +146,7 @@ func TestStrictHTTPCancellationIgnoringEngineQuarantines(t *testing.T) {
 			p, _ := strictHTTPFixture(t)
 			received := make(chan struct{})
 			release := make(chan struct{})
-			e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(received); <-release; w.WriteHeader(http.StatusOK) }))
+			e := httptest.NewServer(fixtureRequestHandler(http.MethodPost, routeChatCompletions, func(w http.ResponseWriter, r *http.Request) { close(received); <-release; w.WriteHeader(http.StatusOK) }))
 			defer e.Close()
 			defer close(release)
 			setBackend(t, p.soleFacade(), e.URL, true)
@@ -172,7 +172,7 @@ func TestStrictHTTPPreOutputDeadlineQuarantines(t *testing.T) {
 			c := useStrictClock(p.admission)
 			received := make(chan struct{})
 			release := make(chan struct{})
-			e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			e := httptest.NewServer(fixtureRequestHandler(http.MethodPost, routeChatCompletions, func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusOK)
 				w.(http.Flusher).Flush()
 				close(received)
@@ -235,7 +235,7 @@ func TestStrictHTTPHealthyGenerationOutlivesSelectionBudget(t *testing.T) {
 	p, _ := strictHTTPFixture(t)
 	c := useStrictClock(p.admission)
 	release := make(chan struct{})
-	e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	e := httptest.NewServer(fixtureRequestHandler(http.MethodPost, routeChatCompletions, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "first")
 		w.(http.Flusher).Flush()
 		<-release
@@ -385,14 +385,14 @@ type stallingEngine struct {
 	once      sync.Once
 }
 
-func newStallingEngine(t *testing.T) *stallingEngine {
+func newStallingEngine(t *testing.T, path string) *stallingEngine {
 	t.Helper()
 	e := &stallingEngine{
 		received:  make(chan struct{}, 8),
 		cancelled: make(chan struct{}, 8),
 		release:   make(chan struct{}),
 	}
-	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	e.Server = httptest.NewServer(fixtureRequestHandler(http.MethodPost, path, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		e.received <- struct{}{}
 		select {
@@ -524,7 +524,7 @@ func TestIngress_WaitHeaderZeroRejectsBusyImmediately(t *testing.T) {
 
 func TestIngress_DrainingFinishesActiveAndCancelActiveCancels(t *testing.T) {
 	tc := anyCase(t)
-	engine := newStallingEngine(t)
+	engine := newStallingEngine(t, tc.inferencePath)
 	p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
 	f := p.soleFacade()
 	setBackend(t, f, engine.URL, true)
@@ -552,7 +552,7 @@ func TestIngress_DrainingFinishesActiveAndCancelActiveCancels(t *testing.T) {
 	}
 
 	// cancelActive: the running request is cancelled at the engine.
-	stall := newStallingEngine(t)
+	stall := newStallingEngine(t, tc.inferencePath)
 	setBackend(t, f, stall.URL, true)
 	p.admission.setAvailability(nodepolicy.Available, false)
 	go func() {
@@ -821,7 +821,7 @@ func TestHandleHTTP_SoleBusyPeerWaitsWithoutSpendingDispatches(t *testing.T) {
 	setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
 	tc := anyCase(t)
 	var hits atomic.Int32
-	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	peer := httptest.NewServer(fixtureRequestHandler(http.MethodPost, tc.inferencePath, func(w http.ResponseWriter, r *http.Request) {
 		if hits.Add(1) <= 6 {
 			writeAdmissionRejection(w, nodepolicy.RejectBusy)
 			return
@@ -849,7 +849,7 @@ func TestHandleHTTP_SolePeerOtherRefusalsSpendDispatches(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			tc := anyCase(t)
 			var hits atomic.Int32
-			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			peer := httptest.NewServer(fixtureRequestHandler(http.MethodPost, tc.inferencePath, func(w http.ResponseWriter, r *http.Request) {
 				hits.Add(1)
 				w.Header().Set(nodepolicy.AdmissionHeader, string(reason))
 				w.WriteHeader(status)
@@ -877,7 +877,7 @@ func TestHandleHTTP_SolePeerOtherRefusalsSpendDispatches(t *testing.T) {
 func TestHandleHTTP_MultipleBusyPeersSpendDispatches(t *testing.T) {
 	tc := anyCase(t)
 	var hits atomic.Int32
-	busy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	busy := fixtureRequestHandler(http.MethodPost, tc.inferencePath, func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		writeAdmissionRejection(w, nodepolicy.RejectBusy)
 	})
@@ -902,7 +902,7 @@ func TestHandleHTTP_SoleBusyPeerStopsAtJobDeadline(t *testing.T) {
 	setForTest(t, &jobDeadline, 100*time.Millisecond)
 	tc := anyCase(t)
 	var hits atomic.Int32
-	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	peer := httptest.NewServer(fixtureRequestHandler(http.MethodPost, tc.inferencePath, func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		writeAdmissionRejection(w, nodepolicy.RejectBusy)
 	}))
@@ -1009,7 +1009,7 @@ func TestHandleHTTP_EngineOffIsNotWoken(t *testing.T) {
 // moves the request to another candidate rather than failing it.
 func TestHandleHTTP_CancelActiveMovesSelfDispatchOn(t *testing.T) {
 	tc := anyCase(t)
-	local := newStallingEngine(t)
+	local := newStallingEngine(t, tc.inferencePath)
 	peer := newRecordingEngine(t, http.StatusOK)
 	port := tc.profile.FacadePort
 	disc := NewDiscovery()
@@ -1044,8 +1044,8 @@ func TestHandleHTTP_CancelActiveMovesSelfDispatchOn(t *testing.T) {
 
 func TestHandleHTTP_SelfAdmissionCancelStaysWithAttempt(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		local := newStallingEngine(t)
-		peer := newStallingEngine(t)
+		local := newStallingEngine(t, tc.inferencePath)
+		peer := newStallingEngine(t, tc.inferencePath)
 		port := tc.profile.FacadePort
 		disc := NewDiscovery()
 		disc.AddManual(selfNode("self", port, tc.advertisedModel))

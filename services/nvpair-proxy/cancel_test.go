@@ -107,7 +107,7 @@ func (fx *cancelFixture) terminal(t *testing.T) Workload {
 
 func TestCancel_BeforeCommitWithRegenerateMovesOn(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		fx := startCancelFixture(t, tc, newStallingEngine(t))
+		fx := startCancelFixture(t, tc, newStallingEngine(t, tc.inferencePath))
 		if res := fx.cancel(t, tc.profile.Name, true); !res.Found {
 			t.Fatal("workload/cancel did not find the in-flight workload")
 		}
@@ -142,7 +142,7 @@ func TestCancel_BeforeCommitWithRegenerateMovesOn(t *testing.T) {
 // is the only owner left: the request ends instead of waiting it out.
 func TestCancel_RegenerateWithNoOtherNodeEnds(t *testing.T) {
 	tc := anyCase(t)
-	a := newStallingEngine(t)
+	a := newStallingEngine(t, tc.inferencePath)
 	w := &recordingWriter{}
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "a", a.URL, tc.advertisedModel))
@@ -167,7 +167,7 @@ func TestCancel_RegenerateWithNoOtherNodeEnds(t *testing.T) {
 
 func TestCancel_BeforeCommitWithoutRegenerateCancels(t *testing.T) {
 	tc := anyCase(t)
-	fx := startCancelFixture(t, tc, newStallingEngine(t))
+	fx := startCancelFixture(t, tc, newStallingEngine(t, tc.inferencePath))
 	if res := fx.cancel(t, "", false); !res.Found {
 		t.Fatal("not found")
 	}
@@ -186,10 +186,10 @@ func TestCancel_BeforeCommitWithoutRegenerateCancels(t *testing.T) {
 }
 
 // streamingStallEngine commits a response and then holds the stream open.
-func newStreamingStallEngine(t *testing.T) *stallingEngine {
+func newStreamingStallEngine(t *testing.T, path string) *stallingEngine {
 	t.Helper()
 	e := &stallingEngine{received: make(chan struct{}, 8), cancelled: make(chan struct{}, 8), release: make(chan struct{})}
-	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	e.Server = httptest.NewServer(fixtureRequestHandler(http.MethodPost, path, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -213,7 +213,7 @@ func newStreamingStallEngine(t *testing.T) *stallingEngine {
 // answers — so the stream is aborted and the workload cancelled.
 func TestCancel_AfterCommitAbortsAndCancels(t *testing.T) {
 	tc := anyCase(t)
-	fx := startCancelFixture(t, tc, newStreamingStallEngine(t))
+	fx := startCancelFixture(t, tc, newStreamingStallEngine(t, tc.inferencePath))
 	waitForCond(t, 2*time.Second, "the commit", func() bool {
 		return len(notificationsOf(t, fx.w, workloadStartedMethod)) == 1
 	})
