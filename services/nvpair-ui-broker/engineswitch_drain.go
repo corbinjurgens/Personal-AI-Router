@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,232 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
+
+// nodeDrainLease owns only registry entries newly added by drainNode. Task 6
+// keeps this private lease until its manager operation has conclusively stopped.
+// It is not a reservation and does not own engine lifecycle or admission state.
+// The existing policy push slot serializes access to added, including concurrent
+// releases; an entry leaves this lease only after confirmed cleanup.
+type nodeDrainLease struct {
+	broker       *Broker
+	added        []string
+	settingsHeld bool
+}
+
+// drainNode retains settingsApplyMu until cleanup completes, excluding other
+// node drains and switch/settings owners of the same registry entries. The
+// caller still owns manager reservation, catalog stability and its operation
+// ledger. This primitive acknowledges the current catalog and proves it idle.
+// On failure, a non-nil lease means rollback is incomplete: retain it and the
+// reservation until release succeeds. A nil lease means no cleanup remains.
+func (b *Broker) drainNode(parent context.Context) (lease *nodeDrainLease, err error) {
+	ctx, cancel := context.WithTimeout(parent, settings.SwitchDrainBudget)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !b.settingsApplyMu.TryLock() {
+		return nil, fmt.Errorf("an engine configuration operation is active")
+	}
+	settingsHeld := true
+	defer func() {
+		if settingsHeld {
+			b.settingsApplyMu.Unlock()
+		}
+	}()
+	r := b.nodePolicyRuntime()
+	if !r.acquirePush(ctx) {
+		return nil, ctx.Err()
+	}
+	defer r.releasePush()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pp := b.policyProxy()
+	r.mu.Lock()
+	runID := r.runID
+	r.mu.Unlock()
+	if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
+		return nil, err
+	}
+	profiles := b.frontedEngineProfiles()
+	owned := &nodeDrainLease{broker: b, settingsHeld: true}
+	settingsHeld = false
+	r.mu.Lock()
+	for _, profile := range profiles {
+		if !r.drains[profile.Name] {
+			r.drains[profile.Name] = true
+			owned.added = append(owned.added, profile.Name)
+		}
+	}
+	r.mu.Unlock()
+	defer func() {
+		if err == nil {
+			return
+		}
+		// Keep the push slot through rollback. Reacquiring it here would wait
+		// on ourselves, or on replacement replay waiting for this acquisition.
+		cleanup, cancelCleanup := context.WithTimeout(context.Background(), proxyCallTimeout)
+		defer cancelCleanup()
+		if cleanupErr := owned.releaseUnderPush(cleanup, pp); cleanupErr != nil {
+			lease = owned
+			err = errors.Join(err, fmt.Errorf("node drain rollback incomplete: %w", cleanupErr))
+		}
+	}()
+	for _, profile := range profiles {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
+			return nil, err
+		}
+		if err := switchDrainAck(ctx, pp, profile.Name, true); err != nil {
+			return nil, err
+		}
+		if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
+			return nil, err
+		}
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
+			return nil, err
+		}
+		raw, rpcErr, err := pp.Call(ctx, nodepolicy.MethodAdmissionSnapshot, settingsJSON(nodepolicy.AdmissionSnapshotParams{}))
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
+			return nil, err
+		}
+		if rpcErr != nil {
+			return nil, fmt.Errorf("admission snapshot refused: %s", rpcErr.Message)
+		}
+		idle, err := nodeDrainSnapshotIdle(raw, runID)
+		if err != nil {
+			return nil, err
+		}
+		if idle {
+			return owned, nil
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// release uses a caller-owned cleanup context, independent of acquisition
+// cancellation. Failed or uncertain undrains keep their registry entries and
+// lease ownership for retry. A successful concurrent/repeated release is a no-op.
+func (l *nodeDrainLease) release(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r := l.broker.nodePolicyRuntime()
+	if !r.acquirePush(ctx) {
+		return ctx.Err()
+	}
+	defer r.releasePush()
+	return l.releaseUnderPush(ctx, nil)
+}
+
+// acquiringProxy is non-nil only during rollback with the original push slot
+// still held. No intervening replay or push could have sent our additions to
+// an un-replayed replacement, so rollback can remove them before letting replay
+// proceed. Ordinary release returns retryable failure for an unverified live
+// proxy. With no live proxy, only registry cleanup remains.
+func (l *nodeDrainLease) releaseUnderPush(ctx context.Context, acquiringProxy *proxyProcess) error {
+	b := l.broker
+	r := b.nodePolicyRuntime()
+	for len(l.added) != 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pp := b.policyProxy()
+		r.mu.Lock()
+		incarnation, runID := r.incarnation, r.runID
+		r.mu.Unlock()
+		if pp != nil && pp != incarnation && (acquiringProxy == nil || pp == acquiringProxy) {
+			return fmt.Errorf("node drain cleanup proxy run is unverified")
+		}
+		if pp != nil && pp == incarnation {
+			if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
+				return err
+			}
+			if err := switchDrainAck(ctx, pp, l.added[0], false); err != nil {
+				return fmt.Errorf("release drain for %s: %w", l.added[0], err)
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := b.nodeDrainProxyCurrent(pp, runID); err != nil {
+				return err
+			}
+		} else if b.policyProxy() != pp {
+			return fmt.Errorf("proxy incarnation changed during node drain cleanup")
+		}
+		r.mu.Lock()
+		delete(r.drains, l.added[0])
+		r.mu.Unlock()
+		l.added = l.added[1:]
+	}
+	if l.settingsHeld {
+		l.settingsHeld = false
+		b.settingsApplyMu.Unlock()
+	}
+	return nil
+}
+
+func (b *Broker) nodeDrainProxyCurrent(pp *proxyProcess, runID string) error {
+	if pp == nil || b.policyProxy() != pp {
+		return fmt.Errorf("proxy incarnation changed during node drain")
+	}
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	current := r.incarnation == pp && runID != "" && r.runID == runID
+	r.mu.Unlock()
+	if !current {
+		return fmt.Errorf("node drain proxy run is unverified or changed")
+	}
+	return nil
+}
+
+func nodeDrainSnapshotIdle(raw json.RawMessage, runID string) (bool, error) {
+	// Presence matters: missing/null counts are not evidence of zero. Pointer
+	// map values also prevent a null per-engine count from decoding as zero.
+	var snapshot struct {
+		RunID          *string         `json:"runId"`
+		Active         *int            `json:"active"`
+		Queued         *int            `json:"queued"`
+		ActiveByEngine map[string]*int `json:"activeByEngine"`
+	}
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return false, fmt.Errorf("invalid node admission snapshot: %w", err)
+	}
+	if snapshot.RunID == nil || *snapshot.RunID != runID || snapshot.Active == nil || snapshot.Queued == nil || snapshot.ActiveByEngine == nil {
+		return false, fmt.Errorf("missing or wrong-incarnation node admission evidence")
+	}
+	if *snapshot.Active < 0 || *snapshot.Queued < 0 {
+		return false, fmt.Errorf("invalid node admission count")
+	}
+	idle := *snapshot.Active == 0 && *snapshot.Queued == 0
+	for _, count := range snapshot.ActiveByEngine {
+		if count == nil || *count < 0 {
+			return false, fmt.Errorf("invalid engine admission count")
+		}
+		idle = idle && *count == 0
+	}
+	return idle, nil
+}
 
 // Unlike the settings drain, a switch has no timeout-and-stop path. The bound
 // includes acquiring the push slot and every acknowledgement/snapshot request.
