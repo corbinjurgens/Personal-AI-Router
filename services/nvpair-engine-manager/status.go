@@ -110,6 +110,9 @@ func (e *Executor) Status(engine string) (EngineStatus, error) {
 func (e *Executor) StatusAtPort(engine string, probePort int) (EngineStatus, error) {
 	st, err := e.state(engine)
 	if err != nil {
+		if e.reg.invalid[engine] != nil {
+			return EngineStatus{Engine: engine, DisplayName: engine, Locked: e.lockedStatus(engine)}, nil
+		}
 		// Known engine with no host-platform block: return a shell status
 		// (matching get-installed) rather than erroring, so status is
 		// consistent for the same engine across methods.
@@ -127,6 +130,10 @@ func (e *Executor) GetInstalled() []EngineStatus {
 	for _, name := range e.reg.Names() {
 		st, err := e.state(name)
 		if err != nil {
+			if e.reg.invalid[name] != nil {
+				out = append(out, EngineStatus{Engine: name, DisplayName: name, Locked: e.lockedStatus(name)})
+				continue
+			}
 			// Known engine with no block for this host: surface a shell
 			// status so the UI can still list it as unavailable here.
 			if m, ok := e.reg.Get(name); ok {

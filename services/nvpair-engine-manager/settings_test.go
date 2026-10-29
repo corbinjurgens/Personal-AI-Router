@@ -110,7 +110,6 @@ func TestServingOverridesRejectInvalidDeclarations(t *testing.T) {
 				t.Fatal(err)
 			}
 			reg.bundledRaw["fake"] = base
-			before, _ := reg.Get("fake")
 			serving := servingSettingsFixture()
 			mutate(serving)
 			override, err := json.Marshal(map[string]any{"engine": "fake", "runtime": map[string]any{"serving": serving}})
@@ -132,9 +131,10 @@ func TestServingOverridesRejectInvalidDeclarations(t *testing.T) {
 			if err := reg.LoadOverrideDir(dir); err != nil {
 				t.Fatal(err)
 			}
-			after, _ := reg.Get("fake")
-			if after != before {
-				t.Fatal("invalid override replaced bundled manifest")
+			// An invalid override must disable its engine, not fall back to
+			// the bundled manifest with different serving declarations.
+			if after, ok := reg.Get("fake"); ok || after != nil || reg.invalid["fake"] == nil || !strings.Contains(reg.invalid["fake"].Error(), field) {
+				t.Fatalf("invalid override remained available or lost diagnostic: %+v, %v", after, reg.invalid["fake"])
 			}
 			stored, err := os.ReadFile(path)
 			if err != nil {

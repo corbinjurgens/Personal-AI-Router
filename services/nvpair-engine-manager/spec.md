@@ -1263,6 +1263,21 @@ fails activation closed.
 
 Errors are emitted with the `nvpair-shared/errors.ServiceError` wire shape (`id`, `message`, `severity`, `action`, …), mirrored locally in `reporter.go` with identical JSON tags. `id` follows `engine-manager:<class>:<engine>`; the Broker stamps `nodeId` / `timestamp`.
 
+An invalid or unreadable engine override disables that engine instead of falling
+back to its bundled manifest. The engine remains listed as unavailable, with a
+false installed/running/healthy status and a validation diagnostic through the
+existing `engine:errors` / `errors:report` path. Normal engine-manager admission
+does not start or probe that engine.
+Override filenames must match their declared engine; a mismatch disables both
+identities, and conflicting files cannot restore an invalid entry. The separate
+privileged `--uninstall-managed` path uses only bundled commands and location
+overrides; it intentionally does not depend on validity of user override files.
+If the override directory exists but cannot be read as a directory, all known
+engines are unavailable rather than falling back. Runtime override reload is
+not supported: corrected overrides take effect in a fresh manager, which clears
+the stable validation error for each valid engine. Shutdown still cleans up
+processes the executor already owns.
+
 Example request:
 ```json
 {"jsonrpc":"2.0","id":1,"method":"engine:install","params":{"engine":"ollama"}}

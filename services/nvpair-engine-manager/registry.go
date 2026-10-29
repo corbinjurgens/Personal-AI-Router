@@ -368,7 +368,9 @@ func (i *Install) ModeOrDefault() string {
 
 // Registry holds validated manifests keyed by engine name.
 type Registry struct {
-	engines map[string]*Manifest
+	engines   map[string]*Manifest
+	invalid   map[string]error
+	overrides map[string]bool
 	// bundledRaw is the raw JSON of each bundled manifest (pre-merge),
 	// keyed by engine name. LoadOverrideDir deep-merges a per-user
 	// override onto this base so a partial override file pins only the
@@ -378,6 +380,9 @@ type Registry struct {
 
 // Get returns the manifest for an engine name.
 func (r *Registry) Get(name string) (*Manifest, bool) {
+	if r.invalid[name] != nil {
+		return nil, false
+	}
 	m, ok := r.engines[name]
 	return m, ok
 }
@@ -388,6 +393,11 @@ func (r *Registry) Names() []string {
 	for n := range r.engines {
 		names = append(names, n)
 	}
+	for n := range r.invalid {
+		if _, ok := r.engines[n]; !ok {
+			names = append(names, n)
+		}
+	}
 	sort.Strings(names)
 	return names
 }
@@ -396,6 +406,8 @@ func (r *Registry) Names() []string {
 func NewRegistry() *Registry {
 	return &Registry{
 		engines:    make(map[string]*Manifest),
+		invalid:    make(map[string]error),
+		overrides:  make(map[string]bool),
 		bundledRaw: make(map[string][]byte),
 	}
 }
@@ -493,37 +505,117 @@ func (r *Registry) addManifest(src string, data []byte) (string, error) {
 // changed runtime.port — pins only that field and keeps inheriting every
 // other bundled value (install URLs, actions, fixes) across upgrades. A file
 // for an engine with no bundled base is loaded standalone. A missing dir is
-// not an error; a single bad file is skipped (logged) so it can't brick
-// startup.
+// not an error. A bad file disables its engine rather than using the bundle.
 func (r *Registry) LoadOverrideDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		missing := false
 		if os.IsNotExist(err) {
-			return nil
+			// Windows also classifies ENOTDIR as not-exist. Only an absent
+			// directory entry permits the ordinary no-overrides case.
+			_, statErr := os.Lstat(dir)
+			missing = os.IsNotExist(statErr)
 		}
-		return fmt.Errorf("read override dir %s: %w", dir, err)
+		if !missing {
+			problem := fmt.Errorf("read override dir %s: %w", dir, err)
+			// No entry can be trusted when the directory cannot be inspected.
+			// Keep diagnostics visible, but never continue on bundled commands.
+			for _, name := range r.Names() {
+				r.invalid[name] = problem
+			}
+			return problem
+		}
 	}
 	sort.Slice(entries, func(a, b int) bool { return entries[a].Name() < entries[b].Name() })
+	invalid := make(map[string]error)
+	seen := make(map[string]bool)
+	accepted := make(map[string]*Manifest)
 	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".json") {
+		if !strings.EqualFold(filepath.Ext(e.Name()), ".json") {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
+		stem := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		if e.IsDir() {
+			if _, known := r.engines[stem]; known {
+				invalid[stem] = fmt.Errorf("override %s: expected a manifest file, found a directory", p)
+			}
+			continue
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
-			slog.Warn("skipping unreadable override manifest", "path", p, "err", err)
+			invalid[stem] = fmt.Errorf("override %s: %w", p, err)
 			continue
 		}
+		var fields map[string]json.RawMessage
+		identityErr := json.Unmarshal(data, &fields)
+		var name string
+		if identityErr == nil {
+			for key := range fields {
+				if strings.EqualFold(key, "engine") && key != "engine" {
+					identityErr = fmt.Errorf("engine identity must use the canonical engine key")
+				}
+			}
+			if raw, exists := fields["engine"]; exists && identityErr == nil {
+				identityErr = json.Unmarshal(raw, &name)
+			}
+		}
+		if identityErr == nil && name == "" {
+			if _, bundled := r.bundledRaw[stem]; !bundled {
+				continue // Non-manifest JSON sidecars do not name an engine.
+			}
+		}
+		if identityErr != nil {
+			invalid[stem] = fmt.Errorf("override %s: invalid JSON or engine identity: %w", p, identityErr)
+			continue
+		}
+		if name == "" {
+			invalid[stem] = fmt.Errorf("override %s: missing engine identity", p)
+			continue
+		}
+		if stem != name {
+			err := fmt.Errorf("override %s: filename does not match engine %q", p, name)
+			invalid[stem], invalid[name] = err, err
+			continue
+		}
+		if seen[name] {
+			invalid[name] = fmt.Errorf("duplicate override for engine %q", name)
+			continue
+		}
+		seen[name] = true
 		merged, err := r.mergeOntoBundled(data)
 		if err != nil {
-			slog.Warn("skipping invalid override manifest", "path", p, "err", err)
+			invalid[name] = fmt.Errorf("override %s: %w", p, err)
 			continue
 		}
-		if _, err := r.addManifest(p, merged); err != nil {
-			slog.Warn("skipping invalid override manifest", "path", p, "err", err)
+		tmp := NewRegistry()
+		validatedName, err := tmp.addManifest(p, merged)
+		if err != nil {
+			invalid[name] = err
 			continue
+		}
+		if validatedName != name || tmp.engines[name] == nil {
+			invalid[name] = fmt.Errorf("override %s: validated engine identity changed", p)
+			continue
+		}
+		accepted[name] = tmp.engines[name]
+	}
+	// Rebuild bundled entries so a repaired or removed override can be loaded.
+	for name := range r.overrides {
+		if raw, ok := r.bundledRaw[name]; ok {
+			if _, err := r.addManifest(name, raw); err != nil {
+				return err
+			}
+		} else {
+			delete(r.engines, name)
 		}
 	}
+	r.overrides = make(map[string]bool)
+	for name, m := range accepted {
+		r.engines[name] = m
+		r.overrides[name] = true
+	}
+	r.invalid = invalid
 	return nil
 }
 
@@ -533,8 +625,7 @@ func (r *Registry) LoadOverrideDir(dir string) error {
 // the paths it deletes stay bundled. A port decides where it looks for the
 // engine still running, and a model store decides what removal keeps — the
 // same store the running engine manager, which reads the whole override,
-// already keeps. An override that would leave the platform invalid is ignored,
-// as it is at startup.
+// already keeps. This separate privileged path ignores invalid location overrides.
 func (r *Registry) applyLocationOverrides(dir string) {
 	if dir == "" {
 		return
