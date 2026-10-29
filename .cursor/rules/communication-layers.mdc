@@ -9,6 +9,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Communication Layers
 
+Build preview and operation status use the existing service bridge. Native main
+owns the picker and GUI facts; the broker's impact, prepare and finish calls are
+private to the local service. Production admission refuses before Pause while
+`buildApplyOwners` is nil. Do not add a peer update route or another supervisor.
+
 Model inspection uses `pairApi.engines.inspectModel` via `engines:inspect-model`,
 the broker's correlated settings relay and the existing pinned engine-control
 `/v1/engine-settings/inspect` read route. Never add a renderer node-to-node path,

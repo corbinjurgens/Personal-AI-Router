@@ -23,6 +23,9 @@ The sibling `services/` tree is the backend source of truth.
 - Electron attaches to `nvpair-service`, starting it if needed; the service owns
   `nvpair-ui-broker`.
 - The broker supervises all runtime workers.
+- The copied one-shot service build-apply executor is a finite transaction
+  owner, not a second supervisor. Production admission refuses before Pause
+  while `buildApplyOwners` is nil.
 - PAIR must not reimplement backend services in TypeScript.
 - Never run a worker from both Electron and the broker.
 - Never add a broker-absent fallback.

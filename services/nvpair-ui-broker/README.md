@@ -73,7 +73,8 @@ unrepresented roots and uncertain reservations remain unknown. Manager paths
 and operation identities stay in the private envelope. Matching reads detect
 observed changes; they do not reserve the manager after the reply.
 
-Production prepare remains unavailable because no owner can pin manager
+Production `buildApplyOwners` is nil, so prepare refuses before Pause. It
+remains unavailable because no owner can pin manager
 intent, locks, content reservations and Pause acceptance atomically through
 `WithLocked`. The service also requires independent identity/membership,
 worker-exit, durable-save, enforcement and physical-stop evidence before a

@@ -11,8 +11,24 @@ settings. `shared/modelconfig` is a portable wire/validation owner, not a native
 argument parser or another settings database. Inspection travels through the
 existing broker settings read relay and pinned engine-control listener; derived
 facts and advisory estimates never establish readiness or qualification.
-The preparatory contract refuses typed mutation until its target implementation
-lands. Future apply-build maintenance must exclude model-settings application.
+The broker's build-maintenance reservation and model-settings entry leases
+exclude conflicting operations at their owners.
+
+Staged build preview is local and read-only. Production build apply currently
+refuses before Pause because the broker's `buildApplyOwners` is nil; accepted
+transaction, helper, swap, restart, recovery and semantic-readback cases are
+unmet pending owner decision O1. The transaction implementation is a finite
+one-shot copy of `nvpair-service`, not a runtime worker or supervisor. Its
+intended ordered stop, swap, restart and readback leave the node paused, retain
+uncertain outcomes and require explicit local Resume; no automatic rollback is
+promised. A pending or unknown operation gates ordinary startup. These paths do
+not establish end-to-end or native acceptance.
+
+Future downloaded signed packages need a resolver that supplies authenticated
+immutable bytes and expected identity to this same transaction, without another
+lifecycle owner. No download, signature verification or distribution guarantee
+is provided by staged preview. Downloaded installation currently refuses before
+stopping the connector.
 
 Personal AI Router (PAIR) is a desktop-or-headless control plane around local Go
 services and HTTP inference proxies. Its control traffic and inference traffic

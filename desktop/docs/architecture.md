@@ -9,8 +9,14 @@ The model configuration contract keeps portable selected edits separate from
 target-owned artifacts, allocation resolution and runtime readback. The renderer
 uses `pairApi.engines.inspectModel`; Electron decodes the service reply without
 resolving native flags or estimating readiness. Engine settings editors preserve
-`modelLoads` on unrelated port/launch changes. Typed Apply is not exposed by this
-preparatory contract.
+`modelLoads` on unrelated port/launch changes.
+
+The local staged-build picker and preview relay through the existing service
+bridge. Production apply refuses before Pause because `buildApplyOwners` is nil;
+accepted transaction, helper, swap, restart, recovery and semantic-readback
+cases remain unmet pending owner decision O1. A pending or unknown operation
+gates ordinary startup. See [Building and Running](../../docs/building.mdx) and
+[architecture](../../docs/architecture.mdx) for the bundle and lifecycle boundary.
 
 Personal AI Router is an Electron desktop application backed by the modular Go
 services in the sibling `services/` directory of this repository. The renderer

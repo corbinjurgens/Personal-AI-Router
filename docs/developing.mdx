@@ -5,6 +5,14 @@ SPDX-License-Identifier: Apache-2.0
 
 # Developer Guide
 
+Distribution updates and local staged preview are separate. Development and
+packaged builds without `resources/app-update.yml` skip automatic distribution
+checks; explicit checks or downloads report that distribution updates are not
+configured. Invalid or unreadable configuration reports an error. Downloaded
+installation refuses before connector shutdown until a verified-package adapter
+can use the build lifecycle. Local preview does not authenticate packages, and
+production apply currently refuses before Pause pending owner decision O1.
+
 This is the orientation document: what lives where, how a change travels through
 the layers, and which document to read next. It assumes you have read
 [Overview](overview.mdx) for the vocabulary and can build Personal AI Router

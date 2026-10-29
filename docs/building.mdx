@@ -13,6 +13,30 @@ refer to [Getting started](getting-started.mdx).
 
 Run commands from the indicated project directory.
 
+## Staged builds and Windows shortcuts
+
+Settings > Service can select and preview an existing complete extracted GUI
+build for the host platform and architecture. Windows expects `PAIR.exe` and
+`resources/cli-bin`; macOS expects `NVIDIA PAIR.app` with its executable in
+`Contents/MacOS` and services in `Contents/Resources/cli-bin`; Linux expects
+`nvpair` and `resources/cli-bin`. Standalone `services/build/bin` output is not
+a GUI bundle. Inspection checks paths, ownership and permissions, and refuses
+unsafe paths or installer-owned targets. It executes no candidate code and does
+not authenticate its publisher.
+
+Build application is currently unavailable: production has no atomic acceptance
+owner and refuses before Pause. Accepted transaction, helper, swap, restart,
+recovery and semantic-readback cases remain unmet pending owner decision O1.
+First deployment of a future apply-capable build requires a separate manual
+rollout. Native installed application acceptance remains unverified.
+
+On Windows, the GUI can create its per-user Start Menu shortcut. From the
+repository, `scripts/pair-shortcut.ps1 create -AppPath <absolute-path-to-PAIR.exe>`
+invokes the GUI's shortcut-only mode; `status` and `remove` are also supported.
+Use an absolute path to a stable installed or unpacked executable. The command
+does not start the service or open the normal window. An unrelated shortcut is
+preserved. Native shortcut appearance and launch remain unverified.
+
 ## Prerequisites
 
 Install these first:
