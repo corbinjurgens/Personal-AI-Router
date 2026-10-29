@@ -622,8 +622,7 @@ func TestLoadOverrideDirRejectsEmptyInstallRun(t *testing.T) {
 	if !ok {
 		t.Fatal("bundled ollama manifest missing")
 	}
-	baseRun := base.Platforms["linux/amd64"].Install.Run
-	if len(baseRun) == 0 {
+	if len(base.Platforms["linux/amd64"].Install.Run) == 0 {
 		t.Fatal("bundled ollama install.run is empty")
 	}
 	dir := t.TempDir()
@@ -638,12 +637,8 @@ func TestLoadOverrideDirRejectsEmptyInstallRun(t *testing.T) {
 	if err := reg.LoadOverrideDir(dir); err != nil {
 		t.Fatalf("load override directory: %v", err)
 	}
-	got, ok := reg.Get("ollama")
-	if !ok || got != base {
-		t.Fatalf("invalid override replaced bundled manifest: got %+v, want original manifest", got)
-	}
-	if !slices.Equal(got.Platforms["linux/amd64"].Install.Run, baseRun) {
-		t.Fatal("invalid override changed the bundled install.run")
+	if got, ok := reg.Get("ollama"); ok || got != nil || reg.invalid["ollama"] == nil {
+		t.Fatalf("invalid override must make ollama unavailable: manifest=%+v error=%v", got, reg.invalid["ollama"])
 	}
 }
 

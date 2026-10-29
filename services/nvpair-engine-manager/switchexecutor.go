@@ -228,7 +228,10 @@ func (e *Executor) switchConfiguration(state desiredStateFile) (settings.SwitchC
 		if e.switchMutations[name] != 0 {
 			return config, &switchBusyError{name}
 		}
-		manifest, _ := e.reg.Get(name)
+		manifest, ok := e.reg.Get(name)
+		if !ok {
+			continue
+		}
 		digest, err := switchDigest(manifest)
 		if err != nil {
 			return config, err
