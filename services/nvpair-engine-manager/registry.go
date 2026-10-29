@@ -64,6 +64,7 @@ type Manifest struct {
 	ManifestVersion int                 `json:"manifest_version"`
 	Platforms       map[string]Platform `json:"platforms"`
 	Actions         map[string]Action   `json:"actions,omitempty"`
+	MemoryPlan      *memoryPlanAdapter  `json:"memory_plan,omitempty"`
 
 	// Family names the engine's lineage and selects the coded adapters it
 	// shares with that lineage: the model-store layout model copy uses and the
@@ -103,11 +104,12 @@ func (m *Manifest) ModelNamingOrDefault() string {
 // first; OS-specific Go code is the fallback only for primitives a
 // manifest cannot express (process termination, console hiding).
 type Platform struct {
-	Detect         []string   `json:"detect,omitempty"`
-	DetectRequired []string   `json:"detect_required,omitempty"`
-	Install        *Install   `json:"install,omitempty"`
-	Uninstall      *Uninstall `json:"uninstall,omitempty"`
-	Runtime        Runtime    `json:"runtime"`
+	Detect         []string           `json:"detect,omitempty"`
+	DetectRequired []string           `json:"detect_required,omitempty"`
+	Install        *Install           `json:"install,omitempty"`
+	Uninstall      *Uninstall         `json:"uninstall,omitempty"`
+	Runtime        Runtime            `json:"runtime"`
+	MemoryPlan     *memoryPlanCommand `json:"memory_plan,omitempty"`
 	// ModelsDir is the engine's on-disk model store, referenced elsewhere as
 	// {models_dir}. Nothing this service removes may delete it: Uninstall skips
 	// it, and the app-level data purge never reaches it because validation
@@ -898,6 +900,9 @@ func deepMerge(base, override map[string]any) map[string]any {
 // human-readable so a manifest author can fix them without reading
 // the code.
 func (m *Manifest) Validate() error {
+	if m.MemoryPlan != nil && m.MemoryPlan.Adapter != "strata" {
+		return errors.New("invalid memory plan adapter")
+	}
 	if strings.TrimSpace(m.Engine) == "" {
 		return errors.New("engine is required")
 	}
@@ -933,6 +938,14 @@ func (m *Manifest) Validate() error {
 		return errors.New("at least one platforms entry is required")
 	}
 	for key, p := range m.Platforms {
+		if p.MemoryPlan != nil {
+			if m.MemoryPlan == nil {
+				return errors.New("memory plan invocation requires adapter")
+			}
+			if err := p.MemoryPlan.validate(key); err != nil {
+				return err
+			}
+		}
 		if !validPlatformKey(key) {
 			return fmt.Errorf("platform key %q must be \"<goos>/<goarch>\"", key)
 		}

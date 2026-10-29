@@ -54,6 +54,53 @@ func TestValidateAcceptsValid(t *testing.T) {
 	}
 }
 
+func TestMemoryPlanManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		declaration string
+		platform    string
+		valid       bool
+	}{
+		{"valid", `{"adapter":"strata"}`, `{"command":["/python","-B","-s","-m","serve.server","--estimate-memory","--memory-plan-request","{memory_plan_request}"],"working_directory":"/strata"}`, true},
+		{"missing adapter", `null`, `{"command":["/python","-B","-s","-m","serve.server","--estimate-memory","--memory-plan-request","{memory_plan_request}"],"working_directory":"/strata"}`, false},
+		{"unknown adapter", `{"adapter":"other"}`, `null`, false},
+		{"relative interpreter", `{"adapter":"strata"}`, `{"command":["python","-B","-s","-m","serve.server","--estimate-memory","--memory-plan-request","{memory_plan_request}"],"working_directory":"/strata"}`, false},
+		{"wrong mode", `{"adapter":"strata"}`, `{"command":["/python","-m","serve.server","--config","{memory_plan_request}"],"working_directory":"/strata"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := validManifest()
+			raw, err := json.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &object); err != nil {
+				t.Fatal(err)
+			}
+			object["memory_plan"] = json.RawMessage(tc.declaration)
+			var platforms map[string]map[string]json.RawMessage
+			if err := json.Unmarshal(object["platforms"], &platforms); err != nil {
+				t.Fatal(err)
+			}
+			platforms["linux/amd64"]["memory_plan"] = json.RawMessage(tc.platform)
+			object["platforms"], err = json.Marshal(platforms)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err = json.Marshal(object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Validate(); (err == nil) != tc.valid {
+				t.Fatalf("Validate() = %v, valid = %t", err, tc.valid)
+			}
+		})
+	}
+}
+
 func TestManifestUserCredential(t *testing.T) {
 	reg := NewRegistry()
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {

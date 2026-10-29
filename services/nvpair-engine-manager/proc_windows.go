@@ -7,11 +7,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -106,6 +109,174 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
 		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+	}
+}
+
+// Restrict the directory before writing the request, independent of inherited
+// temp-root ACLs. Only the current user and SYSTEM receive access.
+func makeMemoryPlanTempDir() (string, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", err
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + user.User.Sid.String() + ")")
+	if err != nil {
+		return "", err
+	}
+	attrs := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	for i := 0; i < 10; i++ {
+		dir := filepath.Join(os.TempDir(), "pair-memory-plan-"+rand.Text())
+		name, err := windows.UTF16PtrFromString(dir)
+		if err != nil {
+			return "", err
+		}
+		err = windows.CreateDirectory(name, &attrs)
+		if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		return dir, nil
+	}
+	return "", errors.New("private temporary directory unavailable")
+}
+
+// startMemoryPlanProcess contains a query before its primary thread executes.
+// The caller owns cmd.Wait after success and must call cleanup even when the
+// parent exits normally: its descendants may still hold the output pipes.
+// A manager crash between Start and job assignment can leave a suspended
+// process; exec.Cmd does not expose atomic PROC_THREAD_ATTRIBUTE_JOB_LIST.
+func startMemoryPlanProcess(ctx context.Context, cmd *exec.Cmd) (func(context.Context) error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	// Do not enable either breakaway flag. Descendants inherit this job, and
+	// closing our non-inherited handle also kills them if the manager exits.
+	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
+		windows.CloseHandle(job)
+		return nil, err
+	}
+	configureSysProcAttr(cmd)
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
+	if err := cmd.Start(); err != nil {
+		windows.CloseHandle(job)
+		return nil, err
+	}
+
+	// No query code runs before assignment, so every failure here can kill
+	// and reap the suspended parent without an uncontained descendant race.
+	fail := func(err error) (func(context.Context) error, error) {
+		killErr := cmd.Process.Kill()
+		if errors.Is(killErr, os.ErrProcessDone) {
+			killErr = nil
+		}
+		closeErr := windows.CloseHandle(job)
+		reapErr := reapMemoryPlanStartFailure(ctx, cmd.Wait)
+		return nil, errors.Join(err, killErr, closeErr, reapErr)
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		return fail(err)
+	}
+	err = windows.AssignProcessToJobObject(job, process)
+	windows.CloseHandle(process)
+	if err != nil {
+		return fail(err)
+	}
+	thread, err := memoryPlanSuspendedThread(uint32(cmd.Process.Pid))
+	if err != nil {
+		return fail(err)
+	}
+	previous, err := windows.ResumeThread(thread)
+	windows.CloseHandle(thread)
+	if err != nil {
+		return fail(err)
+	}
+	if previous != 1 {
+		return fail(errors.New("unexpected planning thread suspension state"))
+	}
+
+	var once sync.Once
+	var cleanupErr error
+	return func(ctx context.Context) error {
+		once.Do(func() {
+			cleanupErr = memoryPlanTerminateJob(ctx, job)
+			cleanupErr = errors.Join(cleanupErr, windows.CloseHandle(job))
+		})
+		return cleanupErr
+	}, nil
+}
+
+// exec.Cmd retains the process handle but closes the primary thread handle.
+// CREATE_SUSPENDED leaves exactly that thread, so a Toolhelp snapshot lets us
+// reopen it without an undocumented NtResumeProcess call or a PID kill tree.
+func memoryPlanSuspendedThread(pid uint32) (windows.Handle, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	var threadID uint32
+	for err := windows.Thread32First(snapshot, &entry); ; err = windows.Thread32Next(snapshot, &entry) {
+		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+			break
+		}
+		if err != nil {
+			return 0, err
+		}
+		if entry.OwnerProcessID == pid {
+			if threadID != 0 {
+				return 0, errors.New("ambiguous planning process primary thread")
+			}
+			threadID = entry.ThreadID
+		}
+	}
+	if threadID == 0 {
+		return 0, errors.New("planning process primary thread unavailable")
+	}
+	return windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, threadID)
+}
+
+// memoryPlanJobAccounting mirrors JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.
+// LARGE_INTEGER fields are 64-bit and all remaining fields are DWORDs.
+type memoryPlanJobAccounting struct {
+	totalUserTime             int64
+	totalKernelTime           int64
+	thisPeriodTotalUserTime   int64
+	thisPeriodTotalKernelTime int64
+	totalPageFaultCount       uint32
+	totalProcesses            uint32
+	activeProcesses           uint32
+	totalTerminatedProcesses  uint32
+}
+
+func memoryPlanTerminateJob(ctx context.Context, job windows.Handle) error {
+	if err := windows.TerminateJobObject(job, 1); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var accounting memoryPlanJobAccounting
+		if err := windows.QueryInformationJobObject(job, windows.JobObjectBasicAccountingInformation, uintptr(unsafe.Pointer(&accounting)), uint32(unsafe.Sizeof(accounting)), nil); err != nil {
+			return err
+		}
+		if accounting.activeProcesses == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 

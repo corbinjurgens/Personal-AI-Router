@@ -56,6 +56,42 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
+func makeMemoryPlanTempDir() (string, error) {
+	return os.MkdirTemp("", "pair-memory-plan-*")
+}
+
+// startMemoryPlanProcess retains the query's process group even if its leader
+// exits first, so cleanup addresses descendants that still hold the pipes.
+func startMemoryPlanProcess(ctx context.Context, cmd *exec.Cmd) (func(context.Context) error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	configureSysProcAttr(cmd)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	pgid := cmd.Process.Pid
+	return func(ctx context.Context) error {
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return err
+		}
+		for {
+			err := syscall.Kill(-pgid, 0)
+			if err == syscall.ESRCH {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}, nil
+}
+
 // gracefulSignal sends SIGTERM to the process's own group if it leads one,
 // otherwise to the process alone. managedProc.stop escalates to SIGKILL after
 // the manifest's grace period.
