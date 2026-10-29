@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/durablefile"
 )
 
 func TestLinkedModelHTTPBinding(t *testing.T) {
@@ -217,7 +218,11 @@ func testLinkedModelHTTPBindingHashDrift(t *testing.T) {
 	manifest := filepath.Join(root, "models", filepath.FromSlash(fx.manifestRel))
 	var once sync.Once
 	var mutationErr error
-	server := &controlServer{exec: ex}
+	// Permit replacement while hashing so Windows exercises drift refusal,
+	// rather than refusing the fixture's mutation through handle sharing.
+	server := &controlServer{exec: ex, access: servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+		return durablefile.Open(path)
+	}}}
 	response := &driftResponseWriter{ResponseRecorder: httptest.NewRecorder(), mutate: func() {
 		once.Do(func() {
 			mutationErr = os.Rename(manifest, manifest+".old")
