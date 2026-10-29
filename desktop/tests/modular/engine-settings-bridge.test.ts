@@ -34,12 +34,18 @@ vi.mock('@/electron/service-bridge/model-catalog', () => ({ getEngineHubModels: 
 import { handleServiceBridgeInvoke } from '@/electron/service-bridge/empty-handlers'
 import { MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS } from '@/shared/constants/modular-runtime'
 import type { EngineServingConfig, EngineSettingsRequest } from '@/shared/types/engine-settings'
-import type { InspectModelRequest } from '@/shared/types/model-config'
+import type {
+    Estimate,
+    InspectModelRequest,
+    InspectModelResult,
+    MemoryPlan
+} from '@/shared/types/model-config'
 import type { JsonValue } from '@/electron/service-bridge/json-rpc-client'
 import { JsonRpcResponseError } from '@/electron/service-bridge/json-rpc-client'
 import {
     parseEngineSettings,
-    parseEngineSettingsPreview
+    parseEngineSettingsPreview,
+    parseInspectModel
 } from '@/electron/service-bridge/engine-settings'
 
 const serving = {
@@ -85,12 +91,529 @@ const baseline = {
     editable: true
 }
 
+function memoryPlanFixture(): MemoryPlan {
+    const config: MemoryPlan['requested'] = {
+        contextTokens: 8192,
+        kvFormat: 'int8',
+        batchSize: 1,
+        microbatch: { mode: 'fixed', tokens: 1024 },
+        parallelSlots: 1,
+        devices: [{ backend: 'cuda', selector: 'cuda:0' }],
+        placement: 'hybrid'
+    }
+    const names: Array<MemoryPlan['devices'][number]['groups'][number]['name']> = [
+        'weights',
+        'kv_cache',
+        'compute_scratch',
+        'output_buffers',
+        'runtime_driver_overhead',
+        'transient_peak'
+    ]
+    const resource = (
+        kind: MemoryPlan['devices'][number]['kind'],
+        total: string
+    ): MemoryPlan['devices'][number] => ({
+        kind,
+        mapping: kind === 'device' ? 'unproven' : 'not-applicable',
+        ...(kind === 'device' ? { nativeSelector: 'cuda:0' } : {}),
+        mappingBasis: 'Synthetic capacity resource, no physical mapping',
+        groups: names.map(name => ({
+            name,
+            quality: name === 'weights' ? 'exact' : 'unknown',
+            ...(name === 'weights' ? { bytes: '0' } : {}),
+            basis: 'Synthetic accounting group',
+            additive: name !== 'transient_peak',
+            ...(name === 'kv_cache' ? { combinedMembership: [...names.slice(1, 3)] } : {})
+        })),
+        combinedAllocations: [
+            {
+                members: ['kv_cache', 'compute_scratch'],
+                bytes: '7',
+                quality: 'estimated',
+                basis: 'Synthetic overlapping view'
+            }
+        ],
+        pricedTotalBytes: total,
+        pricedTotalBasis: 'Synthetic once-counted total',
+        requiredWithAllowancesBytes: total,
+        assumptions: [
+            { name: 'protected reserve', bytes: '0', basis: 'Synthetic protected amount' }
+        ],
+        callerAllowances: [{ name: 'asserted-extra', bytes: '0', provenance: 'caller-asserted' }],
+        uncoveredCosts: ['runtime_driver_overhead', 'transient_peak']
+    })
+    return {
+        identity: {
+            engine: 'strata',
+            provider: 'synthetic-provider',
+            revision: 'fixture-revision',
+            executableSHA256: 'a'.repeat(64),
+            runtimeSourceSHA256: 'b'.repeat(64),
+            artifactIdentitySHA256: 'c'.repeat(64),
+            build: { version: 'fixture', dirty: false, basis: 'Synthetic embedded build summary' },
+            modelId: 'test/model',
+            assertedContentSHA256: 'd'.repeat(64),
+            contentAssurance: 'Sampled identity, caller assertion unverified',
+            cacheable: false,
+            cacheableReason: 'Full model content is unverified'
+        },
+        requested: config,
+        resolved: structuredClone(config),
+        configurationComplete: true,
+        pricingScope: 'resolved_configuration',
+        pricingQualification: 'non-replayable-pricing-inputs',
+        devices: [resource('device', '9007199254740993')],
+        hostRAM: resource('host_ram', '0'),
+        hostCommit: resource('host_commit', '18446744073709551615'),
+        verdict: {
+            status: 'not_evaluated',
+            conditional: true,
+            basis: 'Synthetic provider verdict, no live observation'
+        },
+        warnings: ['Synthetic kernel envelope is not replayable']
+    }
+}
+
+function memoryPlanEstimateFixture() {
+    return {
+        status: 'partial',
+        estimateSource: {
+            kind: 'engine-report',
+            provider: 'synthetic-provider',
+            revision: 'fixture-revision',
+            basis: 'Synthetic pricing',
+            unpricedCosts: ['runtime_driver_overhead', 'transient_peak']
+        },
+        memoryPlan: memoryPlanFixture()
+    } satisfies Estimate
+}
+
+function memoryPlanInspectionFixture() {
+    return {
+        engine: 'strata',
+        modelId: 'test/model',
+        status: 'unknown',
+        estimate: memoryPlanEstimateFixture()
+    } satisfies InspectModelResult
+}
+
+function memoryPlanWithBudget(): MemoryPlan {
+    const plan = memoryPlanFixture()
+    plan.verdict.status = 'indeterminate'
+    plan.verdict.budgetBasis = 'before_runtime_initialization'
+    for (const resource of [...plan.devices, plan.hostRAM, plan.hostCommit]) {
+        resource.budgetBytes = resource.requiredWithAllowancesBytes
+        resource.shortfallBytes = '0'
+        resource.shortfallBasis = 'Synthetic lower bound'
+    }
+    return plan
+}
+
+function withoutField(value: JsonValue, field: string): JsonValue {
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+        throw new Error('Expected object fixture')
+    const result = { ...value }
+    delete result[field]
+    return result
+}
+
 describe('unified settings bridge', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         mocks.supervisor.callProcess.mockImplementation(async (_name: string, method: string) =>
             method === 'engine:get-settings' ? baseline : { revision: 5, phase: 'succeeded' }
         )
+    })
+
+    it('preserves advisory estimate provenance in inspection', async () => {
+        mocks.supervisor.callProcess.mockResolvedValue({
+            engine: 'ollama',
+            modelId: 'exact/model',
+            status: 'unavailable',
+            estimate: {
+                status: 'partial',
+                estimateSource: {
+                    kind: 'engine-report',
+                    provider: 'fixture',
+                    revision: '1',
+                    basis: 'synthetic',
+                    unpricedCosts: ['transient peak']
+                }
+            }
+        })
+        const result = await handleServiceBridgeInvoke('engines:inspect-model', {
+            engine: 'ollama',
+            modelId: 'exact/model'
+        })
+        expect(result).toMatchObject({
+            estimate: { status: 'partial', estimateSource: { unpricedCosts: ['transient peak'] } }
+        })
+    })
+
+    it('preserves exact memory plan bytes, unknown groups and provider verdict through inspection', async () => {
+        const original = memoryPlanInspectionFixture()
+        mocks.supervisor.callProcess.mockResolvedValue(original)
+        const result = await handleServiceBridgeInvoke('engines:inspect-model', {
+            engine: 'strata',
+            modelId: 'test/model'
+        })
+        expect(result.estimate).toEqual(original.estimate)
+        expect(result.estimate.memoryPlan?.devices[0].pricedTotalBytes).toBe('9007199254740993')
+        expect(result.estimate.memoryPlan?.hostCommit.pricedTotalBytes).toBe('18446744073709551615')
+        expect(result.estimate.memoryPlan?.devices[0].groups[0].bytes).toBe('0')
+        expect(result.estimate.memoryPlan?.devices[0].groups[1].bytes).toBeUndefined()
+        expect(result.estimate.status).toBe('partial')
+        expect(result.estimate.memoryPlan?.verdict.status).toBe('not_evaluated')
+    })
+
+    it('detaches nested memory plans from their transport input', () => {
+        const original = memoryPlanInspectionFixture()
+        const before = structuredClone(original)
+        const result = parseInspectModel(original)
+        const plan = result.estimate.memoryPlan
+        if (!plan) throw new Error('Decoded memory plan missing')
+        plan.identity.build.dirty = true
+        plan.requested.devices[0].selector = 'changed'
+        if (plan.resolved?.microbatch) plan.resolved.microbatch.tokens = 512
+        const members = plan.devices[0].combinedAllocations?.[0].members
+        if (!members) throw new Error('Decoded combined allocation missing')
+        members[0] = 'weights'
+        const amounts = plan.devices[0].callerAllowances
+        if (!amounts) throw new Error('Decoded caller allowances missing')
+        amounts[0].name = 'changed'
+        const costs = plan.hostRAM.uncoveredCosts
+        if (!costs) throw new Error('Decoded uncovered costs missing')
+        costs[0] = 'changed'
+        expect(original).toEqual(before)
+    })
+
+    it.each<NonNullable<Estimate['estimateSource']>['kind']>([
+        'engine-report',
+        'pair-estimate',
+        'measured',
+        'user-stated'
+    ])('retains %s source and omissions in inspection and Auto estimates', kind => {
+        const estimate: Estimate = {
+            ...memoryPlanEstimateFixture(),
+            ...(kind === 'engine-report' ? {} : { memoryPlan: undefined }),
+            estimateSource: { ...memoryPlanEstimateFixture().estimateSource, kind }
+        }
+        const inspection = parseInspectModel({ ...memoryPlanInspectionFixture(), estimate })
+        const preview = parseEngineSettingsPreview({
+            settings: baseline.settings,
+            revision: 4,
+            restart: false,
+            rebind: false,
+            estimate,
+            auto: { status: 'unavailable', requested: {}, estimate }
+        })
+        expect(inspection.estimate).toEqual(estimate)
+        expect(preview.estimate).toEqual(estimate)
+        expect(preview.auto?.estimate).toEqual(estimate)
+    })
+
+    it('preserves minimum-layout and automatic resolution scope without replay approval', () => {
+        const minimum = memoryPlanFixture()
+        minimum.configurationComplete = false
+        minimum.pricingScope = 'minimum_supported_layout'
+        delete minimum.resolved
+        const minimumResult = parseInspectModel({
+            ...memoryPlanInspectionFixture(),
+            estimate: { ...memoryPlanEstimateFixture(), memoryPlan: minimum }
+        })
+        expect(minimumResult.estimate.memoryPlan).toEqual(minimum)
+        const automatic = memoryPlanFixture()
+        automatic.requested.kvFormat = 'q8_0'
+        automatic.requested.microbatch = { mode: 'auto', limit: 8192 }
+        expect(
+            parseInspectModel({
+                ...memoryPlanInspectionFixture(),
+                estimate: { ...memoryPlanEstimateFixture(), memoryPlan: automatic }
+            }).estimate.memoryPlan
+        ).toEqual(automatic)
+    })
+
+    it('preserves a policy-only shortfall using the greater of allocation and selection capacity', () => {
+        const plan = memoryPlanWithBudget()
+        const device = plan.devices[0]
+        device.pricedTotalBytes = '100'
+        device.minimumSelectionCapacityBytes = '200'
+        device.minimumSelectionCapacityBasis = 'Synthetic selection threshold'
+        device.callerAllowances = [
+            { name: 'extra-runtime', bytes: '10', provenance: 'caller-asserted' }
+        ]
+        device.requiredWithAllowancesBytes = '210'
+        device.budgetBytes = '205'
+        device.shortfallBytes = '5'
+        plan.verdict.status = 'does_not_fit'
+        const inspection = {
+            ...memoryPlanInspectionFixture(),
+            estimate: { ...memoryPlanEstimateFixture(), memoryPlan: plan }
+        }
+        expect(parseInspectModel(inspection).estimate.memoryPlan).toEqual(plan)
+        device.requiredWithAllowancesBytes = '310'
+        device.shortfallBytes = '105'
+        expect(() => parseInspectModel(inspection)).toThrow('required total')
+    })
+
+    it('retains conditional provider fit with unknown category partitions', () => {
+        const plan = memoryPlanWithBudget()
+        plan.verdict.status = 'fits_within_allowances'
+        for (const resource of [...plan.devices, plan.hostRAM, plan.hostCommit])
+            delete resource.uncoveredCosts
+        const inspection = {
+            ...memoryPlanInspectionFixture(),
+            estimate: { ...memoryPlanEstimateFixture(), memoryPlan: plan }
+        }
+        const result = parseInspectModel(inspection)
+        expect(result.estimate.memoryPlan?.verdict).toEqual(plan.verdict)
+        expect(result.estimate.status).toBe('partial')
+        expect(result.estimate.capacityFit).toBeUndefined()
+        expect(result.estimate.memoryPlan?.devices[0].groups[1].quality).toBe('unknown')
+        plan.verdict.conditional = false
+        expect(() => parseInspectModel(inspection)).toThrow('verdict contradicts')
+    })
+
+    it.each<{ name: string; change: (plan: MemoryPlan) => JsonValue }>([
+        {
+            name: 'private extension',
+            change: plan => ({ ...plan, extensions: { strata: { argv: ['private'] } } })
+        },
+        {
+            name: 'private resource path',
+            change: plan => ({ ...plan, devices: [{ ...plan.devices[0], path: '/private/model' }] })
+        },
+        {
+            name: 'numeric byte token',
+            change: plan => ({ ...plan, hostRAM: { ...plan.hostRAM, pricedTotalBytes: 0 } })
+        },
+        {
+            name: 'null unknown bytes',
+            change: plan => ({
+                ...plan,
+                devices: [
+                    {
+                        ...plan.devices[0],
+                        groups: plan.devices[0].groups.map(group => ({ ...group, bytes: null }))
+                    }
+                ]
+            })
+        },
+        {
+            name: 'noncanonical bytes',
+            change: plan => ({ ...plan, hostRAM: { ...plan.hostRAM, allocatedBytes: '01' } })
+        },
+        {
+            name: 'overflow bytes',
+            change: plan => ({
+                ...plan,
+                hostRAM: { ...plan.hostRAM, allocatedBytes: '18446744073709551616' }
+            })
+        },
+        {
+            name: 'invalid integer',
+            change: plan => ({ ...plan, requested: { ...plan.requested, contextTokens: 1.5 } })
+        },
+        {
+            name: 'duplicate device',
+            change: plan => ({
+                ...plan,
+                devices: [plan.devices[0], plan.devices[0]],
+                requested: {
+                    ...plan.requested,
+                    devices: [...plan.requested.devices, ...plan.requested.devices]
+                }
+            })
+        },
+        {
+            name: 'duplicate group',
+            change: plan => ({
+                ...plan,
+                hostRAM: {
+                    ...plan.hostRAM,
+                    groups: plan.hostRAM.groups.map(group => ({ ...group, name: 'weights' }))
+                }
+            })
+        },
+        {
+            name: 'unknown group',
+            change: plan => ({
+                ...plan,
+                hostRAM: {
+                    ...plan.hostRAM,
+                    groups: [
+                        { ...plan.hostRAM.groups[0], name: 'native_component' },
+                        ...plan.hostRAM.groups.slice(1)
+                    ]
+                }
+            })
+        },
+        {
+            name: 'invalid quality',
+            change: plan => ({
+                ...plan,
+                hostRAM: {
+                    ...plan.hostRAM,
+                    groups: [
+                        { ...plan.hostRAM.groups[0], quality: 'measured' },
+                        ...plan.hostRAM.groups.slice(1)
+                    ]
+                }
+            })
+        },
+        {
+            name: 'unknown category has zero bytes',
+            change: plan => ({
+                ...plan,
+                hostRAM: {
+                    ...plan.hostRAM,
+                    groups: plan.hostRAM.groups.map(group => ({ ...group, bytes: '0' }))
+                }
+            })
+        },
+        {
+            name: 'additive transient peak',
+            change: plan => ({
+                ...plan,
+                hostRAM: {
+                    ...plan.hostRAM,
+                    groups: plan.hostRAM.groups.map(group => ({ ...group, additive: true }))
+                }
+            })
+        },
+        {
+            name: 'invalid membership',
+            change: plan => ({
+                ...plan,
+                hostRAM: {
+                    ...plan.hostRAM,
+                    combinedAllocations: [
+                        { members: ['native_component'], quality: 'unknown', basis: 'synthetic' }
+                    ]
+                }
+            })
+        },
+        {
+            name: 'wrong pricing scope',
+            change: plan => ({ ...plan, pricingScope: 'minimum_supported_layout' })
+        },
+        { name: 'null resolved configuration', change: plan => ({ ...plan, resolved: null }) },
+        {
+            name: 'changed exact context',
+            change: plan => ({ ...plan, resolved: { ...plan.requested, contextTokens: 4096 } })
+        },
+        {
+            name: 'unverified content made cacheable',
+            change: plan => ({ ...plan, identity: { ...plan.identity, cacheable: true } })
+        },
+        {
+            name: 'unproved physical mapping',
+            change: plan => ({
+                ...plan,
+                devices: [{ ...plan.devices[0], physicalId: 'GPU-fixture' }]
+            })
+        },
+        {
+            name: 'allowance overflow',
+            change: plan => ({
+                ...plan,
+                hostCommit: {
+                    ...plan.hostCommit,
+                    callerAllowances: [{ name: 'extra', bytes: '1', provenance: 'caller-asserted' }]
+                }
+            })
+        },
+        {
+            name: 'missing budget',
+            change: plan => ({
+                ...plan,
+                verdict: {
+                    ...plan.verdict,
+                    status: 'indeterminate',
+                    budgetBasis: 'before_runtime_initialization'
+                }
+            })
+        },
+        {
+            name: 'missing complete flag',
+            change: plan => withoutField(plan, 'configurationComplete')
+        },
+        {
+            name: 'missing cacheable flag',
+            change: plan => ({ ...plan, identity: withoutField(plan.identity, 'cacheable') })
+        },
+        {
+            name: 'missing conditional flag',
+            change: plan => ({ ...plan, verdict: withoutField(plan.verdict, 'conditional') })
+        },
+        {
+            name: 'missing additive flag',
+            change: plan => ({
+                ...plan,
+                hostRAM: {
+                    ...plan.hostRAM,
+                    groups: plan.hostRAM.groups.map(group => withoutField(group, 'additive'))
+                }
+            })
+        },
+        { name: 'oversized warning', change: plan => ({ ...plan, warnings: ['x'.repeat(1025)] }) },
+        {
+            name: 'oversized collection',
+            change: plan => ({
+                ...plan,
+                warnings: Array.from({ length: 257 }, (_, index) => `warning ${index}`)
+            })
+        }
+    ])('rejects malformed memory plan: $name', ({ change }) => {
+        expect(() =>
+            parseInspectModel({
+                ...memoryPlanInspectionFixture(),
+                estimate: {
+                    ...memoryPlanEstimateFixture(),
+                    memoryPlan: change(memoryPlanFixture())
+                }
+            })
+        ).toThrow()
+    })
+
+    it('rejects plan source conflicts, identity mismatches and completeness relabeling', () => {
+        const original = memoryPlanInspectionFixture()
+        expect(() => parseInspectModel({ ...original, modelId: 'other/model' })).toThrow(
+            'identity mismatch'
+        )
+        expect(() =>
+            parseInspectModel({
+                ...original,
+                estimate: { ...original.estimate, status: 'estimated' }
+            })
+        ).toThrow('provenance or status')
+        expect(() =>
+            parseInspectModel({
+                ...original,
+                estimate: {
+                    ...original.estimate,
+                    estimateSource: { ...original.estimate.estimateSource, kind: 'pair-estimate' }
+                }
+            })
+        ).toThrow('provenance or status')
+        expect(() =>
+            parseInspectModel({
+                ...original,
+                estimate: {
+                    ...original.estimate,
+                    components: [{ name: 'weights', status: 'estimated', bytes: '0' }]
+                }
+            })
+        ).toThrow('provenance or status')
+    })
+
+    it('checks the full response ceiling without truncating a plan', () => {
+        const original = memoryPlanInspectionFixture()
+        original.estimate.memoryPlan.warnings = Array.from(
+            { length: 80 },
+            (_, index) => `${String(index).padStart(3, '0')}${'x'.repeat(997)}`
+        )
+        expect(() => parseInspectModel(original)).toThrow('64 KiB')
     })
 
     it('relays model inspection to the broker', async () => {

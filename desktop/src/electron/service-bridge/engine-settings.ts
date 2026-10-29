@@ -14,6 +14,7 @@ import type {
     AutoProposal,
     Estimate,
     InspectModelResult,
+    MemoryPlan,
     ModelImpact,
     ModelLoad,
     RequestedLoad,
@@ -452,9 +453,416 @@ function memoryValidity(value: JsonValue | undefined): number | undefined {
     if (duration > 5000) throw new Error('Memory validity exceeds observation budget.')
     return duration
 }
+const memoryPlanGroupNames: ReadonlyArray<MemoryPlan['devices'][number]['groups'][number]['name']> =
+    [
+        'weights',
+        'kv_cache',
+        'compute_scratch',
+        'output_buffers',
+        'runtime_driver_overhead',
+        'transient_peak'
+    ]
+function memoryPlanArray(value: JsonValue | undefined, maximum = 256): JsonValue[] {
+    return value === undefined || value === null ? [] : boundedArray(value, maximum)
+}
+function memoryPlanTexts(value: JsonValue | undefined, limit = 256): string[] | undefined {
+    if (value === undefined || value === null) return undefined
+    const result = memoryPlanArray(value).map(item => boundedText(item, limit, true))
+    if (new Set(result).size !== result.length) throw new Error('Duplicate memory plan text.')
+    return result
+}
+function memoryPlanConfig(
+    value: JsonValue | undefined,
+    isResolved: boolean
+): MemoryPlan['requested'] {
+    const row = shape(value, [
+        'contextTokens',
+        'kvFormat',
+        'batchSize',
+        'microbatch',
+        'parallelSlots',
+        'devices',
+        'placement'
+    ])
+    const microbatch =
+        row.microbatch === undefined
+            ? undefined
+            : shape(row.microbatch, ['mode', 'tokens', 'limit'])
+    const result: MemoryPlan['requested'] = {
+        contextTokens: integer(row.contextTokens),
+        kvFormat:
+            row.kvFormat === undefined
+                ? undefined
+                : choice(row.kvFormat, ['fp16', 'bf16', 'int8', 'q4_0', 'k8v4', 'f16', 'q8_0']),
+        batchSize: optionalInteger(row.batchSize),
+        parallelSlots: optionalInteger(row.parallelSlots),
+        microbatch: microbatch && {
+            mode: choice(microbatch.mode, ['fixed', 'auto']),
+            tokens: optionalInteger(microbatch.tokens),
+            limit: optionalInteger(microbatch.limit)
+        },
+        devices: memoryPlanArray(row.devices, 64).map(value => {
+            const device = shape(value, ['backend', 'selector'])
+            return {
+                backend: boundedText(device.backend, 256, true),
+                selector: boundedText(device.selector, 256, true)
+            }
+        }),
+        placement: choice(row.placement, ['cpu', 'device', 'hybrid'])
+    }
+    const m = result.microbatch
+    if (
+        (isResolved &&
+            (!result.kvFormat ||
+                result.batchSize === undefined ||
+                result.parallelSlots === undefined ||
+                !m)) ||
+        (m?.mode === 'fixed' &&
+            (m.tokens === undefined || m.tokens > result.contextTokens || m.limit !== undefined)) ||
+        (m?.mode === 'auto' && (isResolved || m.tokens !== undefined)) ||
+        new Set(result.devices.map(device => device.selector)).size !== result.devices.length ||
+        (result.placement === 'cpu' ? result.devices.length !== 0 : result.devices.length === 0)
+    )
+        throw new Error('Invalid memory plan configuration.')
+    return result
+}
+function memoryPlanMembers(
+    value: JsonValue | undefined
+): MemoryPlan['devices'][number]['groups'][number]['combinedMembership'] {
+    if (value === undefined || value === null) return undefined
+    const result = memoryPlanArray(value, memoryPlanGroupNames.length).map(item =>
+        choice(item, memoryPlanGroupNames)
+    )
+    if (new Set(result).size !== result.length) throw new Error('Duplicate memory plan member.')
+    return result
+}
+function memoryPlanQuantity(
+    value: JsonObject
+): Pick<MemoryPlan['devices'][number]['groups'][number], 'bytes' | 'quality' | 'basis'> {
+    const result = {
+        bytes: optionalUnsigned(value.bytes),
+        quality: choice(value.quality, ['exact', 'estimated', 'unknown']),
+        basis: boundedText(value.basis, 1024, true)
+    }
+    if ((result.quality === 'unknown') !== (result.bytes === undefined))
+        throw new Error('Memory plan quality contradicts bytes.')
+    return result
+}
+function memoryPlanAmounts(
+    value: JsonValue | undefined,
+    allowance: boolean
+): MemoryPlan['devices'][number]['assumptions'] {
+    if (value === undefined || value === null) return undefined
+    const result = memoryPlanArray(value).map(value => {
+        const row = shape(value, ['name', 'bytes', 'basis', 'provenance'])
+        return {
+            name: boundedText(row.name, 256, true),
+            bytes: unsigned(row.bytes),
+            basis: optionalText(row.basis, 1024),
+            provenance: allowance
+                ? boundedText(row.provenance, 256, true)
+                : optionalText(row.provenance, 256)
+        }
+    })
+    if (new Set(result.map(amount => amount.name)).size !== result.length)
+        throw new Error('Duplicate memory plan amount.')
+    return result
+}
+function memoryPlanResource(
+    value: JsonValue | undefined,
+    kind: MemoryPlan['devices'][number]['kind']
+): MemoryPlan['devices'][number] {
+    const row = shape(value, [
+        'kind',
+        'nativeSelector',
+        'physicalId',
+        'poolId',
+        'mapping',
+        'mappingBasis',
+        'groups',
+        'combinedAllocations',
+        'allocatedBytes',
+        'mappedViewBytes',
+        'pricedTotalBytes',
+        'pricedTotalBasis',
+        'minimumSelectionCapacityBytes',
+        'minimumSelectionCapacityBasis',
+        'assumptions',
+        'requiredWithAllowancesBytes',
+        'budgetBytes',
+        'shortfallBytes',
+        'shortfallBasis',
+        'callerAllowances',
+        'uncoveredCosts'
+    ])
+    const result: MemoryPlan['devices'][number] = {
+        kind: choice(row.kind, ['device', 'host_ram', 'host_commit']),
+        nativeSelector: optionalText(row.nativeSelector, 256),
+        physicalId: optionalText(row.physicalId, 256),
+        poolId: optionalText(row.poolId, 256),
+        mapping: choice(row.mapping, ['unproven', 'proven', 'not-applicable']),
+        mappingBasis: boundedText(row.mappingBasis, 1024, true),
+        groups: memoryPlanArray(row.groups, memoryPlanGroupNames.length).map(value => {
+            const group = shape(value, [
+                'name',
+                'bytes',
+                'quality',
+                'basis',
+                'additive',
+                'combinedMembership'
+            ])
+            return {
+                name: choice(group.name, memoryPlanGroupNames),
+                ...memoryPlanQuantity(group),
+                additive: flag(group.additive),
+                combinedMembership: memoryPlanMembers(group.combinedMembership)
+            }
+        }),
+        combinedAllocations:
+            row.combinedAllocations === undefined || row.combinedAllocations === null
+                ? undefined
+                : memoryPlanArray(row.combinedAllocations).map(value => {
+                      const combined = shape(value, ['members', 'bytes', 'quality', 'basis'])
+                      const members = memoryPlanMembers(combined.members)
+                      if (!members?.length) throw new Error('Missing combined allocation members.')
+                      return { members, ...memoryPlanQuantity(combined) }
+                  }),
+        allocatedBytes: optionalUnsigned(row.allocatedBytes),
+        mappedViewBytes: optionalUnsigned(row.mappedViewBytes),
+        pricedTotalBytes: unsigned(row.pricedTotalBytes),
+        pricedTotalBasis: boundedText(row.pricedTotalBasis, 1024, true),
+        minimumSelectionCapacityBytes: optionalUnsigned(row.minimumSelectionCapacityBytes),
+        minimumSelectionCapacityBasis: optionalText(row.minimumSelectionCapacityBasis, 1024),
+        assumptions: memoryPlanAmounts(row.assumptions, false),
+        requiredWithAllowancesBytes: unsigned(row.requiredWithAllowancesBytes),
+        budgetBytes: optionalUnsigned(row.budgetBytes),
+        shortfallBytes: optionalUnsigned(row.shortfallBytes),
+        shortfallBasis: optionalText(row.shortfallBasis, 1024),
+        callerAllowances: memoryPlanAmounts(row.callerAllowances, true),
+        uncoveredCosts: memoryPlanTexts(row.uncoveredCosts)
+    }
+    if (
+        result.kind !== kind ||
+        (kind === 'device' && (!result.nativeSelector || result.mapping === 'not-applicable')) ||
+        (kind !== 'device' && !!result.nativeSelector) ||
+        (result.mapping === 'proven'
+            ? !result.physicalId && !result.poolId
+            : !!result.physicalId || !!result.poolId) ||
+        new Set(result.groups.map(group => group.name)).size !== memoryPlanGroupNames.length ||
+        result.groups.some(group => group.name === 'transient_peak' && group.additive) ||
+        !!result.minimumSelectionCapacityBasis !==
+            (result.minimumSelectionCapacityBytes !== undefined) ||
+        !!result.shortfallBasis !== (result.shortfallBytes !== undefined) ||
+        (result.budgetBytes === undefined) !== (result.shortfallBytes === undefined) ||
+        result.callerAllowances?.some(amount => result.uncoveredCosts?.includes(amount.name))
+    )
+        throw new Error('Invalid memory plan resource accounting.')
+    // Check the provider's accounting identities; PAIR fit stays service-owned.
+    const maximum = 18446744073709551615n
+    const allowances = (result.callerAllowances ?? []).reduce(
+        (sum, amount) => sum + BigInt(amount.bytes),
+        0n
+    )
+    const threshold = BigInt(result.minimumSelectionCapacityBytes ?? '0')
+    const priced = BigInt(result.pricedTotalBytes)
+    const required = (threshold > priced ? threshold : priced) + allowances
+    if (
+        allowances > maximum ||
+        required > maximum ||
+        required !== BigInt(result.requiredWithAllowancesBytes)
+    )
+        throw new Error('Invalid memory plan required total.')
+    if (result.budgetBytes !== undefined) {
+        const budget = BigInt(result.budgetBytes)
+        const shortfall = required > budget ? required - budget : 0n
+        if (result.shortfallBytes === undefined || shortfall !== BigInt(result.shortfallBytes))
+            throw new Error('Invalid memory plan shortfall.')
+    }
+    return result
+}
+function memoryPlan(value: JsonValue): MemoryPlan {
+    const row = shape(value, [
+        'identity',
+        'requested',
+        'resolved',
+        'configurationComplete',
+        'pricingScope',
+        'pricingQualification',
+        'devices',
+        'hostRAM',
+        'hostCommit',
+        'verdict',
+        'warnings'
+    ])
+    const identity = shape(row.identity, [
+        'engine',
+        'provider',
+        'revision',
+        'executableSHA256',
+        'build',
+        'runtimeSourceSHA256',
+        'modelId',
+        'contentSHA256',
+        'contentAssurance',
+        'assertedContentSHA256',
+        'artifactIdentitySHA256',
+        'cacheable',
+        'cacheableReason'
+    ])
+    const build = shape(identity.build, ['version', 'revision', 'dirty', 'timestamp', 'basis'])
+    const verdict = shape(row.verdict, ['status', 'conditional', 'budgetBasis', 'basis'])
+    const result: MemoryPlan = {
+        identity: {
+            engine: boundedText(identity.engine, 256, true),
+            provider: boundedText(identity.provider, 256, true),
+            revision: boundedText(identity.revision, 256, true),
+            executableSHA256: modelDigest(identity.executableSHA256),
+            build: {
+                version: optionalText(build.version, 256),
+                revision: optionalText(build.revision, 256),
+                dirty: optionalFlag(build.dirty),
+                timestamp: optionalText(build.timestamp, 256),
+                basis: boundedText(build.basis, 1024, true)
+            },
+            runtimeSourceSHA256: modelDigest(identity.runtimeSourceSHA256),
+            modelId: modelId(identity.modelId),
+            contentSHA256: optionalDigest(identity.contentSHA256),
+            contentAssurance: boundedText(identity.contentAssurance, 256, true),
+            assertedContentSHA256: optionalDigest(identity.assertedContentSHA256),
+            artifactIdentitySHA256: modelDigest(identity.artifactIdentitySHA256),
+            cacheable: flag(identity.cacheable),
+            cacheableReason: optionalText(identity.cacheableReason, 1024)
+        },
+        requested: memoryPlanConfig(row.requested, false),
+        resolved: row.resolved === undefined ? undefined : memoryPlanConfig(row.resolved, true),
+        configurationComplete: flag(row.configurationComplete),
+        pricingScope: choice(row.pricingScope, [
+            'resolved_configuration',
+            'minimum_supported_layout'
+        ]),
+        pricingQualification: choice(row.pricingQualification, ['non-replayable-pricing-inputs']),
+        devices: memoryPlanArray(row.devices, 64).map(value => memoryPlanResource(value, 'device')),
+        hostRAM: memoryPlanResource(row.hostRAM, 'host_ram'),
+        hostCommit: memoryPlanResource(row.hostCommit, 'host_commit'),
+        verdict: {
+            status: choice(verdict.status, [
+                'not_evaluated',
+                'does_not_fit',
+                'indeterminate',
+                'fits_within_allowances'
+            ]),
+            conditional: flag(verdict.conditional),
+            budgetBasis:
+                verdict.budgetBasis === undefined
+                    ? undefined
+                    : choice(verdict.budgetBasis, [
+                          'before_runtime_initialization',
+                          'after_runtime_initialization'
+                      ]),
+            basis: boundedText(verdict.basis, 1024, true)
+        },
+        warnings: memoryPlanTexts(row.warnings, 1024)
+    }
+    if (
+        (result.identity.cacheable
+            ? !result.identity.contentSHA256
+            : !result.identity.cacheableReason) ||
+        result.configurationComplete !== (result.resolved !== undefined) ||
+        result.pricingScope !==
+            (result.configurationComplete
+                ? 'resolved_configuration'
+                : 'minimum_supported_layout') ||
+        result.devices.length !== result.requested.devices.length ||
+        result.devices.some(
+            (device, index) => device.nativeSelector !== result.requested.devices[index]?.selector
+        )
+    )
+        throw new Error('Inconsistent memory plan identity or scope.')
+    const physical = result.devices.flatMap(device =>
+        device.physicalId ? [device.physicalId] : []
+    )
+    if (new Set(physical).size !== physical.length)
+        throw new Error('Duplicate memory plan physical device.')
+    if (result.resolved) {
+        const requested = result.requested
+        const resolved = result.resolved
+        const canonicalKV = (value: string | undefined): string | undefined =>
+            value === 'f16' ? 'fp16' : value === 'q8_0' ? 'int8' : value
+        if (
+            resolved.contextTokens !== requested.contextTokens ||
+            resolved.placement !== requested.placement ||
+            resolved.devices.length !== requested.devices.length ||
+            resolved.devices.some(
+                (device, index) =>
+                    device.selector !== requested.devices[index]?.selector ||
+                    device.backend !== requested.devices[index]?.backend
+            ) ||
+            (requested.kvFormat !== undefined &&
+                canonicalKV(requested.kvFormat) !== canonicalKV(resolved.kvFormat)) ||
+            (requested.batchSize !== undefined && requested.batchSize !== resolved.batchSize) ||
+            (requested.parallelSlots !== undefined &&
+                requested.parallelSlots !== resolved.parallelSlots) ||
+            (requested.microbatch?.mode === 'fixed' &&
+                requested.microbatch.tokens !== resolved.microbatch?.tokens) ||
+            (requested.microbatch?.mode === 'auto' &&
+                requested.microbatch.limit !== undefined &&
+                resolved.microbatch?.tokens !== undefined &&
+                resolved.microbatch.tokens > requested.microbatch.limit)
+        )
+            throw new Error('Memory plan resolution changed exact settings.')
+    }
+    const resources = [...result.devices, result.hostRAM, result.hostCommit]
+    const hasBudget = result.verdict.status !== 'not_evaluated'
+    if (
+        hasBudget !== (result.verdict.budgetBasis !== undefined) ||
+        resources.some(resource => (resource.budgetBytes !== undefined) !== hasBudget)
+    )
+        throw new Error('Incomplete memory plan budget.')
+    const shortfall = resources.some(
+        resource => resource.shortfallBytes !== undefined && resource.shortfallBytes !== '0'
+    )
+    const uncovered = resources.some(resource => resource.uncoveredCosts?.length)
+    if (
+        (hasBudget &&
+            (shortfall
+                ? result.verdict.status !== 'does_not_fit'
+                : uncovered
+                  ? result.verdict.status !== 'indeterminate'
+                  : result.verdict.status !== 'fits_within_allowances')) ||
+        (result.verdict.status === 'fits_within_allowances' && !result.verdict.conditional)
+    )
+        throw new Error('Memory plan verdict contradicts accounting.')
+    return result
+}
+function memoryPlanPartial(plan: MemoryPlan): boolean {
+    return (
+        !plan.configurationComplete ||
+        plan.verdict.conditional ||
+        [...plan.devices, plan.hostRAM, plan.hostCommit].some(
+            resource =>
+                resource.uncoveredCosts?.length ||
+                resource.groups.some(group => group.quality === 'unknown') ||
+                resource.combinedAllocations?.some(combined => combined.quality === 'unknown')
+        )
+    )
+}
+function estimateSource(value: JsonValue): NonNullable<Estimate['estimateSource']> {
+    const row = shape(value, ['kind', 'provider', 'revision', 'basis', 'unpricedCosts'])
+    const costs = strings(row.unpricedCosts)
+    if (costs && new Set(costs).size !== costs.length) throw new Error('Duplicate unpriced cost.')
+    return {
+        kind: choice(row.kind, ['engine-report', 'pair-estimate', 'measured', 'user-stated']),
+        provider: boundedText(row.provider, 256, true),
+        revision: boundedText(row.revision, 256, true),
+        basis: boundedText(row.basis, 1024, true),
+        unpricedCosts: costs?.map(cost => boundedText(cost, 256, true))
+    }
+}
 function estimate(value: JsonValue | undefined): Estimate {
     const row = shape(value, [
         'status',
+        'estimateSource',
+        'memoryPlan',
         'source',
         'buildId',
         'timestamp',
@@ -471,6 +879,9 @@ function estimate(value: JsonValue | undefined): Estimate {
     ])
     const result: Estimate = {
         status: choice(row.status, ['estimated', 'partial', 'unknown', 'unavailable']),
+        estimateSource:
+            row.estimateSource === undefined ? undefined : estimateSource(row.estimateSource),
+        memoryPlan: row.memoryPlan === undefined ? undefined : memoryPlan(row.memoryPlan),
         source: optionalText(row.source),
         buildId: optionalText(row.buildId),
         timestamp: optionalText(row.timestamp),
@@ -567,6 +978,21 @@ function estimate(value: JsonValue | undefined): Estimate {
         )
     )
         throw new Error('Invalid estimate domain reference.')
+    if (result.memoryPlan) {
+        const plan = result.memoryPlan
+        const source = result.estimateSource
+        if (
+            !source ||
+            source.kind !== 'engine-report' ||
+            source.provider !== plan.identity.provider ||
+            source.revision !== plan.identity.revision ||
+            result.components?.length ||
+            !['partial', 'estimated'].includes(result.status) ||
+            ((memoryPlanPartial(plan) || source.unpricedCosts?.length) &&
+                result.status !== 'partial')
+        )
+            throw new Error('Inconsistent memory plan estimate provenance or status.')
+    }
     return result
 }
 function bufferComponent(
@@ -982,6 +1408,12 @@ export function parseInspectModel(value: JsonValue | undefined): InspectModelRes
         orderedSummaryArtifacts(result.artifacts ?? [])
     if (new Set(result.options?.map(item => item.field)).size !== (result.options?.length ?? 0))
         throw new Error('Duplicate model option.')
+    if (
+        result.estimate.memoryPlan &&
+        (result.estimate.memoryPlan.identity.engine !== result.engine ||
+            result.estimate.memoryPlan.identity.modelId !== result.modelId)
+    )
+        throw new Error('Inspection memory plan identity mismatch.')
     return result
 }
 function option(value: JsonValue): NonNullable<InspectModelResult['options']>[number] {
