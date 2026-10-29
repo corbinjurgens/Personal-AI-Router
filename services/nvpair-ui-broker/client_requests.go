@@ -518,6 +518,14 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		msg = &start
 	}
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
+	// Send the manager reply only after reconciliation and the lifecycle lock
+	// defers finish, so the next client operation can acquire settingsApplyMu.
+	var reply func()
+	defer func() {
+		if reply != nil {
+			reply()
+		}
+	}()
 	lifecycleLocked := false
 	localOffEngine := ""
 	localOffOperationID := ""
@@ -657,12 +665,16 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	}
 	switch {
 	case err != nil:
-		if e := b.codec.RespondError(id, -32000, fmt.Sprintf("engine call failed: %v", err)); e != nil {
-			log.Printf("failed to relay engine transport error for %s", method)
+		reply = func() {
+			if e := b.codec.RespondError(id, -32000, fmt.Sprintf("engine call failed: %v", err)); e != nil {
+				log.Printf("failed to relay engine transport error for %s", method)
+			}
 		}
 	case rpcErr != nil:
-		if e := b.codec.RespondError(id, rpcErr.Code, rpcErr.Message); e != nil {
-			log.Printf("failed to relay engine RPC error for %s", method)
+		reply = func() {
+			if e := b.codec.RespondError(id, rpcErr.Code, rpcErr.Message); e != nil {
+				log.Printf("failed to relay engine RPC error for %s", method)
+			}
 		}
 	default:
 		// A manager can return an unchanged running status without emitting a
@@ -689,8 +701,10 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		if isLMStudioSetPort {
 			b.lmstudioState().backendPort.Store(int32(requestedLMStudioPort))
 		}
-		if e := b.codec.Respond(id, result); e != nil {
-			log.Printf("failed to relay engine result for %s", method)
+		reply = func() {
+			if e := b.codec.Respond(id, result); e != nil {
+				log.Printf("failed to relay engine result for %s", method)
+			}
 		}
 	}
 }
