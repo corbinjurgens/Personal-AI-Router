@@ -36,6 +36,19 @@ import (
 
 const forkPlaceholder = "/REPLACE_WITH_ABSOLUTE_PATH"
 
+// Pure pricing is a separate 37115e0b protocol, not the historical generated
+// saved-launch specimen characterized by the other tests in this file.
+func TestStrataCurrentForkPureMemoryPlan(t *testing.T) {
+	b := strataPlanFixture(t, "explicit-not-evaluated")
+	p, err := decodeStrataMemoryPlan(b, 0, strataPlanBinding(t, b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Identity.Revision != "37115e0bfbd4ffd051984b3176d6b56011e7f848" || p.PricingQualification != "non-replayable-pricing-inputs" || p.Verdict.Status != "not_evaluated" {
+		t.Fatal("pure pricing contract changed")
+	}
+}
+
 // forkBooleanFlags are the native flags that take no value.
 var forkBooleanFlags = map[string]bool{"--serve": true, "--no-prefill-borrow": true}
 

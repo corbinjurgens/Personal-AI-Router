@@ -1,0 +1,560 @@
+{
+  "kind": "engine_memory_plan",
+  "schema_version": 1,
+  "engine": {
+    "id": "strata",
+    "build": {
+      "schema_version": 1,
+      "version": "fixture",
+      "commit": "synthetic",
+      "dirty": true,
+      "built_at": "2026-10-29T00:00:00Z",
+      "cuda": "synthetic",
+      "backend": "cuda"
+    },
+    "executable_sha256": "f1b430e4b4c10a55b8e06b3fc61ec7588ff357ff8a371a94c9e9fa227c2e78a6",
+    "identity_basis": "Embedded build record bound to executable content, no execution."
+  },
+  "model": {
+    "id": "synthetic",
+    "content_sha256": null,
+    "asserted_content_sha256": null,
+    "identity_basis": "Bounded metadata/header hashes and file stat identity; caller digest not verified."
+  },
+  "requested_config": {
+    "context": 8192,
+    "kv_type": "int8",
+    "batch_size": 1,
+    "microbatch_size": 1024,
+    "parallel_slots": 1,
+    "devices": [
+      {
+        "id": 0,
+        "backend": "cuda"
+      }
+    ],
+    "offload": {
+      "mode": "hybrid"
+    }
+  },
+  "resolved_config": {
+    "context": 8192,
+    "kv_type": "int8",
+    "batch_size": 1,
+    "microbatch_size": 1024,
+    "parallel_slots": 1,
+    "devices": [
+      {
+        "id": 0,
+        "backend": "cuda"
+      }
+    ],
+    "offload": {
+      "mode": "hybrid"
+    }
+  },
+  "configuration_complete": true,
+  "budget_basis": "before_runtime_initialization",
+  "pricing_scope": "resolved_configuration",
+  "resources": {
+    "devices": [
+      {
+        "groups": {
+          "weights": {
+            "bytes": 40,
+            "quality": "exact",
+            "basis": "Native counted weight allocations; excludes tables and combined workspace."
+          },
+          "kv_cache": {
+            "bytes": null,
+            "quality": "unknown",
+            "basis": "Not separately priced by the native metadata owner.",
+            "combined_membership": [
+              "kv_cache",
+              "compute_scratch",
+              "output_buffers"
+            ]
+          },
+          "compute_scratch": {
+            "bytes": null,
+            "quality": "unknown",
+            "basis": "Not separately priced by the native metadata owner.",
+            "combined_membership": [
+              "kv_cache",
+              "compute_scratch",
+              "output_buffers"
+            ]
+          },
+          "output_buffers": {
+            "bytes": null,
+            "quality": "unknown",
+            "basis": "Not separately priced by the native metadata owner.",
+            "combined_membership": [
+              "compute_scratch",
+              "output_buffers"
+            ]
+          },
+          "runtime_driver_overhead": {
+            "bytes": null,
+            "quality": "unknown",
+            "basis": "Not separately priced by the native metadata owner."
+          },
+          "transient_peak": {
+            "bytes": null,
+            "quality": "unknown",
+            "basis": "Additional peak above priced allocations is unknown; nonadditive.",
+            "additive": false
+          }
+        },
+        "combined_allocations": [
+          {
+            "bytes": 20,
+            "members": [
+              "kv_cache",
+              "compute_scratch",
+              "output_buffers"
+            ],
+            "quality": "exact",
+            "basis": "Counted once in priced_total_bytes; partition unavailable."
+          },
+          {
+            "bytes": 10,
+            "members": [
+              "compute_scratch",
+              "output_buffers"
+            ],
+            "quality": "exact",
+            "basis": "Counted once in priced_total_bytes; partition unavailable."
+          },
+          {
+            "bytes": 10,
+            "members": [
+              "compute_scratch",
+              "kv_cache"
+            ],
+            "quality": "estimated",
+            "basis": "Counted once in priced_total_bytes; partition unavailable."
+          }
+        ],
+        "allocated_bytes": 120,
+        "mapped_view_bytes": 0,
+        "assumptions": [
+          {
+            "name": "protected_device_reserve",
+            "bytes": 10
+          }
+        ],
+        "priced_total_bytes": 130,
+        "minimum_selection_capacity_bytes": 0,
+        "minimum_selection_capacity_basis": "Native selection-policy requirement, not an allocated component.",
+        "priced_total_basis": "Native capacity model counts components once; category rows are not additive.",
+        "caller_allowances": {
+          "device_runtime_context": 0,
+          "device_late_libraries": 0,
+          "device_transient_peak": 0
+        },
+        "required_with_allowances_bytes": 130,
+        "budget_bytes": 1000,
+        "shortfall_bytes": 0,
+        "shortfall_basis": "Lower bound; uncovered runtime costs may increase it.",
+        "uncovered_costs": [],
+        "id": 0,
+        "backend": "cuda"
+      }
+    ],
+    "host_ram": {
+      "groups": {
+        "weights": {
+          "bytes": 20,
+          "quality": "estimated",
+          "basis": "Pinned resident weight bytes plus mapped embedding span, not measured physical residency."
+        },
+        "kv_cache": {
+          "bytes": 10,
+          "quality": "exact",
+          "basis": "Native counted host KV backing allocations."
+        },
+        "compute_scratch": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Not separately priced by the native metadata owner.",
+          "combined_membership": [
+            "kv_cache",
+            "compute_scratch",
+            "output_buffers"
+          ]
+        },
+        "output_buffers": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Not separately priced by the native metadata owner."
+        },
+        "runtime_driver_overhead": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Not separately priced by the native metadata owner."
+        },
+        "transient_peak": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Additional peak above priced allocations is unknown; nonadditive.",
+          "additive": false
+        }
+      },
+      "combined_allocations": [
+        {
+          "bytes": 10,
+          "members": [
+            "kv_cache",
+            "compute_scratch",
+            "output_buffers"
+          ],
+          "quality": "estimated",
+          "basis": "Counted once in priced_total_bytes; partition unavailable."
+        }
+      ],
+      "allocated_bytes": 30,
+      "mapped_view_bytes": 20,
+      "assumptions": [
+        {
+          "name": "file_cache_target",
+          "bytes": 10
+        },
+        {
+          "name": "protected_host_headroom",
+          "bytes": 10
+        },
+        {
+          "name": "startup_scratch_allowance",
+          "bytes": 10
+        }
+      ],
+      "priced_total_bytes": 80,
+      "minimum_selection_capacity_bytes": 0,
+      "minimum_selection_capacity_basis": "Native selection-policy requirement, not an allocated component.",
+      "priced_total_basis": "Native capacity model counts components once; category rows are not additive.",
+      "caller_allowances": {
+        "host_ram_runtime": 0,
+        "host_ram_transient_peak": 0
+      },
+      "required_with_allowances_bytes": 80,
+      "budget_bytes": 1000,
+      "shortfall_bytes": 0,
+      "shortfall_basis": "Lower bound; uncovered runtime costs may increase it.",
+      "uncovered_costs": []
+    },
+    "host_commit": {
+      "groups": {
+        "weights": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Not separately priced by the native metadata owner."
+        },
+        "kv_cache": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Not separately priced by the native metadata owner."
+        },
+        "compute_scratch": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Not separately priced by the native metadata owner."
+        },
+        "output_buffers": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Not separately priced by the native metadata owner."
+        },
+        "runtime_driver_overhead": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Not separately priced by the native metadata owner."
+        },
+        "transient_peak": {
+          "bytes": null,
+          "quality": "unknown",
+          "basis": "Additional peak above priced allocations is unknown; nonadditive.",
+          "additive": false
+        }
+      },
+      "combined_allocations": [],
+      "allocated_bytes": null,
+      "mapped_view_bytes": null,
+      "assumptions": [
+        {
+          "name": "combined_capacity_model",
+          "bytes": 210,
+          "basis": "Host RAM requirement plus device requirement, not measured OS commit."
+        }
+      ],
+      "priced_total_bytes": 210,
+      "minimum_selection_capacity_bytes": 0,
+      "minimum_selection_capacity_basis": "Native selection-policy requirement, not an allocated component.",
+      "priced_total_basis": "Native capacity model counts components once; category rows are not additive.",
+      "caller_allowances": {
+        "host_commit_runtime": 0,
+        "host_commit_transient_peak": 0
+      },
+      "required_with_allowances_bytes": 210,
+      "budget_bytes": 1000,
+      "shortfall_bytes": 0,
+      "shortfall_basis": "Lower bound; uncovered runtime costs may increase it.",
+      "uncovered_costs": []
+    }
+  },
+  "fit": {
+    "status": "fits_within_allowances",
+    "conditional": true,
+    "basis": "Caller capacities and explicit upper-bound allowances, not live admission or measured residency."
+  },
+  "cacheable": false,
+  "cacheable_reason": "Complete model content identity is unverified; v1 has no persistent cache.",
+  "warnings": [
+    "Unpartitioned groups are already represented by combined counted allocations.",
+    "Transient peaks are nonadditive and unknown until explicitly bounded by the caller."
+  ],
+  "capabilities": {
+    "live_observation": false,
+    "max_context_search": false,
+    "automatic_cache_fill": true,
+    "supported_backends": [
+      "cuda"
+    ],
+    "serial_only": true
+  },
+  "extensions": {
+    "strata": {
+      "requested": {
+        "executable": "/synthetic/strata/synthetic.exe",
+        "working_directory": "/synthetic/strata",
+        "pack": "/synthetic/strata",
+        "native_model": "/synthetic/strata/model.gguf",
+        "expert_profile": "/synthetic/strata/profile.bin",
+        "resident_budget_bytes": 1073741824,
+        "file_cache_bytes": 0,
+        "host_headroom_bytes": 0,
+        "vram_reserve_bytes": 0,
+        "cache_slots": 2,
+        "kv_resident_cells": 0,
+        "spec": 2,
+        "no_prefill_borrow": true,
+        "allowances": {
+          "device_runtime_context": 0,
+          "device_late_libraries": 0,
+          "device_transient_peak": 0,
+          "host_ram_runtime": 0,
+          "host_ram_transient_peak": 0,
+          "host_commit_runtime": 0,
+          "host_commit_transient_peak": 0
+        }
+      },
+      "resolved": {
+        "context": 8192,
+        "prefill": 1024,
+        "spec": 2,
+        "kv": 1,
+        "kv_resident": 0,
+        "batch": 0,
+        "batch_groups": 1,
+        "parallel": 1,
+        "auto_cache": 0,
+        "per_layer": 0,
+        "no_prefill_borrow": 1,
+        "resident_budget": 1073741824,
+        "resident_bytes": 0,
+        "resident_experts": 0,
+        "resident_pin": 0,
+        "file_cache": 0,
+        "host_headroom": 0,
+        "vram_reserve": 0,
+        "shared_stage": 0,
+        "ring": 0,
+        "workspace": 0,
+        "weight_scratch": 0,
+        "common": 0,
+        "region": 0,
+        "prefill_mmq": 0,
+        "prefill_stage_own": 0,
+        "prefill_reserve_bo": 0,
+        "prefill_ring_enabled": 0,
+        "experts": 0,
+        "top_k": 0,
+        "vocab": 0,
+        "max_blob": 0,
+        "cache_request": 2,
+        "environment": 0,
+        "file_cache_effective": 0,
+        "file_cache_compact": 0,
+        "vram_required": 0,
+        "ram_required": 0,
+        "commit_required": 0,
+        "stager_threads": 0,
+        "stager_ring": 0,
+        "stager_batch": 0,
+        "layer_blobs": [
+          256
+        ],
+        "kv_stage_runs": [],
+        "resident_order": [],
+        "slots": [
+          [
+            0,
+            1,
+            256,
+            0
+          ]
+        ]
+      },
+      "native_components": {
+        "vram": {
+          "weights_canonical": 10,
+          "weights_native_dense": 10,
+          "weights_native_head": 10,
+          "head_scratch_logits": 10,
+          "session_including_resident_kv": 10,
+          "verifier": 10,
+          "prefill_scratch_ring_stage": 10,
+          "prefill_token_ids": 10,
+          "prefill_kv_identity": 10,
+          "cache_tables": 10,
+          "decode_hit_scratch": 10,
+          "expert_cache": 10,
+          "overhead_allowance": 10
+        },
+        "ram": {
+          "resident_experts": 10,
+          "file_cache_target": 10,
+          "mapped_embedding": 10,
+          "verifier_mapped": 10,
+          "streamed_kv": 10,
+          "host_headroom_allowance": 10,
+          "startup_scratch_allowance": 10,
+          "prefill_host_stager": 10
+        },
+        "vram_required": 130,
+        "ram_required": 80,
+        "commit_required": 210,
+        "unknown_costs": "CUDA context/modules, graph capture, CPU TLS/request scratch, driver and OS residency"
+      },
+      "native_fit": {
+        "status": "within_priced_budget",
+        "shortfall_bytes": {
+          "vram": 0,
+          "ram": 0,
+          "commit": 0
+        }
+      },
+      "pricing_budget": {
+        "basis": "before_runtime_initialization",
+        "devices": [
+          {
+            "id": 0,
+            "bytes": 1000
+          }
+        ],
+        "host_ram_bytes": 1000,
+        "host_commit_bytes": 1000
+      },
+      "inputs": [
+        {
+          "path": "/synthetic/strata/profile.bin",
+          "size_bytes": 19,
+          "file_id": [
+            1,
+            1
+          ],
+          "content_sha256": "60352a5299d2b088d2c74e14681e20ba706810c296829db89ef2928e305e3115",
+          "metadata_bytes": null,
+          "metadata_sha256": null
+        },
+        {
+          "path": "/synthetic/strata/index.txt",
+          "size_bytes": 19,
+          "file_id": [
+            1,
+            2
+          ],
+          "content_sha256": "60352a5299d2b088d2c74e14681e20ba706810c296829db89ef2928e305e3115",
+          "metadata_bytes": null,
+          "metadata_sha256": null
+        },
+        {
+          "path": "/synthetic/strata/native_experts.txt",
+          "size_bytes": 19,
+          "file_id": [
+            1,
+            3
+          ],
+          "content_sha256": "60352a5299d2b088d2c74e14681e20ba706810c296829db89ef2928e305e3115",
+          "metadata_bytes": null,
+          "metadata_sha256": null
+        },
+        {
+          "path": "/synthetic/strata/dense.bin",
+          "size_bytes": 21,
+          "file_id": [
+            1,
+            4
+          ],
+          "content_sha256": null,
+          "metadata_bytes": null,
+          "metadata_sha256": null
+        },
+        {
+          "path": "/synthetic/strata/model.gguf",
+          "size_bytes": 38,
+          "file_id": [
+            1,
+            5
+          ],
+          "content_sha256": null,
+          "metadata_bytes": 24,
+          "metadata_sha256": "a4e5e156ddec27e286f75328784d7106b60a4eb1d246e950a001a3f944fbda99"
+        }
+      ],
+      "estimate_basis": "native_count_geometry",
+      "query": {
+        "argv": [
+          "/synthetic/strata/synthetic.exe",
+          "--resolve-launch",
+          "--price-only",
+          "--pack",
+          "/synthetic/strata",
+          "--native",
+          "/synthetic/strata/model.gguf",
+          "--expert-profile",
+          "/synthetic/strata/profile.bin",
+          "--max-context",
+          "8192",
+          "--prefill",
+          "1024",
+          "--kv",
+          "int8",
+          "--spec",
+          "2",
+          "--kv-resident",
+          "0",
+          "--resident-budget-gib",
+          "1",
+          "--expert-cache",
+          "2",
+          "--vram-reserve-mib",
+          "0",
+          "--no-prefill-borrow",
+          "--plan-vram-free-bytes",
+          "1000",
+          "--plan-ram-available-bytes",
+          "1000",
+          "--plan-commit-available-bytes",
+          "1000"
+        ],
+        "environment": {
+          "CUDA_VISIBLE_DEVICES": "0",
+          "STRATA_FILE_CACHE_MIB": "0",
+          "STRATA_RESIDENT_HEADROOM_GIB": "0"
+        },
+        "working_directory": "/synthetic/strata"
+      }
+    }
+  }
+}
