@@ -63,7 +63,11 @@ func (r *installProgressRecorder) assertSingleTerminal(t *testing.T, want string
 
 func TestInstallDownloadsAllNamedArtifactsBeforeRunning(t *testing.T) {
 	payload := []byte("artifact")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || (r.URL.Path != "/server.zip" && r.URL.Path != "/cudart.zip") {
+			http.NotFound(w, r)
+			return
+		}
 		_, _ = w.Write(payload)
 	}))
 	defer server.Close()
@@ -98,7 +102,11 @@ func TestInstallDownloadsAllNamedArtifactsBeforeRunning(t *testing.T) {
 
 func TestInstallRejectsBadSecondArtifactBeforeCommand(t *testing.T) {
 	payload := []byte("artifact")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || (r.URL.Path != "/server.zip" && r.URL.Path != "/cudart.zip") {
+			http.NotFound(w, r)
+			return
+		}
 		_, _ = w.Write(payload)
 	}))
 	defer server.Close()
