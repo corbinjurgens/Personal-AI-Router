@@ -304,6 +304,11 @@ func fixtureRequestHandler(method, path string, handler http.HandlerFunc) http.H
 
 func assertFixtureRejectsProbe(t *testing.T, serverURL string) {
 	t.Helper()
+	assertFixtureProbeStatus(t, serverURL, http.StatusNotFound)
+}
+
+func assertFixtureProbeStatus(t *testing.T, serverURL string, want int) {
+	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, serverURL+"/", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -316,9 +321,10 @@ func assertFixtureRejectsProbe(t *testing.T, serverURL string) {
 	if err := resp.Body.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("fixture probe status=%d, want 404", resp.StatusCode)
+	if resp.StatusCode != want {
+		t.Fatalf("fixture probe status=%d, want %d", resp.StatusCode, want)
 	}
+	t.Logf("injected plain GET %s/: status %d", serverURL, resp.StatusCode)
 }
 
 func newRecordingEngineForRequest(t *testing.T, status int, method, path string) *recordingEngine {
@@ -764,7 +770,6 @@ func TestHandleHTTP_SoleBusySelfWaitsWithoutSpendingDispatches(t *testing.T) {
 			setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
 			tc := anyCase(t)
 			local := newRecordingEngineForRequest(t, http.StatusOK, http.MethodPost, tc.inferencePath)
-			assertFixtureRejectsProbe(t, local.URL)
 			disc := NewDiscovery()
 			disc.AddManual(selfNode("self", tc.profile.FacadePort, tc.advertisedModel))
 			p := testProxy(tc.profile, disc, tc.profile.FacadePort)
@@ -786,10 +791,26 @@ func TestHandleHTTP_SoleBusySelfWaitsWithoutSpendingDispatches(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
 			defer cancel()
 			rec := httptest.NewRecorder()
-			p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+			done := make(chan struct{})
+			defer func() { cancel(); <-done }()
+			go func() {
+				defer close(done)
+				p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+			}()
+			waitForCond(t, time.Second, "busy self admission waiter", func() bool {
+				p.admission.mu.Lock()
+				defer p.admission.mu.Unlock()
+				return p.admission.queued == 1
+			})
+			assertFixtureRejectsProbe(t, local.URL)
+			if local.hits() != 0 {
+				t.Fatal("unrelated probe counted as an inference dispatch")
+			}
+			<-done
 			if rec.Code != http.StatusOK || local.hits() != 1 {
 				t.Fatalf("sole busy self: status %d, local hits %d, requests %v, context %v, body %q; want 200 and one dispatch after capacity is released", rec.Code, local.hits(), local.requestPaths(), ctx.Err(), rec.Body.String())
 			}
+			ownedAssertHandlerDrained(t, p, nil)
 		})
 	}
 	test("admission model limit", false)
