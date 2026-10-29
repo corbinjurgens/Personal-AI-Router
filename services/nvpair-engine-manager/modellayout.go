@@ -117,6 +117,10 @@ func engineEnvValue(st *engineState, key string) string {
 // each file's resolved path. A sha256 is filled in only where the layout
 // already names it (content-addressed blobs); hashModelFiles computes the rest.
 func (e *Executor) modelSourceFiles(ctx context.Context, engine, model string) (modelFileList, error) {
+	return e.modelSourceFilesWithAccess(ctx, engine, model, servingFileAccess{})
+}
+
+func (e *Executor) modelSourceFilesWithAccess(ctx context.Context, engine, model string, access servingFileAccess) (modelFileList, error) {
 	st, store, err := e.modelStoreFor(engine)
 	if err != nil {
 		return modelFileList{}, err
@@ -124,9 +128,20 @@ func (e *Executor) modelSourceFiles(ctx context.Context, engine, model string) (
 	var list modelFileList
 	switch store.adapter {
 	case engines.NameOllama:
-		list, err = ollamaSourceFiles(store.root, model)
+		observation, recognitionErr := e.recognizeModelSource(ctx, engine, model)
+		if recognitionErr != nil {
+			return modelFileList{}, recognitionErr
+		}
+		if err := e.nativeSourceCurrent(ctx, st, store, observation); err != nil {
+			return modelFileList{}, err
+		}
+		list, err = ollamaSourceFilesWithAccess(ctx, store.root, model, access)
+		if err == nil {
+			err = e.nativeSourceCurrent(ctx, st, store, observation)
+			list.source = nativeSourceSnapshot(store, observation, list.Files)
+		}
 	case engines.NameLlamaCPP:
-		list, err = e.llamaExportFiles(ctx, st, store, model)
+		list, err = e.llamaExportFilesWithAccess(ctx, st, store, model, access)
 	case engines.NameLMStudio:
 		list, err = e.lmstudioSourceFiles(ctx, store, model)
 	}
@@ -135,6 +150,51 @@ func (e *Executor) modelSourceFiles(ctx context.Context, engine, model string) (
 	}
 	list.Engine, list.Model = engine, model
 	return list, nil
+}
+
+// Recognition uses the inventory owner's fresh per-engine read, never the sweep
+// cache. Store and launch comparisons remain with the selecting source owner.
+func (e *Executor) recognizeModelSource(ctx context.Context, engine, model string) (engineInventory, error) {
+	if err := ctx.Err(); err != nil {
+		return engineInventory{}, err
+	}
+	observation := e.readEngineInventory(ctx, engine)
+	switch observation.membership(model) {
+	case inventoryAbsent:
+		return engineInventory{}, fmt.Errorf("%w: native engine does not list the requested model", errModelNotFound)
+	case inventoryPresent:
+		return observation, nil
+	default:
+		return engineInventory{}, fmt.Errorf("native model recognition is unavailable or ambiguous")
+	}
+}
+
+func (e *Executor) nativeSourceCurrent(ctx context.Context, st *engineState, store engineModelStore, observation engineInventory) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	current, currentStore, err := e.modelStoreFor(store.engine)
+	if err != nil || current != st || currentStore != store || !observation.ok || observation.engine != store.engine {
+		return fmt.Errorf("native model source configuration changed")
+	}
+	e.inventoryMu.Lock()
+	valid := e.inventoryObservationCurrent(store.engine, observation.digests)
+	e.inventoryMu.Unlock()
+	st.mu.Lock()
+	valid = valid && st.running && st.runID == observation.runID && st.launchDigest == observation.launchDigest && st.modelsDir == observation.modelsDir
+	st.mu.Unlock()
+	if !valid {
+		return fmt.Errorf("native model recognition changed")
+	}
+	return nil
+}
+
+func nativeSourceSnapshot(store engineModelStore, observation engineInventory, files []modelFile) *sourceSnapshot {
+	return &sourceSnapshot{
+		engine: store.engine, run: observation.runID, configuration: observation.launchDigest, root: store.root,
+		recognition: append([]byte(nil), observation.raw...), inventory: &observation,
+		artifacts: append([]modelFile(nil), files...),
+	}
 }
 
 // plannedFile is one file the destination must hold, and where.
@@ -329,6 +389,10 @@ func readSmallFile(path string, limit int64) ([]byte, error) {
 const ollamaManifestLimit = 4 << 20
 
 func ollamaSourceFiles(root, model string) (modelFileList, error) {
+	return ollamaSourceFilesWithAccess(context.Background(), root, model, servingFileAccess{})
+}
+
+func ollamaSourceFilesWithAccess(ctx context.Context, root, model string, access servingFileAccess) (modelFileList, error) {
 	rel, err := ollamaManifestRel(model)
 	if err != nil {
 		return modelFileList{}, fmt.Errorf("%w: %v", errModelNotFound, err)
@@ -340,9 +404,20 @@ func ollamaSourceFiles(root, model string) (modelFileList, error) {
 		}
 		return modelFileList{}, err
 	}
-	data, err := readSmallFile(manifestPath, ollamaManifestLimit)
+	f, err := access.checkedOpen(ctx, filepath.Join(root, filepath.FromSlash(rel)), manifestPath, info)
 	if err != nil {
 		return modelFileList{}, err
+	}
+	data, err := io.ReadAll(io.NewSectionReader(f, 0, ollamaManifestLimit+1))
+	closeErr := f.Close()
+	if err != nil {
+		return modelFileList{}, err
+	}
+	if closeErr != nil {
+		return modelFileList{}, closeErr
+	}
+	if len(data) > ollamaManifestLimit {
+		return modelFileList{}, fmt.Errorf("manifest exceeds the small-file limit")
 	}
 	m, err := parseOllamaManifest(data)
 	if err != nil {
@@ -632,10 +707,14 @@ const modelArtifactScanEntries = 100000
 type modelArtifactScan struct{ entries int }
 
 func (b *modelArtifactScan) directory(ctx context.Context, path string, visit func(os.DirEntry) error) error {
+	return b.directoryWithAccess(ctx, path, servingFileAccess{}, visit)
+}
+
+func (b *modelArtifactScan) directoryWithAccess(ctx context.Context, path string, access servingFileAccess, visit func(os.DirEntry) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	f, err := os.Open(path)
+	f, err := access.openDirectory(path)
 	if err != nil {
 		return err
 	}
@@ -708,7 +787,7 @@ func (b *modelArtifactScan) cachedRef(ctx context.Context, repoDir string, acces
 		return commit, nil
 	}
 	var names []string
-	if err := b.directory(ctx, refs, func(entry os.DirEntry) error {
+	if err := b.directoryWithAccess(ctx, refs, access, func(entry os.DirEntry) error {
 		if entry.Type().IsRegular() {
 			names = append(names, entry.Name())
 		}
@@ -766,7 +845,7 @@ func boundedLlamaCacheArtifacts(ctx context.Context, store engineModelStore, mod
 		if err != nil || !pathWithinRoot(realRepo, resolved) {
 			return fmt.Errorf("unsafe cache directory")
 		}
-		return scan.directory(ctx, dir, func(d os.DirEntry) error {
+		return scan.directoryWithAccess(ctx, dir, access, func(d os.DirEntry) error {
 			path := filepath.Join(dir, d.Name())
 			if d.IsDir() {
 				return walk(path, depth+1)

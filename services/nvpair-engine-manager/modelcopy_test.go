@@ -114,6 +114,7 @@ func TestCopyModelOllamaOverControlRoutes(t *testing.T) {
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
 	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny:1b", 300_000, 4)
+	copyTestNativeModels(t, srcExec, "ollama", "tiny:1b")
 	_, client := modelFileServer(t, srcExec, nil)
 	dst := copyTestExecutor(t, "ollama", dstDir, true)
 
@@ -201,6 +202,8 @@ func TestLinkedModelNativeTransferToken(t *testing.T) {
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
 	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 500_000, 5)
+	copyTestNativeModels(t, srcExec, "ollama", "tiny")
+	copyTestSourceListing(t, srcExec, "ollama", "tiny")
 	var weightsRel string
 	for rel, b := range fx.blobs {
 		if len(b) == 500_000 {
@@ -281,6 +284,7 @@ func TestCopyModelHashMismatchRejectsAndDeletesPartial(t *testing.T) {
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
 	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 50_000, 6)
+	copyTestNativeModels(t, srcExec, "ollama", "tiny")
 	src := sourceFromExecutor(t, srcExec, "ollama", "tiny")
 	// The source serves different bytes than it listed for the manifest.
 	src.data[fx.manifestRel] = append([]byte(nil), src.data[fx.manifestRel]...)
@@ -305,6 +309,7 @@ func TestCopyModelSkipsFilesAlreadyPresent(t *testing.T) {
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
 	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 80_000, 7)
+	copyTestNativeModels(t, srcExec, "ollama", "tiny")
 	src := sourceFromExecutor(t, srcExec, "ollama", "tiny")
 	dst := copyTestExecutor(t, "ollama", dstDir, true)
 	var present string
@@ -333,6 +338,7 @@ func TestCopyModelOllamaWritesManifestLast(t *testing.T) {
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
 	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 20_000, 8)
+	copyTestNativeModels(t, srcExec, "ollama", "tiny")
 	src := sourceFromExecutor(t, srcExec, "ollama", "tiny")
 	dst := copyTestExecutor(t, "ollama", dstDir, true)
 	root := filepath.Join(dstDir, "models")
@@ -378,6 +384,7 @@ func TestCopyModelRefusesWhenDiskSpaceIsShort(t *testing.T) {
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
 	writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 100_000, 9)
+	copyTestNativeModels(t, srcExec, "ollama", "tiny")
 	src := sourceFromExecutor(t, srcExec, "ollama", "tiny")
 	dst := copyTestExecutor(t, "ollama", dstDir, true)
 	prev := diskFreeBytes
@@ -470,6 +477,7 @@ func TestCopyModelLlamacpp(t *testing.T) {
 	}
 	writeLlamaCache(t, srcDir, repo, commit, files)
 	srcExec := copyTestExecutor(t, "llamacpp", srcDir, true)
+	copyTestNativeModels(t, srcExec, "llamacpp", repo+":Q4_K_M")
 	_, client := modelFileServer(t, srcExec, nil)
 
 	list, err := client.modelFiles(context.Background(), "llamacpp", repo+":Q4_K_M", nil)
@@ -509,6 +517,7 @@ func TestCopyModelLlamacpp(t *testing.T) {
 		}
 	}
 	// The destination's own cache lists it the way llama.cpp would.
+	copyTestNativeModels(t, dst, "llamacpp", repo+":Q4_K_M")
 	back, err := dst.modelSourceFiles(context.Background(), "llamacpp", repo+":Q4_K_M")
 	if err != nil || len(back.Files) != 2 {
 		t.Fatalf("destination listing = %+v, %v", back, err)

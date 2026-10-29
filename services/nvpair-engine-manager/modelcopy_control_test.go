@@ -137,6 +137,8 @@ func newCopyControlSourceFixture(t *testing.T, wrap func(http.Handler) http.Hand
 		t.Fatal(err)
 	}
 	writeOllamaModel(t, sourceStore.root, "tiny", 100_000, 2)
+	copyTestNativeModels(t, f.source, "ollama", "tiny")
+	copyTestSourceListing(t, f.source, "ollama", "tiny")
 	f.source.nodeProjection.set(nodeProjection{})
 	sourceMesh := clustertrust.Open(sourceDir)
 	sourceControl := &controlServer{exec: f.source, mesh: sourceMesh}

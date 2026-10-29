@@ -486,6 +486,7 @@ func TestModelMutationGuardBlocksCopyUntilConfirmed(t *testing.T) {
 	srcDir, dstDir := t.TempDir(), t.TempDir()
 	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
 	writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny:1b", 4096, 4)
+	copyTestNativeModels(t, srcExec, "ollama", "tiny:1b")
 	source := sourceFromExecutor(t, srcExec, "ollama", "tiny:1b")
 	dst := copyTestExecutor(t, "ollama", dstDir, true)
 

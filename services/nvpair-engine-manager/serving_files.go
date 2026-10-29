@@ -35,10 +35,11 @@ type servingReadUsage struct {
 }
 
 type servingFileAccess struct {
-	open    func(string) (servingArtifactFile, error)
-	openDir func(string) (servingDirectory, error)
-	usage   *servingReadUsage
-	scan    *modelArtifactScan
+	open      func(string) (servingArtifactFile, error)
+	openDir   func(string) (servingDirectory, error)
+	usage     *servingReadUsage
+	scan      *modelArtifactScan
+	recognize func(context.Context, string) (engineInventory, error)
 }
 
 type servingDirectory interface {
@@ -67,6 +68,7 @@ type selectorEvidence struct {
 type sourceSnapshot struct {
 	engine, run, configuration, root string
 	recognition                      []byte
+	inventory                        *engineInventory
 	selectors                        []selectorEvidence
 	directories                      []sourceEvidence
 	artifacts                        []modelFile
@@ -130,13 +132,7 @@ func (a servingFileAccess) readDirectory(ctx context.Context, e sourceEvidence, 
 	if err := validateSource(e); err != nil {
 		return nil, err
 	}
-	var f servingDirectory
-	var err error
-	if a.openDir != nil {
-		f, err = a.openDir(e.configured)
-	} else {
-		f, err = os.Open(e.configured)
-	}
+	f, err := a.openDirectory(e.configured)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +197,13 @@ func (r servingContextReaderAt) ReadAt(p []byte, offset int64) (int, error) {
 func (a servingFileAccess) openFile(path string) (servingArtifactFile, error) {
 	if a.open != nil {
 		return a.open(path)
+	}
+	return os.Open(path)
+}
+
+func (a servingFileAccess) openDirectory(path string) (servingDirectory, error) {
+	if a.openDir != nil {
+		return a.openDir(path)
 	}
 	return os.Open(path)
 }

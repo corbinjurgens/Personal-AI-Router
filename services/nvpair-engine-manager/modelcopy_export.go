@@ -392,6 +392,10 @@ func copyLaunchSnapshot(st *engineState) (*engineState, launchCommand, error) {
 }
 
 func (e *Executor) llamaExportFiles(ctx context.Context, st *engineState, store engineModelStore, model string) (modelFileList, error) {
+	return e.llamaExportFilesWithAccess(ctx, st, store, model, servingFileAccess{})
+}
+
+func (e *Executor) llamaExportFilesWithAccess(ctx context.Context, st *engineState, store engineModelStore, model string, access servingFileAccess) (modelFileList, error) {
 	if err := ctx.Err(); err != nil {
 		return modelFileList{}, err
 	}
@@ -399,7 +403,24 @@ func (e *Executor) llamaExportFiles(ctx context.Context, st *engineState, store 
 	if err != nil {
 		return modelFileList{}, errNoArtifactBinding
 	}
-	list, presetSelected, err := resolveLlamaArtifacts(ctx, snapshot, command, store, model, servingFileAccess{})
+	checkConfiguration := func() error {
+		current, currentCommand, currentErr := copyLaunchSnapshot(st)
+		if currentErr != nil || !reflect.DeepEqual(command, currentCommand) || !snapshot.plat.Runtime.Serving.Equal(current.plat.Runtime.Serving) || !modelconfig.EqualLoads(snapshot.plat.Runtime.ModelLoads, current.plat.Runtime.ModelLoads) {
+			return fmt.Errorf("custom artifact configuration changed during export resolution")
+		}
+		return nil
+	}
+	access.recognize = func(ctx context.Context, model string) (engineInventory, error) {
+		observation, err := e.recognizeModelSource(ctx, store.engine, model)
+		if err != nil {
+			return engineInventory{}, err
+		}
+		if err := e.nativeSourceCurrent(ctx, st, store, observation); err != nil {
+			return engineInventory{}, err
+		}
+		return observation, checkConfiguration()
+	}
+	list, presetSelected, err := resolveLlamaArtifacts(ctx, snapshot, command, store, model, access)
 	if err != nil {
 		return modelFileList{}, err
 	}
@@ -429,9 +450,13 @@ func (e *Executor) llamaExportFiles(ctx context.Context, st *engineState, store 
 			return modelFileList{}, errNoArtifactBinding
 		}
 	}
-	current, currentCommand, currentErr := copyLaunchSnapshot(st)
-	if currentErr != nil || !reflect.DeepEqual(command, currentCommand) || !snapshot.plat.Runtime.Serving.Equal(current.plat.Runtime.Serving) || !modelconfig.EqualLoads(snapshot.plat.Runtime.ModelLoads, current.plat.Runtime.ModelLoads) {
-		return modelFileList{}, fmt.Errorf("custom artifact configuration changed during export resolution")
+	if err := checkConfiguration(); err != nil {
+		return modelFileList{}, err
+	}
+	if list.source != nil && list.source.inventory != nil {
+		if err := e.nativeSourceCurrent(ctx, st, store, *list.source.inventory); err != nil {
+			return modelFileList{}, err
+		}
 	}
 	return list, nil
 }
@@ -608,7 +633,18 @@ func resolveLlamaArtifacts(ctx context.Context, snapshot *engineState, command l
 		return candidates[0], presetSelected, nil
 	}
 	if _, _, err := splitLlamaModel(model); err == nil {
+		var observation engineInventory
+		if access.recognize != nil {
+			var err error
+			observation, err = access.recognize(ctx, model)
+			if err != nil {
+				return modelFileList{}, false, err
+			}
+		}
 		list, err := boundedLlamaCacheArtifacts(ctx, store, model, access)
+		if err == nil && access.recognize != nil {
+			list.source = nativeSourceSnapshot(store, observation, list.Files)
+		}
 		return list, false, err
 	}
 	return modelFileList{}, false, errNoArtifactBinding

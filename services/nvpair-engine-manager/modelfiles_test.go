@@ -39,6 +39,7 @@ func TestModelDownloadExportReaderHoldsThroughBody(t *testing.T) {
 	root := t.TempDir()
 	fixture := writeOllamaModel(t, filepath.Join(root, "models"), "demo", 64, 1)
 	ex := copyTestExecutor(t, "ollama", root, true)
+	copyTestNativeModels(t, ex, "ollama", "demo")
 	server := &controlServer{exec: ex}
 	_, client := modelFileServer(t, ex, nil)
 	list, err := client.modelFiles(context.Background(), "ollama", "demo", nil)
@@ -76,6 +77,7 @@ func TestModelDownloadExportReaderHoldsThroughHashing(t *testing.T) {
 	root := t.TempDir()
 	fixture := writeOllamaModel(t, filepath.Join(root, "models"), "demo", 64, 1)
 	ex := copyTestExecutor(t, "ollama", root, true)
+	copyTestNativeModels(t, ex, "ollama", "demo")
 	abs, err := filepath.EvalSymlinks(filepath.Join(root, "models", filepath.FromSlash(fixture.manifestRel)))
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +143,71 @@ func copyTestExecutor(t *testing.T, engine, modelsDir string, installed bool) *E
 			Runtime:   Runtime{Bin: bin},
 		}},
 	})
+}
+
+// copyTestNativeModels declares only the named models through the native action
+// owner. Destination-only executors remain inert unless a test opts in.
+func copyTestNativeModels(t *testing.T, ex *Executor, engine string, models ...string) *int {
+	t.Helper()
+	st, err := ex.state(engine)
+	if err != nil {
+		t.Fatalf("native membership engine: %v", err)
+	}
+	if st.manifest.Actions == nil {
+		st.manifest.Actions = make(map[string]Action)
+	}
+	path := "/copy-test/" + engine + "/models"
+	st.manifest.Actions["list_models"] = Action{
+		HTTP:   &ActionHTTP{Method: http.MethodGet, Path: path},
+		Result: &ActionResult{Array: "models", Field: "name"},
+	}
+	rows := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		rows = append(rows, map[string]any{"name": model, "status": map[string]string{"value": "unloaded"}})
+	}
+	body, err := json.Marshal(map[string]any{"models": rows})
+	if err != nil {
+		t.Fatalf("encode native membership: %v", err)
+	}
+	st.mu.Lock()
+	st.running, st.runID, st.port = true, "copy-test-run", 18080
+	st.launchDigest = strings.Repeat("a", 64)
+	st.mu.Unlock()
+	calls := new(int)
+	var mu sync.Mutex
+	ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+		mu.Lock()
+		*calls++
+		mu.Unlock()
+		if request.Method != http.MethodGet || request.URL.Path != path {
+			t.Fatalf("unexpected native action: %s %s", request.Method, request.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})
+	return calls
+}
+
+// Exercise the real listing and issued-ID owners before a fixture installs a
+// transport failure. The in-memory lane does not affect peer request counters.
+func copyTestSourceListing(t *testing.T, ex *Executor, engine, model string) modelFileList {
+	t.Helper()
+	control := &controlServer{exec: ex}
+	client := &remoteClient{base: "https://source.invalid", controlHTTP: &http.Client{Transport: memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet || request.URL.Path != controlModelFilesPath {
+			t.Fatalf("unexpected positive-control route: %s %s", request.Method, request.URL.Path)
+		}
+		response := httptest.NewRecorder()
+		control.handleModelFiles(response, request)
+		return response.Result(), nil
+	})}}
+	list, err := client.modelFiles(context.Background(), engine, model, nil)
+	if err != nil {
+		t.Fatalf("positive source listing: %v", err)
+	}
+	if list.Engine != engine || list.Model != model || list.Layout != "" || len(list.Files) == 0 || !validSHA256(list.ExportID) {
+		t.Fatalf("positive source listing lost exact identity or files: %+v", list)
+	}
+	return list
 }
 
 func sha256Hex(b []byte) string {
@@ -258,6 +325,7 @@ func TestModelFilesListsOllamaModelWithHashes(t *testing.T) {
 	dir := t.TempDir()
 	exec := copyTestExecutor(t, "ollama", dir, true)
 	fx := writeOllamaModel(t, filepath.Join(dir, "models"), "tiny", 4096, 1)
+	copyTestNativeModels(t, exec, "ollama", "tiny")
 	_, client := modelFileServer(t, exec, nil)
 
 	list, err := client.modelFiles(context.Background(), "ollama", "tiny", nil)
@@ -281,6 +349,7 @@ func TestModelFilesListsOllamaModelWithHashes(t *testing.T) {
 func TestModelFilesUnknownModelIs404(t *testing.T) {
 	dir := t.TempDir()
 	exec := copyTestExecutor(t, "ollama", dir, true)
+	copyTestNativeModels(t, exec, "ollama")
 	srv, _ := modelFileServer(t, exec, nil)
 	resp, err := srv.Client().Get(srv.URL + controlModelFilesPath + "?engine=ollama&model=missing")
 	if err != nil {
@@ -298,6 +367,7 @@ func TestModelFileRejectsTraversalAndUnlistedFiles(t *testing.T) {
 	root := filepath.Join(dir, "models")
 	fx := writeOllamaModel(t, root, "tiny", 1024, 1)
 	other := writeOllamaModel(t, root, "other", 1024, 2)
+	copyTestNativeModels(t, exec, "ollama", "tiny", "other")
 	writeTestFile(t, filepath.Join(dir, "secret"), []byte("secret"))
 	srv, client := modelFileServer(t, exec, nil)
 	list, err := client.modelFiles(context.Background(), "ollama", "tiny", nil)
@@ -340,6 +410,7 @@ func TestModelFileServesRanges(t *testing.T) {
 	dir := t.TempDir()
 	exec := copyTestExecutor(t, "ollama", dir, true)
 	fx := writeOllamaModel(t, filepath.Join(dir, "models"), "tiny", 10000, 3)
+	copyTestNativeModels(t, exec, "ollama", "tiny")
 	_, client := modelFileServer(t, exec, nil)
 	list, err := client.modelFiles(context.Background(), "ollama", "tiny", nil)
 	if err != nil {
