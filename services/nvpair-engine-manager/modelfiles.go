@@ -58,11 +58,12 @@ type modelFile struct {
 
 // modelFileList is the GET /v1/models/files result.
 type modelFileList struct {
-	Engine   string `json:"engine"`
-	Model    string `json:"model"`
-	Layout   string `json:"layout,omitempty"`
-	ExportID string `json:"exportId,omitempty"`
-	binding  string
+	Engine        string `json:"engine"`
+	Model         string `json:"model"`
+	Layout        string `json:"layout,omitempty"`
+	ExportID      string `json:"exportId,omitempty"`
+	binding       string
+	configuration string
 	// source retains request-local selection evidence, never peer-visible paths.
 	source *sourceSnapshot
 	// Revision is the snapshot a llama.cpp model's files were listed from (the
@@ -434,7 +435,7 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 	}()
 	list, err := s.exec.modelSourceFilesWithAccess(ctx, engine, model, s.access)
 	if err != nil {
-		http.Error(w, err.Error(), modelLookupStatus(err))
+		http.Error(w, "model source unavailable", modelLookupStatus(err))
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -457,15 +458,14 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 	if err := fileHashes.hashModelFilesAccess(ctx, &list, func(path string, pct int) {
 		writeFrame(streamFrame{Type: "progress", Engine: engine, Op: "copy", Stage: "hashing", Percent: pct, Message: path})
 	}, s.access); err != nil {
-		writeFrame(streamFrame{Type: "error", Engine: engine, Op: "copy", Message: err.Error()})
+		writeFrame(streamFrame{Type: "error", Engine: engine, Op: "copy", Message: "model source unavailable"})
 		return
 	}
-	if list.Layout == llamaArtifactsLayout {
-		if err := s.exec.recheckCopyExportAccess(ctx, list, s.access); err != nil {
-			writeFrame(streamFrame{Type: "error", Message: err.Error()})
-			return
-		}
-	} else {
+	if err := s.exec.recheckCopyExportAccess(ctx, list, s.access); err != nil {
+		writeFrame(streamFrame{Type: "error", Message: "source binding changed"})
+		return
+	}
+	if list.Layout != llamaArtifactsLayout {
 		list.ExportID, err = nativeExportID(list)
 		if err != nil {
 			writeFrame(streamFrame{Type: "error", Message: err.Error()})
@@ -594,24 +594,13 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "path is not a file of this model", http.StatusNotFound)
 		return
 	}
-	if list.Layout == llamaArtifactsLayout {
-		current, err := s.exec.modelSourceFilesWithAccess(r.Context(), engine, model, s.access)
-		if err != nil || fileHashes.hashModelFilesAccess(r.Context(), &current, nil, s.access) != nil {
-			http.Error(w, "source artifact changed or unavailable", http.StatusConflict)
-			return
-		}
-		if current.ExportID != list.ExportID {
-			http.Error(w, "export identity changed", http.StatusConflict)
-			return
-		}
-		if err := s.exec.recheckCopyExportAccess(r.Context(), list, s.access); err != nil {
-			http.Error(w, "source binding changed", http.StatusConflict)
-			return
-		}
-		if !checkIssuedCopyExport(st, current) {
-			http.Error(w, "source binding changed or export expired; list the model again", http.StatusConflict)
-			return
-		}
+	if err := s.exec.recheckCopyExportAccess(r.Context(), list, s.access); err != nil {
+		http.Error(w, "source binding changed", http.StatusConflict)
+		return
+	}
+	if !checkIssuedCopyExport(st, list) {
+		http.Error(w, "source binding changed or export expired; list the model again", http.StatusConflict)
+		return
 	}
 	evidence := sourceEvidence{configured: selected.configured, target: selected.abs, info: selected.info, size: selected.Size}
 	if selected.info != nil {

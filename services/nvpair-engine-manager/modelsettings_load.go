@@ -715,6 +715,22 @@ func rtLoadResolution(loads []modelconfig.ModelLoad, id string) *modelconfig.Res
 	return nil
 }
 
+// Export consumes persisted artifact assertions without reconstructing a native
+// build identity or executing the typed launch/Auto allocation compiler.
+func validateTypedLlamaExport(rt Runtime, model string) error {
+	var selected *modelconfig.ModelLoad
+	for i := range rt.ModelLoads {
+		load := &rt.ModelLoads[i]
+		if load.ModelID == model {
+			if selected != nil || load.Resolved == nil || load.Validate() != nil {
+				return errNoArtifactBinding
+			}
+			selected = load
+		}
+	}
+	return nil
+}
+
 func sameTypedFiles(a, b modelFileList) bool {
 	if len(a.Files) != len(b.Files) {
 		return false

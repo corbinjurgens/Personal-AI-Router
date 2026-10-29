@@ -341,6 +341,38 @@ func compilePreparedServingContext(ctx context.Context, st *engineState, command
 	return compileLlamaServingExpected(ctx, command, rt, approved, access, nil)
 }
 
+// This export-only entry point shares selection with inspection and serving,
+// but grants no launch approval and never reads executable or library inputs.
+func resolvePreparedExport(ctx context.Context, st *engineState, command launchCommand, store engineModelStore, model string, access servingFileAccess, expected *modelFileList) (modelFileList, error) {
+	rt := st.plat.Runtime
+	if err := validateTypedLlamaExport(rt, model); err != nil {
+		return modelFileList{}, err
+	}
+	declaration, err := llamaExportDeclaration(rt, model)
+	if err != nil {
+		return modelFileList{}, err
+	}
+	list, presetSelected, err := resolveLlamaArtifactsSelection(ctx, st, command, store, model, access, expected, func(paths, roles []string) error {
+		if rt.Serving != nil && declaration == nil {
+			return errNoArtifactBinding
+		}
+		return llamaExportSelection(declaration, paths, roles)
+	})
+	if err != nil {
+		return modelFileList{}, err
+	}
+	typedSelected := rtLoadResolution(rt.ModelLoads, model) != nil
+	if presetSelected || typedSelected {
+		if rt.Serving != nil && declaration == nil {
+			return modelFileList{}, errNoArtifactBinding
+		}
+		if err := bindLlamaExportAssertions(declaration, &list); err != nil {
+			return modelFileList{}, err
+		}
+	}
+	return list, nil
+}
+
 func preparedServingReadback(st *engineState, prepared *llamaServingLaunch) *engines.ServingReadback {
 	result := llamaServingReadback(prepared)
 	if strataServingRuntime(st, prepared.Config) {

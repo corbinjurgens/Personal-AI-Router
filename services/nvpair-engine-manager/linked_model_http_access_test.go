@@ -25,13 +25,24 @@ func TestLinkedModelHTTPAccess(t *testing.T) {
 	fixture := writeOllamaModel(t, filepath.Join(root, "models"), "tiny", 128, 3)
 	copyTestNativeModels(t, ex, "ollama", "tiny")
 	counts := &linkedHashCounts{}
-	access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+	usage := &servingReadUsage{}
+	var pathsMu sync.Mutex
+	paths := map[string]*linkedHashCounts{}
+	access := servingFileAccess{usage: usage, open: func(path string) (servingArtifactFile, error) {
 		f, err := os.Open(path)
 		if err != nil {
 			return nil, err
 		}
 		counts.opens.Add(1)
-		return &linkedHashFile{File: f, counts: counts}, nil
+		pathsMu.Lock()
+		counter := paths[path]
+		if counter == nil {
+			counter = &linkedHashCounts{}
+			paths[path] = counter
+		}
+		pathsMu.Unlock()
+		counter.opens.Add(1)
+		return &linkedHashFile{File: f, counts: counts, afterRead: func(n int, _ int64) { counter.bytes.Add(int64(n)) }}, nil
 	}}
 	f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
 		mux := (&controlServer{exec: ex, mesh: mesh, access: access}).mux()
@@ -64,7 +75,15 @@ func TestLinkedModelHTTPAccess(t *testing.T) {
 		t.Fatalf("pinned response mismatch or reader not closed: opens=%d closes=%d reads=%d", counts.opens.Load(), counts.closes.Load(), counts.readAt.Load())
 	}
 	q := url.Values{"engine": {"ollama"}, "model": {"tiny"}, "path": {fixture.manifestRel}, "exportId": {list.ExportID}}
-	before := counts.readAt.Load()
+	selectorPath := filepath.Join(root, "models", filepath.FromSlash(fixture.manifestRel))
+	pathsMu.Lock()
+	selector := paths[selectorPath]
+	pathsMu.Unlock()
+	if selector == nil {
+		t.Fatal("listing did not read manifest through injected reader")
+	}
+	beforeBytes, beforeSelector := counts.bytes.Load(), selector.bytes.Load()
+	beforeUsage := *usage
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, client.base+controlModelFilePath+"?"+q.Encode(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -73,11 +92,18 @@ func TestLinkedModelHTTPAccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	headBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := resp.Body.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK || counts.readAt.Load() != before {
-		t.Fatalf("HEAD status=%d body reads=%d", resp.StatusCode, counts.readAt.Load()-before)
+	observed := counts.bytes.Load() - beforeBytes
+	selectorBytes := selector.bytes.Load() - beforeSelector
+	accounted := (usage.SourceBytes - beforeUsage.SourceBytes) + (usage.SampleBytes - beforeUsage.SampleBytes) + (usage.HeaderBytes - beforeUsage.HeaderBytes)
+	if resp.StatusCode != http.StatusOK || len(headBody) != 0 || selectorBytes <= 0 || observed != selectorBytes || uint64(observed) != accounted || usage.SourceBytes == beforeUsage.SourceBytes || counts.opens.Load() != counts.closes.Load() {
+		t.Fatalf("HEAD status=%d body=%d observed=%d selector=%d accounted=%d usage=%+v opens=%d closes=%d", resp.StatusCode, len(headBody), observed, selectorBytes, accounted, *usage, counts.opens.Load(), counts.closes.Load())
 	}
 	body, offset, err := client.modelFile(ctx, "ollama", "tiny", fixture.manifestRel, list.ExportID, 2)
 	if err != nil {

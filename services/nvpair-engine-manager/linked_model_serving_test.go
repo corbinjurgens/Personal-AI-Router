@@ -164,7 +164,7 @@ func TestLinkedModelServingBinding(t *testing.T) {
 			t.Fatalf("replacement executable read: %d", reads)
 		}
 	})
-	t.Run("export approval retains selected artifact", func(t *testing.T) {
+	t.Run("selected export retains artifact binding", func(t *testing.T) {
 		f := newLlamaServingFixture(t)
 		settingsState(t, f.ex).modelsDir = t.TempDir()
 		applyLlamaServing(t, f, approveLlamaServing(t, f))
@@ -189,15 +189,15 @@ func TestLinkedModelServingBinding(t *testing.T) {
 		if _, err := f.ex.modelSourceFilesWithAccess(context.Background(), "fake", "medium", access); err != nil {
 			t.Fatal(err)
 		}
-		if opens < 2 || otherReads == 0 {
-			t.Fatalf("approval positive control did not read selected file: opens=%d reads=%d", opens, otherReads)
+		if opens == 0 || otherReads == 0 {
+			t.Fatalf("export positive control did not read selected file: opens=%d reads=%d", opens, otherReads)
 		}
 		trigger, opens = opens, 0
 		if _, err := f.ex.modelSourceFilesWithAccess(context.Background(), "fake", "medium", access); err == nil {
-			t.Fatal("substituted approval artifact accepted")
+			t.Fatal("substituted export artifact accepted")
 		}
 		if opens != trigger || forbidden != 0 {
-			t.Fatalf("approval substitution: opens=%d trigger=%d forbidden reads=%d", opens, trigger, forbidden)
+			t.Fatalf("export substitution: opens=%d trigger=%d forbidden reads=%d", opens, trigger, forbidden)
 		}
 	})
 	t.Run("auto native library", func(t *testing.T) {
