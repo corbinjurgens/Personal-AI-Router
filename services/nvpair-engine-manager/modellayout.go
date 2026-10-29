@@ -922,6 +922,7 @@ type llamaCacheScan struct {
 	access   servingFileAccess
 	snapshot *sourceSnapshot
 	expected *sourceSnapshot
+	strict   bool
 }
 
 func (s *llamaCacheScan) directory(path string) (sourceEvidence, error) {
@@ -948,6 +949,11 @@ func (s *llamaCacheScan) directory(path string) (sourceEvidence, error) {
 	}
 	if err != nil {
 		return sourceEvidence{}, err
+	}
+	for _, previous := range s.snapshot.directories {
+		if os.SameFile(previous.info, evidence.info) {
+			return sourceEvidence{}, errNoArtifactBinding
+		}
 	}
 	s.snapshot.directories = append(s.snapshot.directories, evidence)
 	return evidence, nil
@@ -1039,7 +1045,7 @@ func validateSourceSnapshot(ctx context.Context, snapshot *sourceSnapshot) error
 }
 
 func (b *modelArtifactScan) cachedRef(ctx context.Context, repoDir string, access servingFileAccess) (string, error) {
-	scan := &llamaCacheScan{budget: b, access: access, snapshot: &sourceSnapshot{}}
+	scan := &llamaCacheScan{budget: b, access: access, snapshot: &sourceSnapshot{}, strict: true}
 	return scan.cachedRef(ctx, repoDir)
 }
 
@@ -1050,17 +1056,32 @@ func (s *llamaCacheScan) cachedRef(ctx context.Context, repoDir string) (string,
 	}
 	read := func(name string) (string, error) {
 		path := filepath.Join(refs, name)
-		real, info, err := confinedRegularFile(repoDir, path)
+		var strictTarget string
+		var strictInfo os.FileInfo
+		if s.strict {
+			var err error
+			strictTarget, strictInfo, err = confinedRegularFile(repoDir, path)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return "", os.ErrNotExist
+				}
+				return "", errNoArtifactBinding
+			}
+		}
+		evidence, err := captureSource(path, false)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return "", os.ErrNotExist
 			}
 			return "", errNoArtifactBinding
 		}
-		if info.Size() > 4096 {
+		if s.strict && (evidence.target != strictTarget || !sameSource(evidence.info, strictInfo, false)) {
+			return "", errNoArtifactBinding
+		}
+		if evidence.size > 4096 {
 			return "", errModelArtifactLimit
 		}
-		data, err := s.selector(ctx, path, real, info)
+		data, err := s.selector(ctx, path, evidence.target, evidence.info)
 		if err != nil {
 			if ctx.Err() != nil {
 				return "", ctx.Err()
@@ -1086,8 +1107,15 @@ func (s *llamaCacheScan) cachedRef(ctx context.Context, repoDir string) (string,
 	}
 	var names []string
 	if err := s.enumerate(ctx, refs, func(entry os.DirEntry) error {
-		if entry.Type().IsRegular() {
+		path := filepath.Join(refs, entry.Name())
+		link, err := removalEntryIsLink(path, entry.Type())
+		if err != nil {
+			return errNoArtifactBinding
+		}
+		if entry.Type().IsRegular() || link {
 			names = append(names, entry.Name())
+		} else if !entry.IsDir() {
+			return errNoArtifactBinding
 		}
 		return nil
 	}); err != nil {
@@ -1162,10 +1190,6 @@ func resolveBoundedLlamaCacheArtifacts(ctx context.Context, store engineModelSto
 	if _, err := hf.directory(filepath.Join(repoDir, "snapshots")); err != nil {
 		return modelFileList{}, err
 	}
-	realRepo, err := resolveExistingPath(repoDir)
-	if err != nil {
-		return modelFileList{}, err
-	}
 	var rels []string
 	seenPaths := map[string]bool{}
 	var walk func(string, int) error
@@ -1173,13 +1197,23 @@ func resolveBoundedLlamaCacheArtifacts(ctx context.Context, store engineModelSto
 		if depth > 64 {
 			return errModelArtifactLimit
 		}
-		resolved, err := resolveExistingPath(dir)
-		if err != nil || !pathWithinRoot(realRepo, resolved) {
-			return fmt.Errorf("unsafe cache directory")
-		}
 		return hf.enumerate(ctx, dir, func(d os.DirEntry) error {
 			path := filepath.Join(dir, d.Name())
-			if d.IsDir() {
+			link, err := removalEntryIsLink(path, d.Type())
+			if err != nil {
+				return errNoArtifactBinding
+			}
+			isDir := d.IsDir()
+			if link {
+				info, err := os.Stat(path)
+				if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
+					return errNoArtifactBinding
+				}
+				isDir = info.IsDir()
+			} else if !isDir && !d.Type().IsRegular() {
+				return errNoArtifactBinding
+			}
+			if isDir {
 				return walk(path, depth+1)
 			}
 			if !strings.HasSuffix(d.Name(), ".gguf") {
@@ -1221,18 +1255,12 @@ func resolveBoundedLlamaCacheArtifacts(ctx context.Context, store engineModelSto
 		if !validModelRelPath(rel) {
 			return modelFileList{}, fmt.Errorf("cached file %q has a name this service cannot copy safely", rel)
 		}
-		real, info, err := confinedRegularFile(repoDir, filepath.Join(snap, filepath.FromSlash(rel)))
-		if err != nil {
-			return modelFileList{}, err
-		}
 		path := filepath.Join(snap, filepath.FromSlash(rel))
-		if !artifactPathSafe(path) || !artifactPathSafe(real) {
-			return modelFileList{}, errNoArtifactBinding
-		}
 		evidence, err := captureSource(path, false)
-		if err != nil || evidence.target != real || !sameSource(info, evidence.info, false) {
+		if err != nil || !artifactPathSafe(path) || !artifactPathSafe(evidence.target) {
 			return modelFileList{}, errModelInspectionChanged
 		}
+		real, info := evidence.target, evidence.info
 		role := "model"
 		if !ggufIsModel(rel) {
 			role = "companion"
