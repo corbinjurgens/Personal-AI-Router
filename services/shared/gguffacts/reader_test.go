@@ -26,6 +26,57 @@ type fixture struct {
 	order binary.ByteOrder
 }
 
+func TestDecodeTokenShiftCount(t *testing.T) {
+	for _, arch := range []string{"rwkv6", "rwkv7"} {
+		t.Run(arch, func(t *testing.T) {
+			f := fixture{order: binary.LittleEndian}
+			f.header(3, 0, 3)
+			f.key("general.architecture", 8)
+			f.str(arch)
+			f.key(arch+".token_shift_count", 4)
+			f.u32(3)
+			f.key("other.token_shift_count", 4)
+			f.u32(99)
+			facts, err := Decode(context.Background(), []Artifact{artifact(&f, aligned(f.Len()))})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := facts.Shards[0].Numeric[arch+".token_shift_count"]; got.Type != 4 || got.Bits != 3 || got.Array != nil {
+				t.Fatalf("shift=%+v", got)
+			}
+			if _, ok := facts.Shards[0].Numeric["other.token_shift_count"]; ok {
+				t.Fatal("retained foreign namespace")
+			}
+		})
+	}
+}
+
+func TestDecodeTokenShiftCountUsesNumericLimits(t *testing.T) {
+	t.Run("string dimension rejected", func(t *testing.T) {
+		f := fixture{order: binary.LittleEndian}
+		f.header(3, 0, 2)
+		f.key("general.architecture", 8)
+		f.str("rwkv6")
+		f.key("rwkv6.token_shift_count", 8)
+		f.str("3")
+		if _, err := Decode(context.Background(), []Artifact{artifact(&f, aligned(f.Len()))}); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("error=%v", err)
+		}
+	})
+	t.Run("array ceiling retained", func(t *testing.T) {
+		f := fixture{order: binary.LittleEndian}
+		f.header(3, 0, 2)
+		f.key("general.architecture", 8)
+		f.str("rwkv7")
+		f.key("rwkv7.token_shift_count", 9)
+		f.u32(4)
+		f.u64(productionLimits.numeric + 1)
+		if _, err := Decode(context.Background(), []Artifact{artifact(&f, aligned(f.Len()))}); !errors.Is(err, ErrLimit) {
+			t.Fatalf("error=%v", err)
+		}
+	})
+}
+
 func TestTensorRangesAndTruncation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
