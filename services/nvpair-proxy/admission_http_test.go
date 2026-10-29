@@ -28,13 +28,17 @@ import (
 
 func strictHTTPFixture(t *testing.T) (*Proxy, *recordingEngine) {
 	t.Helper()
+	return strictHTTPFixtureWithEngine(t, newRecordingEngine(t, http.StatusOK))
+}
+
+func strictHTTPFixtureWithEngine(t *testing.T, e *recordingEngine) (*Proxy, *recordingEngine) {
+	t.Helper()
 	profile, ok := profileFor("ollama")
 	if !ok {
 		t.Fatal("missing ollama profile")
 	}
 	p := testProxy(profile, NewDiscovery(), profile.FacadePort)
 	configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
-	e := newRecordingEngine(t, http.StatusOK)
 	setBackend(t, p.soleFacade(), e.URL, true)
 	return p, e
 }
@@ -275,19 +279,57 @@ func setBackend(t *testing.T, f *facade, serverURL string, healthy bool) {
 // recordingEngine is an upstream that records what it was sent.
 type recordingEngine struct {
 	*httptest.Server
-	mu      sync.Mutex
-	bodies  []string
-	headers []http.Header
+	mu       sync.Mutex
+	bodies   []string
+	headers  []http.Header
+	requests []string
 }
 
 func newRecordingEngine(t *testing.T, status int) *recordingEngine {
 	t.Helper()
+	return newRecordingEngineForRequest(t, status, "", "")
+}
+
+// fixtureRequestHandler keeps unrelated loopback probes out of a fixture's
+// counters, blocking stream, and buffer leases. Empty method accepts all requests.
+func fixtureRequestHandler(method, path string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if method != "" && (r.Method != method || r.URL.Path != path) {
+			http.NotFound(w, r)
+			return
+		}
+		handler(w, r)
+	}
+}
+
+func assertFixtureRejectsProbe(t *testing.T, serverURL string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, serverURL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("fixture probe: %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("fixture probe status=%d, want 404", resp.StatusCode)
+	}
+}
+
+func newRecordingEngineForRequest(t *testing.T, status int, method, path string) *recordingEngine {
+	t.Helper()
 	e := &recordingEngine{}
-	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	e.Server = httptest.NewServer(fixtureRequestHandler(method, path, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		e.mu.Lock()
 		e.bodies = append(e.bodies, string(b))
 		e.headers = append(e.headers, r.Header.Clone())
+		e.requests = append(e.requests, r.Method+" "+r.URL.Path)
 		e.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -301,6 +343,12 @@ func (e *recordingEngine) hits() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.bodies)
+}
+
+func (e *recordingEngine) requestPaths() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.requests...)
 }
 
 func (e *recordingEngine) lastBody() string {
@@ -715,7 +763,8 @@ func TestHandleHTTP_SoleBusySelfWaitsWithoutSpendingDispatches(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
 			tc := anyCase(t)
-			local := newRecordingEngine(t, http.StatusOK)
+			local := newRecordingEngineForRequest(t, http.StatusOK, http.MethodPost, tc.inferencePath)
+			assertFixtureRejectsProbe(t, local.URL)
 			disc := NewDiscovery()
 			disc.AddManual(selfNode("self", tc.profile.FacadePort, tc.advertisedModel))
 			p := testProxy(tc.profile, disc, tc.profile.FacadePort)
@@ -739,7 +788,7 @@ func TestHandleHTTP_SoleBusySelfWaitsWithoutSpendingDispatches(t *testing.T) {
 			rec := httptest.NewRecorder()
 			p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
 			if rec.Code != http.StatusOK || local.hits() != 1 {
-				t.Fatalf("sole busy self: status %d, local hits %d; want 200 and one dispatch after capacity is released", rec.Code, local.hits())
+				t.Fatalf("sole busy self: status %d, local hits %d, requests %v, context %v, body %q; want 200 and one dispatch after capacity is released", rec.Code, local.hits(), local.requestPaths(), ctx.Err(), rec.Body.String())
 			}
 		})
 	}

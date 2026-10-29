@@ -568,7 +568,10 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
-			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
+			fx := newTierFixtureForRequest(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil, http.MethodPost, "/api/generate")
+			for _, engine := range fx.eng {
+				assertFixtureRejectsProbe(t, engine.URL)
+			}
 			capacity := int64(256<<10) + registryNextTestBytes(fx.p)
 			if later {
 				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
@@ -577,7 +580,8 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 			held := make(chan *bufferLease, 1)
 			var firstCalls atomic.Int32
 			if later {
-				first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				first := httptest.NewServer(fixtureRequestHandler(http.MethodPost, "/api/generate", func(w http.ResponseWriter, r *http.Request) {
+					t.Logf("retry pressure request: %s %s", r.Method, r.URL.Path)
 					firstCalls.Add(1)
 					select {
 					case <-time.After(250 * time.Millisecond):
@@ -600,6 +604,7 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 					w.WriteHeader(http.StatusServiceUnavailable)
 				}))
 				defer first.Close()
+				assertFixtureRejectsProbe(t, first.URL)
 				fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "a", first.URL, "small:1b"))
 			} else {
 				held <- bufferMustAcquire(t, fx.p.buffers, 128<<10)
@@ -650,7 +655,7 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 				t.Fatal("preparation replenished or exceeded original deadline")
 			}
 			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"code":"inference-buffer"`) || fx.eng["b"].hits() != 0 || !later && (firstCalls.Load() != 0 || fx.eng["a"].hits() != 0 || len(notificationsOf(t, fx.w, workloadSubmittedMethod)) != 0) {
-				t.Fatalf("preparation deadline status=%d body=%q first=%d later=%d", rec.Code, rec.Body.String(), firstCalls.Load(), fx.eng["b"].hits())
+				t.Fatalf("preparation deadline status=%d body=%q first=%d later=%d laterRequests=%v", rec.Code, rec.Body.String(), firstCalls.Load(), fx.eng["b"].hits(), fx.eng["b"].requestPaths())
 			}
 			hold.close()
 			ownedAssertHandlerDrained(t, fx.p, owner)
@@ -664,7 +669,8 @@ func TestUnifiedDispatchDestinationPreparationDeadline(t *testing.T) {
 	defer func() { jobDeadline = original }()
 	for _, path := range []string{"self strict", "ingress strict", "ingress concrete", "self strict qualification", "ingress strict qualification"} {
 		t.Run(path, func(t *testing.T) {
-			p, engine := strictHTTPFixture(t)
+			p, engine := strictHTTPFixtureWithEngine(t, newRecordingEngineForRequest(t, http.StatusOK, http.MethodPost, routeChatCompletions))
+			assertFixtureRejectsProbe(t, engine.URL)
 			capacity := int64(256 << 10)
 			if strings.HasPrefix(path, "self") {
 				capacity += registryNextTestBytes(p)
@@ -703,7 +709,7 @@ func TestUnifiedDispatchDestinationPreparationDeadline(t *testing.T) {
 				t.Fatal("destination preparation exceeded request deadline")
 			}
 			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"code":"inference-buffer"`) || engine.hits() != 0 {
-				t.Fatalf("destination status=%d body=%q upstream=%d", rec.Code, rec.Body.String(), engine.hits())
+				t.Fatalf("destination status=%d body=%q upstream=%d requests=%v", rec.Code, rec.Body.String(), engine.hits(), engine.requestPaths())
 			}
 			p.admission.mu.Lock()
 			markers := len(p.admission.strict.markers)

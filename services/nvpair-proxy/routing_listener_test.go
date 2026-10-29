@@ -1921,26 +1921,38 @@ func TestRoutingListener_InferenceHealthyStreamSurvivesActivationAndFormerWriteT
 	release := make(chan struct{})
 	finish := sync.OnceFunc(func() { close(release) })
 	defer finish()
-	done := make(chan error, 1)
-	inferencePeerHandler(t, fx, "peer", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	type completion struct {
+		method string
+		path   string
+		err    error
+	}
+	done := make(chan completion, 1)
+	inferencePeerHandler(t, fx, "peer", fixtureRequestHandler(http.MethodPost, routeChatCompletions, func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("stream peer request: %s %s", r.Method, r.URL.Path)
+		report := func(err error) { done <- completion{r.Method, r.URL.Path, err} }
 		w.Header().Set("Content-Type", "text/event-stream")
 		if _, err := io.WriteString(w, continuitySSEEvent); err != nil {
-			done <- err
+			report(err)
 			return
 		}
 		if err := http.NewResponseController(w).Flush(); err != nil {
-			done <- err
+			report(err)
 			return
 		}
 		select {
 		case <-release:
 		case <-r.Context().Done():
-			done <- r.Context().Err()
+			report(r.Context().Err())
 			return
 		}
 		_, err := io.WriteString(w, "data: [DONE]\n\n")
-		done <- err
+		report(err)
 	}))
+	peer := fx.p.soleFacade().discovery.Nodes()
+	if len(peer) != 1 {
+		t.Fatalf("fixture peers=%d, want one", len(peer))
+	}
+	assertFixtureRejectsProbe(t, "http://"+net.JoinHostPort(peer[0].Addresses[0], strconv.Itoa(peer[0].Port)))
 	port := inferenceListener(t, fx)
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
 		"http://127.0.0.1:"+strconv.Itoa(port)+routeChatCompletions, strings.NewReader(`{"model":"weak","stream":true}`))
@@ -1973,8 +1985,8 @@ func TestRoutingListener_InferenceHealthyStreamSurvivesActivationAndFormerWriteT
 	timer := time.NewTimer(proxyReadHeaderTimeout + 100*time.Millisecond)
 	defer timer.Stop()
 	select {
-	case err := <-done:
-		t.Fatalf("committed stream ended before release: %v", err)
+	case result := <-done:
+		t.Fatalf("committed stream ended before release: %s %s: %v", result.method, result.path, result.err)
 	case <-timer.C:
 	}
 	finish()
@@ -1982,8 +1994,8 @@ func TestRoutingListener_InferenceHealthyStreamSurvivesActivationAndFormerWriteT
 	if err != nil || string(tail) != "data: [DONE]\n\n" || resp.StatusCode != http.StatusOK {
 		t.Fatalf("stream tail %q, %v, status %d", tail, err, resp.StatusCode)
 	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	if result := <-done; result.err != nil {
+		t.Fatalf("stream completion: %s %s: %v", result.method, result.path, result.err)
 	}
 	waitInferenceDrained(t, fx.p)
 }

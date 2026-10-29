@@ -733,11 +733,16 @@ type tierFixture struct {
 
 func newTierFixture(t *testing.T, tc engineCase, pol nodepolicy.Policy, nodes map[string][]string, loaded map[string][]string) *tierFixture {
 	t.Helper()
+	return newTierFixtureForRequest(t, tc, pol, nodes, loaded, "", "")
+}
+
+func newTierFixtureForRequest(t *testing.T, tc engineCase, pol nodepolicy.Policy, nodes map[string][]string, loaded map[string][]string, method, path string) *tierFixture {
+	t.Helper()
 	fx := &tierFixture{w: &recordingWriter{}, eng: map[string]*recordingEngine{}}
 	disc := NewDiscovery()
 	ids := make([]string, 0, len(nodes))
 	for id, models := range nodes {
-		e := newRecordingEngine(t, http.StatusOK)
+		e := newRecordingEngineForRequest(t, http.StatusOK, method, path)
 		fx.eng[id] = e
 		n := nodeFor(t, id, e.URL)
 		n.Models = models
