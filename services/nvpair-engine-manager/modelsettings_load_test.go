@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -83,7 +84,13 @@ func runModelLoadChild() bool {
 	if err != nil {
 		os.Exit(2)
 	}
-	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })}
+	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.Error(w, "unexpected fixture request", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})}
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		os.Exit(2)
 	}
@@ -149,6 +156,270 @@ func typedFixtureCommand(t *testing.T, f modelLoadFixture, rt Runtime) launchCom
 		t.Fatal(err)
 	}
 	return command
+}
+
+type typedBindingCloseFile struct {
+	servingArtifactFile
+	afterClose func()
+}
+
+func (f *typedBindingCloseFile) Close() error {
+	err := f.servingArtifactFile.Close()
+	f.afterClose()
+	return err
+}
+
+func TestLinkedModelTypedBinding(t *testing.T) {
+	nativeFixture := func(t *testing.T) (modelLoadFixture, Runtime, launchCommand) {
+		t.Helper()
+		f := newModelLoadFixture(t)
+		model := "owner/repository:Q4_K_M"
+		commit := strings.Repeat("a", 40)
+		repo := llamaRepoDir(f.root, "owner/repository")
+		writeTestFile(t, filepath.Join(repo, "refs", "main"), []byte(commit))
+		writeInspectionGGUF(t, filepath.Join(repo, "snapshots", commit, "model-Q4_K_M.gguf"), "llama", 0.25, 4096)
+		rt := f.rt
+		args := []string{"--models-max", "1"}
+		rt.LaunchArgs, rt.Serving = &args, nil
+		rt.ModelLoads = []modelconfig.ModelLoad{{ModelID: model}}
+		return f, rt, typedFixtureCommand(t, f, rt)
+	}
+	t.Run("native callback reaches the selected owner", func(t *testing.T) {
+		f, rt, command := nativeFixture(t)
+		calls := copyTestNativeModels(t, f.ex, "fake", rt.ModelLoads[0].ModelID)
+		prepared, err := compileTypedLlamaInputs(context.Background(), f.st, command, rt, false)
+		if err != nil || *calls != 2 || prepared == nil || prepared.Config != nil || len(prepared.ModelLoads) != 1 {
+			t.Fatalf("native compile: result=%+v calls=%d err=%v", prepared, *calls, err)
+		}
+	})
+	t.Run("native compilation completes while settings owns opMu", func(t *testing.T) {
+		f, rt, command := nativeFixture(t)
+		calls := copyTestNativeModels(t, f.ex, "fake", rt.ModelLoads[0].ModelID)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		finished := make(chan error, 1)
+		f.st.opMu.Lock()
+		go func() {
+			_, err := compileTypedLlamaInputs(ctx, f.st, command, rt, false)
+			finished <- err
+		}()
+		select {
+		case err := <-finished:
+			f.st.opMu.Unlock()
+			if err != nil || *calls != 2 {
+				t.Fatalf("compile under settings lock: calls=%d err=%v", *calls, err)
+			}
+		case <-ctx.Done():
+			// Release the lock before waiting for cleanup, even for the RED case.
+			f.st.opMu.Unlock()
+			<-finished
+			t.Fatal("native compilation blocked on the settings operation lock")
+		}
+	})
+	t.Run("missing owner refuses native fallback", func(t *testing.T) {
+		f, rt, command := nativeFixture(t)
+		rt.modelLoadOwner = nil
+		usage := servingReadUsage{}
+		if _, err := compileTypedLlamaInputsExpected(context.Background(), f.st, command, rt, false, servingFileAccess{usage: &usage}, nil); err == nil || usage.HeaderBytes != 0 || usage.SourceBytes != 0 {
+			t.Fatal("native cache fallback bypassed its recognition owner")
+		}
+	})
+	t.Run("recognition withdrawal precedes final cache reads", func(t *testing.T) {
+		f, rt, command := nativeFixture(t)
+		copyTestNativeModels(t, f.ex, "fake", rt.ModelLoads[0].ModelID)
+		native := f.ex.client.Transport
+		calls, forbidden, opened, closed := 0, 0, 0, 0
+		withdrawn := false
+		f.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+			if request.Method != http.MethodGet || request.URL.Path != "/copy-test/fake/models" {
+				t.Fatalf("unexpected native request: %s %s", request.Method, request.URL.Path)
+			}
+			calls++
+			if calls == 2 {
+				withdrawn = true
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":[]}`))}, nil
+			}
+			return native.RoundTrip(request)
+		})
+		var reads []inspectionRead
+		access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+			file, err := os.Open(path)
+			if err != nil {
+				return nil, err
+			}
+			opened++
+			return &inspectionCountFile{File: file, reads: &reads, opened: &opened, closed: &closed, onRead: func(int64, int) {
+				if withdrawn {
+					forbidden++
+				}
+			}}, nil
+		}}
+		if _, err := compileTypedLlamaInputsExpected(context.Background(), f.st, command, rt, false, access, nil); err == nil || !withdrawn || forbidden != 0 || opened != closed {
+			t.Fatalf("withdrawal: err=%v calls=%d forbidden=%d opened=%d closed=%d", err, calls, forbidden, opened, closed)
+		}
+	})
+
+	replacement := func(name, operation, kind string, atOpen int) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelLoadFixture(t)
+			rt := f.rt
+			command := f.command
+			if operation == "native" {
+				f, rt, command = nativeFixture(t)
+				copyTestNativeModels(t, f.ex, "fake", rt.ModelLoads[0].ModelID)
+			}
+			if operation == "compile" {
+				rt = convertModelLoadFixture(t, f)
+				command = typedFixtureCommand(t, f, rt)
+			}
+			target := filepath.Join(f.root, "medium.gguf")
+			if kind == "selector" {
+				target = f.source
+				if operation == "native" {
+					target = filepath.Join(llamaRepoDir(f.root, "owner/repository"), "refs", "main")
+				}
+			}
+			if kind == "build" {
+				// Compilation reads build identity but never executes this file.
+				target = filepath.Join(t.TempDir(), "native-build")
+				writeTestFile(t, target, []byte("synthetic native build"))
+				command.Bin = target
+			}
+			var reads []inspectionRead
+			opens, opened, closed, forbidden := 0, 0, 0, 0
+			replaced := false
+			access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+				if path == target {
+					opens++
+					if opens == atOpen {
+						info, err := os.Stat(target)
+						if err != nil {
+							t.Fatal(err)
+						}
+						data, err := os.ReadFile(target)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Rename(target, target+".old"); err != nil {
+							t.Fatal(err)
+						}
+						writeTestFile(t, target, data)
+						if err := os.Chtimes(target, info.ModTime(), info.ModTime()); err != nil {
+							t.Fatal(err)
+						}
+						replaced = true
+					}
+				}
+				file, err := os.Open(path)
+				if err != nil {
+					return nil, err
+				}
+				opened++
+				return &inspectionCountFile{File: file, reads: &reads, opened: &opened, closed: &closed, onRead: func(int64, int) {
+					if path == target && replaced {
+						forbidden++
+					}
+				}}, nil
+			}}
+			var err error
+			if operation == "conversion" {
+				_, err = f.ex.previewTypedLlamaConversionExpected(context.Background(), f.st, command, rt, access, nil)
+			} else {
+				_, err = compileTypedLlamaInputsExpected(context.Background(), f.st, command, rt, false, access, nil)
+			}
+			if err == nil || !replaced || forbidden != 0 || opened != closed {
+				t.Fatalf("replacement: err=%v replaced=%v target opens=%d forbidden=%d opened=%d closed=%d", err, replaced, opens, forbidden, opened, closed)
+			}
+		})
+	}
+	replacement("final artifact sampling keeps initial identity", "compile", "artifact", 4)
+	replacement("final HF ref read keeps initial identity", "native", "selector", 7)
+	replacement("final native build sampling keeps initial identity", "compile", "build", 2)
+	replacement("conversion compilation keeps external artifact identity", "conversion", "artifact", 3)
+	replacement("conversion first resolution keeps initial source identity", "conversion", "selector", 4)
+	replacement("conversion final source sampling keeps initial identity", "conversion", "selector", 12)
+	t.Run("conversion retains selector after first complete source read", func(t *testing.T) {
+		f := newModelLoadFixture(t)
+		data, err := os.ReadFile(f.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(f.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reads []inspectionRead
+		opens, opened, closed, forbidden := 0, 0, 0, 0
+		replaced := false
+		access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+			file, err := os.Open(path)
+			if err != nil {
+				return nil, err
+			}
+			opened++
+			counted := &inspectionCountFile{File: file, reads: &reads, opened: &opened, closed: &closed, onRead: func(int64, int) {
+				if path == f.source && replaced {
+					forbidden++
+				}
+			}}
+			if path != f.source {
+				return counted, nil
+			}
+			opens++
+			if opens != 3 {
+				return counted, nil
+			}
+			// The source reader has completed its final identity check before
+			// closing this handle. Replace before resolver admission starts.
+			return &typedBindingCloseFile{servingArtifactFile: counted, afterClose: func() {
+				if err := os.Rename(f.source, f.source+".old"); err != nil {
+					t.Fatal(err)
+				}
+				writeTestFile(t, f.source, data)
+				if err := os.Chtimes(f.source, info.ModTime(), info.ModTime()); err != nil {
+					t.Fatal(err)
+				}
+				replaced = true
+			}}, nil
+		}}
+		_, err = f.ex.previewTypedLlamaConversionExpected(context.Background(), f.st, f.command, f.rt, access, nil)
+		if err == nil || !replaced || forbidden != 0 || opened != closed {
+			t.Fatalf("initial selector replacement: err=%v replaced=%v forbidden=%d opened=%d closed=%d", err, replaced, forbidden, opened, closed)
+		}
+	})
+
+	t.Run("saved artifact metadata checked before sampling", func(t *testing.T) {
+		f := newModelLoadFixture(t)
+		rt := convertModelLoadFixture(t, f)
+		target := rt.ModelLoads[0].Resolved.Artifacts[0].Path
+		rt.ModelLoads[0].Resolved.Artifacts[0].Size = "1"
+		opens := 0
+		access := servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+			if path == target {
+				opens++
+			}
+			return os.Open(path)
+		}}
+		if _, err := compileTypedLlamaInputsExpected(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, true, access, nil); err == nil || opens != 0 {
+			t.Fatalf("saved metadata: err=%v artifact opens=%d", err, opens)
+		}
+	})
+	t.Run("exact outside custom artifacts remain usable while off", func(t *testing.T) {
+		f := newModelLoadFixture(t)
+		outside := filepath.Join(t.TempDir(), "outside.gguf")
+		writeInspectionGGUF(t, outside, "llama", 0.25, 4096)
+		writeTestFile(t, f.source, []byte("[external-alias]\nmodel = "+outside+"\ngpu-layers = 0\n"))
+		conversion, err := f.ex.previewTypedLlamaConversion(context.Background(), f.st, f.command, f.rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt := conversion.Runtime
+		rt.modelLoadOwner = nil
+		prepared, err := compileTypedLlamaInputs(context.Background(), f.st, typedFixtureCommand(t, f, rt), rt, true)
+		if err != nil || prepared == nil || prepared.ModelLoads[0].Resolved.Artifacts[0].Path != outside || f.st.running {
+			t.Fatalf("outside exact custom artifacts: result=%+v err=%v", prepared, err)
+		}
+	})
 }
 
 func captureModelLoadChild(t *testing.T, path string) ([]string, []byte) {
