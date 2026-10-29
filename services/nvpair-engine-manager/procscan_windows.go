@@ -13,7 +13,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func listProcessNames(ctx context.Context) ([]string, error) {
+func listProcessRecords(ctx context.Context) ([]processRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -25,12 +25,12 @@ func listProcessNames(ctx context.Context) ([]string, error) {
 	var entry windows.ProcessEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))
 	err = windows.Process32First(snapshot, &entry)
-	var names []string
+	var records []processRecord
 	for err == nil {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		names = append(names, windows.UTF16ToString(entry.ExeFile[:]))
+		records = append(records, windowsProcessRecord(entry))
 		err = windows.Process32Next(snapshot, &entry)
 	}
 	if err := ctx.Err(); err != nil {
@@ -39,5 +39,9 @@ func listProcessNames(ctx context.Context) ([]string, error) {
 	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
 		return nil, err
 	}
-	return names, nil
+	return records, nil
+}
+
+func windowsProcessRecord(entry windows.ProcessEntry32) processRecord {
+	return processRecord{int(entry.ProcessID), windows.UTF16ToString(entry.ExeFile[:])}
 }

@@ -21,6 +21,7 @@ import (
 	"nvpair-shared/appdir"
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/durablefile"
 )
 
 // bundledManifests are the default engine manifests compiled into the
@@ -45,8 +46,103 @@ func main() {
 	loadedPollSec := flag.Int("loaded-poll-interval", defaultLoadedPollSeconds, "seconds between loaded-model polls that drive engine:models-changed pushes; 0 disables the watcher")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	uninstallManaged := flag.Bool("uninstall-managed", false, "remove every engine PAIR installed, preserving downloaded models, then exit; for the platform uninstallers")
+	freshProfile := flag.Bool("initialize-fresh-profile", false, "allocate a fresh profile during an exclusive offline interval")
+	amend := flag.Bool("amend-copy-baseline", false, "amend reviewed empty history during an exclusive offline interval")
+	expected := flag.String("expected-journal-sha256", "", "reviewed exact journal SHA-256")
+	disposition := flag.String("copy-baseline-disposition", "", "explicit complete-empty-history disposition")
+	attest := flag.Bool("attest-profile-quiescent", false, "attest all profile users are excluded throughout the interval")
+	allowOld := flag.Bool("allow-empty-old-journal", false, "allow precisely empty predecessor journal")
+	previousReviewed := flag.Bool("previous-profile-reviewed", false, "attest previous application profile review")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "unexpected positional arguments")
+		os.Exit(1)
+	}
+	amendFlags := map[string]bool{"amend-copy-baseline": true, "expected-journal-sha256": true, "copy-baseline-disposition": true, "attest-profile-quiescent": true, "allow-empty-old-journal": true, "previous-profile-reviewed": true}
+	present := make(map[string]bool)
+	amendSpecified, amendConflict := false, false
+	flag.Visit(func(f *flag.Flag) {
+		present[f.Name] = true
+		if amendFlags[f.Name] {
+			amendSpecified = true
+		} else {
+			amendConflict = true
+		}
+	})
+	if amendSpecified {
+		o := copyBaselineOptions{Mode: *amend, Expected: *expected, Disposition: *disposition, Attest: *attest, AllowOld: *allowOld, PreviousReviewed: *previousReviewed}
+		if amendConflict || o.validate() != nil || !present["amend-copy-baseline"] || present["allow-empty-old-journal"] && !*allowOld || present["previous-profile-reviewed"] && !*previousReviewed {
+			fmt.Println(unavailableCopyBaselineResult(o).summary())
+			fmt.Fprintln(os.Stderr, "invalid amendment flags or mode conflict")
+			os.Exit(1)
+		}
+		if err := offlineEnvironmentGuard(); err != nil {
+			fmt.Println(unavailableCopyBaselineResult(o).summary())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		current, err := appdir.Dir()
+		if err != nil {
+			fmt.Println(unavailableCopyBaselineResult(o).summary())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		previous, err := appdir.PreviousDir()
+		if err != nil {
+			fmt.Println(unavailableCopyBaselineResult(o).summary())
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		result, err := amendCopyBaseline(current, previous, o, hostCopyBaselineQuiescence, durablefile.Replacer{}, durablefile.Replacer{})
+		fmt.Println(result.summary())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "amendment refused or unconfirmed; hold offline interval: %.240s\n", err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+	freshSpecified := false
+	conflict := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "initialize-fresh-profile" {
+			freshSpecified = true
+		} else {
+			conflict = true
+		}
+	})
+	if freshSpecified {
+		if !*freshProfile || conflict {
+			fmt.Fprintln(os.Stderr, "fresh profile mode cannot be combined with other arguments")
+			os.Exit(1)
+		}
+		if err := offlineEnvironmentGuard(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		current, err := appdir.Dir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		previous, err := appdir.PreviousDir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		unsupported, err := initializeFreshProfile(current, previous, durablefile.Replacer{})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("fresh journal publication and readback confirmed")
+		if unsupported {
+			fmt.Println("fresh-directory durability: UNVERIFIED (unsupported)")
+		} else {
+			fmt.Println("fresh-directory entries confirmed")
+		}
+		return
+	}
 	if err := validateControlHost(*controlHost); err != nil {
 		log.Fatalf("invalid --control-host: %v", err)
 	}
