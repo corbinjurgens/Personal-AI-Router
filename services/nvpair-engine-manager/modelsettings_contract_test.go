@@ -177,8 +177,7 @@ func TestModelSettingsContractTargetMemoryFrozenCounterTimeline(t *testing.T) {
 	if candidatePrices != beforePrices {
 		t.Fatal("accepted replay searched Auto candidates")
 	}
-	// The same trusted worker route must still refuse the actual partial cost
-	// provider. Synthetic complete arithmetic above never enables production.
+	// Advisory partial costs do not enable production Auto resolution.
 	f.ex.modelEstimates = modelEstimateState{}
 	reply = call(settings.WorkerRequest[settings.Request]{Request: request, Memory: memory("8589934592"), NativeInitAllowed: true})
 	if reply.Error == nil {
@@ -188,9 +187,6 @@ func TestModelSettingsContractTargetMemoryFrozenCounterTimeline(t *testing.T) {
 		}
 		if len(partial.Errors) == 0 || partial.Auto != nil && (partial.Auto.Resolved != nil || partial.Auto.Status == "fits") {
 			t.Fatal("production partial provider authorized Auto through the worker route")
-		}
-		if partial.Estimate != nil && (partial.Estimate.CapacityFit == "fits" || partial.Estimate.FreeFit == "fits") {
-			t.Fatal("production partial provider advertised Fits")
 		}
 	}
 }
@@ -223,7 +219,7 @@ func TestModelSettingsContractHostProvenanceSurvivesUnavailableGPUMap(t *testing
 			for _, domain := range out.Domains {
 				if domain.Kind == "host" {
 					hostSeen = true
-					if domain.CapacityBytes != fact.Bytes || domain.FreeBytes != "0" || domain.CapacitySource != fact.Source || domain.FreeSource != fact.Source || domain.CapacityTimestamp != fact.SampledAt.Format(time.RFC3339Nano) || domain.FreeTimestamp != fact.SampledAt.Format(time.RFC3339Nano) || domain.RemainingValidityMS <= 0 || domain.RemainingValidityMS > noderec.MemoryFreshMS || domain.CapacityFit != "unknown" || domain.FreeFit != "unknown" {
+					if domain.CapacityBytes != fact.Bytes || domain.FreeBytes != "0" || domain.CapacitySource != fact.Source || domain.FreeSource != fact.Source || domain.CapacityTimestamp != fact.SampledAt.Format(time.RFC3339Nano) || domain.FreeTimestamp != fact.SampledAt.Format(time.RFC3339Nano) || domain.RemainingValidityMS <= 0 || domain.RemainingValidityMS > noderec.MemoryFreshMS || domain.CapacityFit != "fits" || domain.FreeFit != "exceeds" || !slices.Contains(domain.Unknowns, "not priced (any pool): compute-workspace") {
 						t.Fatalf("independent host facts disappeared with unavailable GPU map: %+v", domain)
 					}
 				}

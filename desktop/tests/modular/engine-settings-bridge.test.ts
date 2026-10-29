@@ -218,6 +218,71 @@ function withoutField(value: JsonValue, field: string): JsonValue {
 }
 
 describe('unified settings bridge', () => {
+    it('preserves exact component and domain ranges', () => {
+        const parsed = parseInspectModel({
+            ...memoryPlanInspectionFixture(),
+            estimate: {
+                status: 'partial',
+                domains: [
+                    {
+                        id: 'ram',
+                        kind: 'host',
+                        requiredBytes: '9007199254740993',
+                        requiredLowBytes: '0',
+                        requiredHighBytes: '18446744073709551615'
+                    }
+                ],
+                components: [
+                    {
+                        name: 'weights',
+                        domainId: 'ram',
+                        status: 'partial',
+                        bytes: '9007199254740993',
+                        lowBytes: '0',
+                        highBytes: '18446744073709551615',
+                        basis: 'heuristic',
+                        reason: 'unpriced residual'
+                    }
+                ]
+            }
+        })
+        expect(parsed.estimate.components?.[0].bytes).toBe('9007199254740993')
+        expect(parsed.estimate.domains?.[0].requiredHighBytes).toBe('18446744073709551615')
+    })
+    it.each<[JsonValue]>([
+        [{ lowBytes: null }],
+        [{ highBytes: null }],
+        [{ lowBytes: '101' }],
+        [{ highBytes: '99' }],
+        [{ highBytes: '0100' }],
+        [{ highBytes: '18446744073709551616' }],
+        [{ basis: 'guess' }],
+        [{ bytes: 100 }],
+        [{ status: 'unknown' }],
+        [{ status: 'partial' }]
+    ])('rejects malformed ranged components %j', patch => {
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch))
+            throw new Error('Invalid fixture')
+        expect(() =>
+            parseInspectModel({
+                ...memoryPlanInspectionFixture(),
+                estimate: {
+                    status: 'partial',
+                    components: [
+                        {
+                            name: 'weights',
+                            status: 'estimated',
+                            bytes: '100',
+                            lowBytes: '100',
+                            highBytes: '100',
+                            basis: 'derived',
+                            ...patch
+                        }
+                    ]
+                }
+            })
+        ).toThrow()
+    })
     beforeEach(() => {
         vi.clearAllMocks()
         mocks.supervisor.callProcess.mockImplementation(async (_name: string, method: string) =>
@@ -264,6 +329,28 @@ describe('unified settings bridge', () => {
         expect(result.estimate.memoryPlan?.devices[0].groups[1].bytes).toBeUndefined()
         expect(result.estimate.status).toBe('partial')
         expect(result.estimate.memoryPlan?.verdict.status).toBe('not_evaluated')
+    })
+
+    it('retains a memory plan across selected figure overrides and clearing', () => {
+        const original = memoryPlanInspectionFixture()
+        for (const kind of ['engine-report', 'user-stated', 'measured', 'engine-report']) {
+            const inspection = {
+                ...original,
+                estimate: {
+                    ...original.estimate,
+                    estimateSource: {
+                        ...original.estimate.estimateSource,
+                        kind,
+                        ...(kind === 'engine-report'
+                            ? {}
+                            : { provider: 'selected-figure', revision: 'recorded-at' })
+                    }
+                }
+            }
+            const parsed = parseInspectModel(inspection)
+            expect(parsed.estimate.estimateSource?.kind).toBe(kind)
+            expect(parsed.estimate.memoryPlan).toEqual(original.estimate.memoryPlan)
+        }
     })
 
     it('detaches nested memory plans from their transport input', () => {
@@ -601,7 +688,16 @@ describe('unified settings bridge', () => {
                 ...original,
                 estimate: {
                     ...original.estimate,
-                    components: [{ name: 'weights', status: 'estimated', bytes: '0' }]
+                    components: [
+                        {
+                            name: 'weights',
+                            status: 'estimated',
+                            bytes: '0',
+                            lowBytes: '0',
+                            highBytes: '0',
+                            basis: 'derived'
+                        }
+                    ]
                 }
             })
         ).toThrow('provenance or status')

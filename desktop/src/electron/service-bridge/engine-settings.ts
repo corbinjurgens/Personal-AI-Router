@@ -858,6 +858,21 @@ function estimateSource(value: JsonValue): NonNullable<Estimate['estimateSource'
         unpricedCosts: costs?.map(cost => boundedText(cost, 256, true))
     }
 }
+function validateByteRange(
+    value: string | undefined,
+    low: string | undefined,
+    high: string | undefined,
+    required: boolean
+): void {
+    if (value === undefined && low === undefined && high === undefined && !required) return
+    if (value === undefined || (required && (low === undefined || high === undefined)))
+        throw new Error('Incomplete byte range.')
+    if (
+        (low !== undefined && BigInt(low) > BigInt(value)) ||
+        (high !== undefined && BigInt(high) < BigInt(value))
+    )
+        throw new Error('Invalid byte range.')
+}
 function estimate(value: JsonValue | undefined): Estimate {
     const row = shape(value, [
         'status',
@@ -902,6 +917,8 @@ function estimate(value: JsonValue | undefined): Estimate {
                           'capacityBytes',
                           'freeBytes',
                           'requiredBytes',
+                          'requiredLowBytes',
+                          'requiredHighBytes',
                           'reserveBytes',
                           'capacityFit',
                           'freeFit',
@@ -921,6 +938,8 @@ function estimate(value: JsonValue | undefined): Estimate {
                           capacityBytes: optionalUnsigned(item.capacityBytes),
                           freeBytes: optionalUnsigned(item.freeBytes),
                           requiredBytes: optionalUnsigned(item.requiredBytes),
+                          requiredLowBytes: optionalUnsigned(item.requiredLowBytes),
+                          requiredHighBytes: optionalUnsigned(item.requiredHighBytes),
                           reserveBytes: optionalUnsigned(item.reserveBytes),
                           capacityFit: memoryFit(item.capacityFit),
                           freeFit: memoryFit(item.freeFit),
@@ -938,16 +957,18 @@ function estimate(value: JsonValue | undefined): Estimate {
             row.components === undefined
                 ? undefined
                 : boundedArray(row.components, 256).map(value => {
-                      const item = shape(value, ['name', 'domainId', 'status', 'bytes', 'reason'])
+                      const item = shape(value, [
+                          'name',
+                          'domainId',
+                          'status',
+                          'bytes',
+                          'lowBytes',
+                          'highBytes',
+                          'basis',
+                          'reason'
+                      ])
                       return {
-                          name: choice(item.name, [
-                              'weights',
-                              'attention-cache',
-                              'recurrent-state',
-                              'compute-workspace',
-                              'prompt-cache',
-                              'companions'
-                          ]),
+                          name: memoryComponentName(item.name),
                           domainId: optionalText(item.domainId),
                           status: choice(item.status, [
                               'estimated',
@@ -956,11 +977,44 @@ function estimate(value: JsonValue | undefined): Estimate {
                               'excluded'
                           ]),
                           bytes: optionalUnsigned(item.bytes),
+                          lowBytes: optionalUnsigned(item.lowBytes),
+                          highBytes: optionalUnsigned(item.highBytes),
+                          basis:
+                              item.basis === undefined
+                                  ? undefined
+                                  : choice(item.basis, [
+                                        'derived',
+                                        'heuristic',
+                                        'calibrated',
+                                        'observed'
+                                    ]),
                           reason: optionalText(item.reason)
                       }
                   }),
         assumptions: strings(row.assumptions),
         unknowns: strings(row.unknowns)
+    }
+    for (const domain of result.domains ?? []) {
+        validateByteRange(
+            domain.requiredBytes,
+            domain.requiredLowBytes,
+            domain.requiredHighBytes,
+            false
+        )
+    }
+    for (const component of result.components ?? []) {
+        const priced = component.status === 'estimated' || component.status === 'partial'
+        validateByteRange(component.bytes, component.lowBytes, component.highBytes, priced)
+        if (
+            (priced && !component.basis) ||
+            (!priced &&
+                (component.bytes !== undefined ||
+                    component.lowBytes !== undefined ||
+                    component.highBytes !== undefined ||
+                    component.basis !== undefined)) ||
+            (component.status === 'partial' && !component.reason)
+        )
+            throw new Error('Invalid component range or basis.')
     }
     const domains = new Set(result.domains?.map(item => item.id))
     const physicalDevices =
@@ -983,9 +1037,10 @@ function estimate(value: JsonValue | undefined): Estimate {
         const source = result.estimateSource
         if (
             !source ||
-            source.kind !== 'engine-report' ||
-            source.provider !== plan.identity.provider ||
-            source.revision !== plan.identity.revision ||
+            !['engine-report', 'user-stated', 'measured'].includes(source.kind) ||
+            (source.kind === 'engine-report' &&
+                (source.provider !== plan.identity.provider ||
+                    source.revision !== plan.identity.revision)) ||
             result.components?.length ||
             !['partial', 'estimated'].includes(result.status) ||
             ((memoryPlanPartial(plan) || source.unpricedCosts?.length) &&
@@ -995,7 +1050,7 @@ function estimate(value: JsonValue | undefined): Estimate {
     }
     return result
 }
-function bufferComponent(
+function memoryComponentName(
     value: JsonValue | undefined
 ): NonNullable<LoadBufferObservation['baseline']>[number]['component'] {
     return choice(value, [
@@ -1004,7 +1059,8 @@ function bufferComponent(
         'recurrent-state',
         'compute-workspace',
         'prompt-cache',
-        'companions'
+        'companions',
+        'runtime-overhead'
     ])
 }
 function bufferReason(value: JsonValue | undefined): NonNullable<LoadBufferObservation['reason']> {
@@ -1246,7 +1302,7 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
                 : boundedArray(row.baseline, 64).map(value => {
                       const component = shape(value, ['component', 'status', 'bytes'])
                       return {
-                          component: bufferComponent(component.component),
+                          component: memoryComponentName(component.component),
                           status: choice(component.status, [
                               'estimated',
                               'partial',
@@ -1270,7 +1326,7 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
                           'deltaUpperBytes'
                       ])
                       return {
-                          component: bufferComponent(comparison.component),
+                          component: memoryComponentName(comparison.component),
                           status: choice(comparison.status, ['compatible', 'unknown']),
                           estimatedBytes: optionalUnsigned(comparison.estimatedBytes),
                           lowerBytes: optionalUnsigned(comparison.lowerBytes),
@@ -1286,7 +1342,7 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
     if (
         result.estimatorRevision !== undefined &&
         result.estimatorRevision !==
-            'pair-gguf/1;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385'
+            'pair-gguf/2;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385'
     )
         throw new Error('Unsupported buffer estimator revision.')
     if (result.current && (result.status === 'unknown' || !result.sampleId))

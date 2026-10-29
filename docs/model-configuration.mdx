@@ -58,19 +58,32 @@ qualification.
 Memory advice uses the service's per-pool `capacityFit` and `freeFit` values:
 `unknown`, `exceeds`, `tight` or `fits`. Available memory is distinct from total
 capacity. Each independent pool reserves ten percent of its capacity, rounded
-up, plus 512 MiB. Required bytes above available bytes exceed the pool; equality
-is tight unless the reserve also fits. UMA represents one shared pool.
+up, plus 512 MiB. Expected bytes above available bytes exceed the pool. A pool
+fits when its upper bound plus reserve is at most the available amount;
+otherwise it is tight, including equality between expected and available bytes.
+UMA represents one shared pool.
 Measurement source, sample identity, measurement timestamps and bounded remaining
 validity accompany comparisons. The estimate timestamp describes computation,
 not a new measurement. Expiry withdraws comparisons while preserving components.
 
 The canonical component names are `weights`, `attention-cache`,
-`recurrent-state`, `compute-workspace`, `prompt-cache` and `companions`.
-Charges crossing independent pools appear as separate component rows. Unsized
-workspace, missing mapping and other incomplete costs keep comparisons Unknown.
-Current production costs remain partial: telemetry does not enable production
-Fits or Auto. Complete synthetic arithmetic fixtures establish comparison
-boundaries only. Worker-only memory envelopes and frozen validation are defined
+`recurrent-state`, `compute-workspace`, `prompt-cache`, `companions` and
+`runtime-overhead`. Priced rows carry canonical decimal `bytes` (expected),
+`lowBytes` and `highBytes`, with `lowBytes <= bytes <= highBytes`, and a basis:
+`derived`, `heuristic`, `calibrated` or `observed`. Partial rows retain the range
+of their priced portion and name the unpriced residual. Unknown rows carry no
+bytes. Charges crossing independent pools appear as separate component rows.
+PAIR estimates sum expected and upper amounts on each pool. Partial and unknown
+costs add `not priced` warnings; domainless omissions warn on every pool. Adding
+uncertainty never improves a verdict. Unknown weights, expired or missing capacity
+and unmapped device pools keep their comparisons Unknown.
+User-stated, measured and engine-report sources instead use each domain's
+`requiredBytes` and optional `requiredLowBytes` and `requiredHighBytes`, counted
+once, with source-level unpriced costs shown as warnings. Component rows remain
+display information for these sources. A retained engine memory plan keeps its
+own provenance when a stated or measured figure is selected.
+These comparisons are advisory and do not enable production Auto or admission.
+Worker-only memory envelopes and frozen validation are defined
 separately from public inspection and portable load edits. The target broker
 injects its own self observation. Reviewed GPU allocations persist a full UUID
 constraint and use `CUDA0` within that child-only visibility set; replay validates

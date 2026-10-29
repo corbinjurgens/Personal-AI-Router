@@ -221,7 +221,7 @@ func (o BufferObservation) Validate() error {
 			return fmt.Errorf("loadObservation: invalid option unknown")
 		}
 	}
-	if o.EstimatorRevision != "" && o.EstimatorRevision != "pair-gguf/1;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385" {
+	if o.EstimatorRevision != "" && o.EstimatorRevision != "pair-gguf/2;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385" {
 		return fmt.Errorf("loadObservation: unsupported estimator revision")
 	}
 	for _, a := range o.Artifacts {

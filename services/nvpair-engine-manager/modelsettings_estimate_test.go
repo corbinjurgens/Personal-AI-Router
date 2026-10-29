@@ -609,12 +609,15 @@ func TestModelSettingsEstimateCacheWithdrawsExpiredComparisons(t *testing.T) {
 	}
 }
 
-func TestModelSettingsEstimateProductionPartialCannotFit(t *testing.T) {
+func TestModelSettingsEstimateProductionPartialFitsWithWarnings(t *testing.T) {
 	in := estimateFixture("llama")
 	in.Memory = autoTestMemory(time.Now())
+	in.Memory.UMA = true
+	in.Memory.Domains = in.Memory.Domains[:1]
+	in.Memory.Domains[0].Kind = "shared"
 	out := estimateFixtureResult(t, in)
-	if out.Status != "partial" || out.FreeFit != "unknown" || out.CapacityFit != "unknown" {
-		t.Fatalf("partial production estimator became eligible: %+v", out)
+	if out.Status != "partial" || out.FreeFit != "fits" || out.CapacityFit != "fits" || len(out.Domains[0].Unknowns) == 0 {
+		t.Fatalf("partial production estimator lost advisory fit/warnings: %+v", out)
 	}
 }
 

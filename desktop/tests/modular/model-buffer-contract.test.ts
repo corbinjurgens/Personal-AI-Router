@@ -16,7 +16,7 @@ function observation(): JsonObject {
         upstreamPin: '7fe450e19305b828c199d602c23a8337aaa1f03b',
         buildAssurance: 'recognized-self-reported-pin',
         estimatorRevision:
-            'pair-gguf/1;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385',
+            'pair-gguf/2;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385',
         inputIdentity: 'b'.repeat(64),
         sourceIdentity: 'c'.repeat(64),
         optionsIdentity: 'd'.repeat(64),
@@ -94,6 +94,20 @@ function first(value: JsonValue | undefined): JsonObject {
 }
 
 describe('load buffer Inspect contract', () => {
+    it('uses the neutral component vocabulary for estimates, baselines and comparisons', () => {
+        const source = observation()
+        source.baseline = [{ component: 'runtime-overhead', status: 'unknown' }]
+        source.comparisons = [{ component: 'runtime-overhead', status: 'unknown' }]
+        const input = inspection(source)
+        input.estimate = {
+            status: 'partial',
+            components: [{ name: 'runtime-overhead', status: 'unknown', reason: 'unpriced' }]
+        }
+        const result = parseInspectModel(input)
+        expect(result.estimate.components?.[0].name).toBe('runtime-overhead')
+        expect(result.loadObservation?.baseline?.[0].component).toBe('runtime-overhead')
+        expect(result.loadObservation?.comparisons?.[0].component).toBe('runtime-overhead')
+    })
     it('preserves rounded service intervals, frozen baseline and self-reported assurance', () => {
         const source = observation()
         const parsed = parseInspectModel(inspection(source)).loadObservation

@@ -171,6 +171,8 @@ type MemoryDomain struct {
 	CapacityBytes       string   `json:"capacityBytes,omitempty"`
 	FreeBytes           string   `json:"freeBytes,omitempty"`
 	RequiredBytes       string   `json:"requiredBytes,omitempty"`
+	RequiredLowBytes    string   `json:"requiredLowBytes,omitempty"`
+	RequiredHighBytes   string   `json:"requiredHighBytes,omitempty"`
 	ReserveBytes        string   `json:"reserveBytes,omitempty"`
 	CapacityFit         string   `json:"capacityFit,omitempty"`
 	FreeFit             string   `json:"freeFit,omitempty"`
@@ -184,11 +186,14 @@ type MemoryDomain struct {
 	Unknowns            []string `json:"unknowns,omitempty"`
 }
 type EstimateComponent struct {
-	Name     string `json:"name"`
-	DomainID string `json:"domainId,omitempty"`
-	Status   string `json:"status"`
-	Bytes    string `json:"bytes,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+	Name      string `json:"name"`
+	DomainID  string `json:"domainId,omitempty"`
+	Status    string `json:"status"`
+	Bytes     string `json:"bytes,omitempty"`
+	LowBytes  string `json:"lowBytes,omitempty"`
+	HighBytes string `json:"highBytes,omitempty"`
+	Basis     string `json:"basis,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 // Estimate is advisory, never allocation/admission/qualification authority.
@@ -871,7 +876,7 @@ func (e Estimate) Validate() error {
 		if err := e.MemoryPlan.Validate(); err != nil {
 			return err
 		}
-		if e.EstimateSource == nil || e.EstimateSource.Kind != "engine-report" || e.EstimateSource.Provider != e.MemoryPlan.Identity.Provider || e.EstimateSource.Revision != e.MemoryPlan.Identity.Revision || len(e.Components) != 0 {
+		if e.EstimateSource == nil || !slices.Contains([]string{"engine-report", "user-stated", "measured"}, e.EstimateSource.Kind) || len(e.Components) != 0 || (e.EstimateSource.Kind == "engine-report" && (e.EstimateSource.Provider != e.MemoryPlan.Identity.Provider || e.EstimateSource.Revision != e.MemoryPlan.Identity.Revision)) {
 			return fmt.Errorf("estimate: memory plan requires matching engine provenance and separate accounting")
 		}
 		if !slices.Contains([]string{"partial", "estimated"}, e.Status) || (e.MemoryPlan.partial() || len(e.EstimateSource.UnpricedCosts) != 0) && e.Status != "partial" {
@@ -934,10 +939,13 @@ func (e Estimate) Validate() error {
 		if !validMemoryFit(d.CapacityFit) || !validMemoryFit(d.FreeFit) || d.RemainingValidityMS < 0 || d.RemainingValidityMS > 5000 || len(d.Unknowns) > 256 {
 			return fmt.Errorf("estimate.domains: invalid comparison or validity")
 		}
-		for _, value := range []string{d.CapacityBytes, d.FreeBytes, d.RequiredBytes, d.ReserveBytes} {
+		for _, value := range []string{d.CapacityBytes, d.FreeBytes, d.RequiredBytes, d.RequiredLowBytes, d.RequiredHighBytes, d.ReserveBytes} {
 			if value != "" && ValidateUnsignedDecimal(value) != nil {
 				return fmt.Errorf("estimate.domains: expected canonical byte strings")
 			}
+		}
+		if err := validateEstimateRange(d.RequiredBytes, d.RequiredLowBytes, d.RequiredHighBytes, false); err != nil {
+			return err
 		}
 	}
 	for _, c := range e.Components {
@@ -947,9 +955,41 @@ func (e Estimate) Validate() error {
 		if boundedText(c.Name, 256, true) != nil || !slices.Contains([]string{"estimated", "partial", "unknown", "excluded"}, c.Status) || c.DomainID != "" && !seen[c.DomainID] {
 			return fmt.Errorf("estimate.components: invalid component or domain")
 		}
-		if c.Bytes != "" && ValidateUnsignedDecimal(c.Bytes) != nil {
-			return fmt.Errorf("estimate.components: expected canonical byte string")
+		priced := c.Status == "estimated" || c.Status == "partial"
+		if err := validateEstimateRange(c.Bytes, c.LowBytes, c.HighBytes, priced); err != nil {
+			return err
+		}
+		if priced && !slices.Contains([]string{"derived", "heuristic", "calibrated", "observed"}, c.Basis) || !priced && (c.Bytes != "" || c.LowBytes != "" || c.HighBytes != "" || c.Basis != "") || c.Status == "partial" && c.Reason == "" {
+			return fmt.Errorf("estimate.components: invalid range or basis")
 		}
 	}
 	return CheckPayloadSize(e)
+}
+
+func validateEstimateRange(value, low, high string, required bool) error {
+	if value == "" && low == "" && high == "" && !required {
+		return nil
+	}
+	if value == "" || (required && (low == "" || high == "")) {
+		return fmt.Errorf("estimate: incomplete byte range")
+	}
+	for _, s := range []string{value, low, high} {
+		if s != "" && ValidateUnsignedDecimal(s) != nil {
+			return fmt.Errorf("estimate: invalid byte range")
+		}
+	}
+	v, _ := strconv.ParseUint(value, 10, 64)
+	if low != "" {
+		n, _ := strconv.ParseUint(low, 10, 64)
+		if n > v {
+			return fmt.Errorf("estimate: invalid lower bound")
+		}
+	}
+	if high != "" {
+		n, _ := strconv.ParseUint(high, 10, 64)
+		if n < v {
+			return fmt.Errorf("estimate: invalid upper bound")
+		}
+	}
+	return nil
 }

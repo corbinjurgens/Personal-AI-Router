@@ -842,9 +842,7 @@ func (o *modelBufferOwner) work(e *Executor, done chan struct{}) {
 			estimate := e.modelEstimates.estimate(ctx, input)
 			cancel()
 			if len(estimate.Components) <= 64 {
-				for _, component := range estimate.Components {
-					baseline = append(baseline, modelconfig.BufferBaseline{Component: component.Name, Status: component.Status, Bytes: component.Bytes})
-				}
+				baseline = modelBufferBaseline(estimate.Components)
 			}
 			if len(baseline) == 0 {
 				for _, name := range modelconfig.MemoryComponentNames {
@@ -879,6 +877,41 @@ func (o *modelBufferOwner) work(e *Executor, done chan struct{}) {
 		o.releaseLocked(c)
 		o.mu.Unlock()
 	}
+}
+
+// A captured baseline is keyed by category, independent of pool placement.
+func modelBufferBaseline(components []modelconfig.EstimateComponent) []modelconfig.BufferBaseline {
+	var out []modelconfig.BufferBaseline
+	rank := map[string]int{"excluded": 0, "estimated": 1, "partial": 2, "unknown": 3}
+	for _, c := range components {
+		i := slices.IndexFunc(out, func(b modelconfig.BufferBaseline) bool { return b.Component == c.Name })
+		if i < 0 {
+			out = append(out, modelconfig.BufferBaseline{Component: c.Name, Status: c.Status, Bytes: c.Bytes})
+			continue
+		}
+		b := &out[i]
+		if rank[c.Status] > rank[b.Status] {
+			b.Status = c.Status
+		}
+		if b.Status == "unknown" {
+			b.Bytes = ""
+			continue
+		}
+		if c.Bytes == "" {
+			continue
+		}
+		x, ex := strconv.ParseUint(b.Bytes, 10, 64)
+		if b.Bytes == "" {
+			x, ex = 0, nil
+		}
+		y, ey := strconv.ParseUint(c.Bytes, 10, 64)
+		if ex != nil || ey != nil || y > ^uint64(0)-x {
+			b.Status, b.Bytes = "unknown", ""
+			continue
+		}
+		b.Bytes = strconv.FormatUint(x+y, 10)
+	}
+	return out
 }
 
 func modelBufferBoundSample(sample *modelBufferStoredSample) {

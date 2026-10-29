@@ -21,7 +21,7 @@ import (
 	"nvpair-shared/noderec"
 )
 
-const modelEstimatorRevision = "pair-gguf/1;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385"
+const modelEstimatorRevision = "pair-gguf/2;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385"
 const modelEstimatorSupport = "finite-llama/non-unified/1"
 const modelEstimateRecords = 128
 const modelEstimateBytes = 1 << 20
@@ -181,6 +181,7 @@ func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput
 		return modelEstimateUnknown("estimator operation budget exhausted")
 	}
 	out.Source, out.BuildID, out.Timestamp = modelEstimatorRevision, in.BuildID, now.UTC().Format(time.RFC3339Nano)
+	out.EstimateSource = &modelconfig.EstimateSource{Kind: "pair-estimate", Provider: "PAIR", Revision: modelEstimatorRevision, Basis: "bounded GGUF facts and pinned graph estimates; uncalibrated"}
 	raw := out.Clone()
 	modelEstimateDomains(&out, in, s.clock())
 	if err := out.Validate(); err != nil {
@@ -462,7 +463,8 @@ func (m modelEstimateModel) number(name string) (uint64, bool) {
 }
 
 func estimateComponent(name string, bytes uint64, reason string) modelconfig.EstimateComponent {
-	return modelconfig.EstimateComponent{Name: name, Status: "estimated", Bytes: strconv.FormatUint(bytes, 10), Reason: reason}
+	amount := strconv.FormatUint(bytes, 10)
+	return modelconfig.EstimateComponent{Name: name, Status: "estimated", Bytes: amount, LowBytes: amount, HighBytes: amount, Basis: "derived", Reason: reason}
 }
 
 func unknownEstimateComponent(name, reason string) modelconfig.EstimateComponent {
@@ -489,14 +491,18 @@ func calculateModelEstimate(ctx context.Context, in modelEstimateInput) modelcon
 	}
 	out.Components = append(out.Components, weights)
 	if m.companions {
-		out.Components = append(out.Components, modelconfig.EstimateComponent{Name: "companions", Status: "partial", Bytes: strconv.FormatUint(m.companionWeights, 10), Reason: "draft/projector tensor storage only; independent cache, workspace and placement unsized"})
+		c := estimateComponent("companions", m.companionWeights, "draft/projector tensor storage only; independent cache, workspace and placement unsized")
+		c.Status, c.Basis = "partial", "heuristic"
+		out.Components = append(out.Components, c)
 	} else {
 		out.Components = append(out.Components, absentEstimateComponent("companions"))
 	}
 	kv, recurrent := modelEstimateCaches(ctx, m, in)
 	out.Components = append(out.Components, kv, recurrent, modelEstimateCompute(ctx, m, in))
 	if in.Allocation != nil && in.Allocation.Options.CacheRAM != nil && *in.Allocation.Options.CacheRAM > 0 {
-		out.Components = append(out.Components, estimateComponent("prompt-cache", modelEstimateMul(uint64(*in.Allocation.Options.CacheRAM), 1<<20), "configured host prompt-cache ceiling; usage is demand-dependent"))
+		c := estimateComponent("prompt-cache", modelEstimateMul(uint64(*in.Allocation.Options.CacheRAM), 1<<20), "configured host prompt-cache ceiling; usage is demand-dependent")
+		c.LowBytes = "0"
+		out.Components = append(out.Components, c)
 	} else {
 		out.Components = append(out.Components, unknownEstimateComponent("prompt-cache", "effective native cache-ram unavailable"))
 	}
@@ -926,6 +932,7 @@ func modelEstimateCompute(ctx context.Context, m modelEstimateModel, in modelEst
 	}
 	component := estimateComponent("compute-workspace", total, "pinned library dense CPU graph portion only; complete CPU scratch/op-offload mapping unavailable; no hypothetical GPU buffer charged as host")
 	component.Status = "partial"
+	component.Basis = "heuristic"
 	return component
 }
 
@@ -1012,8 +1019,12 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 			device = modelEstimateAdd(device, d)
 			c.Reason += "; output-first tensor placement projection; embedding/unclassified tensors on host"
 			c.DomainID, c.Bytes = "host", strconv.FormatUint(h, 10)
+			c.LowBytes, c.HighBytes = c.Bytes, c.Bytes
 			if d > 0 {
-				out.Components = append(out.Components, modelconfig.EstimateComponent{Name: c.Name, DomainID: "offload-unmapped", Status: c.Status, Bytes: strconv.FormatUint(d, 10), Reason: c.Reason})
+				part := *c
+				part.DomainID, part.Bytes = "offload-unmapped", strconv.FormatUint(d, 10)
+				part.LowBytes, part.HighBytes = part.Bytes, part.Bytes
+				out.Components = append(out.Components, part)
 			}
 		} else if c.Name == "attention-cache" || c.Name == "recurrent-state" {
 			if a.Options.KVOffload != nil && !*a.Options.KVOffload {
@@ -1030,6 +1041,18 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 	out.HostBytes, out.DeviceBytes = strconv.FormatUint(host, 10), strconv.FormatUint(device, 10)
 	out.Domains[0].RequiredBytes = out.HostBytes
 	out.Domains[1].RequiredBytes = out.DeviceBytes
+	for i := range out.Domains {
+		d := &out.Domains[i]
+		var low, high uint64
+		for _, c := range out.Components {
+			if c.DomainID == d.ID && c.Bytes != "" {
+				l, _ := strconv.ParseUint(c.LowBytes, 10, 64)
+				h, _ := strconv.ParseUint(c.HighBytes, 10, 64)
+				low, high = modelEstimateAdd(low, l), modelEstimateAdd(high, h)
+			}
+		}
+		d.RequiredLowBytes, d.RequiredHighBytes = strconv.FormatUint(low, 10), strconv.FormatUint(high, 10)
+	}
 	if !cpu {
 		out.Unknowns = append(out.Unknowns, "native offload device identity unavailable; device bytes are an unmapped aggregate")
 	}

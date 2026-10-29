@@ -31,6 +31,65 @@ type modelBufferTestFixture struct {
 	sequences [2]uint64
 }
 
+func TestModelBufferSplitBaselinePersists(t *testing.T) {
+	f := newModelBufferTestFixture(t)
+	f.load.ex.modelEstimates.run = func(context.Context, modelEstimateInput) modelconfig.Estimate {
+		host := estimateComponent("weights", 100, "synthetic host")
+		device := estimateComponent("weights", 200, "synthetic device")
+		host.DomainID, device.DomainID = "host", "device"
+		device.Status = "partial"
+		return modelconfig.Estimate{Status: "partial", Domains: []modelconfig.MemoryDomain{{ID: "host", Kind: "host"}, {ID: "device", Kind: "device"}}, Components: []modelconfig.EstimateComponent{host, device}}
+	}
+	f.initial("medium-model", 31001)
+	o := f.confirm(t, "medium-model", 1)
+	if err := o.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if o.EstimatorRevision != modelEstimatorRevision || o.Persistence != "saved" || len(o.Baseline) != 1 || o.Baseline[0].Bytes != "300" || o.Baseline[0].Status != "partial" {
+		t.Fatalf("split baseline=%+v", o)
+	}
+	data, err := os.ReadFile(f.load.ex.modelBuffers.store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored []modelBufferStoredSample
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("persisted samples=%+v", stored)
+	}
+	if err := validateModelBufferSample(stored[0]); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(stored[0].Observation.Baseline, o.Baseline) || stored[0].Observation.EstimatorRevision != modelEstimatorRevision {
+		t.Fatal("persisted baseline or revision changed")
+	}
+}
+
+func TestModelBufferBaselineLeastCertaintyAndOverflow(t *testing.T) {
+	t.Run("excluded part precedes priced part", func(t *testing.T) {
+		got := modelBufferBaseline([]modelconfig.EstimateComponent{absentEstimateComponent("weights"), estimateComponent("weights", 2, "synthetic")})
+		if len(got) != 1 || got[0].Status != "estimated" || got[0].Bytes != "2" {
+			t.Fatalf("baseline=%+v", got)
+		}
+	})
+	for _, tc := range []struct{ name, status, amount, wantStatus, wantBytes string }{
+		{"partial", "partial", "2", "partial", "3"},
+		{"unknown", "unknown", "", "unknown", ""},
+		{"overflow", "estimated", "18446744073709551615", "unknown", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := estimateComponent("weights", 1, "synthetic")
+			second := modelconfig.EstimateComponent{Name: "weights", Status: tc.status, Bytes: tc.amount}
+			got := modelBufferBaseline([]modelconfig.EstimateComponent{first, second})
+			if len(got) != 1 || got[0].Status != tc.wantStatus || got[0].Bytes != tc.wantBytes {
+				t.Fatalf("baseline=%+v", got)
+			}
+		})
+	}
+}
+
 func newModelBufferTestFixture(t *testing.T, configure ...func(*modelLoadFixture)) *modelBufferTestFixture {
 	t.Helper()
 	f := newModelLoadFixture(t)
