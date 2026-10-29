@@ -746,11 +746,14 @@ func safeCopyDestinationBounded(ctx context.Context, root, dest string, scan *mo
 		if err != nil {
 			return fmt.Errorf("cannot inspect copy destination")
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("copy destination contains a symlink")
+		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return fmt.Errorf("copy destination contains a link or irregular entry")
 		}
-		if p != dest && !info.IsDir() {
+		if p != dest && (!info.IsDir() || info.Mode().Type() != os.ModeDir) {
 			return fmt.Errorf("copy destination parent is not a directory")
+		}
+		if p == dest && !info.Mode().IsRegular() {
+			return fmt.Errorf("copy destination is not a regular file")
 		}
 	}
 	realRoot, err := resolveExistingPath(nearestExistingDir(root))
