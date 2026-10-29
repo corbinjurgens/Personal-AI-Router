@@ -21,6 +21,7 @@ import (
 	"nvpair-shared/appdir"
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/durablefile"
 )
 
 // bundledManifests are the default engine manifests compiled into the
@@ -45,8 +46,54 @@ func main() {
 	loadedPollSec := flag.Int("loaded-poll-interval", defaultLoadedPollSeconds, "seconds between loaded-model polls that drive engine:models-changed pushes; 0 disables the watcher")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	uninstallManaged := flag.Bool("uninstall-managed", false, "remove every engine PAIR installed, preserving downloaded models, then exit; for the platform uninstallers")
+	freshProfile := flag.Bool("initialize-fresh-profile", false, "allocate a fresh profile during an exclusive offline interval")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "unexpected positional arguments")
+		os.Exit(1)
+	}
+	freshSpecified := false
+	conflict := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "initialize-fresh-profile" {
+			freshSpecified = true
+		} else {
+			conflict = true
+		}
+	})
+	if freshSpecified {
+		if !*freshProfile || conflict {
+			fmt.Fprintln(os.Stderr, "fresh profile mode cannot be combined with other arguments")
+			os.Exit(1)
+		}
+		if err := offlineEnvironmentGuard(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		current, err := appdir.Dir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		previous, err := appdir.PreviousDir()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		unsupported, err := initializeFreshProfile(current, previous, durablefile.Replacer{})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("fresh journal publication and readback confirmed")
+		if unsupported {
+			fmt.Println("fresh-directory durability: UNVERIFIED (unsupported)")
+		} else {
+			fmt.Println("fresh-directory entries confirmed")
+		}
+		return
+	}
 	if err := validateControlHost(*controlHost); err != nil {
 		log.Fatalf("invalid --control-host: %v", err)
 	}

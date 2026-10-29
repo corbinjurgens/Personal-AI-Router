@@ -33,6 +33,15 @@ func Dir() (string, error) {
 	return filepath.Join(base, orgDir, appDir), nil
 }
 
+// PreviousDir resolves the profile used before the application was renamed.
+func PreviousDir() (string, error) {
+	base, err := baseDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "NVIDIA Corporation", "PAIR"), nil
+}
+
 // Path joins elems onto Dir().
 func Path(elems ...string) (string, error) {
 	d, err := Dir()
