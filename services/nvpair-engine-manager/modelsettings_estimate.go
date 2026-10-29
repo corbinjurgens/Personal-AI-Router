@@ -181,7 +181,7 @@ func (s *modelEstimateState) estimate(ctx context.Context, in modelEstimateInput
 		return modelEstimateUnknown("estimator operation budget exhausted")
 	}
 	out.Source, out.BuildID, out.Timestamp = modelEstimatorRevision, in.BuildID, now.UTC().Format(time.RFC3339Nano)
-	out.EstimateSource = &modelconfig.EstimateSource{Kind: "pair-estimate", Provider: "PAIR", Revision: modelEstimatorRevision, Basis: "bounded GGUF facts and pinned graph estimates; uncalibrated"}
+	out.EstimateSource = &modelconfig.EstimateSource{Kind: "pair-estimate", Provider: "PAIR", Revision: modelEstimatorRevision, Basis: "bounded GGUF facts and pinned graph estimates; see component range bases"}
 	raw := out.Clone()
 	modelEstimateDomains(&out, in, s.clock())
 	if err := out.Validate(); err != nil {
@@ -481,9 +481,9 @@ func calculateModelEstimate(ctx context.Context, in modelEstimateInput) modelcon
 		return modelEstimateUnknown(reason)
 	}
 	out := modelconfig.Estimate{Status: "partial", Assumptions: []string{
-		"Advisory and uncalibrated; tensor storage and pinned library graph costs are not measured native allocations.",
-		"Selected model scenario only; simultaneous residents are unsized and no reclaimed memory is credited.",
-		"Known totals are partial component sums, not a complete peak or a Fits decision.",
+		"Advisory; tensor storage and pinned library graph costs are not measured native allocations.",
+		"Simultaneous resident models are not included.",
+		"Known totals are partial component sums; advisory fit verdicts retain warnings for unpriced costs and are not complete peak bounds.",
 	}}
 	weights := estimateComponent("weights", m.weights, "bounded tensor directory; all resident experts retained, never active-expert fraction")
 	if m.weightsUnknown || m.weights == 0 {
@@ -506,14 +506,95 @@ func calculateModelEstimate(ctx context.Context, in modelEstimateInput) modelcon
 	} else {
 		out.Components = append(out.Components, unknownEstimateComponent("prompt-cache", "effective native cache-ram unavailable"))
 	}
-	out.Unknowns = append(out.Unknowns, "driver/runtime, allocator alignment/fragmentation, mmap residency and simultaneous resident model costs unsized")
+	out.Components = append(out.Components, unknownEstimateComponent("runtime-overhead", "backend context, driver and allocator costs not yet calibrated or measured"))
+	out.Unknowns = append(out.Unknowns, "mmap residency unsized", "transient peaks unsized")
 	modelEstimatePlacement(&out, m, in)
+	// Band each placed portion, so split weights retain their calibrated ranges.
+	// Only the already supported conventional dense class is grouped here.
+	class := m.arch
+	if m.arch == "llama" || m.arch == "qwen2" || m.arch == "qwen3" {
+		class = "dense"
+	}
+	backend := modelEstimateBackend(in)
+	for i := range out.Components {
+		c := &out.Components[i]
+		if c.Bytes == "" {
+			continue
+		}
+		_, calibrated := modelEstimateCalibrations[modelEstimateCalibrationKey{c.Name, class, backend}]
+		if c.Basis != "heuristic" && !calibrated {
+			continue
+		}
+		n, err := strconv.ParseUint(c.Bytes, 10, 64)
+		if err != nil {
+			panic(errModelEstimateOverflow)
+		}
+		low, high, basis := modelEstimateBand(c.Name, class, backend, n)
+		c.LowBytes, c.HighBytes, c.Basis = strconv.FormatUint(low, 10), strconv.FormatUint(high, 10), basis
+	}
+	modelEstimateDomainAmounts(&out)
 	for _, c := range out.Components {
 		if c.Status == "unknown" || c.Status == "partial" {
 			out.Unknowns = append(out.Unknowns, c.Name+": "+c.Reason)
 		}
 	}
 	return out
+}
+
+// Family evidence is advisory only. Missing or mixed native inventory is not a
+// reason to infer a family from the operating system or a physical GPU brand.
+func modelEstimateBackend(in modelEstimateInput) string {
+	if in.Allocation == nil {
+		return ""
+	}
+	a := in.Allocation
+	if a.GPU.Mode == "cpu" || a.GPU.Mode == "layers" && a.GPU.Layers != nil && *a.GPU.Layers == 0 {
+		return "cpu"
+	}
+	if in.Memory == nil || in.Memory.Map == nil || in.Memory.Map.Unknown != "" {
+		return ""
+	}
+	family := ""
+	for _, d := range in.Memory.Map.Devices {
+		if d.Kind == 0 {
+			continue
+		}
+		next := ""
+		if d.Unknown == "" && strings.HasPrefix(d.Selector, "CUDA") {
+			next = "cuda"
+		}
+		if d.Unknown == "" && strings.HasPrefix(d.Selector, "Metal") {
+			next = "metal"
+		}
+		if next == "" || family != "" && family != next {
+			return ""
+		}
+		family = next
+	}
+	return family
+}
+
+func modelEstimateDomainAmounts(out *modelconfig.Estimate) {
+	for i := range out.Domains {
+		d := &out.Domains[i]
+		var expected, low, high uint64
+		for _, c := range out.Components {
+			if c.DomainID != d.ID || c.Bytes == "" {
+				continue
+			}
+			for _, pair := range []struct {
+				text string
+				sum  *uint64
+			}{{c.Bytes, &expected}, {c.LowBytes, &low}, {c.HighBytes, &high}} {
+				n, err := strconv.ParseUint(pair.text, 10, 64)
+				if err != nil {
+					panic(errModelEstimateOverflow)
+				}
+				*pair.sum = modelEstimateAdd(*pair.sum, n)
+			}
+		}
+		d.RequiredBytes, d.RequiredLowBytes, d.RequiredHighBytes = strconv.FormatUint(expected, 10), strconv.FormatUint(low, 10), strconv.FormatUint(high, 10)
+	}
 }
 
 func modelEstimateCacheType(value *string) (gguf.GGMLType, bool) {
@@ -1039,20 +1120,7 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 		}
 	}
 	out.HostBytes, out.DeviceBytes = strconv.FormatUint(host, 10), strconv.FormatUint(device, 10)
-	out.Domains[0].RequiredBytes = out.HostBytes
-	out.Domains[1].RequiredBytes = out.DeviceBytes
-	for i := range out.Domains {
-		d := &out.Domains[i]
-		var low, high uint64
-		for _, c := range out.Components {
-			if c.DomainID == d.ID && c.Bytes != "" {
-				l, _ := strconv.ParseUint(c.LowBytes, 10, 64)
-				h, _ := strconv.ParseUint(c.HighBytes, 10, 64)
-				low, high = modelEstimateAdd(low, l), modelEstimateAdd(high, h)
-			}
-		}
-		d.RequiredLowBytes, d.RequiredHighBytes = strconv.FormatUint(low, 10), strconv.FormatUint(high, 10)
-	}
+	modelEstimateDomainAmounts(out)
 	if !cpu {
 		out.Unknowns = append(out.Unknowns, "native offload device identity unavailable; device bytes are an unmapped aggregate")
 	}
@@ -1123,6 +1191,40 @@ func modelEstimateDomains(out *modelconfig.Estimate, in modelEstimateInput, now 
 			}
 		}
 	}
+	// A trusted, unmixed UMA topology has one physical pool. Collapse before
+	// attaching capacity, preserving each component's charge and band once.
+	if !cpu && mapKnown && len(observation.Domains) == 1 && observation.Domains[0].Kind == "shared" && observation.Domains[0].ID == hostPool {
+		for i := range out.Components {
+			if out.Components[i].DomainID == "host" || out.Components[i].DomainID == "offload-unmapped" {
+				out.Components[i].DomainID = hostPool
+			}
+		}
+		out.Domains = []modelconfig.MemoryDomain{{ID: hostPool, Kind: "shared"}}
+		modelEstimateDomainAmounts(out)
+		out.HostBytes, out.DeviceBytes = "", ""
+		out.Assumptions = append(out.Assumptions, "UMA is one shared pool; host and GPU capacity are never added.")
+	}
+	var assumed *modelNativeDevice
+	if !cpu && mapKnown && in.Allocation != nil && in.Allocation.DeviceBinding == nil && modelEstimateBackend(in) == "cuda" {
+		// QA1 is a display comparison, never a synthesized launch binding.
+		var devices []modelNativeDevice
+		for _, device := range m.Map.Devices {
+			if device.Kind != 0 {
+				devices = append(devices, device)
+			}
+		}
+		if len(devices) == 1 && devices[0].Kind == 1 && devices[0].Unknown == "" && canonicalModelDeviceUUID(devices[0].UUID) != "" {
+			var dedicated []noderec.MemoryDomain
+			for _, fact := range observation.Domains {
+				if fact.Kind == "dedicated" {
+					dedicated = append(dedicated, fact)
+				}
+			}
+			if len(dedicated) == 1 && dedicated[0].ID == devices[0].Pool && slices.Contains(dedicated[0].DeviceIDs, devices[0].UUID) {
+				assumed = &devices[0]
+			}
+		}
+	}
 	for i := range out.Domains {
 		d := &out.Domains[i]
 		if !cpu && !mapKnown && (d.Kind == "device" || d.ID == "offload-unmapped") {
@@ -1134,15 +1236,20 @@ func modelEstimateDomains(out *modelconfig.Estimate, in modelEstimateInput, now 
 			pool = hostPool
 		}
 		if d.ID == "offload-unmapped" {
-			b := m.Map.Binding
-			if b == nil || in.Allocation == nil || in.Allocation.DeviceBinding == nil {
-				continue
+			if assumed != nil {
+				pool = assumed.Pool
+				d.Unknowns = append(d.Unknowns, "device mapping assumed: only one GPU present")
+			} else {
+				b := m.Map.Binding
+				if b == nil || in.Allocation == nil || in.Allocation.DeviceBinding == nil {
+					continue
+				}
+				a := in.Allocation.DeviceBinding
+				if a.Validate() != nil || a.HostID != m.Target.HostID || a.Digest != b.Digest || a.DeviceID != b.UUID || a.DomainID != b.Pool || a.HostID != b.Host || a.Selector != b.Selector {
+					continue
+				}
+				pool = b.Pool
 			}
-			a := in.Allocation.DeviceBinding
-			if a.Validate() != nil || a.HostID != m.Target.HostID || a.Digest != b.Digest || a.DeviceID != b.UUID || a.DomainID != b.Pool || a.HostID != b.Host || a.Selector != b.Selector {
-				continue
-			}
-			pool = b.Pool
 		}
 		for _, fact := range observation.Domains {
 			if fact.ID != pool {
@@ -1154,7 +1261,7 @@ func modelEstimateDomains(out *modelconfig.Estimate, in modelEstimateInput, now 
 			if d.Kind == "device" && fact.Kind != "dedicated" || d.Kind == "host" && fact.Kind != "system" && fact.Kind != "shared" {
 				continue
 			}
-			if fact.Kind == "dedicated" && (m.Map == nil || m.Map.Binding == nil || !slices.Contains(fact.DeviceIDs, m.Map.Binding.UUID)) {
+			if fact.Kind == "dedicated" && assumed == nil && (m.Map == nil || m.Map.Binding == nil || !slices.Contains(fact.DeviceIDs, m.Map.Binding.UUID)) {
 				continue
 			}
 			old := d.ID
@@ -1163,8 +1270,12 @@ func modelEstimateDomains(out *modelconfig.Estimate, in modelEstimateInput, now 
 				d.Kind = "shared"
 				out.HostBytes, out.DeviceBytes = "", ""
 			}
-			if fact.Kind == "dedicated" && m.Map.Binding != nil {
-				d.DeviceID = m.Map.Binding.UUID
+			if fact.Kind == "dedicated" {
+				if assumed != nil {
+					d.DeviceID = assumed.UUID
+				} else {
+					d.DeviceID = m.Map.Binding.UUID
+				}
 			}
 			for j := range out.Components {
 				if out.Components[j].DomainID == old {
