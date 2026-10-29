@@ -125,6 +125,11 @@ func TestInstallRejectsBadSecondArtifactBeforeCommand(t *testing.T) {
 }
 
 func TestInstallCancellationRemovesDownloadedArtifacts(t *testing.T) {
+	// Downloads use os.CreateTemp's environment-selected default directory.
+	artifactDir := t.TempDir()
+	t.Setenv("TMPDIR", artifactDir)
+	t.Setenv("TMP", artifactDir)
+	t.Setenv("TEMP", artifactDir)
 	firstPayload := []byte("server")
 	secondStarted := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +168,13 @@ func TestInstallCancellationRemovesDownloadedArtifacts(t *testing.T) {
 
 	select {
 	case <-secondStarted:
+		matches, err := filepath.Glob(filepath.Join(artifactDir, "nvpair-engine-"+manifest.Engine+"-*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) == 0 {
+			t.Fatal("downloaded artifacts did not use the test-private temporary directory")
+		}
 		assertFixtureRejectsProbe(t, server.URL)
 		cancel()
 	case <-time.After(5 * time.Second):

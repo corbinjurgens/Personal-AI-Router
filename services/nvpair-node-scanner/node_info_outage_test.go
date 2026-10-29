@@ -164,19 +164,19 @@ func TestNodeInfoTransportBoundsConnectionsPerHost(t *testing.T) {
 func TestNodeInfoConcurrentFetchesGetIndependentRequestBudgets(t *testing.T) {
 	const responseDelay = 200 * time.Millisecond
 	var requests atomic.Int32
-	server := httptest.NewUnstartedServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, _ *http.Request) {
+	var connections atomic.Int32
+	var expectedConnections sync.Map
+	server := httptest.NewUnstartedServer(fixtureRequestHandler(http.MethodGet, "/v1/node-info", func(w http.ResponseWriter, r *http.Request) {
+		if _, seen := expectedConnections.LoadOrStore(r.RemoteAddr, struct{}{}); !seen {
+			connections.Add(1)
+		}
 		requests.Add(1)
 		time.Sleep(responseDelay)
 		_ = json.NewEncoder(w).Encode(NodeInfoResponse{HostUUID: "peer-uuid"})
 	}))
-	var connections atomic.Int32
-	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state == http.StateNew {
-			connections.Add(1)
-		}
-	}
 	server.Start()
 	defer server.Close()
+	assertFixtureRejectsProbe(t, server.URL)
 
 	serverURL, err := url.Parse(server.URL)
 	if err != nil {
