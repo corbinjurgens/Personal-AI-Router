@@ -54,7 +54,15 @@ func (r *Registry) Descriptors() []engines.Descriptor {
 	names := r.Names()
 	out := make([]engines.Descriptor, 0, len(names))
 	for _, name := range names {
-		m, _ := r.Get(name)
+		m, ok := r.Get(name)
+		if !ok {
+			if engines.ValidID(name) {
+				out = append(out, engines.Descriptor{Version: engines.DescriptorVersion,
+					Engine: name, Family: name, Label: name, ModelNaming: engines.ModelNamingExact,
+					Platforms: []string{}, Protocols: []string{}, Operations: map[string]engines.OperationCapability{}})
+			}
+			continue
+		}
 		out = append(out, m.descriptor(runtime.GOOS, runtime.GOARCH))
 	}
 	return out
