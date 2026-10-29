@@ -88,13 +88,14 @@ func TestLinkedModelReadBinding(t *testing.T) {
 }
 
 func TestLinkedModelResolution(t *testing.T) {
-	t.Run("pre-widening Ollama blob outside the store is refused", func(t *testing.T) {
+	t.Run("recognized Ollama blob outside the store is bound", func(t *testing.T) {
 		root := t.TempDir()
-		fixture := writeOllamaModel(t, root, "tiny", 128, 3)
+		store := filepath.Join(root, "models")
+		fixture := writeOllamaModel(t, store, "tiny", 128, 3)
 		for rel, data := range fixture.blobs {
 			target := filepath.Join(t.TempDir(), "blob")
 			writeTestFile(t, target, data)
-			path := filepath.Join(root, filepath.FromSlash(rel))
+			path := filepath.Join(store, filepath.FromSlash(rel))
 			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
 			}
@@ -102,8 +103,11 @@ func TestLinkedModelResolution(t *testing.T) {
 				t.Skipf("symlink unavailable: %v", err)
 			}
 		}
-		if _, err := ollamaSourceFiles(root, "tiny"); err == nil {
-			t.Fatal("outside blob was accepted before source widening")
+		ex := copyTestExecutor(t, "ollama", root, true)
+		copyTestNativeModels(t, ex, "ollama", "tiny")
+		list, err := ex.modelSourceFiles(context.Background(), "ollama", "tiny")
+		if err != nil || len(list.Files) != len(fixture.blobs)+1 {
+			t.Fatalf("recognized outside blobs: files=%v err=%v", list.Files, err)
 		}
 	})
 }
