@@ -208,6 +208,61 @@ func TestSafeRemoveUnderRootRejectsOutsideJunction(t *testing.T) {
 	}
 }
 
+func TestSafeRemoveUnderRootUnlinksOutsideJunction(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	outside := filepath.Join(base, "outside")
+	keep := victimDir(t, outside)
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked")
+	junction(t, link, outside)
+	if err := safeRemoveUnderRoot(root, link); err != nil {
+		t.Fatalf("safeRemoveUnderRoot: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("junction remains or lstat failed: %v", err)
+	}
+	data, err := os.ReadFile(keep)
+	if err != nil || string(data) != "x" {
+		t.Fatalf("outside file = %q, err = %v", data, err)
+	}
+}
+
+func TestJunctionRemovalBehavior(t *testing.T) {
+	for _, operation := range []struct {
+		name   string
+		remove func(string) error
+	}{
+		{name: "Remove", remove: os.Remove},
+		{name: "RemoveAll", remove: os.RemoveAll},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			base := t.TempDir()
+			outside := filepath.Join(base, "outside")
+			keep := victimDir(t, outside)
+			link := filepath.Join(base, "linked")
+			junction(t, link, outside)
+			info, err := os.Lstat(link)
+			if err != nil {
+				t.Fatalf("lstat junction: %v", err)
+			}
+			t.Logf("junction Lstat mode: %v (%#x)", info.Mode(), uint32(info.Mode()))
+			if err := operation.remove(link); err != nil {
+				t.Fatalf("%s junction: %v", operation.name, err)
+			}
+			if _, err := os.Lstat(link); !os.IsNotExist(err) {
+				t.Fatalf("junction remains or lstat failed: %v", err)
+			}
+			data, err := os.ReadFile(keep)
+			if err != nil || string(data) != "x" {
+				t.Fatalf("outside file = %q, err = %v", data, err)
+			}
+		})
+	}
+}
+
 func TestSafeRemoveUnderRootAcceptsJunctionRoot(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "root")

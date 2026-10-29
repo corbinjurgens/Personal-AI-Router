@@ -187,9 +187,8 @@ func directoriesAbove(path string) []os.FileInfo {
 	return out
 }
 
-// safeRemoveUnderRoot deletes target after verifying it resolves under root.
-// Both paths are cleaned; symlinks on target are evaluated before the confinement
-// check so a path cannot escape the allowed root via symlink tricks.
+// safeRemoveUnderRoot deletes a resolved target under root. A link itself is
+// unlinked only when its resolved parent is under root; its target is preserved.
 func safeRemoveUnderRoot(root, target string) error {
 	if strings.TrimSpace(root) == "" || strings.TrimSpace(target) == "" {
 		return fmt.Errorf("remove_path: root and path are required")
@@ -210,19 +209,55 @@ func safeRemoveUnderRoot(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("remove_path: target resolution: %w", err)
 	}
-	if !pathWithinRoot(evalRoot, evalTarget) {
-		return fmt.Errorf("remove_path: %q escapes allowed root %q", evalTarget, evalRoot)
-	}
 	if _, err := os.Stat(evalTarget); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("remove_path: %q does not exist", evalTarget)
 		}
 		return fmt.Errorf("remove_path: stat %q: %w", evalTarget, err)
 	}
+	info, err := os.Lstat(absTarget)
+	if err != nil {
+		return fmt.Errorf("remove_path: lstat %q: %w", absTarget, err)
+	}
+	isLink, err := removalEntryIsLink(absTarget, info.Mode())
+	if err != nil {
+		return fmt.Errorf("remove_path: classify link: %w", err)
+	}
+	if isLink {
+		parent, err := resolveExistingPath(filepath.Dir(absTarget))
+		if err != nil {
+			return fmt.Errorf("remove_path: parent resolution: %w", err)
+		}
+		if !pathWithinRoot(evalRoot, parent) {
+			return fmt.Errorf("remove_path: %q escapes allowed root %q", parent, evalRoot)
+		}
+		if err := os.Remove(filepath.Join(parent, filepath.Base(absTarget))); err != nil {
+			return fmt.Errorf("remove_path: %w", err)
+		}
+		return nil
+	}
+	if !pathWithinRoot(evalRoot, evalTarget) {
+		return fmt.Errorf("remove_path: %q escapes allowed root %q", evalTarget, evalRoot)
+	}
 	if err := os.RemoveAll(evalTarget); err != nil {
 		return fmt.Errorf("remove_path: %w", err)
 	}
 	return nil
+}
+
+func removalEntryIsLink(path string, mode os.FileMode) (bool, error) {
+	if mode&os.ModeSymlink != 0 {
+		return true, nil
+	}
+	if mode&os.ModeIrregular != 0 {
+		// Windows junctions have ModeIrregular. A failed classification must
+		// never fall through to recursive removal of the resolved target.
+		if _, err := os.Readlink(path); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func pathWithinRoot(root, target string) bool {
