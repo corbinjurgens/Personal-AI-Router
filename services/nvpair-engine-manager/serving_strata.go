@@ -328,13 +328,17 @@ func compilePreparedServing(st *engineState, command launchCommand, rt Runtime, 
 }
 
 func compilePreparedServingAccess(st *engineState, command launchCommand, rt Runtime, approved bool, access servingFileAccess, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
+	return compilePreparedServingContext(context.Background(), st, command, rt, approved, access, advisory...)
+}
+
+func compilePreparedServingContext(ctx context.Context, st *engineState, command launchCommand, rt Runtime, approved bool, access servingFileAccess, advisory ...*map[string]modelEstimateInput) (*llamaServingLaunch, error) {
 	if len(rt.ModelLoads) != 0 {
-		return compileTypedLlamaExpected(st, command, rt, approved, access, nil, advisory...)
+		return compileTypedLlamaExpectedContext(ctx, st, command, rt, approved, access, nil, advisory...)
 	}
 	if strataServingRuntime(st, rt.Serving) {
-		return compileStrataServingExpected(context.Background(), command, rt, approved, access, nil)
+		return compileStrataServingExpected(ctx, command, rt, approved, access, nil)
 	}
-	return compileLlamaServingExpected(context.Background(), command, rt, approved, access, nil)
+	return compileLlamaServingExpected(ctx, command, rt, approved, access, nil)
 }
 
 func preparedServingReadback(st *engineState, prepared *llamaServingLaunch) *engines.ServingReadback {

@@ -238,6 +238,10 @@ func nativeExportID(list modelFileList) (string, error) {
 // A cold full hash may outlive a settings update. Re-resolve after hashing so
 // a manifest is never issued from a configuration superseded during that read.
 func (e *Executor) recheckCopyExport(ctx context.Context, list modelFileList) error {
+	return e.recheckCopyExportAccess(ctx, list, servingFileAccess{})
+}
+
+func (e *Executor) recheckCopyExportAccess(ctx context.Context, list modelFileList, access servingFileAccess) error {
 	var current modelFileList
 	var err error
 	if list.Layout == llamaArtifactsLayout {
@@ -245,10 +249,10 @@ func (e *Executor) recheckCopyExport(ctx context.Context, list modelFileList) er
 		var store engineModelStore
 		st, store, err = e.modelStoreFor(list.Engine)
 		if err == nil {
-			current, err = e.llamaExportFilesBound(ctx, st, store, list.Model, servingFileAccess{}, &list)
+			current, err = e.llamaExportFilesBound(ctx, st, store, list.Model, access, &list)
 		}
 	} else {
-		current, err = e.modelSourceFiles(ctx, list.Engine, list.Model)
+		current, err = e.modelSourceFilesWithAccess(ctx, list.Engine, list.Model, access)
 	}
 	if err != nil || current.Layout != list.Layout || current.binding != list.binding || len(current.Files) != len(list.Files) {
 		return fmt.Errorf("custom artifact binding changed during hashing")
@@ -471,7 +475,7 @@ func (e *Executor) llamaExportFilesBound(ctx context.Context, st *engineState, s
 			}
 			return original.openFile(path)
 		}
-		compiled, err := compilePreparedServingAccess(snapshot, command, snapshot.plat.Runtime, true, access)
+		compiled, err := compilePreparedServingContext(ctx, snapshot, command, snapshot.plat.Runtime, true, access)
 		if err != nil {
 			return modelFileList{}, fmt.Errorf("configured serving artifact binding failed: %w", err)
 		}
