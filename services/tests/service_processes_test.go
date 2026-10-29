@@ -49,6 +49,13 @@ type ownerFirewallSnapshot struct {
 	Rules      []ownerFirewallRule `json:"rules"`
 }
 
+func requireOwnerProcessEnvironment(t *testing.T, message string) {
+	t.Helper()
+	if runtime.GOOS != "windows" || !filepath.IsAbs(os.Getenv(testbin.EnvRoot)) || !strings.Contains(os.Getenv("GOFLAGS"), "nvpair-test-exec") {
+		t.Skip(message)
+	}
+}
+
 // PC3's outer serialized interval captures native firewall data before go test
 // (including TestMain builds) and again in finally after it exits, then compares
 // Rules. The test consumes the before capture so missing exact-image rules fail
@@ -58,7 +65,10 @@ func readOwnerFirewallSnapshot(t *testing.T) ownerFirewallSnapshot {
 	t.Helper()
 	path := os.Getenv("NVPAIR_OWNER_FIREWALL_BEFORE")
 	runID := os.Getenv("NVPAIR_OWNER_INTERVAL")
-	if !filepath.IsAbs(path) || runID == "" {
+	if path == "" || runID == "" {
+		t.Skip("PC3 firewall before/after orchestration is required: set NVPAIR_OWNER_FIREWALL_BEFORE and NVPAIR_OWNER_INTERVAL")
+	}
+	if !filepath.IsAbs(path) {
 		t.Fatal("PC3 firewall before/after orchestration is required: set NVPAIR_OWNER_FIREWALL_BEFORE and NVPAIR_OWNER_INTERVAL")
 	}
 	f, err := os.Open(path)

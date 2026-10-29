@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,9 +21,7 @@ import (
 // This exercises only admission paths reachable without an O1 manager
 // reservation. It does not establish transaction or helper acceptance.
 func TestBuildApplyProcess(t *testing.T) {
-	if runtime.GOOS != "windows" || !filepath.IsAbs(os.Getenv(testbin.EnvRoot)) || !strings.Contains(os.Getenv("GOFLAGS"), "nvpair-test-exec") {
-		t.Fatal("process proof requires PC3's Windows fixed-path wrapper")
-	}
+	requireOwnerProcessEnvironment(t, "process proof requires PC3's Windows fixed-path wrapper")
 	firewall := readOwnerFirewallSnapshot(t)
 	if ownerEvidenceBuildRace(t) {
 		inheritedRace := false

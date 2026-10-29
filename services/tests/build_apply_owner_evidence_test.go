@@ -639,9 +639,7 @@ func (*ownerFixtureCredentials) Delete(context.Context, string, string) error { 
 
 func newOwnerEvidenceProcessFixture(t *testing.T) *ownerEvidenceProcessFixture {
 	t.Helper()
-	if runtime.GOOS != "windows" || !filepath.IsAbs(os.Getenv(testbin.EnvRoot)) {
-		t.Fatal("owner process proof requires Windows and the fixed testbin root; compile only elsewhere")
-	}
+	requireOwnerProcessEnvironment(t, "owner process proof requires Windows and the fixed testbin root; compile only elsewhere")
 	f := &ownerEvidenceProcessFixture{serviceFixture: newServiceFixture(t), enginePorts: map[string]int{},
 		pullEntered: make(chan struct{}, 1), pullRelease: make(chan struct{}), deliveries: map[string]*ownerHeldReply{}, allocatedPorts: map[int]bool{}}
 	args := f.ports.args()
@@ -1069,9 +1067,7 @@ func ownerEvidenceEntry(t *testing.T, e buildapply.EngineOwnerEvidence, engine s
 // below use the real service's private owner/transport, never a public relay of
 // engine:owner-evidence or an acceptance receipt assembled by this fixture.
 func TestBuildApplyOwnerEvidenceProcess(t *testing.T) {
-	if runtime.GOOS != "windows" || !filepath.IsAbs(os.Getenv(testbin.EnvRoot)) || !strings.Contains(os.Getenv("GOFLAGS"), "nvpair-test-exec") {
-		t.Fatal("owner process proof requires PC3's Windows fixed-path wrapper setup; compile only elsewhere")
-	}
+	requireOwnerProcessEnvironment(t, "owner process proof requires PC3's Windows fixed-path wrapper setup; compile only elsewhere")
 	firewall := readOwnerFirewallSnapshot(t)
 	self, err := os.Executable()
 	if err != nil {
