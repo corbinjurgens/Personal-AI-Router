@@ -178,6 +178,7 @@ func TestForkManifestGetsItsFamilyBehavior(t *testing.T) {
 			"tiny-Q4_K_M.gguf": testBytes(4_000, 1),
 			"tiny-Q8_0.gguf":   testBytes(6_000, 2),
 		})
+		copyTestNativeModels(t, ex, "llamacpp-custom", repo+":Q4_K_M")
 		list, err := ex.modelSourceFiles(context.Background(), "llamacpp-custom", repo+":Q4_K_M")
 		if err != nil {
 			t.Fatal(err)

@@ -27,6 +27,7 @@ func TestModelCopyBlockedSourceRetryReachesDownloadFence(t *testing.T) {
 		t.Fatalf("source store: %v", err)
 	}
 	writeOllamaModel(t, sourceStore.root, "tiny-fenced", 16, 3)
+	nativeCalls := copyTestNativeModels(t, source, "ollama", "tiny-fenced")
 	control := &controlServer{exec: source}
 	listings, bodies := 0, 0
 	// Exercise the real source listing fence and client decoder in memory.
@@ -89,14 +90,15 @@ func TestModelCopyBlockedSourceRetryReachesDownloadFence(t *testing.T) {
 		}
 		defer release()
 		beforeListings := listings
+		beforeNative := *nativeCalls
 		_, err = m.copyWithEvidence(ctx, p, "destination", func() (copyModelResult, error) {
 			return destination.CopyModelFrom(ctx, client, p.Engine, p.Model, nil)
 		})
 		if err == nil || !strings.Contains(err.Error(), "model content unavailable") || listings != beforeListings+1 {
 			t.Fatalf("%s source must refuse at listing lifecycle fence: error = %v, new listings = %d", phase, err, listings-beforeListings)
 		}
-		if bodies != 0 || withdrawals != 0 || !source.downloads.snapshot().Equal(before) {
-			t.Fatalf("blocked source caused transfer effects or changed lifecycle: bodies = %d, withdrawals = %d, state = %+v", bodies, withdrawals, source.downloads.snapshot())
+		if bodies != 0 || withdrawals != 0 || *nativeCalls != beforeNative || !source.downloads.snapshot().Equal(before) {
+			t.Fatalf("blocked source caused transfer effects or changed lifecycle: bodies = %d, withdrawals = %d, native queries = %d, state = %+v", bodies, withdrawals, *nativeCalls-beforeNative, source.downloads.snapshot())
 		}
 		artifacts, err := os.ReadDir(destinationStore.root)
 		if err != nil {

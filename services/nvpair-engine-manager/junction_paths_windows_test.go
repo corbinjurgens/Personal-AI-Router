@@ -201,6 +201,7 @@ func TestModelFileHTTPAcceptsJunctionSelectedBinding(t *testing.T) {
 	}
 	junction(t, filepath.Join(repoDir, "snapshots", commit), filepath.Join(repoDir, "blobs"))
 	ex := copyTestExecutor(t, "llamacpp", base, true)
+	copyTestNativeModels(t, ex, "llamacpp", repo+":Q4_K_M")
 	_, client := modelFileServer(t, ex, nil)
 	list, err := client.modelFiles(context.Background(), "llamacpp", repo+":Q4_K_M", nil)
 	if err != nil {

@@ -27,6 +27,7 @@ type reverseCopyFixture struct {
 	model   ollamaFixture
 	root    string
 	weights string
+	listing modelFileList
 }
 
 func newReverseCopyFixture(t *testing.T, wrap func(http.Handler) http.Handler) *reverseCopyFixture {
@@ -38,6 +39,8 @@ func newReverseCopyFixture(t *testing.T, wrap func(http.Handler) http.Handler) *
 		model: writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 500_000, 5),
 		root:  filepath.Join(dstDir, "models"),
 	}
+	copyTestNativeModels(t, src, "ollama", "tiny")
+	f.listing = copyTestSourceListing(t, src, "ollama", "tiny")
 	for path, data := range f.model.blobs {
 		if len(data) == 500_000 {
 			f.weights = path
@@ -209,7 +212,7 @@ func TestModelCopyReverseCancellationKeepsPartialWithoutVisibility(t *testing.T)
 	defer cancel()
 	client := f.peer.client(t, ctx)
 	dest := filepath.Join(f.root, filepath.FromSlash(f.weights))
-	file := plannedFile{modelFile: modelFile{Path: f.weights, Size: 500_000, SHA256: sha256Hex(f.model.blobs[f.weights])}, dest: dest, root: f.root}
+	file := plannedFile{modelFile: modelFile{Path: f.weights, Size: 500_000, SHA256: sha256Hex(f.model.blobs[f.weights])}, dest: dest, root: f.root, exportID: f.listing.ExportID}
 	// Cancel only once bytes reached the copy owner's .part, independently of
 	// HTTP buffering and the throttled user-facing progress notifications.
 	_, _, err := downloadPlannedFile(ctx, client, "ollama", "tiny", file, func(n int64) {
@@ -319,7 +322,7 @@ func TestModelCopyReverseInvalidPinNeverReachesFileHandlers(t *testing.T) {
 			if _, err := client.modelFiles(ctx, "ollama", "tiny", nil); err == nil {
 				t.Fatal("invalid pin allowed file listing")
 			}
-			body, _, err := client.modelFile(ctx, "ollama", "tiny", f.weights, "", 0)
+			body, _, err := client.modelFile(ctx, "ollama", "tiny", f.weights, f.listing.ExportID, 0)
 			if body != nil {
 				if closeErr := body.Close(); closeErr != nil {
 					t.Error(closeErr)
