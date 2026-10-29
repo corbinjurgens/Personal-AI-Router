@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"nvpair-shared/engines"
 )
 
 const (
@@ -333,14 +335,13 @@ func (m *Manager) bindCopyAuthorityLocked(entry *activeCopy, p copyRequest, role
 	return nil
 }
 
-// The callback is the synchronous copy completion owner: it returns only after
-// local finalization or the identity-checked terminal transport has finished.
-// Cancellation, errors and uncertain publication never establish completion.
-func (m *Manager) copyWithEvidence(ctx context.Context, p copyRequest, self string, effect func() (copyModelResult, error)) (copyModelResult, error) {
-	var res copyModelResult
+// Bind one live claimant to the descriptor-owned content identity before reads
+// or effects. Retained provenance is reused only by its current incarnation.
+func (m *Manager) bindCopyEvidence(p copyRequest, self string) (modelCopyMarker, *activeCopy, bool, error) {
+	var marker modelCopyMarker
 	d := m.copyJournal
 	if d == nil {
-		return res, errDownloadRecovery
+		return marker, nil, false, errDownloadRecovery
 	}
 	d.mu.Lock()
 	source := d.source
@@ -348,40 +349,67 @@ func (m *Manager) copyWithEvidence(ctx context.Context, p copyRequest, self stri
 	// Naming is owned by the registry, not the caller or remote capability.
 	// Controllers retain this configuration even when they do no artifact I/O.
 	if m.copyRegistry == nil {
-		return res, errDownloadRecovery
+		return marker, nil, false, errDownloadRecovery
 	}
 	manifest, ok := m.copyRegistry.Get(p.Engine)
 	if !ok {
-		return res, errDownloadRecovery
+		return marker, nil, false, errDownloadRecovery
 	}
 	naming := manifest.ModelNamingOrDefault()
 	key, err := downloadKey(p.Engine, p.Model, naming)
 	if err != nil {
-		return res, err
+		return marker, nil, false, err
 	}
 	role := "controller"
 	if p.DestinationNodeID == self {
 		role = "destination"
 	}
-	marker := modelCopyMarker{OpID: p.OpID, Engine: p.Engine, Model: p.Model, ContentKey: key.model, Naming: naming, ExpectedExportID: p.ExpectedExportID, Role: role, OwnerNodeID: self, SourceNodeID: p.SourceNodeID, DestinationNodeID: p.DestinationNodeID, ManagerIncarnation: source, Phase: "unsafe"}
+	marker = modelCopyMarker{OpID: p.OpID, Engine: p.Engine, Model: p.Model, ContentKey: key.model, Naming: naming, ExpectedExportID: p.ExpectedExportID, Role: role, OwnerNodeID: self, SourceNodeID: p.SourceNodeID, DestinationNodeID: p.DestinationNodeID, ManagerIncarnation: source, Phase: "unsafe"}
+	if marker.validate() != nil {
+		return marker, nil, false, errDownloadPersistence
+	}
 	m.copyMu.Lock()
 	entry := m.copies[p.OpID]
 	live := !m.copiesClosed && entry != nil && entry.copyRequest == p
 	if live {
+		// A retained marker cannot cover concurrent effects for this tuple.
+		// Bind the role under the same lock that excludes another claimant.
+		for _, other := range m.copies {
+			if other != entry && other.role == role && other.Engine == p.Engine && other.SourceNodeID == p.SourceNodeID && other.DestinationNodeID == p.DestinationNodeID && engines.NormalizeModelName(other.Model, naming) == key.model {
+				err = errDownloadBusy
+				break
+			}
+		}
+	}
+	if live && err == nil {
 		err = m.bindCopyAuthorityLocked(entry, p, role)
 	}
 	m.copyMu.Unlock()
 	if err != nil {
-		return res, err
+		return marker, nil, false, err
 	}
 	if !live {
-		return res, errDownloadBusy
+		return marker, nil, false, errDownloadBusy
 	}
-	if err := d.changeCopyMarker(marker, false); err != nil {
+	marker, retained, err := d.retainedCopyMarker(marker)
+	return marker, entry, retained, err
+}
+
+// The callback returns only after local finalization or the identity-checked
+// terminal transport. Errors and cancellation leave the original marker intact.
+func (m *Manager) copyWithEvidence(ctx context.Context, p copyRequest, self string, effect func() (copyModelResult, error)) (copyModelResult, error) {
+	var res copyModelResult
+	marker, entry, retained, err := m.bindCopyEvidence(p, self)
+	if err != nil {
 		return res, err
 	}
+	if !retained {
+		if err := m.copyJournal.changeCopyMarker(marker, false); err != nil {
+			return res, err
+		}
+	}
 	m.copyMu.Lock()
-	live = !m.copiesClosed && m.copies[p.OpID] == entry
+	live := !m.copiesClosed && m.copies[p.OpID] == entry
 	if live && entry.pendingPublication {
 		entry.pendingPublication = false
 		entry.authorityHeld--
@@ -399,13 +427,20 @@ func (m *Manager) copyWithEvidence(ctx context.Context, p copyRequest, self stri
 	if err != nil {
 		return res, err
 	}
-	if !validCopyResult(res, p.Engine, p.Model) || p.ExpectedExportID != "" && res.ExportID != p.ExpectedExportID {
+	// A fresh marker belongs to this synchronous effect. A reused alias-only
+	// marker may describe another export's surviving partials: this result
+	// cannot establish that earlier export's identity.
+	return m.completeCopyEvidence(ctx, p, marker, entry, !retained || marker.ExpectedExportID != "", res)
+}
+
+func (m *Manager) completeCopyEvidence(ctx context.Context, p copyRequest, marker modelCopyMarker, entry *activeCopy, retire bool, res copyModelResult) (copyModelResult, error) {
+	if !validCopyResult(res, p.Engine, p.Model) || p.ExpectedExportID != "" && res.ExportID != p.ExpectedExportID || marker.ExpectedExportID != "" && res.ExportID != marker.ExpectedExportID {
 		return res, copyUnknown(errors.New("copy completion identity does not match reservation"))
 	}
 	// A positive result after shutdown/cancellation is not this live owner's
 	// permission to retire evidence. A successor cannot complete this marker.
 	m.copyMu.Lock()
-	live = !m.copiesClosed && m.copies[p.OpID] == entry
+	live := !m.copiesClosed && m.copies[p.OpID] == entry
 	m.copyMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return res, err
@@ -413,8 +448,12 @@ func (m *Manager) copyWithEvidence(ctx context.Context, p copyRequest, self stri
 	if !live {
 		return res, copyUnknown(errors.New("copy owner retired before completion"))
 	}
-	if err := d.changeCopyMarker(marker, true); err != nil {
-		return res, copyUnknown(err)
+	if retire {
+		if err := m.copyJournal.changeCopyMarker(marker, true); err != nil {
+			return res, copyUnknown(err)
+		}
+	} else if _, _, err := m.copyJournal.retainedCopyMarker(marker); err != nil {
+		return res, err
 	}
 	return res, nil
 }
@@ -644,56 +683,69 @@ func (m *Manager) executeCopy(parent context.Context, p copyRequest, inbound boo
 			emit(cp)
 		}
 	}
-	return m.copyWithEvidence(ctx, p, self, func() (copyModelResult, error) {
-		return m.copyEffect(ctx, p, self, progress)
-	})
+	marker, entry, retained, err := m.bindCopyEvidence(p, self)
+	if err != nil {
+		return res, err
+	}
+	effect, verified, err := m.copyPrepare(ctx, p, self, progress)
+	if err != nil {
+		return res, err
+	}
+	if effect == nil {
+		return m.completeCopyEvidence(ctx, p, marker, entry, retained && marker.ExpectedExportID != "", verified)
+	}
+	return m.copyWithEvidence(ctx, p, self, effect)
 }
 
-func (m *Manager) performCopy(ctx context.Context, p copyRequest, self string, progress func(copyProgress)) (res copyModelResult, err error) {
+// Preparation performs only reads. Mutation dispatch and source listing/import
+// remain in the returned effect, after confirmed journal publication.
+func (m *Manager) prepareCopy(ctx context.Context, p copyRequest, self string, progress func(copyProgress)) (effect func() (copyModelResult, error), res copyModelResult, err error) {
 	if p.DestinationNodeID != self {
 		client, err := m.copyClient(ctx, p.DestinationNodeID)
 		if err != nil {
-			return res, err
+			return nil, res, err
 		}
 		capability, err := client.copyCapabilities(ctx, p.Engine)
 		if err != nil {
-			return res, err
+			return nil, res, err
 		}
 		if err := requireCopyDestination(capability); err != nil {
-			return res, err
+			return nil, res, err
 		}
 		// No source checks here: the authorized destination must first be able
 		// to prove a completed identity-bound retry even with source offline.
-		return client.copyModel(ctx, p, progress)
+		return func() (copyModelResult, error) { return client.copyModel(ctx, p, progress) }, res, nil
 	}
 	if err := m.exec.copyAdmission(); err != nil {
-		return res, err
+		return nil, res, err
 	}
 	if err := requireCopyDestination(m.exec.copyCapabilities(p.Engine)); err != nil {
-		return res, err
+		return nil, res, err
 	}
 	if p.ExpectedExportID != "" {
 		verified, complete, err := m.exec.completedCopy(ctx, p.Engine, p.Model, p.ExpectedExportID, progress)
 		if err != nil || complete {
-			return verified, err
+			return nil, verified, err
 		}
 	}
 	client, err := m.copyClient(ctx, p.SourceNodeID)
 	if err != nil {
-		return res, err
+		return nil, res, err
 	}
 	source, err := client.copyCapabilities(ctx, p.Engine)
 	if err != nil {
-		return res, err
+		return nil, res, err
 	}
 	destination := m.exec.copyCapabilities(p.Engine)
 	if p.ExpectedExportID != "" && !source.IdentityBoundRetry {
-		return res, fmt.Errorf("source does not support identity-bound model copy retry")
+		return nil, res, fmt.Errorf("source does not support identity-bound model copy retry")
 	}
 	if source.Version != 1 || !source.Available || !source.Installed || !copyLayoutsIntersect(source, destination) {
-		return res, fmt.Errorf("source and destination do not support a common copy layout")
+		return nil, res, fmt.Errorf("source and destination do not support a common copy layout")
 	}
-	return m.exec.copyModelFrom(ctx, client, p.Engine, p.Model, p.ExpectedExportID, source.ExportLayouts, destination.ImportLayouts, progress)
+	return func() (copyModelResult, error) {
+		return m.exec.copyModelFrom(ctx, client, p.Engine, p.Model, p.ExpectedExportID, source.ExportLayouts, destination.ImportLayouts, progress)
+	}, res, nil
 }
 
 func (m *Manager) runCopy(ctx context.Context, msg *Message) {

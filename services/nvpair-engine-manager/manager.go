@@ -83,8 +83,8 @@ type Manager struct {
 	// that never access a destination engine or model store.
 	copyJournal  *modelDownloads
 	copyRegistry *Registry
-	// Synchronous effects run only inside the durable copy reservation.
-	copyEffect       func(context.Context, copyRequest, string, func(copyProgress)) (copyModelResult, error)
+	// Preparation is read-only; its returned effect runs inside durable evidence.
+	copyPrepare      func(context.Context, copyRequest, string, func(copyProgress)) (func() (copyModelResult, error), copyModelResult, error)
 	switchWatchers   switchWatchers
 	switchRelay      switchRelay
 	settingsRelay    settingsRelay
@@ -125,7 +125,7 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 		catalog:      newCatalogService(),
 		cancel:       func() {},
 	}
-	m.copyEffect = m.performCopy
+	m.copyPrepare = m.prepareCopy
 	m.catalog.familyOf = exec.reg.familyOf
 	baseDir := ""
 	if clusterDir != "" {

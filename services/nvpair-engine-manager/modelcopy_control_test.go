@@ -525,15 +525,14 @@ func TestModelCopyControlVerifiedRetryPrecedesSourceLookup(t *testing.T) {
 			t.Fatalf("changed identity error=%v", err)
 		}
 		m.copyJournal.mu.Lock()
-		retained, exists := m.copyJournal.copies[p.OpID]
+		_, exists := m.copyJournal.copies[p.OpID]
 		m.copyJournal.mu.Unlock()
-		if !exists || retained.ExpectedExportID != p.ExpectedExportID {
-			t.Fatal("identity-mismatched attempt lost its retained evidence")
+		if exists {
+			t.Fatal("side-effect-free receipt mismatch created unsafe evidence")
 		}
 	})
 	t.Run("tampered receipt bytes bypass the prior hash cache", func(t *testing.T) {
-		// Use a fresh complete journal, independent of the mismatched operation
-		// retained above, so only receipt validation can cause this conflict.
+		// Use a fresh complete journal so only receipt validation can cause this conflict.
 		m, store, src, p := setup(t)
 		file := src.list.Files[0]
 		path := filepath.Join(copyAliasDir(store.root, reportedCopyAlias), src.list.ExportID, filepath.FromSlash(file.Path))

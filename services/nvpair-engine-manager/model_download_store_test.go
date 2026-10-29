@@ -441,21 +441,23 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 			f.downloads.store.replace.SyncDir = func(string) error { close(entered); <-resume; return nil }
 			effects := make(chan struct{}, 1)
 			stopped := errors.New("synthetic copy effect stopped")
-			m.copyEffect = func(ctx context.Context, p copyRequest, owner string, _ func(copyProgress)) (copyModelResult, error) {
-				effects <- struct{}{}
-				_, copies, complete, _, err := f.downloads.store.loadJournal()
-				if err != nil {
-					return copyModelResult{}, err
-				}
-				marker := copies[p.OpID]
-				if !complete || len(copies) != 1 || marker.OpID != f.request.OpID || marker.Role != role || marker.Model != f.request.Model || marker.ContentKey != f.request.Model || marker.Engine != f.request.Engine || marker.OwnerNodeID != self || marker.SourceNodeID != f.request.SourceNodeID || marker.DestinationNodeID != f.request.DestinationNodeID || marker.ManagerIncarnation != f.downloads.source || marker.Phase != "unsafe" {
-					t.Errorf("actual admission dispatched before exact durable marker: %+v / %v", marker, complete)
-				}
-				live := m.activeCopies()
-				if ctx.Err() != nil || owner != self || p != f.request || len(live) != 1 || live[0].pendingPublication {
-					t.Errorf("effect admission = %+v / %+v / %v", p, live, ctx.Err())
-				}
-				return copyModelResult{}, stopped
+			m.copyPrepare = func(ctx context.Context, p copyRequest, owner string, _ func(copyProgress)) (func() (copyModelResult, error), copyModelResult, error) {
+				return func() (copyModelResult, error) {
+					effects <- struct{}{}
+					_, copies, complete, _, err := f.downloads.store.loadJournal()
+					if err != nil {
+						return copyModelResult{}, err
+					}
+					marker := copies[p.OpID]
+					if !complete || len(copies) != 1 || marker.OpID != f.request.OpID || marker.Role != role || marker.Model != f.request.Model || marker.ContentKey != f.request.Model || marker.Engine != f.request.Engine || marker.OwnerNodeID != self || marker.SourceNodeID != f.request.SourceNodeID || marker.DestinationNodeID != f.request.DestinationNodeID || marker.ManagerIncarnation != f.downloads.source || marker.Phase != "unsafe" {
+						t.Errorf("actual admission dispatched before exact durable marker: %+v / %v", marker, complete)
+					}
+					live := m.activeCopies()
+					if ctx.Err() != nil || owner != self || p != f.request || len(live) != 1 || live[0].pendingPublication {
+						t.Errorf("effect admission = %+v / %+v / %v", p, live, ctx.Err())
+					}
+					return copyModelResult{}, stopped
+				}, copyModelResult{}, nil
 			}
 			done := make(chan error, 1)
 			go func() {
@@ -897,3 +899,67 @@ func TestOwnerEvidenceCopyRetention(t *testing.T) {
 type copyEvidenceTransport func(*http.Request) (*http.Response, error)
 
 func (f copyEvidenceTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestModelCopyEvidenceExplicitRetryAfterRetainedOutcome(t *testing.T) {
+	test := func(name, self string, outcome error) {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := newModelDownloadStore(dir)
+			if _, _, err := store.save(nil, nil, true, false); err != nil {
+				t.Fatalf("seed complete private baseline: %v", err)
+			}
+			d := newModelDownloads(newOpID(), dir, map[string]string{"llamacpp": engines.ModelNamingExact})
+			registry := NewRegistry()
+			registry.engines["llamacpp"] = &Manifest{Engine: "llamacpp", ModelNaming: engines.ModelNamingExact}
+			m := &Manager{copyJournal: d, copyRegistry: registry}
+			t.Cleanup(m.stopCopies)
+			p := copyRequest{OpID: newOpID(), Engine: "llamacpp", Model: "tiny-retry", SourceNodeID: "source", DestinationNodeID: "destination"}
+			ctx, release, err := m.reserveCopy(context.Background(), p)
+			if err != nil {
+				t.Fatalf("reserve initial copy: %v", err)
+			}
+			t.Cleanup(release)
+			firstEffects := 0
+			_, err = m.copyWithEvidence(ctx, p, self, func() (copyModelResult, error) {
+				firstEffects++
+				if errors.Is(outcome, context.Canceled) && !m.cancelCopy(p.OpID) {
+					t.Fatal("initial copy was not cancellable")
+				}
+				return copyModelResult{}, outcome
+			})
+			release()
+			if !errors.Is(err, outcome) || firstEffects != 1 || len(m.activeCopies()) != 0 {
+				t.Fatalf("initial outcome = %v, effects = %d, active = %+v", err, firstEffects, m.activeCopies())
+			}
+			_, retained, complete, recovery, err := d.store.loadJournal()
+			if err != nil || !complete || recovery || len(retained) != 1 || retained[p.OpID].ManagerIncarnation != d.source || retained[p.OpID].Phase != "unsafe" {
+				t.Fatalf("initial unresolved provenance = %+v, complete = %v, recovery = %v, error = %v", retained, complete, recovery, err)
+			}
+
+			// A new explicit request may resume or verify the same content. It is
+			// not a replay of the interrupted mutation or inferred completion.
+			retry := p
+			retry.OpID, retry.ExpectedExportID = newOpID(), strings.Repeat("a", 64)
+			ctx, releaseRetry, err := m.reserveCopy(context.Background(), retry)
+			if err != nil {
+				t.Fatalf("reserve explicit retry: %v", err)
+			}
+			t.Cleanup(releaseRetry)
+			retryEffects := 0
+			res, err := m.copyWithEvidence(ctx, retry, self, func() (copyModelResult, error) {
+				retryEffects++
+				return copyModelResult{Engine: retry.Engine, Model: retry.Model, Layout: llamaArtifactsLayout, ExportID: retry.ExpectedExportID, RequiresConfiguration: true, Durability: copyDurabilityUncertain, Files: 1, FilesSkipped: 1, BytesTotal: 8}, nil
+			})
+			releaseRetry()
+			if err != nil || retryEffects != 1 || res.ExportID != retry.ExpectedExportID {
+				t.Fatalf("explicit same-content retry must reach verification: error = %v, effects = %d, result = %+v; retained operation = %s", err, retryEffects, res, p.OpID)
+			}
+		})
+	}
+	test("controller after interrupted transfer", "controller", io.ErrUnexpectedEOF)
+	test("destination after interrupted transfer", "destination", io.ErrUnexpectedEOF)
+	test("controller after cancellation", "controller", context.Canceled)
+	test("destination after cancellation", "destination", context.Canceled)
+	test("controller after lost mutation acknowledgement", "controller", copyUnknown(io.EOF))
+	test("destination after lost mutation acknowledgement", "destination", copyUnknown(io.EOF))
+}
