@@ -2138,7 +2138,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				// synchronization is needed.
 				sc.upstreamAlive = func() { p.reportActivity(cand.id) }
 				// Preserve the upstream response, including absent CORS permissions.
-				if !started {
+				// Error bodies are responses, but do not prove execution began.
+				// Keep their copy/error tracking even when no start is published.
+				committedSC = sc
+				if !started && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 					started = true
 					_ = f.notify("proxy/request-started", RequestStartedEvent{
 						ID:     reqID,
@@ -2152,11 +2155,6 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					// as the belt-and-braces guarantee that the node that
 					// actually served is the one counted as loaded.
 					moveHeld(cand.id)
-					// Record the commit here, not just after the loop: a copy
-					// error aborts this handler by panic, and finalize needs to
-					// know the response had committed (and on which capture) to
-					// classify it.
-					committedSC = sc
 					// queued -> running: the engine is producing content, so
 					// this is the first moment "running" is true. It also fixes
 					// the placement on the node that actually served, which may

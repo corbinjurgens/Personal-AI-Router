@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +13,61 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
+
+func TestHandleHTTP_PeerRefusalNeverStartsWorkload(t *testing.T) {
+	setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
+	forEachEngine(t, func(t *testing.T, tc engineCase) {
+		fx := paNewFixture(t, tc.profile)
+		peer := fx.peers(t, "paused-peer")[0]
+		// Discovery still advertises availability when the destination pauses.
+		peer.p.admission.setAvailability(nodepolicy.Paused, true)
+		fx.replace(t, peer.node)
+		response := fx.finish(t, fx.request(http.MethodPost, tc.inferencePath,
+			fmt.Sprintf(`{"model":%q}`, paModel)), http.StatusServiceUnavailable)
+		var refusal struct {
+			Code   string `json:"code"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(response.body, &refusal); err != nil {
+			t.Fatalf("decode refusal: %v", err)
+		}
+		if refusal.Code != "admission" || refusal.Reason != string(nodepolicy.RejectPaused) || response.header.Get(nodepolicy.AdmissionHeader) != string(nodepolicy.RejectPaused) {
+			t.Fatalf("refusal = %+v, headers = %v", refusal, response.header)
+		}
+		if peer.ingress.Load() != 5 || peer.inference.Load() != 0 {
+			t.Fatalf("peer ingress/engine calls = %d/%d, want 5/0", peer.ingress.Load(), peer.inference.Load())
+		}
+		var terminal *Workload
+		for _, event := range frames(t, fx.w) {
+			switch event.Method {
+			case engines.AddressMethod(tc.profile.Name, "proxy/request-started"):
+				t.Error("refusal published proxy/request-started")
+			case workloadSubmittedMethod, workloadStartedMethod, workloadCompletedMethod, workloadErroredMethod:
+				var params workloadParams
+				if err := json.Unmarshal(event.Params, &params); err != nil {
+					t.Fatalf("decode workload: %v", err)
+				}
+				wl := params.WorkloadInfo
+				if event.Method == workloadStartedMethod || wl.State == "running" || wl.StartedAt != nil {
+					t.Errorf("refusal published execution: method=%s workload=%+v", event.Method, wl)
+				}
+				if event.Method == workloadErroredMethod {
+					if terminal != nil {
+						t.Fatal("duplicate terminal event")
+					}
+					terminal = &wl
+				}
+			}
+		}
+		if terminal == nil || terminal.State != "failed" || terminal.CompletedAt == nil || terminal.Error == nil || *terminal.Error != "upstream returned HTTP 503" {
+			t.Fatalf("terminal = %+v, want failed before start with HTTP 503 error", terminal)
+		}
+	})
+}
 
 // recRW is a thread-safe io.ReadWriter that records everything the codec writes
 // (newline-delimited JSON-RPC frames) so a test can assert which notifications
