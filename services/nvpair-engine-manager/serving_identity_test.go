@@ -433,11 +433,19 @@ func TestServingSparseModelNeverFullyHashed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Error(err)
+		}
+	})
+	prepareSparseFixture(t, file)
 	err = file.Truncate(80 << 30)
-	closeErr := file.Close()
 	if err != nil {
-		t.Skipf("filesystem does not support sparse extension: %v", err)
+		file.Close()
+		t.Fatalf("extend sparse fixture: %v", err)
 	}
+	checkSparseFixtureAllocation(t, file, 80<<30)
+	closeErr := file.Close()
 	if closeErr != nil {
 		t.Fatal(closeErr)
 	}
