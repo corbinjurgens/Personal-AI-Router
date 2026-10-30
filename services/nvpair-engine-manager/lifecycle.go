@@ -605,7 +605,7 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		if !rt.hasCustomLaunch() {
 			st.logs.append(stream, line)
 		}
-	}, observeOutput)
+	}, observeOutput, 0)
 	e.nodeProjection.mu.Unlock()
 	if err != nil {
 		if allocated {

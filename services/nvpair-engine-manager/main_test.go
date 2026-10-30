@@ -20,11 +20,19 @@ import (
 // a real inference engine) and the engine-manager binary with a test-only
 // registry overlay. The overlay leaves main's transport/lifecycle intact.
 var (
-	fakeEngineBin string
-	managerBin    string
+	fakeEngineBin       string
+	managerBin          string
+	workingSetTestChild func(string) error
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 3 && os.Args[1] == "working-set-test-child" && workingSetTestChild != nil {
+		if err := workingSetTestChild(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) == 3 && os.Args[1] == "model-devices-test-child" {
 		os.Exit(runModelDevicesTestChild(os.Args[2]))
 	}
