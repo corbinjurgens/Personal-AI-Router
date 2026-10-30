@@ -1627,6 +1627,9 @@ function config(value: JsonValue | undefined): EngineSettingsConfig {
         serverPort: number(row.serverPort),
         proxyPort: number(row.proxyPort),
         launchText: text(row.launchText),
+        ...(row.workingSetLimitMiB == null
+            ? {}
+            : { workingSetLimitMiB: integer(row.workingSetLimitMiB, 0) }),
         ...(modelLoads === undefined ? {} : { modelLoads }),
         ...(row.serving == null ? {} : { serving: servingConfig(row.serving) })
     }
@@ -1799,6 +1802,14 @@ export function parseEngineSettings(value: JsonValue | undefined): EngineSetting
         revision: number(row.revision),
         appliedRevision: number(row.appliedRevision),
         settings: config(row.settings),
+        workingSetLimitStatus:
+            row.workingSetLimitStatus === undefined
+                ? undefined
+                : choice(row.workingSetLimitStatus, [
+                      'applied',
+                      'not-running',
+                      'unenforced-adopted'
+                  ]),
         serving: servingReadback(row.serving),
         effectiveServerPort: number(row.effectiveServerPort),
         effectiveProxyPort: number(row.effectiveProxyPort),
