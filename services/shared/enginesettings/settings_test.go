@@ -13,6 +13,54 @@ import (
 	"nvpair-shared/modelconfig"
 )
 
+func TestWorkingSetLimitWireAndValueEquality(t *testing.T) {
+	limit := 12288
+	launch := LaunchState{WorkingSetLimitMiB: &limit, WorkingSetLimitStatus: "applied"}
+	config := ConfigFromLaunch(launch, 8081)
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeConfig(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.WorkingSetLimitMiB == nil || *decoded.WorkingSetLimitMiB != 12288 || !config.Equal(decoded) {
+		t.Fatalf("round trip = %+v", decoded)
+	}
+	cloned := config.Clone()
+	*cloned.WorkingSetLimitMiB = 256
+	if *config.WorkingSetLimitMiB != 12288 || config.Equal(cloned) {
+		t.Fatal("clone aliases limit or equality ignores changed value")
+	}
+	*config.WorkingSetLimitMiB = 512
+	if limit != 12288 {
+		t.Fatal("launch reconstruction aliases limit")
+	}
+	cloned.WorkingSetLimitMiB = nil
+	if cloned.Equal(decoded) {
+		t.Fatal("absent limit equals configured limit")
+	}
+	t.Run("launch readback", func(t *testing.T) {
+		var got LaunchState
+		if err := json.Unmarshal(settingsJSON(t, launch), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.WorkingSetLimitMiB == nil || *got.WorkingSetLimitMiB != 12288 || got.WorkingSetLimitStatus != "applied" {
+			t.Fatalf("launch round trip = %+v", got)
+		}
+	})
+	t.Run("snapshot readback", func(t *testing.T) {
+		var got Snapshot
+		if err := json.Unmarshal(settingsJSON(t, Snapshot{Settings: decoded, WorkingSetLimitStatus: "unenforced-adopted"}), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.WorkingSetLimitStatus != "unenforced-adopted" || got.Settings.WorkingSetLimitMiB == nil || *got.Settings.WorkingSetLimitMiB != 12288 {
+			t.Fatalf("snapshot round trip = %+v", got)
+		}
+	})
+}
+
 func TestStatedMemoryRelayStrictUnion(t *testing.T) {
 	set := modelconfig.SetStatedMemoryRequest{Engine: "llamacpp", ModelID: "model", ConfigurationKey: strings.Repeat("a", 64), HostBytes: "1"}
 	valid := Relay{ID: "operation", Method: "set-stated-memory", Caller: "peer", SetStatedMemory: &set}

@@ -16,8 +16,9 @@ import (
 )
 
 type Config struct {
-	ServerPort int `json:"serverPort"`
-	ProxyPort  int `json:"proxyPort"`
+	WorkingSetLimitMiB *int `json:"workingSetLimitMiB,omitempty"`
+	ServerPort         int  `json:"serverPort"`
+	ProxyPort          int  `json:"proxyPort"`
 	// Arguments and leading environment assignments; excludes the executable
 	// and manifest-owned startup subcommand. Snapshot.Format identifies syntax.
 	LaunchText string                  `json:"launchText"`
@@ -26,10 +27,14 @@ type Config struct {
 }
 
 func (c Config) Equal(other Config) bool {
-	return c.ServerPort == other.ServerPort && c.ProxyPort == other.ProxyPort && c.LaunchText == other.LaunchText && c.Serving.Equal(other.Serving) && modelconfig.EqualLoads(c.ModelLoads, other.ModelLoads)
+	return reflect.DeepEqual(c.WorkingSetLimitMiB, other.WorkingSetLimitMiB) && c.ServerPort == other.ServerPort && c.ProxyPort == other.ProxyPort && c.LaunchText == other.LaunchText && c.Serving.Equal(other.Serving) && modelconfig.EqualLoads(c.ModelLoads, other.ModelLoads)
 }
 
 func (c Config) Clone() Config {
+	if c.WorkingSetLimitMiB != nil {
+		limit := *c.WorkingSetLimitMiB
+		c.WorkingSetLimitMiB = &limit
+	}
 	c.Serving = c.Serving.Clone()
 	c.ModelLoads = modelconfig.CloneLoads(c.ModelLoads)
 	return c
@@ -62,7 +67,7 @@ func (s Snapshot) Clone() Snapshot {
 
 // ConfigFromLaunch preserves the complete manager-owned declaration.
 func ConfigFromLaunch(s LaunchState, proxyPort int) Config {
-	return Config{ServerPort: s.ServerPort, ProxyPort: proxyPort, LaunchText: s.LaunchText, Serving: s.Serving.Clone(), ModelLoads: modelconfig.CloneLoads(s.ModelLoads)}
+	return (Config{WorkingSetLimitMiB: s.WorkingSetLimitMiB, ServerPort: s.ServerPort, ProxyPort: proxyPort, LaunchText: s.LaunchText, Serving: s.Serving, ModelLoads: s.ModelLoads}).Clone()
 }
 
 type Request struct {
@@ -214,28 +219,29 @@ func (r Request) Clone() Request {
 }
 
 type Snapshot struct {
-	Serving             *engines.ServingReadback `json:"serving,omitempty"`
-	NodeID              string                   `json:"nodeId"`
-	Engine              string                   `json:"engine"`
-	Revision            uint64                   `json:"revision"`
-	AppliedRevision     uint64                   `json:"appliedRevision"`
-	Sequence            uint64                   `json:"sequence"`
-	Epoch               string                   `json:"epoch"`
-	Settings            Config                   `json:"settings"`
-	EffectiveServerPort int                      `json:"effectiveServerPort"`
-	EffectiveProxyPort  int                      `json:"effectiveProxyPort"`
-	Running             bool                     `json:"running"`
-	Adopted             bool                     `json:"adopted"`
-	Editable            bool                     `json:"editable"`
-	Reason              string                   `json:"reason,omitempty"`
-	Format              string                   `json:"format"`
-	Phase               string                   `json:"phase"`
-	Error               string                   `json:"error,omitempty"`
-	RequestID           string                   `json:"requestId,omitempty"`
-	CoupledStage        string                   `json:"coupledStage,omitempty"`
-	PolicyRevision      string                   `json:"policyRevision,omitempty"`
-	UnresolvedError     string                   `json:"unresolvedError,omitempty"`
-	EffectiveSettings   *Config                  `json:"effectiveSettings,omitempty"`
+	WorkingSetLimitStatus string                   `json:"workingSetLimitStatus,omitempty"`
+	Serving               *engines.ServingReadback `json:"serving,omitempty"`
+	NodeID                string                   `json:"nodeId"`
+	Engine                string                   `json:"engine"`
+	Revision              uint64                   `json:"revision"`
+	AppliedRevision       uint64                   `json:"appliedRevision"`
+	Sequence              uint64                   `json:"sequence"`
+	Epoch                 string                   `json:"epoch"`
+	Settings              Config                   `json:"settings"`
+	EffectiveServerPort   int                      `json:"effectiveServerPort"`
+	EffectiveProxyPort    int                      `json:"effectiveProxyPort"`
+	Running               bool                     `json:"running"`
+	Adopted               bool                     `json:"adopted"`
+	Editable              bool                     `json:"editable"`
+	Reason                string                   `json:"reason,omitempty"`
+	Format                string                   `json:"format"`
+	Phase                 string                   `json:"phase"`
+	Error                 string                   `json:"error,omitempty"`
+	RequestID             string                   `json:"requestId,omitempty"`
+	CoupledStage          string                   `json:"coupledStage,omitempty"`
+	PolicyRevision        string                   `json:"policyRevision,omitempty"`
+	UnresolvedError       string                   `json:"unresolvedError,omitempty"`
+	EffectiveSettings     *Config                  `json:"effectiveSettings,omitempty"`
 }
 
 type Conflict struct {
@@ -266,18 +272,20 @@ type Preview struct {
 }
 
 type LaunchState struct {
-	ModelLoads      []modelconfig.ModelLoad  `json:"modelLoads,omitempty"`
-	Serving         *engines.ServingConfig   `json:"serving,omitempty"`
-	ServingReadback *engines.ServingReadback `json:"servingReadback,omitempty"`
-	Engine          string                   `json:"engine"`
-	ServerPort      int                      `json:"serverPort"`
-	EffectivePort   int                      `json:"effectivePort"`
-	LaunchText      string                   `json:"launchText"`
-	Running         bool                     `json:"running"`
-	Adopted         bool                     `json:"adopted"`
-	Editable        bool                     `json:"editable"`
-	Reason          string                   `json:"reason,omitempty"`
-	Format          string                   `json:"format"`
+	WorkingSetLimitMiB    *int                     `json:"workingSetLimitMiB,omitempty"`
+	WorkingSetLimitStatus string                   `json:"workingSetLimitStatus,omitempty"`
+	ModelLoads            []modelconfig.ModelLoad  `json:"modelLoads,omitempty"`
+	Serving               *engines.ServingConfig   `json:"serving,omitempty"`
+	ServingReadback       *engines.ServingReadback `json:"servingReadback,omitempty"`
+	Engine                string                   `json:"engine"`
+	ServerPort            int                      `json:"serverPort"`
+	EffectivePort         int                      `json:"effectivePort"`
+	LaunchText            string                   `json:"launchText"`
+	Running               bool                     `json:"running"`
+	Adopted               bool                     `json:"adopted"`
+	Editable              bool                     `json:"editable"`
+	Reason                string                   `json:"reason,omitempty"`
+	Format                string                   `json:"format"`
 }
 
 type Configure struct {

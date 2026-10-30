@@ -598,6 +598,7 @@ func (b *Broker) modelSettingsBaselineLocked(p settings.Request, caller string, 
 	}
 	policy := r.current
 	record.Snapshot.Running, record.Snapshot.Adopted = launch.Running, launch.Adopted
+	record.Snapshot.WorkingSetLimitStatus = launch.WorkingSetLimitStatus
 	record.Snapshot.EffectiveServerPort, record.Snapshot.EffectiveProxyPort = launch.EffectivePort, port
 	record.Snapshot.Editable, record.Snapshot.Format = true, launch.Format
 	record.Snapshot.EffectiveSettings = &native
@@ -935,6 +936,7 @@ func observeModelSettingsLaunch(record *engineSettingsRecord, launch settings.La
 	record.Snapshot.EffectiveSettings = &actual
 	record.Snapshot.Serving = launch.ServingReadback.Clone()
 	record.Snapshot.Running, record.Snapshot.Adopted = launch.Running, launch.Adopted
+	record.Snapshot.WorkingSetLimitStatus = launch.WorkingSetLimitStatus
 	record.Snapshot.EffectiveServerPort = launch.EffectivePort
 }
 

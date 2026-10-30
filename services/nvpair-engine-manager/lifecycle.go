@@ -438,6 +438,9 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 }
 
 func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string, prepareSnapshot func(string, []byte) (string, func(), error)) error {
+	if reason := workingSetLimitError(st, rt); reason != "" {
+		return &ServingFieldError{Field: "workingSetLimitMiB", Reason: reason}
+	}
 	rt.modelLoadOwner = e
 	recheckContent := func() error { return nil }
 	if len(rt.ModelLoads) != 0 {
@@ -589,6 +592,10 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 	if capture != nil {
 		observeOutput = capture.observe
 	}
+	var workingSetLimitBytes uint64
+	if rt.WorkingSetLimitMiB != nil {
+		workingSetLimitBytes = uint64(*rt.WorkingSetLimitMiB) << 20
+	}
 	proc, err := startManagedProcObserved(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
 		if serving {
 			if prepared.Credential != "" {
@@ -605,7 +612,7 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		if !rt.hasCustomLaunch() {
 			st.logs.append(stream, line)
 		}
-	}, observeOutput, 0)
+	}, observeOutput, workingSetLimitBytes)
 	e.nodeProjection.mu.Unlock()
 	if err != nil {
 		if allocated {
@@ -636,6 +643,8 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 	previousCapture := st.bufferCapture
 	st.bufferCapture = capture
 	st.proc = proc
+	st.plat.Runtime.workingSetProcess = proc
+	st.plat.Runtime.workingSetLimitBytes = workingSetLimitBytes
 	st.launchDigest = digest
 	st.plat.Runtime.servingLaunch = prepared
 	if len(rt.ModelLoads) != 0 {

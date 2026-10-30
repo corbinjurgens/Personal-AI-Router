@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -39,7 +40,9 @@ type settingsHarness struct {
 	entered, release    chan struct{}
 	// launchMu guards the fixture's launch state, which a suspended
 	// engine:configure-launch mutates while the reader loop keeps serving.
-	launchMu sync.Mutex
+	launchMu        sync.Mutex
+	launchStatus    string
+	configureStatus string
 	// proxyCalls records the unaddressed requests the fake proxy answered,
 	// such as node/set-engine-drain, in arrival order.
 	proxyCallsMu sync.Mutex
@@ -163,6 +166,7 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 			case "engine:get-launch":
 				h.launchMu.Lock()
 				current := launch
+				current.WorkingSetLimitStatus = h.launchStatus
 				h.launchMu.Unlock()
 				_ = codec.Respond(msg.ID, current)
 			case "engine:configured-ports":
@@ -203,6 +207,11 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 					_ = json.Unmarshal(msg.Params, &p)
 					h.launchMu.Lock()
 					launch.ServerPort = p.Settings.ServerPort
+					launch.WorkingSetLimitMiB = p.Settings.Clone().WorkingSetLimitMiB
+					if h.configureStatus != "" {
+						h.launchStatus = h.configureStatus
+					}
+					launch.WorkingSetLimitStatus = h.launchStatus
 					launch.LaunchText = p.Settings.LaunchText
 					launch.Serving = p.Settings.Serving.Clone()
 					launch.Running = false
@@ -251,6 +260,63 @@ func (h *settingsHarness) request(t *testing.T) settings.Request {
 func brokerServingFixture() *engines.ServingConfig {
 	ram, vram := int64(4096), int64(0)
 	return &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{ModelID: "exact/model", MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: strings.Repeat("a", 64), Provenance: engines.ServingProvenance{Kind: "hf-lfs-sha256"}, Binding: &engines.ServingBinding{SourcePath: "fixture-link", ResolvedTarget: "fixture-blob", SizeBytes: 64, MtimeNS: "1729000000000000001", SampleSHA256: strings.Repeat("b", 64)}}}}}}
+}
+
+func TestWorkingSetLimitStatusReachesPublishedSettings(t *testing.T) {
+	h := newSettingsHarnessForEngine(t, "llamacpp")
+	var published bytes.Buffer
+	h.b.codec = NewCodec(&published)
+	h.launchMu.Lock()
+	h.launchStatus = "unenforced-adopted"
+	h.launchMu.Unlock()
+	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
+	if err != nil || snapshot.WorkingSetLimitStatus != "unenforced-adopted" {
+		t.Fatalf("refresh snapshot = %+v, error = %v", snapshot, err)
+	}
+	assertPublished := func(want string) {
+		t.Helper()
+		decoder := json.NewDecoder(bytes.NewReader(published.Bytes()))
+		last := ""
+		for {
+			var message Message
+			if err := decoder.Decode(&message); err != nil {
+				if err == io.EOF {
+					break
+				}
+				t.Fatal(err)
+			}
+			if message.Method != "engine:settings-changed" {
+				continue
+			}
+			var payload settings.Snapshot
+			if err := json.Unmarshal(message.Params, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Engine == "llamacpp" {
+				last = payload.WorkingSetLimitStatus
+			}
+		}
+		if last != want {
+			t.Fatalf("published status = %q, want %q", last, want)
+		}
+		published.Reset()
+	}
+	assertPublished("unenforced-adopted")
+	h.launchMu.Lock()
+	h.configureStatus = "applied"
+	h.launchMu.Unlock()
+	limit := 256
+	request := settings.Request{Engine: "llamacpp", ExpectedRevision: snapshot.Revision, RequestID: settingsID(), Settings: snapshot.Settings.Clone()}
+	request.Settings.WorkingSetLimitMiB = &limit
+	receipt, err := h.b.applyEngineSettings(context.Background(), request, "")
+	if err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("apply receipt = %+v, error = %v", receipt, err)
+	}
+	// Inspect completion publication before another refresh could mask it.
+	assertPublished("applied")
+	if got := h.b.engineSettings["llamacpp"].Snapshot; got.WorkingSetLimitStatus != "applied" || got.Settings.WorkingSetLimitMiB == nil || *got.Settings.WorkingSetLimitMiB != 256 {
+		t.Fatalf("completion snapshot = %+v", got)
+	}
 }
 
 func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {

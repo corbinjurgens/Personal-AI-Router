@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modelconfig"
 )
 
 func init() { workingSetTestChild = runWorkingSetTestChild }
@@ -252,5 +255,46 @@ func TestWorkingSetContainmentCloseIsIdempotent(t *testing.T) {
 	case <-c.done:
 	default:
 		t.Fatal("completion reader survived Close")
+	}
+}
+
+func TestWorkingSetLimitSurvivesModelChangePreview(t *testing.T) {
+	f := newModelLoadFixture(t)
+	limit := 4096
+	f.st.plat.Runtime.WorkingSetLimitMiB = &limit
+	two := int32(2)
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Slots: &two}})
+	if preview.Settings.WorkingSetLimitMiB == nil || *preview.Settings.WorkingSetLimitMiB != 4096 {
+		t.Fatalf("model change preview dropped the saved working-set limit: %v", preview.Settings.WorkingSetLimitMiB)
+	}
+}
+
+func TestWorkingSetLimitEngineStartCapsProcess(t *testing.T) {
+	e := workingSetSettingsExecutor(t)
+	limit := 256
+	request := settingsRequest(t, e)
+	request.Settings.WorkingSetLimitMiB = &limit
+	preview := previewSettings(t, e, request)
+	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	st := settingsState(t, e)
+	st.mu.Lock()
+	pid := st.proc.cmd.Process.Pid
+	st.mu.Unlock()
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(process)
+	_, maximum, flags, err := processWorkingSetLimits(process)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maximum != 268435456 || flags&0x6 != 0x6 {
+		t.Fatalf("started engine quota max=%d flags=%#x, want max=268435456 flags containing 0x6", maximum, flags)
 	}
 }

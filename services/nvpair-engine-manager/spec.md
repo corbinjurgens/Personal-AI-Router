@@ -5,6 +5,37 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Windows engine working-set limit
+
+Engine settings accept optional integer `workingSetLimitMiB`, from 256 through
+1048576 inclusive. Absent or null means no limit. The target refuses a non-null
+value on non-Windows hosts, non-llama.cpp engine families, or runtime modes other
+than `process`, with a field error keyed `workingSetLimitMiB`. Preview reports
+the value change in `diff` and requires a restart when the engine is running.
+Apply validates before stopping or writing, then uses the existing stop,
+persist, rebind and conditional restart operation. The host runtime override
+stores `working_set_limit_mib`; clearing it masks an inherited limit with null.
+
+Windows applies the same hard maximum, in bytes, to each owned engine process
+and descendant. The root starts suspended, is assigned to a limit-free job,
+capped through `SetProcessWorkingSetSizeEx` and verified by readback before
+resuming. Failure kills and reaps the root and fails start. Job notifications
+cap descendants after confirming job membership; a descendant whose cap fails is
+terminated, and if it cannot be opened or the notification read fails, the whole
+engine job is terminated. Windows delivers job notifications best-effort, so a
+lost notification leaves that descendant uncapped. This limits each process
+working set, not aggregate tree memory or committed memory. The engine job has
+no kill-on-close lifetime policy.
+
+`LaunchState` includes the saved `workingSetLimitMiB` and
+`workingSetLimitStatus`; the broker projects the status onto its settings
+snapshot. Status is omitted when no limit is saved. `not-running` means stopped;
+`applied` means this manager started the current owned process with the saved
+value; `unenforced-adopted` means the running engine is adopted or was started
+without the current value. Adoption cannot enforce new descendants after a
+manager restart, so an engine restart is required. A failed spawn leaves the
+saved limit in place and reports the failed start, as with other runtime keys.
+
 ## Private model memory device metadata
 
 `mapModelSettingsDevices(ctx, operation, runner)` consumes an operation snapshot,

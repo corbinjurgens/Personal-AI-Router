@@ -153,6 +153,11 @@ func (e *Executor) persistRuntimeConfig(engine string, port int, args, environme
 // Omitted/nil modelLoads preserves the collection; a supplied empty collection
 // writes a host-platform mask. This private persistence helper never activates.
 func (e *Executor) persistRuntimeServing(engine string, port int, args, environment *[]string, serving **engines.ServingConfig, modelLoads ...*[]modelconfig.ModelLoad) error {
+	return e.persistRuntimeSettings(engine, port, args, environment, serving, nil, modelLoads...)
+}
+
+// A nil outer limit pointer preserves it; a pointer to nil masks inherited limits.
+func (e *Executor) persistRuntimeSettings(engine string, port int, args, environment *[]string, serving **engines.ServingConfig, workingSetLimit **int, modelLoads ...*[]modelconfig.ModelLoad) error {
 	if len(modelLoads) > 1 {
 		return fmt.Errorf("modelLoads: one replacement is permitted")
 	}
@@ -245,6 +250,9 @@ func (e *Executor) persistRuntimeServing(engine string, port int, args, environm
 	}
 	if serving != nil {
 		hostRuntime["serving"] = (*serving).Clone()
+	}
+	if workingSetLimit != nil {
+		hostRuntime["working_set_limit_mib"] = *workingSetLimit
 	}
 	if loads != nil {
 		hostRuntime["modelLoads"] = loads

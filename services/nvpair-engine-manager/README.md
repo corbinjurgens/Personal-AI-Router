@@ -779,6 +779,17 @@ persisted) — NVPAIR can't relocate a process it didn't start; see Adoption bel
 
 Combined launch/server/proxy edits use the broker's
 [engine settings protocol](../nvpair-ui-broker/ENGINE_SETTINGS.md). The worker
+accepts optional `workingSetLimitMiB` (256 through 1048576) alongside
+`serverPort`, `proxyPort` and `launchText`. This setting is available only for
+Windows llama.cpp engines in process mode, and persists as
+`working_set_limit_mib`. Each owned engine process and descendant receives the
+same hard working-set maximum; descendants are capped from best-effort job
+notifications (see [spec.md](spec.md)). Changing or clearing it restarts a running engine.
+Readback `workingSetLimitStatus` is `applied`, `not-running`, or
+`unenforced-adopted`, and is omitted when no limit is saved. An adopted process
+requires a restart for enforcement of new descendants.
+
+The worker
 checks basic argument syntax and adapter-declared networking/CORS controls
 using [`pair-arguments-v1`](LAUNCH_TEXT.md), persists host-platform `launch_args` and `launch_env`
 with the port, and holds its operation lock through stop/rebind/start. The

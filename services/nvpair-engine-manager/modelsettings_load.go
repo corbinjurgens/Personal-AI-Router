@@ -964,7 +964,7 @@ func (e *Executor) previewModelLoadChange(ctx context.Context, st *engineState, 
 	if err != nil {
 		return fail(err)
 	}
-	baseline := settings.Config{ServerPort: rt.Port, ProxyPort: p.Settings.ProxyPort, LaunchText: text, Serving: rt.Serving.Clone(), ModelLoads: modelconfig.CloneLoads(rt.ModelLoads)}
+	baseline := (settings.Config{WorkingSetLimitMiB: rt.WorkingSetLimitMiB, ServerPort: rt.Port, ProxyPort: p.Settings.ProxyPort, LaunchText: text, Serving: rt.Serving, ModelLoads: rt.ModelLoads}).Clone()
 	if err := p.ValidateModelChange(baseline, false); err != nil {
 		return fail(err)
 	}

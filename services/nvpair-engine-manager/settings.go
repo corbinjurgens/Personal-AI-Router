@@ -5,11 +5,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -129,6 +131,17 @@ func launchForState(st *engineState, port int) (launchCommand, error) {
 func (e *Executor) launchStateLocked(engine string, st *engineState) settings.LaunchState {
 	st.mu.Lock()
 	result := settings.LaunchState{Engine: engine, ServerPort: st.plat.Runtime.Port, EffectivePort: st.port, Running: st.running, Adopted: st.adopted, Format: launchTextFormat}
+	if limit := st.plat.Runtime.WorkingSetLimitMiB; limit != nil {
+		value := *limit
+		result.WorkingSetLimitMiB = &value
+		result.WorkingSetLimitStatus = "not-running"
+		if result.Running {
+			result.WorkingSetLimitStatus = "unenforced-adopted"
+			if !result.Adopted && st.proc != nil && st.proc == st.plat.Runtime.workingSetProcess && st.plat.Runtime.workingSetLimitBytes == uint64(value)<<20 {
+				result.WorkingSetLimitStatus = "applied"
+			}
+		}
+	}
 	result.Serving = st.plat.Runtime.Serving.Clone()
 	result.ModelLoads = modelconfig.CloneLoads(st.plat.Runtime.ModelLoads)
 	result.ServingReadback = servingDeclarationReadback(result.Serving)
@@ -304,6 +317,22 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 	return e.previewLaunch(st, request, nil)
 }
 
+func workingSetLimitError(st *engineState, rt Runtime) string {
+	if rt.WorkingSetLimitMiB == nil {
+		return ""
+	}
+	if *rt.WorkingSetLimitMiB < 256 || *rt.WorkingSetLimitMiB > 1048576 {
+		return "Enter a working-set limit from 256 to 1048576 MiB."
+	}
+	if runtime.GOOS != "windows" {
+		return "Working-set limits are available only on Windows."
+	}
+	if st.manifest.FamilyOrDefault() != "llamacpp" || rt.modeOrDefault() != "process" {
+		return "Working-set limits require a llama.cpp engine in process mode."
+	}
+	return ""
+}
+
 // Preparation supplies a bounded compiler on a state snapshot, sharing the
 // exact proposed-launch parser without reading current runtime digests.
 func (e *Executor) previewLaunch(st *engineState, request settings.Request, prepare func(launchCommand, Runtime) (*llamaServingLaunch, error)) settings.Preview {
@@ -323,6 +352,11 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 	st.mu.Lock()
 	rt := st.plat.Runtime
 	st.mu.Unlock()
+	rt.WorkingSetLimitMiB = request.Settings.WorkingSetLimitMiB
+	if reason := workingSetLimitError(st, rt); reason != "" {
+		result.Errors["workingSetLimitMiB"] = reason
+		return result
+	}
 	rt.Serving = request.Settings.Serving.Clone()
 	rt.ModelLoads = modelconfig.CloneLoads(request.Settings.ModelLoads)
 	rt.modelLoadOwner = e
@@ -498,7 +532,13 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 		return result
 	}
 	current := e.launchStateLocked(request.Engine, st)
-	changed := current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving) || !modelconfig.EqualLoads(current.ModelLoads, result.Settings.ModelLoads)
+	limitChanged := !reflect.DeepEqual(current.WorkingSetLimitMiB, result.Settings.WorkingSetLimitMiB)
+	changed := limitChanged || current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving) || !modelconfig.EqualLoads(current.ModelLoads, result.Settings.ModelLoads)
+	if limitChanged {
+		before, _ := json.Marshal(current.WorkingSetLimitMiB)
+		after, _ := json.Marshal(result.Settings.WorkingSetLimitMiB)
+		result.Diff = append(result.Diff, modelconfig.FieldDiff{Field: "workingSetLimitMiB", Before: before, After: after})
+	}
 	result.Restart = current.Running && changed
 	if len(current.ModelLoads) != 0 || len(result.Settings.ModelLoads) != 0 {
 		result.Impact = e.modelLoadImpact(request.Engine, settings.ConfigFromLaunch(current, request.Settings.ProxyPort), result.Settings, current.Running, changed, nil)
@@ -562,7 +602,7 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 	preview := e.previewLaunchLocked(st, settings.Request{Engine: p.Engine, Settings: p.Settings})
 	if len(preview.Errors) > 0 || preview.Conflict != nil {
 		for field, reason := range preview.Errors {
-			if field == "serving" || strings.HasPrefix(field, "serving.") || strings.HasPrefix(field, "modelLoads.") {
+			if field == "workingSetLimitMiB" || field == "serving" || strings.HasPrefix(field, "serving.") || strings.HasPrefix(field, "modelLoads.") {
 				return settings.LaunchState{}, &ServingFieldError{Field: field, Reason: reason}
 			}
 		}
@@ -577,7 +617,7 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 	e.reporter.clear(startFailedID(p.Engine))
 	e.reporter.clear(exitedID(p.Engine))
 	old := e.launchStateLocked(p.Engine, st)
-	changed := old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText || !old.Serving.Equal(preview.Settings.Serving) || !modelconfig.EqualLoads(old.ModelLoads, preview.Settings.ModelLoads)
+	changed := !reflect.DeepEqual(old.WorkingSetLimitMiB, preview.Settings.WorkingSetLimitMiB) || old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText || !old.Serving.Equal(preview.Settings.Serving) || !modelconfig.EqualLoads(old.ModelLoads, preview.Settings.ModelLoads)
 	activationBlocked := false
 	if err := e.activationVeto(p.Engine); err != nil {
 		var veto *localVetoError
@@ -643,7 +683,7 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 		}
 	}
 	if changed || !reflect.DeepEqual(st.plat.Runtime.LaunchArgs, &preview.Args) || !reflect.DeepEqual(st.plat.Runtime.LaunchEnv, &preview.Env) {
-		if err := e.persistRuntimeServing(p.Engine, preview.Settings.ServerPort, &preview.Args, &preview.Env, &preview.Settings.Serving, &preview.Settings.ModelLoads); err != nil {
+		if err := e.persistRuntimeSettings(p.Engine, preview.Settings.ServerPort, &preview.Args, &preview.Env, &preview.Settings.Serving, &preview.Settings.WorkingSetLimitMiB, &preview.Settings.ModelLoads); err != nil {
 			return e.launchStateLocked(p.Engine, st), err
 		}
 	}
@@ -651,6 +691,7 @@ func (e *Executor) configureLaunchLocked(ctx context.Context, st *engineState, p
 	previousSnapshot := st.plat.Runtime.servingSnapshot
 	st.withdrawOwnerKnowledgeLocked()
 	st.plat.Runtime.Port = preview.Settings.ServerPort
+	st.plat.Runtime.WorkingSetLimitMiB = preview.Settings.Clone().WorkingSetLimitMiB
 	st.plat.Runtime.LaunchArgs = &preview.Args
 	st.plat.Runtime.LaunchEnv = &preview.Env
 	st.plat.Runtime.Serving = preview.Settings.Serving.Clone()

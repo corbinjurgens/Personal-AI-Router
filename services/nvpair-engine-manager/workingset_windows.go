@@ -202,17 +202,22 @@ func (c *workingSetContainment) capMember(pid uint32) {
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 		return // Already exited.
 	}
-	if err == nil {
+	if err != nil {
+		// Without a handle the member can be neither capped nor terminated
+		// alone, so fail closed on the engine tree, as a failed read does.
+		err = errors.Join(err, windows.TerminateJobObject(c.job, 1))
+	} else {
 		defer windows.CloseHandle(process)
-		var member bool
-		member, err = processInJob(process, c.job)
-		if err == nil && !member {
+		member, memberErr := processInJob(process, c.job)
+		if memberErr == nil && !member {
 			return
 		}
+		err = memberErr
 		if err == nil {
-			if err = capProcessWorkingSet(process, c.maxBytes); err != nil {
-				err = errors.Join(err, windows.TerminateProcess(process, 1))
-			}
+			err = capProcessWorkingSet(process, c.maxBytes)
+		}
+		if err != nil {
+			err = errors.Join(err, windows.TerminateProcess(process, 1))
 		}
 	}
 	if err != nil {
