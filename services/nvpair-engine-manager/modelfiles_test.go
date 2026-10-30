@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,47 @@ import (
 	"sync"
 	"testing"
 )
+
+func TestModelPublisherOptionalManifestCannotBlockExport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifact")
+	writeTestFile(t, path, []byte("fixture"))
+	evidence, err := captureSource(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := modelFileList{Engine: "llamacpp", Model: publisherTestRepo + ":Q4_K_M", Revision: publisherTestRevision}
+	for i := 0; i < maxCopyArtifacts; i++ {
+		name := fmt.Sprintf("%04d-%s.gguf", i, strings.Repeat("a", 230))
+		observation := publisherTestRecord(sha256Hex([]byte("fixture")))
+		observation.Path, observation.File = name, name
+		list.Files = append(list.Files, modelFile{Path: name, Size: evidence.size, SHA256: observation.ActualDigest, Publisher: &observation, configured: path, abs: evidence.target, info: evidence.info})
+	}
+	identity, err := nativeExportID(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list.ExportID = identity
+	full, err := json.Marshal(list)
+	if err != nil || len(full) <= maxCopyManifest {
+		t.Fatalf("fixture does not cross optional envelope: bytes=%d err=%v", len(full), err)
+	}
+	encoded, err := marshalCopyManifest(list)
+	if err != nil || len(encoded) > maxCopyManifest {
+		t.Fatalf("observations blocked bounded export: bytes=%d err=%v", len(encoded), err)
+	}
+	var decoded modelFileList
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ExportID != identity || len(decoded.Files) != len(list.Files) {
+		t.Fatal("optional omission changed byte identity or file membership")
+	}
+	for i, file := range decoded.Files {
+		if file.Publisher != nil || file.Path != list.Files[i].Path || file.SHA256 != list.Files[i].SHA256 || list.Files[i].Publisher == nil {
+			t.Fatal("omission retained partial coverage, changed bytes, or mutated caller")
+		}
+	}
+}
 
 type modelDownloadBodyWriter struct {
 	*httptest.ResponseRecorder
@@ -305,6 +347,48 @@ func TestValidModelRelPath(t *testing.T) {
 		if validModelRelPath(p) {
 			t.Errorf("validModelRelPath(%q) = true, want false", p)
 		}
+	}
+}
+
+func TestModelPublisherFullHashDoesNotTrustLocalLFSName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), strings.Repeat("a", 64))
+	data := []byte("bytes different from the local LFS filename")
+	writeTestFile(t, path, data)
+	evidence, err := captureSource(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := modelFileList{Revision: publisherTestRevision, source: &sourceSnapshot{}, Files: []modelFile{{Path: publisherTestFile, Size: int64(len(data)), SHA256: strings.Repeat("a", 64), abs: evidence.target, configured: evidence.configured, info: evidence.info}}}
+	cache := &hashCache{done: map[string]hashEntry{}, inflight: map[hashEntry]*hashCall{}}
+	if err := cache.hashModelFiles(context.Background(), &list, nil); err != nil {
+		t.Fatal(err)
+	}
+	if list.Files[0].SHA256 != sha256Hex(data) {
+		t.Fatal("local LFS filename became a full-byte observation")
+	}
+	if err := cache.hashModelFiles(context.Background(), &list, nil); err != nil || len(cache.done) != 1 {
+		t.Fatalf("checked full hash cache was not reused: entries=%d error=%v", len(cache.done), err)
+	}
+}
+
+func TestModelPublisherSourceHashFailureRemainsHard(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifact.gguf")
+	data := []byte("synthetic artifact")
+	writeTestFile(t, path, data)
+	evidence, err := captureSource(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := modelFileList{Layout: llamaArtifactsLayout, Model: "alias", Files: []modelFile{{Path: "model/artifact.gguf", Role: "model", Size: int64(len(data)), abs: evidence.target, configured: evidence.configured, info: evidence.info, asserted: strings.Repeat("f", 64)}}}
+	if err := hashModelFiles(context.Background(), &list, nil); err == nil || list.ExportID != "" {
+		t.Fatal("declared artifact mismatch became observational")
+	}
+	list.Files[0].asserted = ""
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := hashModelFiles(context.Background(), &list, nil); err == nil || list.ExportID != "" {
+		t.Fatal("hash read failure issued a successful export")
 	}
 }
 

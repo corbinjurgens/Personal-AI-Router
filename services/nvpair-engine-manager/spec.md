@@ -1611,8 +1611,9 @@ Requirements:
   Studio selected row group (GGUF and configured-namespace projector, or an
   MLX tree). Supported file and directory links can resolve outside the store;
   no link grants access to arbitrary descendants or a resolved parent. Hashes
-  are computed lazily and cached; a file named by its sha256 uses that name,
-  with the destination still verifying the complete bytes.
+  are computed lazily and cached. Ollama content names remain declarations;
+  HF snapshot files use the checked full hashing/cache owner rather than local
+  LFS blob filenames. The destination verifies the complete bytes.
 - **Source serving.** Each list issues an `exportId` for its frozen selection.
   GET and HEAD, including Range, require that ID and exact engine, model and
   listed logical name (`400` for malformed paths, `404` for unlisted names).
@@ -1712,6 +1713,66 @@ Requirements:
   transport loss never replays the POST or fabricates a definite failed copy.
 
 Stores: Ollama uses `OLLAMA_MODELS` from the engine's launch environment or this process, else `{models_dir}/models`; llama.cpp uses `LLAMA_CACHE` (the manifest sets `{models_dir}`) in the Hugging Face hub cache layout, selecting `owner/repo:TAG` files as llama.cpp does; LM Studio uses `{models_dir}` and the paths `lms ls --json` reports. The layout is selected by the manifest's `family`, so a fork with its own id and `models_dir` uses its family's layout rooted at its own store; an engine whose family has no layout is refused. One copy of a given model runs at a time per node.
+
+#### Publisher comparison observations
+
+`copyModelResult` optionally adds `publisherComparison:{status,files,replayed?}`.
+Each `files` entry has exact fields:
+
+| Field | Meaning |
+| --- | --- |
+| `path` | Exact copied logical relative path |
+| `status` | `verified`, `mismatch`, or `unavailable` |
+| `provider`, `repository`, `revision`, `file` | Optional complete selector: `huggingface`, exact owner/repository, full lowercase 40-hex immutable commit, exact repository-relative file |
+| `algorithm` | `sha256` |
+| `expectedDigest` | Full lowercase provider SHA256, present only for an acquired statement |
+| `actualDigest` | Full lowercase SHA256 of bytes checked by the existing transfer/cache owner |
+| `acquisitionBasis` | `provider`, `cache`, or `unavailable` |
+| `acquiredAt` | Original successful UTC RFC3339 acquisition time; absent for unavailable |
+
+Verified requires exact independently acquired statement agreement. It conveys
+no model safety, author trust or signature assertion. Mismatch remains visible,
+never verified, and introduces no publication veto. Existing full declared
+artifact assertions and full transfer hash failures remain hard failures.
+Missing comparison fields never imply verified. The aggregate is mismatch if
+any file mismatches, verified only if every copied file verifies, otherwise
+unavailable. Include all copied files, with individual mixed states preserved;
+reject partial coverage, duplicate paths and inconsistent aggregate claims.
+
+Only the native llama.cpp HF snapshot resolver initially supplies a mapping.
+Source listings may include a per-file `publisher` record with the same entry
+shape, initially unavailable with a checked full digest. It is solely a selector
+at the destination. The destination replaces every peer observation, regardless
+of claimed status/basis/time, using its own existing catalogue HTTP/cache owner.
+The fixed HF `/api/models/OWNER/REPO/revision/COMMIT?blobs=true` response must
+identify the exact repository and immutable revision, explicitly report public
+and ungated, and name the exact file with a full LFS SHA256. Ignore Git SHA1
+blob identity as a SHA256 statement. Do not follow provider redirects. Refuse
+invalid UTF-8, malformed, duplicate, truncated or
+oversize metadata as unavailable without affecting authorized transfer.
+Never accept a peer URL, mutable revision, alias/name similarity or local LFS
+filename as observation authority. Other providers/layouts, custom aliases,
+private/gated repositories, non-LFS files and unproven/missing mappings are
+unavailable, with transfer allowed under the existing rules.
+
+The catalogue owner bounds revision metadata by its existing search capacity,
+TTL, retry backoff, deadline and response-body cap. Cached statements retain the
+original acquisition time; expired data is unavailable on refresh failure.
+Optional observation records require exact unique keys, valid Unicode, bounded
+safe paths, full lowercase digests, supported statuses, coherent equality and
+bounded valid UTC timestamps. Result metadata uses the existing 8 MiB envelope;
+source manifests/receipts keep their existing 1 MiB cap and progress its 64 KiB
+cap. Tests inject synthetic response transports into the existing HTTP owner.
+
+Receipt replay is destination-local evidence: first rehash every committed
+file, then preserve recorded statement fields and acquisition basis/time with
+`replayed:true`. No provider call, invented freshness or upgraded peer assertion
+is allowed. Missing receipt observations stay unavailable. Native copies do not
+gain durable receipts. Strip observational fields from native ExportID hashing;
+the custom canonical identity already excludes them. No new request fields,
+URL, settings, grant/trust flag, RPC version/capability, serving/launch/apply/Auto
+behavior or permissions arise from these observations. Pinned source reads,
+destination grants, Pause and recovery/admission retain their existing owners.
 
 ## 8. Dependencies
 - **Upstream**: the orchestrator that spawns it and forwards `engine:*` (`nvpair-ui-broker`).

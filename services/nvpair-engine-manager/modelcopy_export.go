@@ -97,6 +97,10 @@ func decodeCopyManifest(data []byte) (modelFileList, error) {
 // Each frame is bounded independently; a long hash stream may contain any
 // number of coalesced progress frames. Never ReadAll the cumulative stream.
 func readCopyFrame(reader *bufio.Reader) ([]byte, error) {
+	return readCopyFrameLimit(reader, maxCopyManifest)
+}
+
+func readCopyFrameLimit(reader *bufio.Reader, resultLimit int) ([]byte, error) {
 	var line []byte
 	limit := maxCopyProgressFrame
 	for {
@@ -109,7 +113,7 @@ func readCopyFrame(reader *bufio.Reader) ([]byte, error) {
 			key, e2 := dec.Token()
 			kind, e3 := dec.Token()
 			if e1 == nil && e2 == nil && e3 == nil && open == json.Delim('{') && key == "type" && kind == "result" {
-				limit = maxCopyManifest + 4096
+				limit = resultLimit + 4096
 			}
 		}
 		if len(line)+len(fragment) > limit {
@@ -162,6 +166,12 @@ func rememberCopyExport(st *engineState, list modelFileList) *issuedCopyExport {
 
 func cloneCopyList(list modelFileList) modelFileList {
 	list.Files = slices.Clone(list.Files)
+	for i := range list.Files {
+		if list.Files[i].Publisher != nil {
+			publisher := *list.Files[i].Publisher
+			list.Files[i].Publisher = &publisher
+		}
+	}
 	if list.source == nil {
 		return list
 	}
@@ -260,6 +270,11 @@ func nativeExportID(list modelFileList) (string, error) {
 		total += f.Size
 	}
 	list.ExportID = ""
+	// Observations never change the native byte identity or read authority.
+	list.Files = slices.Clone(list.Files)
+	for i := range list.Files {
+		list.Files[i].Publisher = nil
+	}
 	data, err := json.Marshal(list)
 	if err != nil || len(data) > maxCopyManifest {
 		return "", fmt.Errorf("copy manifest exceeds bounds")
@@ -1013,6 +1028,9 @@ func (e *Executor) completedCopy(ctx context.Context, engine, model, expected st
 		}
 		done += f.Size
 	}
+	// The receipt is local destination evidence. Preserve the recorded basis
+	// and acquisition time, without a provider request or a freshness claim.
+	res.PublisherComparison = publisherResult(receipt.List, true)
 	return res, true, ctx.Err()
 }
 

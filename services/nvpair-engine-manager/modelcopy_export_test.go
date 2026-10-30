@@ -978,6 +978,80 @@ func TestModelCopyCustomAliasCanonicalManifest(t *testing.T) {
 	}
 }
 
+func TestModelPublisherObservationDoesNotChangeExportIdentity(t *testing.T) {
+	src := publisherCopySource(t)
+	list := cloneCopyList(src.list)
+	for i := range list.Files {
+		list.Files[i].Publisher = nil
+	}
+	before, err := nativeExportID(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list.Files[0].Publisher = publisherSelector(list, list.Files[0])
+	after, err := nativeExportID(list)
+	if err != nil || before != after {
+		t.Fatalf("observation changed native identity: before=%s after=%s error=%v", before, after, err)
+	}
+	custom := customCopyList(t, newCustomCopyFixture(t))
+	before, err = artifactExportID(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom.Files[0].Publisher = &modelPublisherFile{Path: custom.Files[0].Path, Status: "unavailable", Algorithm: "sha256", ActualDigest: custom.Files[0].SHA256, AcquisitionBasis: "unavailable"}
+	after, err = artifactExportID(custom)
+	if err != nil || before != after {
+		t.Fatalf("observation changed custom identity: before=%s after=%s error=%v", before, after, err)
+	}
+}
+
+func TestModelPublisherReceiptReplayPreservesHistoricalBasis(t *testing.T) {
+	plentyOfDisk(t)
+	src := sourceFromExecutor(t, newCustomCopyFixture(t).source, "llamacpp", reportedCopyAlias)
+	dst, store := customDestination(t)
+	res, err := dst.CopyModelFrom(context.Background(), src, "llamacpp", reportedCopyAlias, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := readCopyReceipt(store, reportedCopyAlias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A locally recorded statement fixture, not a peer assertion. Replay must
+	// retain its original basis/time after the committed bytes are rehashed.
+	for i := range receipt.List.Files {
+		f := &receipt.List.Files[i]
+		record := publisherTestRecord(f.SHA256)
+		record.Path, record.AcquisitionBasis = f.Path, "cache"
+		f.Publisher = &record
+	}
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(copyAliasDir(store.root, reportedCopyAlias), "copy.json"), encoded)
+	replayed, complete, err := dst.completedCopy(context.Background(), "llamacpp", reportedCopyAlias, res.ExportID, nil)
+	if err != nil || !complete || replayed.PublisherComparison == nil || !replayed.PublisherComparison.Replayed || replayed.PublisherComparison.Status != "verified" {
+		t.Fatalf("offline replay=%+v complete=%t error=%v", replayed, complete, err)
+	}
+	for _, f := range replayed.PublisherComparison.Files {
+		if f.AcquisitionBasis != "cache" || f.AcquiredAt != "2026-01-01T00:00:00Z" {
+			t.Fatalf("replay invented online freshness: %+v", f)
+		}
+	}
+	file := receipt.List.Files[0]
+	path := filepath.Join(copyAliasDir(store.root, reportedCopyAlias), res.ExportID, filepath.FromSlash(file.Path))
+	changed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed[len(changed)-1] ^= 1
+	writeTestFile(t, path, changed)
+	if _, complete, err := dst.completedCopy(context.Background(), "llamacpp", reportedCopyAlias, res.ExportID, nil); err == nil || complete {
+		t.Fatalf("historical observation bypassed changed bytes: complete=%t error=%v", complete, err)
+	}
+}
+
 func TestModelCopyMetadataBounds(t *testing.T) {
 	t.Run("coalesced progress stream has no cumulative byte cap", func(t *testing.T) {
 		list := modelFileList{Engine: "llamacpp", Model: "alias", Files: []modelFile{{Path: "a.gguf", Size: 1, SHA256: strings.Repeat("a", 64)}}}

@@ -161,6 +161,7 @@ describe('copy wire boundary', () => {
         ).toEqual(retried)
     })
     const invalidByteCounts: [string, Record<string, number>][] = [
+        ['zero artifact count', { files: 0 }],
         ['negative traffic', { bytesCopied: -1 }],
         ['fractional traffic', { bytesCopied: 1.5 }],
         ['negative artifact total', { bytesTotal: -1 }],
@@ -258,6 +259,179 @@ describe('copy wire boundary', () => {
             parseModelCopyResult({ opId: request.opId, result: ordinary }, request).result
                 .requiresConfiguration
         ).toBeUndefined()
+    })
+})
+
+function publisherRecord(overrides: Record<string, JsonValue> = {}) {
+    return {
+        path: 'model/tiny.gguf',
+        status: 'verified',
+        provider: 'huggingface',
+        repository: 'owner/tiny-GGUF',
+        revision: 'a'.repeat(40),
+        file: 'tiny-Q4_K_M.gguf',
+        algorithm: 'sha256',
+        expectedDigest: 'b'.repeat(64),
+        actualDigest: 'b'.repeat(64),
+        acquisitionBasis: 'cache',
+        acquiredAt: '2026-01-01T00:00:00Z',
+        ...overrides
+    }
+}
+
+describe('publisher comparison boundary', () => {
+    it('preserves exact provenance through result decoding and bridge snapshots', () => {
+        const publisherComparison = {
+            status: 'verified',
+            files: [publisherRecord(), publisherRecord({ path: 'draft/tiny.gguf' })],
+            replayed: true
+        }
+        const response = parseModelCopyResult(
+            {
+                opId: request.opId,
+                result: { ...result, publisherComparison }
+            },
+            request
+        )
+        expect(response.result.publisherComparison).toEqual(publisherComparison)
+        state.beginModelCopy(request)
+        state.finishModelCopy(request, 'done', response.result)
+        expect(
+            state.getEngineInitialState().activeProgress.find(row => row.opId === request.opId)
+        ).toMatchObject({ status: 'done', copyResult: { publisherComparison } })
+    })
+
+    it('does not infer a comparison from a successful transfer with missing optional fields', () => {
+        expect(
+            parseModelCopyResult({ opId: request.opId, result }, request).result.publisherComparison
+        ).toBeUndefined()
+    })
+
+    const invalidPublisherRecords: [string, Record<string, JsonValue>][] = [
+        ['missing actual full digest', { actualDigest: '' }],
+        ['truncated digest', { actualDigest: 'abc' }],
+        ['uppercase digest', { actualDigest: 'B'.repeat(64) }],
+        ['verified disagreement', { expectedDigest: 'c'.repeat(64) }],
+        ['mismatch agreement', { status: 'mismatch' }],
+        ['unrecognized status', { status: 'trusted' }],
+        ['unknown authority field', { trusted: true }],
+        ['provider URL', { provider: 'https://example.invalid' }],
+        ['request URL field', { url: 'https://example.invalid' }],
+        ['mutable revision', { revision: 'main' }],
+        ['absolute file', { file: '/tmp/file.gguf' }],
+        ['path traversal', { file: '../file.gguf' }],
+        ['oversize path', { path: 'a'.repeat(1025) }],
+        ['control path', { path: 'bad\u0000file' }],
+        ['lone surrogate', { path: 'bad\ud800file' }],
+        ['missing acquisition basis', { acquisitionBasis: '' }],
+        ['unparseable time', { acquiredAt: 'yesterday' }],
+        ['normalized invalid day', { acquiredAt: '2026-02-30T00:00:00Z' }],
+        ['future time', { acquiredAt: '9999-01-01T00:00:00Z' }],
+        ['null time', { acquiredAt: null }]
+    ]
+    it.each(invalidPublisherRecords)('rejects %s', (_label, changes) => {
+        expect(() =>
+            parseModelCopyResult(
+                {
+                    opId: request.opId,
+                    result: {
+                        ...result,
+                        files: 1,
+                        publisherComparison: {
+                            status: 'verified',
+                            files: [publisherRecord(changes)]
+                        }
+                    }
+                },
+                request
+            )
+        ).toThrow('Invalid model copy response')
+    })
+
+    it('aggregates a missing companion as unavailable and retains visible mismatches', () => {
+        const unavailable = {
+            path: 'draft/tiny.gguf',
+            status: 'unavailable',
+            algorithm: 'sha256',
+            actualDigest: 'c'.repeat(64),
+            acquisitionBasis: 'unavailable'
+        }
+        const parse = (status: string, files: JsonValue[]) =>
+            parseModelCopyResult(
+                {
+                    opId: request.opId,
+                    result: { ...result, publisherComparison: { status, files } }
+                },
+                request
+            ).result.publisherComparison
+        expect(parse('unavailable', [publisherRecord(), unavailable])?.status).toBe('unavailable')
+        expect(
+            parse('mismatch', [
+                publisherRecord({ status: 'mismatch', expectedDigest: 'd'.repeat(64) }),
+                unavailable
+            ])?.status
+        ).toBe('mismatch')
+        expect(() => parse('verified', [publisherRecord(), unavailable])).toThrow()
+        expect(() => parse('verified', [publisherRecord()])).toThrow()
+        expect(() => parse('verified', [publisherRecord(), publisherRecord()])).toThrow()
+    })
+
+    it('rejects oversized observations and null optional records', () => {
+        expect(() =>
+            parseModelCopyResult(
+                {
+                    opId: request.opId,
+                    result: {
+                        ...result,
+                        publisherComparison: {
+                            status: 'verified',
+                            files: Array.from({ length: 1025 }, () => publisherRecord())
+                        }
+                    }
+                },
+                request
+            )
+        ).toThrow()
+        expect(() =>
+            parseModelCopyResult(
+                {
+                    opId: request.opId,
+                    result: {
+                        ...result,
+                        publisherComparison: null
+                    }
+                },
+                request
+            )
+        ).toThrow()
+    })
+
+    it('relays mismatch as a successful result through the supervisor without new control operations', async () => {
+        state.setSelfId('Mac')
+        const publisherComparison = {
+            status: 'mismatch',
+            files: [publisherRecord({ status: 'mismatch', expectedDigest: 'd'.repeat(64) })]
+        }
+        const observed = { ...result, files: 1, publisherComparison }
+        const call = vi
+            .spyOn(supervisor, 'callProcess')
+            .mockImplementation(async (_name, method): Promise<JsonValue> => {
+                if (method === 'engine:copy-model') return { opId: request.opId, result: observed }
+                if (method === 'engine:remote-get-installed') return { engines: [] }
+                if (method === 'discovery:get-nodes') return { nodes: [] }
+                throw new Error(`Unexpected operation ${method}`)
+            })
+        await expect(supervisor.copyModel(request)).resolves.toMatchObject({ result: observed })
+        const outcome = state
+            .getEngineInitialState()
+            .activeProgress.find(row => row.opId === request.opId)
+        expect(outcome).toMatchObject({ status: 'done', copyResult: { publisherComparison } })
+        expect(outcome?.message).toContain('Publisher comparison: mismatch.')
+        expect(call.mock.calls.map(([, method]) => method)).toEqual([
+            'engine:copy-model',
+            'engine:remote-get-installed',
+            'discovery:get-nodes'
+        ])
     })
 })
 

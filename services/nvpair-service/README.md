@@ -460,6 +460,18 @@ and terminal clients can then attach with a clean environment.
 
 ## JSON-RPC methods (client → service)
 
+Model copy uses the ordinary request-ID remapping and raw broker response relay.
+The optional destination-owned `copyModelResult.publisherComparison` retains
+its aggregate and per-file verified/mismatch/unavailable state, exact provider
+tuple, algorithm, expected and actual full digests, acquisition basis/time and
+receipt replay qualifier. The service does not acquire provider statements or
+turn these observations into grants, model safety, serving readiness or copy
+publication policy. Publisher mismatch can accompany a successful transfer;
+missing/unsupported comparison remains unavailable. No service method or
+capability version changes. `TestModelCopyForwardPreservesPublisherResult`
+exercises actual request remapping and response forwarding over in-process
+pipes without changing the generic relay.
+
 Everything under `service/` is handled by the service and never reaches the
 broker. Any other method is forwarded as described above.
 

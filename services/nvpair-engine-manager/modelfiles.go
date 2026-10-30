@@ -44,10 +44,11 @@ const (
 type modelFile struct {
 	// Path is slash-separated and relative to the layout root the engine uses
 	// for this model (see modelFileList).
-	Path   string `json:"path"`
-	Role   string `json:"role,omitempty"`
-	Size   int64  `json:"size"`
-	SHA256 string `json:"sha256"`
+	Path      string              `json:"path"`
+	Role      string              `json:"role,omitempty"`
+	Size      int64               `json:"size"`
+	SHA256    string              `json:"sha256"`
+	Publisher *modelPublisherFile `json:"publisher,omitempty"`
 	// abs is the file's resolved absolute path on the source. Never serialized.
 	abs        string
 	info       os.FileInfo
@@ -472,7 +473,13 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	res, err := json.Marshal(list)
+	_, store, storeErr := s.exec.modelStoreFor(engine)
+	if storeErr == nil && store.adapter == "llamacpp" && list.source != nil {
+		for i := range list.Files {
+			list.Files[i].Publisher = publisherSelector(list, list.Files[i])
+		}
+	}
+	res, err := marshalCopyManifest(list)
 	if err != nil || len(res) > maxCopyManifest {
 		if err == nil {
 			err = fmt.Errorf("copy manifest exceeds bounds")
@@ -485,6 +492,21 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 	if !issued {
 		invalidateCopyGeneration(st, model, newGeneration)
 	}
+}
+
+// Optional observations must never prevent an otherwise bounded export. Keep
+// the original manifest limit and byte identity; omit selectors as one complete
+// set rather than presenting partial publisher coverage as complete.
+func marshalCopyManifest(list modelFileList) ([]byte, error) {
+	data, err := json.Marshal(list)
+	if err != nil || len(data) <= maxCopyManifest {
+		return data, err
+	}
+	list.Files = append([]modelFile(nil), list.Files...)
+	for i := range list.Files {
+		list.Files[i].Publisher = nil
+	}
+	return json.Marshal(list)
 }
 
 // hashProgressInterval spaces hashing progress frames.
@@ -503,6 +525,11 @@ func (c *hashCache) hashModelFiles(ctx context.Context, list *modelFileList, pro
 func (c *hashCache) hashModelFilesAccess(ctx context.Context, list *modelFileList, progress func(path string, pct int), access servingFileAccess) error {
 	for i := range list.Files {
 		f := &list.Files[i]
+		// HF cache blob names are not full-byte observations. Use the existing
+		// checked full hash/cache even when the native resolver supplied a name.
+		if list.Layout == "" && list.Revision != "" && list.source != nil {
+			f.SHA256 = ""
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}

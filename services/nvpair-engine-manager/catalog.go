@@ -333,6 +333,10 @@ type catalogService struct {
 	searchMu      sync.Mutex
 	llamaSearches map[string]*listingCache
 	searchOrder   []string
+	// Immutable public revision statements share the catalogue's HTTP owner,
+	// capacity, expiry and failure backoff. They never contain model bytes.
+	publisherRevisions map[string]*publisherRevisionCache
+	publisherOrder     []string
 
 	// baseURL overrides the listing endpoint in tests. Empty means the real one;
 	// the caching and coalescing around the fetch is the part worth testing, and
@@ -366,13 +370,13 @@ func (c *catalogService) endpoint() string {
 }
 
 func newCatalogService() *catalogService {
-	// The same redirect policy the rest of this package's HTTP uses: a catalogue
-	// endpoint has no reason to redirect, and following one blindly would let an
-	// upstream (or a captive portal) move the request somewhere else.
+	// Provider statements must come from this configured endpoint. A redirect
+	// cannot substitute another origin, even if that origin also uses HTTPS.
 	c := &catalogService{
 		client:        newEngineHTTPClient(catalogHTTPTimeout),
 		llamaSearches: map[string]*listingCache{},
 	}
+	c.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	c.lmStudio = &listingCache{label: "lm studio catalog", fetch: c.fetchLmStudio}
 	c.llamaCPP = &listingCache{label: "llama.cpp catalog", fetch: c.fetchLlamaCPP}
 	return c
@@ -764,10 +768,27 @@ func llamaCPPListing(field, value string) url.Values {
 // the error, and for a search that includes what the operator typed, which
 // would then be logged here and by every client the error is relayed to.
 func (c *catalogService) fetchHF(ctx context.Context, q url.Values) ([]hfModelRow, error) {
+	body, err := c.fetchHFBody(ctx, c.endpoint()+"?"+q.Encode())
+	if err != nil {
+		return nil, err
+	}
+	var rows []hfModelRow
+	if err := json.Unmarshal(body, &rows); err != nil {
+		return nil, fmt.Errorf("decode model catalog: %w", err)
+	}
+	if rows == nil {
+		return nil, fmt.Errorf("model catalog must be an array")
+	}
+	return rows, nil
+}
+
+// fetchHFBody is the bounded, credential-free provider HTTP boundary for both
+// catalogue listings and exact immutable revision metadata.
+func (c *catalogService) fetchHFBody(ctx context.Context, endpoint string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, catalogHTTPTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint()+"?"+q.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build model catalog request: %w", withoutURL(err))
 	}
@@ -790,14 +811,7 @@ func (c *catalogService) fetchHF(ctx context.Context, q url.Values) ([]hfModelRo
 	if len(body) > maxCatalogBody {
 		return nil, fmt.Errorf("model catalog exceeds size limit")
 	}
-	var rows []hfModelRow
-	if err := json.Unmarshal(body, &rows); err != nil {
-		return nil, fmt.Errorf("decode model catalog: %w", err)
-	}
-	if rows == nil {
-		return nil, fmt.Errorf("model catalog must be an array")
-	}
-	return rows, nil
+	return body, nil
 }
 
 // mlxPattern matches an MLX marker as a whole token in a repo id.

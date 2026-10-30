@@ -582,6 +582,91 @@ describe('capability and authority checks', () => {
 })
 
 describe('copy operation lifecycle', () => {
+    it('separates transfer integrity from publisher mismatch and expands full provenance', async () => {
+        const publisherComparison = {
+            status: 'mismatch',
+            replayed: true,
+            files: [
+                {
+                    path: 'model/tiny.gguf',
+                    status: 'mismatch',
+                    provider: 'huggingface',
+                    repository: 'owner/tiny-GGUF',
+                    revision: 'a'.repeat(40),
+                    file: 'tiny-Q4_K_M.gguf',
+                    algorithm: 'sha256',
+                    expectedDigest: 'b'.repeat(64),
+                    actualDigest: 'c'.repeat(64),
+                    acquisitionBasis: 'cache',
+                    acquiredAt: '2026-01-01T00:00:00Z'
+                }
+            ]
+        } satisfies ModelCopyResponse['result']['publisherComparison']
+        publish(
+            progress({
+                status: 'done',
+                copyResult: {
+                    engine: 'llamacpp',
+                    model: alias,
+                    files: 1,
+                    filesSkipped: 1,
+                    bytesTotal: 19,
+                    bytesCopied: 0,
+                    publisherComparison
+                }
+            })
+        )
+        await mount('a'.repeat(32))
+        expect(container.querySelector('[aria-label="Transfer integrity"]')?.textContent).toContain(
+            'Full file hashes matched the source.'
+        )
+        expect(
+            container.querySelector('[aria-label="Publisher comparison"]')?.textContent
+        ).toContain('mismatch')
+        const capabilityReads = capabilities.mock.calls.length
+        const trigger = Array.from(container.querySelectorAll('summary, button')).find(
+            row => row.textContent?.trim() === 'Publisher provenance'
+        )
+        if (!(trigger instanceof HTMLElement)) throw new Error('Missing provenance disclosure')
+        await act(async () => trigger.click())
+        expect(container.textContent).toContain('owner/tiny-GGUF')
+        expect(container.textContent).toContain('a'.repeat(40))
+        expect(container.textContent).toContain('tiny-Q4_K_M.gguf')
+        expect(container.textContent).toContain('b'.repeat(64))
+        expect(container.textContent).toContain('c'.repeat(64))
+        expect(container.textContent).toContain('cache at 2026-01-01T00:00:00Z')
+        expect(container.textContent).toContain('not an online refresh')
+        expect(container.textContent).toContain(
+            'does not establish model safety, author trust or a signature'
+        )
+        expect(useEngineModelsStore.getState().models.size).toBe(0)
+        expect(start).not.toHaveBeenCalled()
+        expect(capabilities.mock.calls.length).toBe(capabilityReads)
+    })
+
+    it('shows unavailable informationally when a completed copy has no publisher fields', async () => {
+        publish(
+            progress({
+                status: 'done',
+                copyResult: {
+                    engine: 'llamacpp',
+                    model: alias,
+                    files: 1,
+                    filesSkipped: 0,
+                    bytesTotal: 19,
+                    bytesCopied: 19
+                }
+            })
+        )
+        await mount('a'.repeat(32))
+        expect(
+            container.querySelector('[aria-label="Publisher comparison"]')?.textContent
+        ).toContain('unavailable')
+        expect(container.querySelector('[aria-label="Transfer integrity"]')?.textContent).toContain(
+            'Full file hashes matched the source.'
+        )
+        expect(container.querySelector('[role="alert"]')).toBeNull()
+    })
     it('shows exact tuple progress and byte counts; closing does not cancel and reopening hydrates it', async () => {
         publish(progress())
         await mount('a'.repeat(32))

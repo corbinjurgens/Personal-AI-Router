@@ -744,7 +744,7 @@ func (m *Manager) prepareCopy(ctx context.Context, p copyRequest, self string, p
 		return nil, res, fmt.Errorf("source and destination do not support a common copy layout")
 	}
 	return func() (copyModelResult, error) {
-		return m.exec.copyModelFrom(ctx, client, p.Engine, p.Model, p.ExpectedExportID, source.ExportLayouts, destination.ImportLayouts, progress)
+		return m.exec.copyModelFromPublisher(ctx, client, p.Engine, p.Model, p.ExpectedExportID, source.ExportLayouts, destination.ImportLayouts, progress, m.catalog)
 	}, res, nil
 }
 
@@ -988,14 +988,11 @@ func (c *remoteClient) copyModel(ctx context.Context, p copyRequest, emit func(c
 	reader := bufio.NewReaderSize(resp.Body, maxCopyProgressFrame)
 	var previous streamFrame
 	for {
-		// Copy operation results contain counters/identity only, never an
-		// artifact manifest. Every frame has the smaller progress-frame cap.
-		data, err := reader.ReadSlice('\n')
+		// Optional per-file observations use the existing bounded result-frame
+		// reader; ordinary progress retains its smaller independent cap.
+		data, err := readCopyFrameLimit(reader, maxCatalogBody)
 		if err != nil {
 			return res, copyUnknown(err)
-		}
-		if len(data) > maxCopyProgressFrame {
-			return res, copyUnknown(fmt.Errorf("copy frame exceeds bounds"))
 		}
 		var frame streamFrame
 		if err := json.Unmarshal(data, &frame); err != nil || !utf8.Valid(data) || !copyResponseIdentity(data, "opId", p.OpID) || !copyResponseIdentity(data, "engine", p.Engine) || !copyResponseIdentity(data, "op", "copy") || !copyResponseIdentity(data, "type", frame.Type) {
@@ -1077,7 +1074,7 @@ func decodeCopyResult(data []byte) (copyModelResult, error) {
 			if !copyStringUnicode(raw) {
 				return res, invalid
 			}
-		case "files", "filesSkipped", "bytesTotal", "bytesCopied", "requiresConfiguration":
+		case "files", "filesSkipped", "bytesTotal", "bytesCopied", "requiresConfiguration", "publisherComparison":
 		default:
 			return res, invalid
 		}
@@ -1098,6 +1095,9 @@ func decodeCopyResult(data []byte) (copyModelResult, error) {
 }
 
 func validCopyResult(res copyModelResult, engine, model string) bool {
+	if validatePublisherComparison(res.PublisherComparison, res.Files) != nil {
+		return false
+	}
 	if res.Engine != engine || res.Model != model || res.Files <= 0 || res.FilesSkipped < 0 || res.FilesSkipped > res.Files || res.BytesTotal < 0 || res.BytesCopied < 0 {
 		return false
 	}

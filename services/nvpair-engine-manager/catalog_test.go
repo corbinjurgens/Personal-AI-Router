@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,6 +22,62 @@ import (
 
 	"nvpair-shared/jsonrpc"
 )
+
+func TestModelPublisherCatalogCacheRetainsBasisAndExpires(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	c, calls := publisherTestCatalog(t, publisherTestBody(digest), http.StatusOK)
+	p := publisherTestRecord(digest)
+	first, acquired, basis, ok := c.publisherDigest(context.Background(), p)
+	if !ok || first != digest || basis != "provider" || acquired == "" {
+		t.Fatalf("first digest=%s time=%s basis=%s ok=%t", first, acquired, basis, ok)
+	}
+	second, cachedAt, basis, ok := c.publisherDigest(context.Background(), p)
+	if !ok || second != first || cachedAt != acquired || basis != "cache" || calls.Load() != 1 {
+		t.Fatalf("cached digest=%s time=%s basis=%s calls=%d", second, cachedAt, basis, calls.Load())
+	}
+	entry := c.publisherRevision(p.Repository + "@" + p.Revision)
+	entry.mu.Lock()
+	entry.fetched = time.Now().Add(-catalogCacheTTL - time.Second)
+	entry.mu.Unlock()
+	c.client.Transport = healthProbeTransport(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("synthetic refresh failure")
+	})
+	if _, _, _, ok := c.publisherDigest(context.Background(), p); ok || calls.Load() != 2 {
+		t.Fatal("expired statement silently reused after failed refresh")
+	}
+	if _, _, _, ok := c.publisherDigest(context.Background(), p); ok || calls.Load() != 2 {
+		t.Fatal("expired statement bypassed provider failure backoff")
+	}
+}
+
+func TestModelPublisherCatalogCacheCapacity(t *testing.T) {
+	c := newCatalogService()
+	for index := 0; index <= llamaCPPSearchCacheLimit; index++ {
+		c.publisherRevision(fmt.Sprintf("owner/repo@%040x", index))
+	}
+	if len(c.publisherRevisions) != llamaCPPSearchCacheLimit || len(c.publisherOrder) != llamaCPPSearchCacheLimit {
+		t.Fatalf("unbounded publisher cache: entries=%d order=%d", len(c.publisherRevisions), len(c.publisherOrder))
+	}
+	if _, exists := c.publisherRevisions[fmt.Sprintf("owner/repo@%040x", 0)]; exists {
+		t.Fatal("oldest provider metadata was not evicted")
+	}
+}
+
+func TestModelPublisherRejectsProviderRedirect(t *testing.T) {
+	c := newCatalogService()
+	calls := 0
+	c.client.Transport = healthProbeTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls != 1 {
+			t.Error("provider redirect reached a different origin")
+		}
+		return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"https://other.invalid/statement"}}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	})
+	if _, _, _, ok := c.publisherDigest(context.Background(), publisherTestRecord(strings.Repeat("a", 64))); ok || calls != 1 {
+		t.Fatalf("redirect became publisher authority: ok=%t requests=%d", ok, calls)
+	}
+}
 
 // TestOllamaCatalogLoadsFromEmbeddedFile checks the committed list is compiled in
 // and parses. If the embed directive or the file shape ever breaks, the catalog

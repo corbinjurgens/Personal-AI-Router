@@ -7,7 +7,9 @@ import type {
     ModelCopyCapabilities,
     ModelCopyProgress,
     ModelCopyRequest,
-    ModelCopyResponse
+    ModelCopyResponse,
+    ModelPublisherComparison,
+    ModelPublisherFile
 } from '@/shared/types/model-copy'
 import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import type { JsonObject, JsonValue } from './json-rpc-client'
@@ -47,6 +49,138 @@ function exportIdentity(value: JsonValue | undefined): string | undefined {
 function operation(value: JsonValue | undefined): string {
     const id = nonempty(value)
     return /^[a-f0-9]{32}$/.test(id) ? id : invalid()
+}
+
+function exactFields(row: JsonObject, fields: string[]): void {
+    if (Object.keys(row).some(key => !fields.includes(key))) invalid()
+}
+
+function publisherPath(value: JsonValue | undefined): string {
+    const path = nonempty(value)
+    if (
+        Buffer.byteLength(path, 'utf8') > 1024 ||
+        /[\\:*?"<>|]/.test(path) ||
+        Array.from(path).some(
+            character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127
+        ) ||
+        path
+            .split('/')
+            .some(
+                part =>
+                    !part ||
+                    part === '.' ||
+                    part === '..' ||
+                    /[. ]$/.test(part) ||
+                    /^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/i.test(
+                        part
+                    )
+            ) ||
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(path)
+    )
+        return invalid()
+    return path
+}
+
+function publisherFile(value: JsonValue): ModelPublisherFile {
+    const row = object(value)
+    exactFields(row, [
+        'path',
+        'status',
+        'provider',
+        'repository',
+        'revision',
+        'file',
+        'algorithm',
+        'expectedDigest',
+        'actualDigest',
+        'acquisitionBasis',
+        'acquiredAt'
+    ])
+    const path = publisherPath(row.path)
+    const actualDigest = exportIdentity(row.actualDigest)
+    if (!actualDigest || row.algorithm !== 'sha256') return invalid()
+    const provider = optionalText(row.provider)
+    const repository = optionalText(row.repository)
+    const revision = optionalText(row.revision)
+    const file = row.file === undefined ? undefined : publisherPath(row.file)
+    const hasTuple = [provider, repository, revision, file].some(value => value !== undefined)
+    if (
+        hasTuple &&
+        (provider !== 'huggingface' ||
+            !repository ||
+            repository.length > 193 ||
+            !/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(repository) ||
+            repository.includes('..') ||
+            !revision ||
+            !/^[a-f0-9]{40}$/.test(revision) ||
+            !file)
+    )
+        return invalid()
+    if (provider !== undefined && provider !== 'huggingface') return invalid()
+    const expectedDigest = exportIdentity(row.expectedDigest)
+    const acquiredAt = optionalText(row.acquiredAt)
+    const basis = row.acquisitionBasis
+    const status = row.status
+    if (status === 'unavailable') {
+        if (expectedDigest !== undefined || acquiredAt !== undefined || basis !== 'unavailable')
+            return invalid()
+    } else {
+        if (
+            (status !== 'verified' && status !== 'mismatch') ||
+            !hasTuple ||
+            !expectedDigest ||
+            (basis !== 'provider' && basis !== 'cache') ||
+            !acquiredAt ||
+            acquiredAt.length > 35 ||
+            !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(acquiredAt) ||
+            !Number.isFinite(Date.parse(acquiredAt)) ||
+            Date.parse(acquiredAt) < Date.UTC(2000, 0) ||
+            new Date(acquiredAt).toISOString().slice(0, 19) !== acquiredAt.slice(0, 19) ||
+            Date.parse(acquiredAt) > Date.now() + 5 * 60 * 1000 ||
+            (status === 'verified') !== (expectedDigest === actualDigest)
+        )
+            return invalid()
+    }
+    if (basis !== 'provider' && basis !== 'cache' && basis !== 'unavailable') return invalid()
+    return {
+        path,
+        status,
+        provider,
+        repository,
+        revision,
+        file,
+        algorithm: 'sha256',
+        expectedDigest,
+        actualDigest,
+        acquisitionBasis: basis,
+        acquiredAt
+    }
+}
+
+function publisherComparison(
+    value: JsonValue | undefined,
+    fileCount: number
+): ModelPublisherComparison | undefined {
+    if (value === undefined) return undefined
+    const row = object(value)
+    exactFields(row, ['status', 'files', 'replayed'])
+    if (
+        !Array.isArray(row.files) ||
+        row.files.length === 0 ||
+        row.files.length > 1024 ||
+        row.files.length !== fileCount
+    )
+        return invalid()
+    const files = row.files.map(publisherFile)
+    if (new Set(files.map(file => file.path.toLowerCase())).size !== files.length) return invalid()
+    const status = files.some(file => file.status === 'mismatch')
+        ? 'mismatch'
+        : files.every(file => file.status === 'verified')
+          ? 'verified'
+          : 'unavailable'
+    if (row.status !== status) return invalid()
+    const replayed = row.replayed === undefined ? undefined : flag(row.replayed)
+    return { status, files, replayed }
 }
 function requestFrom(value: JsonValue | undefined): ModelCopyRequest {
     const row = object(value)
@@ -161,7 +295,7 @@ export function parseModelCopyResult(
     const filesSkipped = count(result.filesSkipped)
     const bytesTotal = count(result.bytesTotal)
     const bytesCopied = count(result.bytesCopied)
-    if (filesSkipped > files) return invalid()
+    if (files === 0 || filesSkipped > files) return invalid()
     return {
         opId: request.opId,
         result: {
@@ -174,7 +308,8 @@ export function parseModelCopyResult(
             layout,
             exportId,
             durability,
-            requiresConfiguration
+            requiresConfiguration,
+            publisherComparison: publisherComparison(result.publisherComparison, files)
         }
     }
 }

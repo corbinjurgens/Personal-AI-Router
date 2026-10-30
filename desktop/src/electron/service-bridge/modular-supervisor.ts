@@ -2382,7 +2382,8 @@ class ModularSupervisor {
         }
     }
 
-    /** Copies relay metadata only; no artifact, engine activation or inventory synthesis here. */
+    /** Relay destination observations through strict decoding and state projection.
+     * Provider acquisition and byte comparisons remain in engine-manager. */
     async copyModel(request: ModelCopyRequest): Promise<ModelCopyResponse> {
         const state = getModularBridgeState()
         state.beginModelCopy(request)

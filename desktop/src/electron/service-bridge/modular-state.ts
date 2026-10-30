@@ -245,7 +245,13 @@ class ModularBridgeState {
      */
     private engineManagerFacts = new Map<
         EngineType,
-        { installed: boolean; running: boolean; port: number; terminationVerified: boolean; locked?: boolean }
+        {
+            installed: boolean
+            running: boolean
+            port: number
+            terminationVerified: boolean
+            locked?: boolean
+        }
     >()
     /**
      * The local engine-manager's validated descriptors (`engine:descriptors`),
@@ -1062,6 +1068,8 @@ class ModularBridgeState {
                 completion += ` Set up this model's serving configuration on ${progress.nodeName} before loading it.`
             if (result.durability === 'uncertain')
                 completion += ' Files copied; publication durability could not be confirmed.'
+            if (result.publisherComparison?.status === 'mismatch')
+                completion += ' Publisher comparison: mismatch.'
         }
         copy.active = false
         copy.sequence = ++this.modelCopySequence
@@ -1550,7 +1558,8 @@ class ModularBridgeState {
                 running: booleanValue(engineObj.running),
                 healthy: booleanValue(engineObj.healthy),
                 port: numberValue(engineObj.port),
-                terminationVerified: engineObj.running === false && engineObj.terminationVerified === true,
+                terminationVerified:
+                    engineObj.running === false && engineObj.terminationVerified === true,
                 ...reportedLock(engineObj.locked)
             })
             seen.add(engineType)

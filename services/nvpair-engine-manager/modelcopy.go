@@ -53,16 +53,17 @@ type copyProgress struct {
 
 // copyModelResult is the engine:remote-copy-model result (under "result").
 type copyModelResult struct {
-	Engine                string         `json:"engine"`
-	Model                 string         `json:"model"`
-	Files                 int            `json:"files"`
-	FilesSkipped          int            `json:"filesSkipped"`
-	BytesTotal            int64          `json:"bytesTotal"`
-	BytesCopied           int64          `json:"bytesCopied"`
-	Layout                string         `json:"layout,omitempty"`
-	ExportID              string         `json:"exportId,omitempty"`
-	Durability            copyDurability `json:"durability,omitempty"`
-	RequiresConfiguration bool           `json:"requiresConfiguration,omitempty"`
+	Engine                string                    `json:"engine"`
+	Model                 string                    `json:"model"`
+	Files                 int                       `json:"files"`
+	FilesSkipped          int                       `json:"filesSkipped"`
+	BytesTotal            int64                     `json:"bytesTotal"`
+	BytesCopied           int64                     `json:"bytesCopied"`
+	Layout                string                    `json:"layout,omitempty"`
+	ExportID              string                    `json:"exportId,omitempty"`
+	Durability            copyDurability            `json:"durability,omitempty"`
+	RequiresConfiguration bool                      `json:"requiresConfiguration,omitempty"`
+	PublisherComparison   *modelPublisherComparison `json:"publisherComparison,omitempty"`
 }
 
 // modelFileSource is where a copy reads from: a peer's ec routes in production.
@@ -196,6 +197,10 @@ func (e *Executor) CopyModelFrom(ctx context.Context, src modelFileSource, engin
 }
 
 func (e *Executor) copyModelFrom(ctx context.Context, src modelFileSource, engine, model, expectedExportID string, exportLayouts, importLayouts []string, emit func(copyProgress)) (copyModelResult, error) {
+	return e.copyModelFromPublisher(ctx, src, engine, model, expectedExportID, exportLayouts, importLayouts, emit, nil)
+}
+
+func (e *Executor) copyModelFromPublisher(ctx context.Context, src modelFileSource, engine, model, expectedExportID string, exportLayouts, importLayouts []string, emit func(copyProgress), catalog *catalogService) (copyModelResult, error) {
 	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
 		return copyModelResult{}, err
 	}
@@ -258,9 +263,17 @@ func (e *Executor) copyModelFrom(ctx context.Context, src modelFileSource, engin
 			return copyModelResult{}, fmt.Errorf("source export layout is not supported by both endpoints")
 		}
 	}
+	// Custom mappings are unsupported. Remove peer observations before the
+	// receipt owner captures metadata, without adding receipt size or authority.
+	if list.Layout == llamaArtifactsLayout {
+		compareModelPublisher(ctx, &list, store.adapter, nil)
+	}
 	plan, err := e.planModelCopy(st, store, model, list)
 	if err != nil {
 		return copyModelResult{}, err
+	}
+	if list.Layout != llamaArtifactsLayout {
+		compareModelPublisher(ctx, &list, store.adapter, catalog)
 	}
 	if list.Layout == llamaArtifactsLayout && list.ExportID != "" {
 		emit(copyProgress{remoteProgress: remoteProgress{Stage: "checking"}, ExportID: list.ExportID})
@@ -297,6 +310,9 @@ func (e *Executor) copyModelFrom(ctx context.Context, src modelFileSource, engin
 	} else {
 		e.pokeLoaded()
 	}
+	// Every destination byte has passed the existing full transfer hash or
+	// checked cache owner. A publisher mismatch remains a successful copy.
+	res.PublisherComparison = publisherResult(list, false)
 	emit(copyProgress{
 		remoteProgress: remoteProgress{Stage: "done", Percent: 100},
 		BytesDone:      res.BytesTotal, BytesTotal: res.BytesTotal,

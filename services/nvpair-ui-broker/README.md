@@ -1859,6 +1859,18 @@ identity, file and byte counters. An absent operation in a reconnect snapshot
 does not establish success; consumers need terminal evidence and the result's
 durability qualification.
 
+The same raw response relay preserves optional `publisherComparison` and every
+per-file provider/repository/immutable-revision/file, algorithm, expected and
+actual full digest, status and acquisition basis/time, including receipt replay.
+Engine-manager's destination owns acquisition and comparison. The broker never
+upgrades peer assertions, performs provider HTTP or interprets hashes as grants.
+Publisher mismatch remains a successful authorized transfer with a visible
+comparison mismatch; unavailable comparison is informational. Transfer integrity
+and publisher agreement are distinct, and neither establishes model safety,
+author trust, signatures or serving readiness. `modelcopy_relay_test.go` checks
+that the generic relay retains the complete observation without production relay
+rewrites or new RPC/capability versions.
+
 Any other `engine:*` request is forwarded to `nvpair-engine-manager` verbatim and its response relayed straight back. This covers the whole engine control plane: `engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`, `engine:uninstall`, `engine:start`, `engine:stop`, `engine:restart`, `engine:action`, `engine:logs`, `engine:errors`, `engine:models`, and the node
 policy's `engine:wake`, `engine:sleep`, `engine:intent` and
 `engine:unload-model`. `engine:wake` is refused by the broker while this node is

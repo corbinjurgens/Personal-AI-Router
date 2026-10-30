@@ -1129,8 +1129,9 @@ On the source, `GET /v1/models/files` resolves the model's files from the
 engine's on-disk layout and lists logical paths relative to that layout's root,
 with size and sha256. Hashes are computed when first asked for, by streaming
 the file, and cached by absolute path, size and modification time. Files whose
-name is already their sha256 (Ollama blobs, llama.cpp blobs behind snapshot
-links) are not re-read on the source; the destination still verifies them. The
+name is already their sha256 (Ollama blobs) retain their native declaration;
+HF snapshot files use the checked full hashing/cache owner even behind local
+LFS blob names. The destination independently verifies every complete file. The
 listing is an NDJSON stream in the shape of the other streaming routes:
 `{"type":"progress","stage":"hashing","message":<path>,"percent"?}` frames
 while files are hashed, then one `{"type":"result","result":{engine, model,
@@ -1175,6 +1176,71 @@ Listing results are bounded to 1 MiB, artifact sets to 1024 entries and progress
 frames to 64 KiB independently of the stream's total length. Shared hashing
 waiters cancel independently; cancellation of a producer lets a live waiter
 retry under its own context.
+
+### Transfer integrity and publisher comparison
+
+Successful transfer integrity means the destination's complete bytes matched
+the source manifest, including resumed files and checked existing files.
+Optional `copyModelResult.publisherComparison` reports a separate observation:
+`{status, files, replayed?}`. Each file contains `path`, `status`, `algorithm`
+(`sha256`), `actualDigest` (the full lowercase SHA256), and `acquisitionBasis`.
+A proven selector also carries `provider:"huggingface"`, `repository`, immutable
+`revision` (full lowercase commit SHA), and exact repository-relative `file`.
+Acquired statements add `expectedDigest` and `acquiredAt` (UTC RFC3339).
+
+Per-file states are `verified`, `mismatch`, or `unavailable`. Verified is exact
+agreement with a provider statement independently acquired by this destination;
+it establishes neither model safety, author trust nor a signature. Mismatch is
+displayed and never labelled verified; it does not veto an authorized copy.
+Declared artifact assertions and complete transfer hash mismatches still fail
+through their existing owners. Missing optional comparison fields mean
+unavailable. Aggregate mismatch wins over other states; aggregate verified
+requires every listed file, including shards and companions, to be verified.
+A verified subset with an unavailable file is unavailable, with each file's
+individual status retained in expandable provenance.
+
+The first supported mapping is a native llama.cpp HF snapshot's exact public
+repository, immutable revision and selected relative file. The source listing
+optionally adds per-file `publisher` selectors. Peer status, digests, acquisition
+time and cache claims never authorize a destination observation. The destination
+uses its existing catalogue HTTP owner to GET the fixed HF model revision API
+with `blobs=true`, requires the exact returned repository/revision and explicit
+public/ungated facts, and compares the exact sibling's LFS SHA256. No peer URL,
+mutable alias, filename similarity or local LFS blob filename supplies authority.
+Custom aliases, Ollama, LM Studio, private/gated repositories, non-LFS files,
+missing mappings and provider failures are unavailable; authorized transfer
+remains available. No credentials, settings, request fields or capabilities are
+added. Executor-only callers without a catalogue owner report unavailable.
+
+Revision metadata is acquired from the catalogue owner's configured endpoint
+without redirects. Malformed provider encodings are
+unavailable. Optional source selectors are omitted as a complete set if they
+would exceed the existing copy-manifest bound; the byte identity and authorized
+copy remain available, with publisher comparison unavailable.
+
+The cache uses the catalogue's existing search capacity, six-hour TTL,
+failure backoff, HTTP deadline and
+8 MiB body limit. Expired statements are unavailable when refresh fails.
+`acquisitionBasis:"provider"|"cache"` distinguishes the read, while `acquiredAt`
+always records the original successful acquisition. Unavailable records carry
+`acquisitionBasis:"unavailable"` and no expected digest or acquisition time.
+Optional records reject malformed/duplicate fields, unsafe paths, non-full
+digests, inconsistent status and invalid times. Result observations use the
+existing 8 MiB metadata envelope; source manifests and receipts retain their
+1 MiB limit, artifact count limit and separately bounded progress frames.
+
+Local receipt replay rehashes every committed artifact first, sets `replayed:true`
+and preserves its recorded acquisition basis/time. It makes no provider call
+and invents no online freshness. Receipts without observations replay as
+unavailable. Native copies gain no new durable receipt. Observations are excluded
+from native/custom ExportID calculations and do not alter pinned reads, grants,
+Pause/recovery, serving configuration, launch/apply or Auto behavior. The copy
+modal labels Transfer integrity and Publisher comparison separately and expands
+the complete per-file tuple, digests and acquisition history.
+
+Provider tests inject the catalogue client's response transport with synthetic
+statements. Existing copy control fixtures explicitly return provider-unavailable;
+executor-only tests have no catalogue owner. These tests do not contact HF.
 
 ### Linked model sources
 

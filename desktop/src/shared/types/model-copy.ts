@@ -34,6 +34,30 @@ export interface ActiveModelCopy extends ModelCopyRequest {
     progress?: ModelCopyProgress
 }
 
+/** Byte agreement with an independently acquired public provider statement.
+ * This says nothing about model safety, author trust or a signature. */
+export interface ModelPublisherFile {
+    path: string
+    status: 'verified' | 'mismatch' | 'unavailable'
+    provider?: 'huggingface'
+    repository?: string
+    revision?: string
+    file?: string
+    algorithm: 'sha256'
+    expectedDigest?: string
+    actualDigest: string
+    acquisitionBasis: 'provider' | 'cache' | 'unavailable'
+    acquiredAt?: string
+}
+
+export interface ModelPublisherComparison {
+    /** Mismatch wins; verified requires every file; otherwise unavailable. */
+    status: 'verified' | 'mismatch' | 'unavailable'
+    files: ModelPublisherFile[]
+    /** Local receipt replay retains the original acquisition basis and time. */
+    replayed?: boolean
+}
+
 /** Verified artifact copy, independently of native inventory or serving readiness. */
 export interface ModelCopyResult {
     engine: string
@@ -48,6 +72,7 @@ export interface ModelCopyResult {
     exportId?: string
     durability?: 'confirmed' | 'uncertain'
     requiresConfiguration?: boolean
+    publisherComparison?: ModelPublisherComparison
 }
 
 export interface ModelCopyResponse {

@@ -527,6 +527,59 @@ func TestCopyModelLlamacpp(t *testing.T) {
 	}
 }
 
+func TestModelPublisherResumedAndCachedCopyUsesFullTransferHash(t *testing.T) {
+	plentyOfDisk(t)
+	src := publisherCopySource(t)
+	file := src.list.Files[0]
+	catalog, calls := publisherTestCatalog(t, publisherTestBody(file.SHA256), http.StatusOK)
+	dst := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
+	_, store, err := dst.modelStoreFor("llamacpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := filepath.Join(llamaRepoDir(store.root, publisherTestRepo), "snapshots", publisherTestRevision, publisherTestFile) + ".part"
+	const prefix = 1024
+	writeTestFile(t, partial, src.data[file.Path][:prefix])
+	res, err := dst.copyModelFromPublisher(context.Background(), src, "llamacpp", src.list.Model, "", nil, nil, nil, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.BytesCopied != file.Size-prefix || res.PublisherComparison == nil || res.PublisherComparison.Status != "verified" || res.PublisherComparison.Files[0].ActualDigest != file.SHA256 {
+		t.Fatalf("resumed full comparison=%+v", res)
+	}
+	res, err = dst.copyModelFromPublisher(context.Background(), src, "llamacpp", src.list.Model, "", nil, nil, nil, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FilesSkipped != res.Files || res.BytesCopied != 0 || calls.Load() != 1 || res.PublisherComparison == nil || res.PublisherComparison.Files[0].AcquisitionBasis != "cache" || res.PublisherComparison.Files[0].ActualDigest != file.SHA256 {
+		t.Fatalf("cached full comparison=%+v calls=%d", res, calls.Load())
+	}
+}
+
+func TestModelPublisherAgreementCannotBypassFullTransferMismatch(t *testing.T) {
+	plentyOfDisk(t)
+	fastRetries(t, 1)
+	src := publisherCopySource(t)
+	file := src.list.Files[0]
+	catalog, _ := publisherTestCatalog(t, publisherTestBody(file.SHA256), http.StatusOK)
+	corrupt := append([]byte(nil), src.data[file.Path]...)
+	corrupt[len(corrupt)-1] ^= 1
+	src.data[file.Path] = corrupt
+	dst := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
+	res, err := dst.copyModelFromPublisher(context.Background(), src, "llamacpp", src.list.Model, "", nil, nil, nil, catalog)
+	if err == nil || res.PublisherComparison != nil {
+		t.Fatalf("provider agreement bypassed hard transfer hash: result=%+v error=%v", res, err)
+	}
+	_, store, err := dst.modelStoreFor("llamacpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(llamaRepoDir(store.root, publisherTestRepo), "refs", "main")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed full hash published native visibility: %v", err)
+	}
+	assertNoPartFiles(t, store.root)
+}
+
 func TestCopyModelLMStudio(t *testing.T) {
 	plentyOfDisk(t)
 	srcDir, dstDir := t.TempDir(), t.TempDir()

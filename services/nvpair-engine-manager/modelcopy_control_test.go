@@ -4,6 +4,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,6 +60,86 @@ func TestModelCopyControlStrictIngress(t *testing.T) {
 	}
 }
 
+func TestModelPublisherControlStrictResultAndLargeFrame(t *testing.T) {
+	file := publisherTestRecord(strings.Repeat("a", 64))
+	result := copyModelResult{Engine: "llamacpp", Model: publisherTestRepo + ":Q4_K_M", Files: 1, BytesTotal: 80, BytesCopied: 80, PublisherComparison: &modelPublisherComparison{Status: "verified", Files: []modelPublisherFile{file}}}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := decodeCopyResult(data)
+	if err != nil || !validCopyResult(parsed, result.Engine, result.Model) || parsed.PublisherComparison == nil || parsed.PublisherComparison.Files[0] != file {
+		t.Fatalf("strict result lost observation: result=%+v error=%v", parsed, err)
+	}
+	result.Files = 2
+	if validCopyResult(result, result.Engine, result.Model) {
+		t.Fatal("partial file comparison accepted")
+	}
+	for _, invalid := range []string{
+		strings.Replace(string(data), `"publisherComparison":`, `"publisherComparison":null,"publisherComparison":`, 1),
+		strings.Replace(string(data), `"publisherComparison":`, `"PublisherComparison":`, 1),
+		strings.Replace(string(data), `"status":"verified"`, `"status":"trusted"`, 1),
+		strings.Replace(string(data), `"publisherComparison":{`, `"publisherComparison":{"url":"https://example.invalid",`, 1),
+	} {
+		if _, err := decodeCopyResult([]byte(invalid)); err == nil {
+			t.Fatalf("invalid optional observation accepted: %s", invalid)
+		}
+	}
+	// Per-file metadata can exceed the progress-frame budget, while remaining
+	// below the existing result/manifest cap. No unbounded ReadAll is needed.
+	result.Files = 180
+	result.PublisherComparison.Files = nil
+	for index := 0; index < result.Files; index++ {
+		entry := file
+		entry.Path = fmt.Sprintf("shards/%04d.gguf", index)
+		result.PublisherComparison.Files = append(result.PublisherComparison.Files, entry)
+	}
+	data, err = json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(streamFrame{Type: "result", Result: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	if len(encoded) <= maxCopyProgressFrame {
+		t.Fatal("fixture did not exercise the larger bounded result frame")
+	}
+	if _, err := readCopyFrame(bufio.NewReaderSize(bytes.NewReader(encoded), maxCopyProgressFrame)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModelPublisherDoesNotBypassCopyAdmission(t *testing.T) {
+	test := func(name string, block func(*copyControlFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newCopyControlFixture(t)
+			catalog, calls := publisherTestCatalog(t, publisherTestBody(strings.Repeat("a", 64)), http.StatusOK)
+			f.destination.catalog = catalog
+			block(f)
+			if _, err := f.controller.executeCopy(remoteFixtureContext(t), controlCopyRequest(), false, nil, nil); err == nil {
+				t.Fatal("publisher comparison bypassed existing admission")
+			}
+			if calls.Load() != 0 || f.reads.Load() != 0 {
+				t.Fatalf("refused copy acquired provider or artifact bytes: provider=%d files=%d", calls.Load(), f.reads.Load())
+			}
+		})
+	}
+	test("controller destination grant", func(f *copyControlFixture) {
+		f.authority.writePermissions("2", map[string]bool{"controller-certificate": false})
+	})
+	test("Pause", func(f *copyControlFixture) {
+		f.destination.exec.nodeProjection.set(nodeProjection{ManagementBlocked: true})
+	})
+	test("switch recovery", func(f *copyControlFixture) { f.destination.exec.switchRecoveryPending.Store(true) })
+	test("download recovery", func(f *copyControlFixture) {
+		f.destination.copyJournal.mu.Lock()
+		f.destination.copyJournal.recoveryRequired = true
+		f.destination.copyJournal.mu.Unlock()
+	})
+}
+
 func TestModelCopyControlRejectsBeforeLookup(t *testing.T) {
 	output := &syncBuffer{}
 	m := &Manager{codec: NewCodec(output)} // No peer directory or executor may be consulted.
@@ -79,6 +161,11 @@ func copyControlManager(t *testing.T, exec *Executor, dir string) *Manager {
 	}
 	d.copyRecoveryRequired = false
 	m := NewManager(NewCodec(&syncBuffer{}), exec, clustertrust.Open(dir), dir)
+	// Legacy copy fixtures never acquire ambient public-provider observations.
+	// A test requiring a statement replaces this existing owner transport.
+	m.catalog.client.Transport = healthProbeTransport(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("synthetic provider unavailable")
+	})
 	exec.switchRecoveryPending.Store(false)
 	exec.nodeProjection.set(nodeProjection{})
 	acceptModelMutations(exec)

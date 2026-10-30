@@ -3,7 +3,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+    Badge,
     Button,
+    Collapsible,
     Flex,
     FormField,
     ModalContent,
@@ -503,6 +505,82 @@ export function ModelCopyModal({
                                     </Text>
                                 )}
                                 {copy.message && <Text kind="body/regular/sm">{copy.message}</Text>}
+                                <Text kind="body/regular/sm" aria-label="Transfer integrity">
+                                    Transfer integrity:{' '}
+                                    {copy.copyResult && copy.status === 'done'
+                                        ? 'Full file hashes matched the source.'
+                                        : 'Not confirmed.'}
+                                </Text>
+                                <Text kind="body/regular/sm" aria-label="Publisher comparison">
+                                    Publisher comparison:{' '}
+                                    <Badge
+                                        kind="solid"
+                                        color={
+                                            copy.copyResult?.publisherComparison?.status ===
+                                            'mismatch'
+                                                ? 'red'
+                                                : copy.copyResult?.publisherComparison?.status ===
+                                                    'verified'
+                                                  ? 'green'
+                                                  : 'gray'
+                                        }
+                                    >
+                                        {copy.copyResult?.publisherComparison?.status ??
+                                            'unavailable'}
+                                    </Badge>
+                                </Text>
+                                <Text kind="body/regular/sm">
+                                    Verified means exact byte agreement with a public provider
+                                    statement. It does not establish model safety, author trust or a
+                                    signature. Unavailable files have no supported independent
+                                    comparison.
+                                </Text>
+                                {copy.copyResult?.publisherComparison && (
+                                    <Collapsible slotTrigger="Publisher provenance">
+                                        <Stack gap="2">
+                                            {copy.copyResult.publisherComparison.replayed && (
+                                                <Text kind="body/regular/sm">
+                                                    Replayed from this destination&apos;s receipt.
+                                                    Acquisition times are recorded history, not an
+                                                    online refresh.
+                                                </Text>
+                                            )}
+                                            {copy.copyResult.publisherComparison.files.map(file => (
+                                                <Stack gap="1" key={file.path}>
+                                                    <Text kind="body/regular/sm">
+                                                        {file.path}: {file.status}
+                                                    </Text>
+                                                    <Text
+                                                        kind="body/regular/sm"
+                                                        className="break-all"
+                                                    >
+                                                        Provider: {file.provider ?? 'unavailable'}
+                                                        <br />
+                                                        Repository:{' '}
+                                                        {file.repository ?? 'unavailable'}
+                                                        <br />
+                                                        Immutable revision:{' '}
+                                                        {file.revision ?? 'unavailable'}
+                                                        <br />
+                                                        Relative file: {file.file ?? file.path}
+                                                        <br />
+                                                        Algorithm: {file.algorithm}
+                                                        <br />
+                                                        Expected digest:{' '}
+                                                        {file.expectedDigest ?? 'unavailable'}
+                                                        <br />
+                                                        Actual full digest: {file.actualDigest}
+                                                        <br />
+                                                        Acquisition: {file.acquisitionBasis}
+                                                        {file.acquiredAt
+                                                            ? ` at ${file.acquiredAt}`
+                                                            : ''}
+                                                    </Text>
+                                                </Stack>
+                                            ))}
+                                        </Stack>
+                                    </Collapsible>
+                                )}
                             </Stack>
                         )}
                         {retry && (
