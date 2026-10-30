@@ -1243,9 +1243,14 @@ and retarget-hook assertions were strengthened; affected plain cases passed,
 and the full race selector passed without skips. Plain evidence composes the
 unchanged earlier cases with the repaired cases, not a new aggregate run.
 An initial author-state receipt-locality assertion failure remains unexplained
-despite later diagnostic and final race passes. Windows process execution
-remains pending; the component Windows skips above are not regraded by these
-macOS process checks.
+despite later diagnostic and final race passes. At frozen source `39a61c4b`,
+Windows x64 plain passed all 12 terminal test records (including the parent),
+with no failures or skips. Existing listener/product image coverage was
+verified; the fixed model-settings-manager bridge used the source-proven
+listenerless allowance and was not counted as firewall-covered. No owned
+survivors or wrapper locks remained. UDP endpoint changes were observed with
+unknown causality; full listener equality is not established. Windows race and
+the component Windows skips above are not covered by this process run.
 
 On the destination, the copy:
 
