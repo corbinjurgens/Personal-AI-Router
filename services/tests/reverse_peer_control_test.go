@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	settings "nvpair-shared/enginesettings"
 	errorswire "nvpair-shared/errors"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
@@ -44,6 +45,13 @@ const task1UpgradePath = "/cluster/reverse"
 // An engine manager's model-mutation request is confirmed as the broker would
 // after withdrawing the engine's identity; these fixtures run no broker, so
 // there is no identity to withdraw.
+type task1SettingsReply struct {
+	ID        string          `json:"id"`
+	Result    json.RawMessage `json:"result"`
+	Error     string          `json:"error,omitempty"`
+	ErrorCode int             `json:"errorCode,omitempty"`
+}
+
 type task1Process struct {
 	t             *testing.T
 	cmd           *exec.Cmd
@@ -58,7 +66,8 @@ type task1Process struct {
 	waitErr       error
 	nextID        int
 	stopped       bool
-	mutationError string // Private broker-boundary fault, guarded by mu.
+	mutationError string                                  // Private broker-boundary fault, guarded by mu.
+	settingsReply func(settings.Relay) task1SettingsReply // Installed before Start; instance-owned.
 }
 
 func startTask1Process(t *testing.T, base, binary string, args ...string) *task1Process {
@@ -68,7 +77,13 @@ func startTask1Process(t *testing.T, base, binary string, args ...string) *task1
 
 func startTask1ProcessWithEnv(t *testing.T, base, binary string, extraEnv []string, args ...string) *task1Process {
 	t.Helper()
+	return startTask1ProcessWithSettings(t, base, binary, extraEnv, nil, args...)
+}
+
+func startTask1ProcessWithSettings(t *testing.T, base, binary string, extraEnv []string, reply func(settings.Relay) task1SettingsReply, args ...string) *task1Process {
+	t.Helper()
 	p := &task1Process{t: t, cmd: exec.Command(binary, args...), done: make(chan struct{}), readDone: make(chan struct{}), nextID: 1}
+	p.settingsReply = reply
 	if binary == brokerBin {
 		var err error
 		p.cmd, err = fixtureBrokerCommand(binary, args...)
@@ -128,6 +143,19 @@ func startTask1ProcessWithEnv(t *testing.T, base, binary string, extraEnv []stri
 			p.mu.Unlock()
 			if frame.Method == nodepolicy.MethodModelMutationRequest {
 				p.confirmModelMutation(frame.Params)
+			}
+			if frame.Method == "engine:settings-request" && p.settingsReply != nil {
+				var relay settings.Relay
+				err := json.Unmarshal(frame.Params, &relay)
+				if err == nil {
+					err = p.write(map[string]any{"jsonrpc": "2.0", "method": "engine:settings-reply", "params": p.settingsReply(relay)})
+				}
+				if err != nil {
+					p.mu.Lock()
+					p.readErr = err
+					p.mu.Unlock()
+					return
+				}
 			}
 		}
 	}()

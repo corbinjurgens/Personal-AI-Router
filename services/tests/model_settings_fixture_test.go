@@ -36,6 +36,19 @@ import (
 )
 
 func init() {
+	if image := os.Getenv("NVPAIR_TEST_MODEL_LMS_IMAGE"); image != "" && image == os.Args[0] {
+		if len(os.Args) != 3 || os.Args[1] != "ls" || os.Args[2] != "--json" {
+			os.Exit(2)
+		}
+		data, err := os.ReadFile(os.Getenv("NVPAIR_TEST_MODEL_LMS_ROWS"))
+		if err != nil {
+			os.Exit(2)
+		}
+		if _, err := os.Stdout.Write(data); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
 	for _, role := range []struct {
 		selector string
 		run      func() error

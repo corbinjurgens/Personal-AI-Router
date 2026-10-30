@@ -1215,11 +1215,37 @@ unconfigured isolated UNC share, privileged symlink creation and an HF hardlink
 fixture setup defect; they are unverified, not passing coverage. The junction
 matrix's separate ordinary-file hardlink case passed. Synthetic metadata
 wrappers do not isolate type rejection or actual vendor-specific reparse
-behavior. Native acceptance
-and the linked-model isolated-process task remain pending. Component reader
+behavior. Native acceptance remains pending. Component reader
 counters prove the instrumented read boundaries, not the absence of every
 process-wide filesystem attempt. See the existing
 [controller COPY process limits](#controller-copy-process-verification).
+
+`TestLinkedModelsProcess` in `services/tests` adds isolated synthetic process
+coverage on base `10b8802d`. On macOS arm64/APFS (2026-10-30), the plain selector
+passed without skips. It exercises independent private controller/source/target
+fixtures for external preset file links and a file hardlink, selected typed
+export without `Runtime.Serving` despite unrelated model drift, HF cache and
+Ollama blob links, and an LM Studio directory link. Native results retain empty
+layout and durable receipt identity fields; custom results retain their receipt
+and fresh target settings review. Destination file sets and SHA256 values are
+checked against synthetic inputs.
+
+Pinned direct and reverse lanes cover logical-name and identity refusals,
+GET/HEAD/Range, source retargeting, fresh listing after manager restart, copy
+failure/retry, destination escape refusal, offline completed custom receipts,
+and preservation of a failed catalog attempt's journal and readiness fence.
+Successful HTTP response counters observe no sibling sentinel bytes. They do
+not observe process-wide filesystem attempts. Fixtures use private profiles,
+registered test images, fake native inventory and loopback endpoints; they do
+not establish vendor recognition, model loading, inference, GPU behavior or
+installed-profile acceptance. The independent source review's refusal-status
+and retarget-hook assertions were strengthened; affected plain cases passed,
+and the full race selector passed without skips. Plain evidence composes the
+unchanged earlier cases with the repaired cases, not a new aggregate run.
+An initial author-state receipt-locality assertion failure remains unexplained
+despite later diagnostic and final race passes. Windows process execution
+remains pending; the component Windows skips above are not regraded by these
+macOS process checks.
 
 On the destination, the copy:
 

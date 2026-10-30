@@ -101,10 +101,32 @@ type controllerCopyFault struct {
 func (f *controllerCopyFault) unblock() { f.once.Do(func() { close(f.release) }) }
 
 type controllerCopyObserver struct {
-	port  int
-	mu    sync.Mutex
-	seen  []controllerCopySeen
-	fault *controllerCopyFault
+	port                   int
+	mu                     sync.Mutex
+	seen                   []controllerCopySeen
+	fault                  *controllerCopyFault
+	forbidden              []byte
+	forbiddenResponseBytes int64
+}
+
+type controllerCopyObservedBody struct {
+	io.ReadCloser
+	owner *controllerCopyObserver
+	tail  []byte
+}
+
+func (b *controllerCopyObservedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.owner.mu.Lock()
+	needle := b.owner.forbidden
+	if len(needle) != 0 && n > 0 {
+		data := append(b.tail, p[:n]...)
+		b.owner.forbiddenResponseBytes += int64(bytes.Count(data, needle) * len(needle))
+		keep := min(len(data), len(needle)-1)
+		b.tail = bytes.Clone(data[len(data)-keep:])
+	}
+	b.owner.mu.Unlock()
+	return n, err
 }
 
 // The body forwards positive bytes before holding an incomplete response.
@@ -176,6 +198,9 @@ func newControllerCopyObserver(t *testing.T, target *task1Node, nodes []*task1No
 			http.Error(w, "private copy upstream unavailable", http.StatusBadGateway)
 		}
 		proxy.ModifyResponse = func(response *http.Response) error {
+			if response.Request.URL.Path == "/v1/models/file" && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+				response.Body = &controllerCopyObservedBody{ReadCloser: response.Body, owner: o}
+			}
 			o.mu.Lock()
 			fault := o.fault
 			file := fault != nil && fault.hold && !fault.used && response.Request.URL.Path == "/v1/models/file" && response.Request.URL.Query().Get("model") == fault.model && response.Request.Header.Get("Range") == "" && response.StatusCode == http.StatusOK
@@ -566,6 +591,7 @@ func (f *controllerCopyFixture) writeManifestWithRouter(t *testing.T, n *task1No
 		t.Fatal(err)
 	}
 	rt := map[string]any{"bin": marker, "cli": filepath.Join(n.base, "never-start-cli"), "port": 0, "args": args, "env": map[string]string{"LLAMA_CACHE": f.stores[n.uuid]}, "ready": nil, "health": nil, "auth_statuses": []int{}}
+	rt["editable_launch"] = map[string]any{"fixed_args": []string{}}
 	if port != 0 {
 		if err := validateFixturePort(port); err != nil {
 			t.Fatal(err)

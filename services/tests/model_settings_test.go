@@ -891,6 +891,11 @@ func TestModelSettingsExplicitRoutingSelectionPreservesOtherPolicy(t *testing.T)
 // This uses the existing content owner and its pinned three-node fixture.
 // Tiny content is copied first; a fresh inspector observes the durable receipt.
 func TestModelSettingsMissingContentCopyThenFreshReceiptInspection(t *testing.T) {
+	modelSettingsCopyThenFreshReceiptInspection(t, nil)
+}
+
+func modelSettingsCopyThenFreshReceiptInspection(t *testing.T, prepare func(*testing.T, controllerCopyModel)) {
+	t.Helper()
 	isolateModelSettingsPresetEnv(t)
 	f := newControllerCopyFixture(t)
 	f.directoryToManagers(t, false)
@@ -907,6 +912,9 @@ func TestModelSettingsMissingContentCopyThenFreshReceiptInspection(t *testing.T)
 		Model     string                   `json:"model"`
 		Artifacts []controllerCopyArtifact `json:"artifacts"`
 	}{1, model.manifest.Model, model.manifest.Files}))
+	if prepare != nil {
+		prepare(t, model)
+	}
 	inspect := func() modelconfig.InspectResult {
 		t.Helper()
 		response := f.targetEM.call(t, "engine:inspect-model", settings.WorkerRequest[modelconfig.InspectRequest]{Request: modelconfig.InspectRequest{Engine: "llamacpp", ModelID: model.manifest.Model}})
@@ -953,6 +961,9 @@ func TestModelSettingsMissingContentCopyThenFreshReceiptInspection(t *testing.T)
 	f.broker.stop()
 	f.sourceEM.stop()
 	f.targetEM.stop()
+	for _, node := range []*task1Node{f.controller, f.source, f.target} {
+		node.cm.stop()
+	}
 	target := prepareModelSettingsProcessFixture(t)
 	target.useCopiedStore(t, f.stores[f.target.uuid])
 	target.startModelSettings(t)
