@@ -494,11 +494,15 @@ func TestLinkedModelHFBinding(t *testing.T) {
 			t.Skipf("symlink unavailable: %v", err)
 		}
 		artifact := original.Files[0].configured
+		hardlink := filepath.Join(t.TempDir(), "artifact.gguf")
+		if err := os.Link(original.Files[0].abs, hardlink); err != nil {
+			t.Skipf("hardlink unavailable: %v", err)
+		}
 		if err := os.Remove(artifact); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Link(original.Files[0].abs, artifact); err != nil {
-			t.Skipf("hardlink unavailable: %v", err)
+		if err := os.Link(hardlink, artifact); err != nil {
+			t.Fatal(err)
 		}
 		list, err := boundedLlamaCacheArtifacts(context.Background(), store, model, servingFileAccess{})
 		if err != nil || len(list.Files) != 1 {

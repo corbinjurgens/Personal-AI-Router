@@ -1209,9 +1209,11 @@ The composed linked-model selector passed on macOS at integration source
 `3300897f`, with 441 test and subtest results passing and no skips or failures
 in each plain and race run. These are synthetic fixtures: fake native rows and
 responses exercise PAIR's selection, checks and transport, not actual vendor
-recognition or inference. Windows execution remains pending. The Windows test
-source is integrated with source-review fixture corrections; its cross-compiled
-binary was not run. UNC lacks an isolated share fixture, and synthetic metadata
+recognition or inference. The Windows plain component selector at `43ab0f45`
+passed with 413 passing and three skipped test records. The skips cover an
+unconfigured isolated UNC share, privileged symlink creation and an HF hardlink
+fixture setup defect; they are unverified, not passing coverage. The junction
+matrix's separate ordinary-file hardlink case passed. Synthetic metadata
 wrappers do not isolate type rejection or actual vendor-specific reparse
 behavior. Native acceptance
 and the linked-model isolated-process task remain pending. Component reader
