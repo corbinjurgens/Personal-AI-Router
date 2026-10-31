@@ -170,7 +170,7 @@ type workingSetContainment struct {
 	done       chan struct{}
 	once       sync.Once
 	startOnce  sync.Once
-	verifiedAt atomic.Int64
+	verifiedAt atomic.Int64 // workingSetClock reading; 0 means unverified
 	closeErr   error
 }
 
@@ -201,9 +201,18 @@ func (c *workingSetContainment) start() {
 	c.startOnce.Do(func() { go c.watch() })
 }
 
+// Verification age is measured on the monotonic clock, so a wall-clock step
+// cannot extend stale evidence. Readings are offsets from process start plus
+// one, keeping zero free to mean unverified.
+var workingSetClockBase = time.Now()
+
+func workingSetClock() int64 { return int64(time.Since(workingSetClockBase)) + 1 }
+
+func (c *workingSetContainment) markVerified() { c.verifiedAt.Store(workingSetClock()) }
+
 func (c *workingSetContainment) Verified() bool {
 	at := c.verifiedAt.Load()
-	return at != 0 && time.Since(time.Unix(0, at)) <= workingSetVerificationMaxAge
+	return at != 0 && time.Duration(workingSetClock()-at) <= workingSetVerificationMaxAge
 }
 
 func (c *workingSetContainment) sweep(onInterval bool) error {
@@ -220,7 +229,7 @@ func (c *workingSetContainment) sweep(onInterval bool) error {
 		}
 	}
 	if allVerified {
-		c.verifiedAt.Store(time.Now().UnixNano())
+		c.markVerified()
 	} else {
 		c.verifiedAt.Store(0)
 	}
@@ -358,7 +367,7 @@ func startWorkingSetProcess(cmd *exec.Cmd, maxBytes uint64) (func() error, func(
 		if err != nil {
 			slog.Warn("working-set cap failed", "engine", engine, "pid", pid, "error", err)
 		} else {
-			c.verifiedAt.Store(time.Now().UnixNano())
+			c.markVerified()
 		}
 		return err
 	}, c.Close); err != nil {

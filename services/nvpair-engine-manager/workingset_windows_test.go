@@ -189,7 +189,7 @@ func startUnnotifiedWorkingSetTree(t *testing.T, c *workingSetContainment) io.Re
 		if err := capWorkingSet(pid, c.maxBytes); err != nil {
 			return err
 		}
-		c.verifiedAt.Store(time.Now().UnixNano())
+		c.markVerified()
 		return nil
 	}, c.Close); err != nil {
 		t.Fatalf("start unnotified working-set tree: %v", err)
@@ -335,11 +335,11 @@ func TestWorkingSetVerifiedRequiresFreshEvidence(t *testing.T) {
 	if c.Verified() {
 		t.Error("zero timestamp must not be verified")
 	}
-	c.verifiedAt.Store(time.Now().UnixNano())
+	c.markVerified()
 	if !c.Verified() {
 		t.Error("fresh timestamp must be verified")
 	}
-	c.verifiedAt.Store(time.Now().Add(-2 * workingSetVerificationMaxAge).UnixNano())
+	c.verifiedAt.Store(workingSetClock() - int64(2*workingSetVerificationMaxAge))
 	if c.Verified() {
 		t.Error("stale timestamp must not be verified")
 	}
