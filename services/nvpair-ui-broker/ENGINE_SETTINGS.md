@@ -226,9 +226,11 @@ and marks a running engine for restart. Apply persists `working_set_limit_mib`
 through the manager's runtime write. Snapshots project the manager's
 `workingSetLimitStatus`: `applied`, `not-running`, or `unenforced-adopted`,
 omitted when no limit is saved. Adopted processes require restart for descendant
-enforcement. Root cap failure fails start; a descendant that cannot be capped is
-terminated, or the whole engine job when the descendant cannot be opened. Windows
-delivers the descendant notifications best-effort (see the manager spec). The
+enforcement. Root cap failure fails start. Job notifications trigger immediate
+member sweeps; a 250 ms target sweep cadence covers lost notifications. Processes
+can fault in pages before their first cap, and a late cap trims the working set.
+An unopenable member terminates the engine job; a live member whose cap fails is
+terminated (see the manager spec). The
 `launchText` field contains
 arguments and leading environment assignments, without the executable or
 startup subcommand. The argument grammar is

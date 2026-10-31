@@ -20,10 +20,13 @@ Windows applies the same hard maximum, in bytes, to each owned engine process
 and descendant. The root starts suspended, is assigned to a limit-free job,
 capped through `SetProcessWorkingSetSizeEx` and verified by readback before
 resuming. Failure kills and reaps the root and fails start. Job notifications
-cap descendants after confirming job membership; a descendant whose cap fails is
-terminated, and if it cannot be opened or the notification read fails, the whole
-engine job is terminated. Windows delivers job notifications best-effort, so a
-lost notification leaves that descendant uncapped. This limits each process
+trigger an immediate sweep of the engine job's members, and the manager also
+sweeps on a 250 ms target cadence, so a lost notification delays a descendant's
+cap by about one interval rather than indefinitely. A process can fault in pages
+before its first cap; the late cap trims its working set to the maximum. A member
+that cannot be opened terminates the engine job; a live member whose cap fails
+is terminated. A notification read or job enumeration failure terminates the
+engine job. This limits each process
 working set, not aggregate tree memory or committed memory. The engine job has
 no kill-on-close lifetime policy.
 

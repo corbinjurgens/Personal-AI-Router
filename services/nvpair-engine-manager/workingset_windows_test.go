@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -27,12 +28,13 @@ import (
 func init() { workingSetTestChild = runWorkingSetTestChild }
 
 type workingSetTestObservation struct {
-	Role         string `json:"role"`
-	PID          int    `json:"pid"`
-	Maximum      uint64 `json:"maximum"`
-	Flags        uint32 `json:"flags"`
-	Peak         uint64 `json:"peak"`
-	TouchedBytes int    `json:"touchedBytes"`
+	Role         string        `json:"role"`
+	PID          int           `json:"pid"`
+	Maximum      uint64        `json:"maximum"`
+	Flags        uint32        `json:"flags"`
+	Peak         uint64        `json:"peak"`
+	TouchedBytes int           `json:"touchedBytes"`
+	CapDelay     time.Duration `json:"capDelay"`
 }
 
 // PROCESS_MEMORY_COUNTERS: DWORD header, then pointer-sized counters.
@@ -50,17 +52,47 @@ type workingSetTestMemoryCounters struct {
 }
 
 func runWorkingSetTestChild(mode string) error {
+	if mode == "exit" {
+		return nil
+	}
+	if mode == "sentinel" {
+		_, err := io.Copy(io.Discard, os.Stdin)
+		return err
+	}
+	if mode == "child-sweep-capped" {
+		// The parent releases this gate after the watcher's initial sweep,
+		// making the later descendant depend on a periodic sweep alone.
+		var gate [1]byte
+		if _, err := io.ReadFull(os.Stdin, gate[:]); err != nil {
+			return err
+		}
+	}
 	capped := strings.HasSuffix(mode, "-capped")
 	role := "child"
 	if strings.HasPrefix(mode, "grandchild-") {
 		role = "grandchild"
 	}
 	// Check the root immediately to prove enforcement before resume. The
-	// grandchild allocates immediately, without waiting for its notification,
-	// so a delayed cap cannot hide an excessive peak from the assertion.
+	// notification-path grandchild allocates immediately so a delayed cap
+	// cannot hide an excessive peak. The sweep fixture waits for its cap.
 	_, maximum, flags, err := processWorkingSetLimits(windows.CurrentProcess())
 	if err != nil {
 		return err
+	}
+	var capDelay time.Duration
+	if mode == "grandchild-sweep-capped" {
+		started := time.Now()
+		for uint64(maximum) != 67108864 || flags&0x6 != 0x6 {
+			if time.Since(started) >= 5*time.Second {
+				return fmt.Errorf("grandchild did not observe its cap within 5 s: max=%d flags=%#x", maximum, flags)
+			}
+			time.Sleep(10 * time.Millisecond)
+			_, maximum, flags, err = processWorkingSetLimits(windows.CurrentProcess())
+			if err != nil {
+				return err
+			}
+		}
+		capDelay = time.Since(started)
 	}
 	if capped && role == "child" && flags&0x6 != 0x6 {
 		return fmt.Errorf("root resumed without working-set cap: max=%d flags=%#x", maximum, flags)
@@ -88,22 +120,229 @@ func runWorkingSetTestChild(mode string) error {
 	if result == 0 {
 		return callErr
 	}
-	observation := workingSetTestObservation{Role: role, PID: os.Getpid(), Maximum: uint64(maximum), Flags: flags, Peak: uint64(counters.PeakWorkingSetSize), TouchedBytes: pagesTouched * 4096}
+	observation := workingSetTestObservation{Role: role, PID: os.Getpid(), Maximum: uint64(maximum), Flags: flags, Peak: uint64(counters.PeakWorkingSetSize), TouchedBytes: pagesTouched * 4096, CapDelay: capDelay}
 	if err := json.NewEncoder(os.Stdout).Encode(observation); err != nil {
 		return err
 	}
 	if role == "grandchild" {
+		if mode == "grandchild-sweep-capped" {
+			_, err := io.Copy(io.Discard, os.Stdin)
+			return err
+		}
 		return nil
 	}
 	grandchildMode := "grandchild-default"
 	if capped {
 		grandchildMode = "grandchild-capped"
 	}
+	if mode == "child-sweep-capped" {
+		grandchildMode = "grandchild-sweep-capped"
+	}
 	cmd := exec.Command(os.Args[0], "working-set-test-child", grandchildMode)
 	cmd.Env = childEnv(nil)
 	configureSysProcAttr(cmd)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if mode == "child-sweep-capped" {
+		cmd.Stdin = os.Stdin
+	}
 	return cmd.Run()
+}
+
+func unnotifiedWorkingSetContainment(t *testing.T) *workingSetContainment {
+	t.Helper()
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		t.Fatalf("create unnotified job: %v", err)
+	}
+	port, err := windows.CreateIoCompletionPort(windows.InvalidHandle, 0, 0, 1)
+	if err != nil {
+		if closeErr := windows.CloseHandle(job); closeErr != nil {
+			t.Errorf("close unnotified job: %v", closeErr)
+		}
+		t.Fatalf("create unassociated completion port: %v", err)
+	}
+	c := &workingSetContainment{job: job, port: port, engine: "fixture", maxBytes: 64 << 20, stop: make(chan struct{}), done: make(chan struct{})}
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("close unnotified containment: %v", err)
+		}
+	})
+	return c
+}
+
+func startUnnotifiedWorkingSetTree(t *testing.T, c *workingSetContainment) io.Reader {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "working-set-test-child", "child-sweep-capped")
+	cmd.Env = childEnv(nil)
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := startSuspendedJobProcess(ctx, cmd, c.job, func(pid uint32) error {
+		if err := capWorkingSet(pid, c.maxBytes); err != nil {
+			return err
+		}
+		c.verifiedAt.Store(time.Now().UnixNano())
+		return nil
+	}, c.Close); err != nil {
+		t.Fatalf("start unnotified working-set tree: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := memoryPlanTerminateJob(ctx, c.job); err != nil {
+			t.Errorf("terminate unnotified tree: %v", err)
+		}
+		if err := stdin.Close(); err != nil {
+			t.Errorf("close unnotified tree input: %v", err)
+		}
+		if err := cmd.Wait(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Errorf("reap unnotified tree: %v", err)
+			}
+		}
+	})
+	rootVerifiedAt := c.verifiedAt.Load()
+	c.start()
+	deadline := time.Now().Add(2 * time.Second)
+	for c.verifiedAt.Load() == rootVerifiedAt {
+		if time.Now().After(deadline) {
+			t.Fatal("initial working-set sweep did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := stdin.Write([]byte{1}); err != nil {
+		t.Fatalf("release working-set root after initial sweep: %v", err)
+	}
+	return stdout
+}
+
+func TestWorkingSetSweepCapsDescendantWithoutNotification(t *testing.T) {
+	c := unnotifiedWorkingSetContainment(t)
+	stdout := startUnnotifiedWorkingSetTree(t, c)
+	type result struct {
+		observations [2]workingSetTestObservation
+		err          error
+	}
+	observed := make(chan result, 1)
+	go func() {
+		var got result
+		decoder := json.NewDecoder(stdout)
+		for i := range got.observations {
+			if err := decoder.Decode(&got.observations[i]); err != nil {
+				got.err = err
+				break
+			}
+		}
+		observed <- got
+	}()
+	select {
+	case got := <-observed:
+		if got.err != nil {
+			t.Fatalf("read unnotified tree observations: %v", got.err)
+		}
+		if got.observations[0].Role != "child" || got.observations[1].Role != "grandchild" || got.observations[0].PID == got.observations[1].PID {
+			t.Fatalf("want distinct root and grandchild observations: %+v", got.observations)
+		}
+		for _, observation := range got.observations {
+			if observation.Maximum != 67108864 || observation.Flags&0x6 != 0x6 {
+				t.Errorf("%s quota max=%d flags=%#x, want max=67108864 flags containing 0x6", observation.Role, observation.Maximum, observation.Flags)
+			}
+			if observation.TouchedBytes != 268435456 || observation.Peak == 0 || observation.Peak > 68157440 {
+				t.Errorf("%s touched=%d peak=%d, want 256 MiB touched and peak at most 65 MiB", observation.Role, observation.TouchedBytes, observation.Peak)
+			}
+			if !pidAlive(observation.PID) {
+				t.Errorf("%s exited before containment verification", observation.Role)
+			}
+			t.Logf("%s max=%d flags=%#x peak=%d capDelay=%s", observation.Role, observation.Maximum, observation.Flags, observation.Peak, observation.CapDelay)
+		}
+		if got.observations[1].CapDelay > 2*time.Second {
+			t.Errorf("grandchild cap took %s, want at most 2 s", got.observations[1].CapDelay)
+		}
+		if !c.Verified() {
+			t.Fatal("running tree containment is not verified")
+		}
+	case <-time.After(45 * time.Second):
+		t.Fatal("unnotified tree did not report its cap")
+	}
+}
+
+func TestWorkingSetExitedMemberIsVerifiedWithoutTermination(t *testing.T) {
+	c := unnotifiedWorkingSetContainment(t)
+	start := func(mode string) (*exec.Cmd, windows.Handle) {
+		t.Helper()
+		cmd := exec.Command(os.Args[0], "working-set-test-child", mode)
+		cmd.Env = childEnv(nil)
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var handle windows.Handle
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := startSuspendedJobProcess(ctx, cmd, c.job, func(pid uint32) error {
+			var err error
+			handle, err = openWorkingSetProcess(pid)
+			return err
+		}, c.Close); err != nil {
+			t.Fatalf("start %s member: %v", mode, err)
+		}
+		t.Cleanup(func() {
+			if err := stdin.Close(); err != nil {
+				t.Errorf("close %s input: %v", mode, err)
+			}
+			if err := windows.TerminateProcess(handle, 1); err != nil {
+				if status, waitErr := windows.WaitForSingleObject(handle, 0); waitErr != nil || status != windows.WAIT_OBJECT_0 {
+					t.Errorf("terminate %s: %v", mode, err)
+				}
+			}
+			if err := cmd.Wait(); err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Errorf("reap %s: %v", mode, err)
+				}
+			}
+			if err := windows.CloseHandle(handle); err != nil {
+				t.Errorf("close %s handle: %v", mode, err)
+			}
+		})
+		return cmd, handle
+	}
+	short, shortHandle := start("exit")
+	_, sentinelHandle := start("sentinel")
+	if status, err := windows.WaitForSingleObject(shortHandle, 5000); err != nil || status != windows.WAIT_OBJECT_0 {
+		t.Fatalf("short-lived child did not exit: status=%d err=%v", status, err)
+	}
+	verified, capped := c.capMember(uint32(short.Process.Pid))
+	if !verified || capped {
+		t.Errorf("exited member verified=%t capped=%t, want true, false", verified, capped)
+	}
+	if status, err := windows.WaitForSingleObject(sentinelHandle, 0); err != nil || status != uint32(windows.WAIT_TIMEOUT) {
+		t.Fatalf("sentinel terminated after exited-member cap: status=%d err=%v", status, err)
+	}
+}
+
+func TestWorkingSetVerifiedRequiresFreshEvidence(t *testing.T) {
+	c := unnotifiedWorkingSetContainment(t)
+	if c.Verified() {
+		t.Error("zero timestamp must not be verified")
+	}
+	c.verifiedAt.Store(time.Now().UnixNano())
+	if !c.Verified() {
+		t.Error("fresh timestamp must be verified")
+	}
+	c.verifiedAt.Store(time.Now().Add(-2 * workingSetVerificationMaxAge).UnixNano())
+	if c.Verified() {
+		t.Error("stale timestamp must not be verified")
+	}
 }
 
 func workingSetTestTree(t *testing.T, limit uint64, mode string) []workingSetTestObservation {
@@ -222,7 +461,9 @@ func TestWorkingSetNotificationIgnoresProcessOutsideJob(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	c.capMember(uint32(cmd.Process.Pid))
+	if verified, capped := c.capMember(uint32(cmd.Process.Pid)); !verified || capped {
+		t.Errorf("nonmember verified=%t capped=%t, want true, false", verified, capped)
+	}
 	process, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(cmd.Process.Pid))
 	if err != nil {
 		t.Fatal(err)
@@ -241,21 +482,36 @@ func TestWorkingSetNotificationIgnoresProcessOutsideJob(t *testing.T) {
 }
 
 func TestWorkingSetContainmentCloseIsIdempotent(t *testing.T) {
-	c, err := newWorkingSetContainment("fixture", 64<<20)
-	if err != nil {
-		t.Fatal(err)
+	checkClose := func(t *testing.T, started bool) {
+		t.Helper()
+		c, err := newWorkingSetContainment("fixture", 64<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if started {
+			c.start()
+		}
+		closed := make(chan error, 1)
+		go func() { closed <- errors.Join(c.Close(), c.Close()) }()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatalf("close containment twice: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("closing containment blocked")
+		}
+		select {
+		case <-c.done:
+		default:
+			t.Fatal("completion reader survived Close")
+		}
+		if c.Verified() {
+			t.Fatal("closed containment is still verified")
+		}
 	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("close unused containment: %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("repeat close: %v", err)
-	}
-	select {
-	case <-c.done:
-	default:
-		t.Fatal("completion reader survived Close")
-	}
+	t.Run("unstarted containment", func(t *testing.T) { checkClose(t, false) })
+	t.Run("started containment", func(t *testing.T) { checkClose(t, true) })
 }
 
 func TestWorkingSetLimitSurvivesModelChangePreview(t *testing.T) {

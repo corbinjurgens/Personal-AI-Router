@@ -783,8 +783,11 @@ accepts optional `workingSetLimitMiB` (256 through 1048576) alongside
 `serverPort`, `proxyPort` and `launchText`. This setting is available only for
 Windows llama.cpp engines in process mode, and persists as
 `working_set_limit_mib`. Each owned engine process and descendant receives the
-same hard working-set maximum; descendants are capped from best-effort job
-notifications (see [spec.md](spec.md)). Changing or clearing it restarts a running engine.
+same hard working-set maximum. Job notifications trigger an immediate member
+sweep, with periodic sweeps on a 250 ms target cadence covering lost notifications.
+Processes may fault in pages before their first cap; a late cap trims the working
+set. An unopenable member terminates the job; a live member whose cap fails is
+terminated (see [spec.md](spec.md)). Changing or clearing it restarts a running engine.
 Readback `workingSetLimitStatus` is `applied`, `not-running`, or
 `unenforced-adopted`, and is omitted when no limit is saved. An adopted process
 requires a restart for enforcement of new descendants.
