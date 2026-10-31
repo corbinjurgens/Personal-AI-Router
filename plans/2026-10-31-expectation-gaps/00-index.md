@@ -27,14 +27,20 @@ convention: debate, execute, audit.
 | 01 | `01-identity-and-unblock.md` | none (baseline) | medium | proposed |
 | 02 | `02-profiles.md` | 01 landed | large | proposed |
 | 03 | `03-roles.md` | 02 landed | medium to large | proposed |
-| 04 | `04-desktop.md` | 02 landed; 03 for the roles editor and Profiles tab | large | proposed |
-| 05 | `05-estimate-and-validate.md` | 01 and 02 landed; 04 lock removal for one refusal change | large | proposed |
-| 06 | `06-routing-and-apps.md` | 01, 02, 03 landed; 04 surfaces for the Apps group | medium | proposed |
+| 04 | `04-desktop.md` | 02 landed (Tasks 1 and 3 may start earlier); 03 for Tasks 8 (card roles) and 10 (Profiles tab) | large | proposed |
+| 05 | `05-estimate-and-validate.md` | 01 and 02 landed; 04 (lock removal, peer-Resume rule) for Task 6 and later; Tasks 1-5 and 10 do not wait for 04 | large | proposed |
+| 06 | `06-routing-and-apps.md` | 01, 02, 03 landed; 04 for Tasks 7 and 9; 05 optional, and Task 11 never while a 05 session is open | medium | proposed |
 
-Dependency graph (acyclic): 01 -> 02 -> {03, 04, 05}; 03 -> 06; 04 -> 06 (Apps
-group only); 05 -> 06 (optional: measured speeds). 03 and 04 may run in
-parallel after 02 where their files are disjoint; each phase file names the
-tasks that may start early.
+Dependency graph (acyclic): 01 -> 02 -> {03, 04, 05}; 03 -> 04 (Tasks 8 and 10
+only); 04 -> 05 (Task 6 onward); 03 -> 06; 04 -> 06 (Tasks 7 and 9: routing
+preference control and Apps group); 05 -> 06 (optional: measured speeds;
+Task 11 waits for 05 to close). 03 and 04 may run in parallel after 02, but
+their files are not disjoint: both phase files list the shared paths and the
+rule (on each shared path the phase that lands second rebases onto the other
+and re-runs its task's Verify). The same rule applies wherever 05 runs
+beside 03, 04 or 06 (shared engine-manager, broker, `modelconfig`,
+`nodepolicy` and desktop bridge files). Each phase file names the tasks that
+may start early.
 
 ## Owner decisions this batch assumes
 

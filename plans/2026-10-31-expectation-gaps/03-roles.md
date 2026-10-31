@@ -37,8 +37,9 @@ Compatibility: stored policies that use only the default names keep parsing beca
 keeps its meaning. No version bump, capability marker or migration is added; the only data
 handling is the existing disk-load repair dropping retired local tier entries (Task 4).
 Non-goals: the smart-routing scorer (phase 06); context advertisement (phase 06); a role
-editor redesign, a fallback-list editor, the Profiles tab or rendering the requested role in
-the history table (phase 04); renaming `TierPolicy`, `tierSearchOrder`, `tierRank`, the
+editor redesign and the Profiles tab (phase 04); rendering the requested role in the history
+table (phase 06 Task 4); a fallback-list editor (deferred, see "Decisions made while writing
+this plan"); renaming `TierPolicy`, `tierSearchOrder`, `tierRank`, the
 `requested.tier` history field, `X-PAIR-Tier` or the "no eligible model for tier" text;
 any change to hybrid/public routing beyond restricting it to the default names (frozen, D7).
 
@@ -47,20 +48,39 @@ Phase 02 (`02-profiles.md`) must have landed. Check all of these on the branch b
 1. `plans/2026-10-31-expectation-gaps/00-index.md`: the row for phase 02 ends with
    ` — done <sha>`, and the vault `WORKLOG.md`
    (`/home/user/wasabi/4. Projects/Personal-AI-Router/WORKLOG.md`) has phase 02's close-out entry.
-2. `services/shared/nodepolicy/policy.go`: `Policy.Roles` maps a role name to an ordered list
-   of profile ids (not to the old `Role{Engine, Model}`), and `Profile` has a stable id field.
-   Read phase 02's close-out entry for the exact field names; this plan calls them "the
-   profile id" and "the role's profile list".
-3. `services/shared/nodepolicy/advertise.go`: `Advertisement.Roles` is keyed by role name and
-   its value lists the advertised profiles (phase 02 "advertisement by profile").
+2. `services/shared/nodepolicy/policy.go`: `git grep -n -e 'Roles map\[string\]\[\]string' -e 'func (pr Profile) ServedModel' -e 'func (p Policy) ProfileByID' -- services/shared/nodepolicy/policy.go`
+   prints all three (`Policy.Roles` maps a role name to an ordered list of `Profile.ID` values;
+   this plan calls them "the profile id" and "the role's profile list").
+3. `services/shared/nodepolicy/advertise.go`: `git grep -n -e 'type AdvertisedProfile struct' -e 'map\[string\]\[\]AdvertisedProfile' -- services/shared/nodepolicy/advertise.go`
+   prints both (`Advertisement.Roles` is keyed by role name and lists `AdvertisedProfile`).
 4. `services/nvpair-proxy/tiers.go` `facade.resolveTierCandidates` builds role candidates from
-   the declared profiles (phase 02 changed the per-role `(engine, model)` match).
+   the declared profiles: `git grep -n 'profileID' -- services/nvpair-proxy/proxy.go services/nvpair-proxy/tiers.go`
+   prints the `candidate.profileID` field and its use (phase 02 Task 4).
 If any of these is absent, stop and report: do not implement phase 02's work here.
 Phase 04 (`04-desktop.md`) is allowed to run in parallel with this phase and touches some of the same desktop files
 (Task 6). Base on the current integration head; if phase 04 has already moved or deleted
 `RoleEditor.tsx`, `NodeDeclaredRoles.tsx`, `BulkNodeConfiguration.tsx`,
 `ModelSettingsCopy.tsx` or `ModelLoadSettings.tsx`, apply Task 6's change to the file that
 now owns that behaviour and record the substitution in the close-out entry.
+Ordering with phase 04 (the same list is in `04-desktop.md`). These paths are in both phases'
+Files lists: `services/shared/noderec/noderec_test.go`, `services/shared/nodepolicy/wire_test.go`,
+`services/nvpair-engine-manager/nodeprojection_test.go`, `services/nvpair-ui-broker/policy_test.go`,
+`services/nvpair-ui-broker/README.md`, `services/nvpair-proxy/proxy.go`, `services/nvpair-proxy/tiers_test.go`,
+`services/nvpair-proxy/engine_binding_requests_test.go`, `services/nvpair-proxy/README.md`,
+`services/nvpair-proxy/spec.md`, `docs/node-availability.mdx`, `desktop/docs/services-api.md`,
+`desktop/docs/services-parity.md`, `desktop/src/ui/stores/node-configuration.store.ts`,
+`desktop/src/ui/components/NodeList/NodeDeclaredRoles.tsx`,
+`desktop/src/ui/components/ModelSettings/ModelSettingsCopy.tsx`,
+`desktop/src/ui/components/RoutingSettings/BulkNodeConfiguration.tsx`,
+`desktop/tests/modular/node-configuration.test.ts`, `desktop/tests/modular/node-configuration-bulk.test.ts`,
+`desktop/tests/modular/node-policy.test.ts`, `desktop/tests/modular/node-policy-precision.test.ts`,
+`desktop/tests/modular/remote-management.test.tsx`, `desktop/tests/modular/model-settings-copy.test.tsx`.
+Rule: on each shared path, the phase whose task lands second rebases onto the other phase's
+commit and re-runs its own task's Verify; neither phase reverts the other's change. Phase 04
+Tasks 8 and 10 (`NodeDeclaredRoles.tsx`, `ModelSettingsCopy.tsx`) wait for this phase by their
+entry condition. When phase 04 Task 7 has already deleted `BulkNodeConfiguration.tsx` and
+`node-configuration-bulk.test.ts`, Task 6 skips them; `desktop/docs/services-api.md` is only
+regenerated, never merged by hand.
 
 ## Context the executor needs
 Repository: the PAIR fork, executors branch from `origin/integration/join33` (`4eccd05d` or
@@ -87,7 +107,9 @@ Verified facts (investigation `L1`, `L7`, `verify-B` at `4eccd05d`; re-checked w
   19 test files, all in Task 1's Files (which also adds `values_test.go` for the alias cases).
 - `services/shared/modelconfig/wire.go` `isTier` (about line 503) is a literal copy used by
   the `modelId` reserved-alias check (about line 498) and `PolicyPatch.Validate`
-  ("roles: unknown tier", about line 621). `nodepolicy` does not import `modelconfig`.
+  ("roles: unknown tier", about line 621). At `4eccd05d` `nodepolicy` does not import
+  `modelconfig`, but phase 02 Task 1 makes it do so (`Profile.Load *modelconfig.RequestedLoad`,
+  `modelconfig.ValidateProfileID`), so `modelconfig` must not import `nodepolicy` (Task 2).
 - Fallback: `TierPolicy{AllowStronger, AllowWeaker, PreferLoaded}` (`policy.go` about line
   569), `Default()` sets `AllowStronger: true, AllowWeaker: false, PreferLoaded: "tier"`.
   `tiers.go` `tierSearchOrder` derives order by index in `TierOrder`; `resolveTierCandidates`
@@ -183,9 +205,12 @@ from the defaults (Task 3 makes such a change revert to the default fallback lis
 - The router treats a request `model` as a role when it is a default name, or when it passes the
   grammar and this node or any visible peer declares it; otherwise it is a concrete model name.
 - `tierPolicy.roleFallback` is router-side (applies to requests entering that node), like
-  `TierPolicy` today; peers still cannot change it (`MergePeerSet` keeps refusing). In this phase
-  it is edited through the desktop's existing "Advanced policy JSON" editor; a fallback editor is
-  phase 04 work.
+  `TierPolicy` today; peers still cannot change it (`MergePeerSet` keeps refusing). It is
+  edited through the desktop's existing "Advanced policy JSON" editor, which phase 04 Task 7
+  moves into the node settings page as `NodePolicyJsonEditor.tsx`.
+- A dedicated fallback-list editor is deferred, because no phase of this batch plans one
+  (phase 04 does not redesign the role editor) and D1 only requires the list to exist; the
+  owner's acceptance step edits it as JSON.
 - Fallback is one level, not transitive; duplicates are removed keeping the first; a list must not
   name its own key; names no node declares are allowed and simply contribute no candidates.
 - Default fallback lists mirror today's defaults (`allowStronger: true`, `allowWeaker: false`):
@@ -286,23 +311,33 @@ nothing; `cd services/shared && go vet ./... && go test ./...` passes; in each o
 `services/nvpair-proxy`, `services/nvpair-ui-broker`, `services/nvpair-engine-manager`,
 `services/nvpair-node-scanner`: `go build ./... && go vet ./... && go test ./...` passes.
 
-### Task 2 — Model-settings patches validate role names with the shared grammar
-**Files:** services/shared/modelconfig/wire.go, services/shared/modelconfig/wire_test.go, services/shared/modelconfig/options_test.go
-**Depends on:** 1 — uses `nodepolicy.ValidateRoleName` and `nodepolicy.IsReservedAlias`
+### Task 2 — Model-settings patches validate role names with the same grammar as nodepolicy
+**Files:** services/shared/modelconfig/wire.go, services/shared/modelconfig/wire_test.go, services/shared/modelconfig/options_test.go, services/shared/nodepolicy/role_grammar_parity_test.go (new)
+**Depends on:** 1 — mirrors `nodepolicy.ValidateRoleName` and `nodepolicy.IsReservedAlias`
 **Complexity:** mechanical
 **Do:**
-1. In `services/shared/modelconfig/wire.go` delete `isTier`. Import `nvpair-shared/nodepolicy`.
+1. In `services/shared/modelconfig/wire.go` delete `isTier`. Do not import `nvpair-shared/nodepolicy`:
+   since phase 02, `nodepolicy` imports `modelconfig`, so the reverse import is a cycle. Add two
+   private helpers with doc comments naming their `nodepolicy` counterparts and the parity test:
+   `validRoleName(name string) error` (Task 1's pattern and suffix rule, same messages) and
+   `reservedRoleAlias(id string) bool` (`weak`, `medium` or `strong`, bare or with `-api`/`-local`).
 2. In the `modelId` check, replace the hand-written suffix strip and `isTier` call with
-   `if nodepolicy.IsReservedAlias(id) { return fmt.Errorf("modelId: reserved routing alias") }`.
+   `if reservedRoleAlias(id) { return fmt.Errorf("modelId: reserved routing alias") }`.
 3. In `PolicyPatch.Validate`, replace the `isTier` loop with
-   `for role := range p.Roles { if err := nodepolicy.ValidateRoleName(role); err != nil { return fmt.Errorf("roles: %w", err) } }`.
+   `for role := range p.Roles { if err := validRoleName(role); err != nil { return fmt.Errorf("roles: %w", err) } }`.
 4. `options_test.go`: the case named "unknown tier" (`{"fast":true}`) becomes "invalid role name"
    with input `{"Fast":true}`; add an accepted case `{"coder":true}`. `wire_test.go`: keep the
    reserved-alias cases for `weak`, `weak-api`, `medium-local`; add `coder` accepted as a
    `modelId` (a role name is not reserved).
-**Verify:** `git grep -n "func isTier" -- services/shared/modelconfig` prints nothing;
-`cd services/shared && go build ./... && go vet ./... && go test ./modelconfig/...` passes (a
-build error "import cycle not allowed" means stop and report).
+5. `services/shared/nodepolicy/role_grammar_parity_test.go` (`nodepolicy` may import `modelconfig`):
+   for every name in Task 1's `ValidateRoleName` table plus `weak-api`, `medium-local` and
+   `strong`, assert that `modelconfig.PolicyPatch{Roles: map[string]bool{name: true}}.Validate()`
+   fails exactly when `ValidateRoleName(name)` fails, and that an otherwise valid
+   `modelconfig.ModelChange` with that `ModelID` is refused as a reserved alias exactly when
+   `IsReservedAlias(name)` is true.
+**Verify:** `git grep -n "func isTier" -- services/shared/modelconfig` and
+`git grep -n '"nvpair-shared/nodepolicy"' -- services/shared/modelconfig ':!*_test.go'` print nothing;
+`cd services/shared && go build ./... && go vet ./... && go test ./modelconfig/... ./nodepolicy/...` passes.
 
 ### Task 3 — Per-role fallback lists replace allowStronger and allowWeaker
 **Files:** services/shared/nodepolicy/policy.go, services/shared/nodepolicy/projection.go, services/shared/nodepolicy/policy_test.go, services/shared/nodepolicy/projection_test.go, services/nvpair-proxy/tiers.go, services/nvpair-proxy/tiers_test.go, services/nvpair-proxy/routing_test.go, services/nvpair-proxy/routing_listener_test.go, services/nvpair-proxy/served_models_test.go, services/nvpair-proxy/engine_binding_candidates_test.go, services/nvpair-ui-broker/policy_test.go, services/tests/policy_relay_joint_test.go
@@ -587,11 +622,14 @@ Acceptance on the owner's machines (Mac, Joes, MSI; external, recorded in the va
 - Add a vault entry to `/home/user/wasabi/4. Projects/Personal-AI-Router/WORKLOG.md` with: the
   commit range, the local gate commands with exit codes and final `ok`/`FAIL` lines, any file
   substitution made because phase 04 moved a desktop file, the acceptance results (steps not yet run are
-  marked "pending on machines"), and the remaining limitations: no fallback-list editor in the desktop (phase 04), the
-  history table does not render the requested role (phase 04), role names cannot be checked for
+  marked "pending on machines"), and the remaining limitations: no fallback-list editor in the desktop (deferred; JSON
+  only), the history table does not render the requested role yet (phase 06 Task 4), role names cannot be checked for
   collisions with concrete model ids on other nodes.
 - Hand-over: phase 06 (`06-routing-and-apps.md`) relies on `tierRank` meaning "position in the
-  role's fallback chain" and on role names being strings; phase 04 builds its role surfaces on
+  role's fallback chain" and on role names being strings; name the kept identifiers in the
+  WORKLOG entry: `TierPolicy.RoleFallback` (`tierPolicy.roleFallback`), `tierSearchOrder`,
+  `tierRank`, `resolveTierCandidates`, `requested.tier`, `X-PAIR-Tier`,
+  `nodepolicy.ValidateRoleName`, `DefaultRoles`, `IsDefaultRole`, `MaxRoleNameBytes`; phase 04 builds its role surfaces on
   `roleNames`, `roleNameError` and `DEFAULT_ROLES` from `desktop/src/shared/utils/node-roles.ts`.
 
 ## Do not
@@ -612,8 +650,7 @@ Acceptance on the owner's machines (Mac, Joes, MSI; external, recorded in the va
 - A test that fails because it encoded the old closed vocabulary or router-entry behaviour:
   classify it under the categories in "Context the executor needs" and edit it as that category
   says. A test that fails for another reason is a real regression: fix the code, not the test.
-- Stop and report (do not improvise) when: an entry condition is missing; `modelconfig` cannot
-  import `nodepolicy` without a cycle; a maximum-size history record no longer fits the frame;
+- Stop and report (do not improvise) when: an entry condition is missing; a maximum-size history record no longer fits the frame;
   phase 02's role or advertisement shape makes a step here impossible as written; or the gate
   still fails after two fix attempts on the same failure.
 

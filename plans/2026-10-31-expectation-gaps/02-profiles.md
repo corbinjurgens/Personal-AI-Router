@@ -77,26 +77,31 @@ the phase's WORKLOG entry.
 1. `plans/2026-10-31-expectation-gaps/00-index.md` row 01 ends with
    ` — done <sha>` and `git merge-base --is-ancestor <sha> HEAD` exits 0.
 2. Structured model identity exists in a shared Go package:
-   `git grep -n 'json:"contentId' -- services/shared` prints at least one
-   struct field whose struct also declares a repository field and a file or
-   quantization label field. This plan calls that type `ModelIdentity`; use
-   the name and package phase 01 gave it. The package must be importable from
-   `services/shared/nodepolicy` and `services/shared/enginesettings` without an
-   import cycle (`nvpair-shared/engines` and `nvpair-shared/modelconfig` both
-   qualify).
-3. The engine inventory carries it: `git grep -n 'ModelIdentity'` (with phase
-   01's name) lists a use in `services/nvpair-engine-manager/models.go`, and
-   phase 01 provides a function that computes it from a resolved artifact list
-   (find it with `git grep -n 'func .*Identit' -- services/nvpair-engine-manager`).
-4. Typed loads express the MoE and placement options: `type RequestedLoad struct` in `services/shared/modelconfig/wire.go` has fields for
-   `n-cpu-moe`, `cpu-moe`, `repack`, `tensor-split` and `device`.
-5. Phase 01's lenient preset reader exists (its task names the function) and
-   the external-preset conversion path (`previewTypedLlamaConversion` in
-   `services/nvpair-engine-manager/modelsettings_load.go`) no longer fails the
-   whole file on one unsupported key.
-6. The desktop has phase 01's identity tag formatter
-   (`git grep -n -i 'identity' -- desktop/src/shared/utils` lists an exported
-   function that renders repository and quantization tags).
+   `git grep -n 'type ModelIdentity struct' -- services/shared/engines/model_identity.go`
+   prints one line and that struct has `json:"contentId,omitempty"`,
+   `json:"repository,omitempty"` and `json:"quantization,omitempty"` fields.
+   This plan calls it `engines.ModelIdentity` (package `nvpair-shared/engines`,
+   which `nodepolicy` and `enginesettings` already import).
+3. The engine inventory carries it and one function computes it:
+   `git grep -n 'json:"modelIdentities' -- services/nvpair-engine-manager/models.go`
+   prints the `ModelsResult.Identities` field, and
+   `git grep -n 'func (e \*Executor) modelIdentityFromArtifacts' -- services/nvpair-engine-manager`
+   prints the function phase 01 Task 3 extracted (identity from a resolved
+   `modelFileList` and a per-slot context).
+4. Typed loads express the MoE and placement options:
+   `git grep -n -e 'json:"nCpuMoe' -e 'json:"cpuMoe' -e 'json:"repack' -e 'json:"tensorSplit' -e 'json:"device' -- services/shared/modelconfig/wire.go`
+   prints five `RequestedLoad` fields.
+5. Phase 01's preset readers exist:
+   `git grep -n -e 'func readLlamaArtifactPreset' -e 'func readLlamaPresetSections' -- services/nvpair-engine-manager/serving_llamacpp.go`
+   prints both (the lenient artifact-lookup reader and the exact conversion
+   reader), and `previewTypedLlamaConversionExpected` in
+   `services/nvpair-engine-manager/modelsettings_load.go` calls
+   `readLlamaPresetSections`, so conversion turns unknown keys into
+   `extraFlags` instead of failing the whole file.
+6. The desktop has phase 01's identity tag renderer:
+   `git grep -n 'export function modelIdentityTags' -- desktop/src/ui/utils/model-identity-label.ts`
+   prints one line and `desktop/src/ui/components/ModelIdentity/ModelIdentityTags.tsx`
+   exists.
 
 If any condition is absent: stop before Task 1, write a WORKLOG entry
 "phase 02 blocked: phase 01 entry condition N missing" (N = the number
@@ -184,6 +189,13 @@ Model-change wire and engine manager today (verified, L3-C6..C14, A1, A3):
 - The engine manager restarts frozen Auto loads from `Requested` plus
   `Resolved` (`modelAutoCompileFrozen`) without the broker; it never reads node
   policy.
+- Import direction (verified at `4eccd05d`): `modelconfig/memory.go` imports
+  `nvpair-shared/noderec` (`MemoryObservation`, `MemoryHop`) and
+  `noderec/noderec.go` imports `nvpair-shared/nodepolicy` (`Advertisement`).
+  Task 1's new `nodepolicy` → `modelconfig` import (`Profile.Load`,
+  `modelconfig.ValidateProfileID`) therefore closes the cycle
+  `nodepolicy → modelconfig → noderec → nodepolicy`. Phase 03 relies on the
+  direction this phase chooses (`modelconfig` never imports `nodepolicy`).
 
 Broker coupled operation today (verified, A1, L3-C9, C10, C16, C18):
 - `services/nvpair-ui-broker/enginesettings.go` `applyEngineSettings`
@@ -488,8 +500,8 @@ print nothing.
    every change on an engine that has an external `models-preset` and no typed
    loads with `modelLoadError("", "import", "Import this engine's presets first.")`; refuse `ImportPreset` with "Preset import is not available yet."
    (Task 6 replaces this refusal). Fill `result.Identities[profileID]` for every
-   compiled load from phase 01's identity function over that load's resolved
-   artifacts; do not compute identity a second way.
+   compiled load with phase 01's `e.modelIdentityFromArtifacts(engine, load.ModelID, <that load's resolved artifact list>, load.Resolved.PerSlotContext)`;
+   do not compute identity a second way.
 5. `modelsettings_rpc.go`: `validateModelSettingsLaunch` uses `ProfileID`;
    `InspectModel` with `InspectRequest.ProfileID` reports that profile's
    stored requested and resolved values as the current ones; without it,
@@ -627,9 +639,10 @@ prints nothing, where `<base>` is the branch base commit.
 2. `parseNodeRoles`/`parsePolicyAdvertisement`/`sameNodeRoles` and
    `node-projection.ts` decode lists, drop invalid entries, drop empty tiers.
 3. Store: add `profileChoices(policyText)` (the node's profiles with id, name,
-   engine, served model, identity); `roleLabel(profile, descriptors)` returns
+   engine, served model, identity); `roleLabel(profile, descriptors)` (replacing
+   phase 01's `roleLabel(role, descriptors, identity)`) returns
    the profile name, the engine label in parentheses and phase 01's identity
-   tags; `roleKey` is the profile id; `roleItems` lists the profiles not yet in
+   tags (`modelIdentityTags`, rendered with `ModelIdentityTags`); `roleKey` is the profile id; `roleItems` lists the profiles not yet in
    the tier; `suggestRoles` maps the first matching local tier entry to the
    profile whose `(engine, servedModel)` equals it; `roleDifferences` compares
    lists in order; delete `inventoryChoices` and `chosenRole` when unused
@@ -672,8 +685,11 @@ exits 0 with no failed test.
 5. `ModelSettingsPanel.tsx`: selection is a profile id from the node's
    profiles for the engine, plus "New profile" from an installed model.
    `ModelProfileControls.tsx`: for `llamacpp`, "Create profile" asks for a
-   name, generates the id and opens `ModelLoadSettings` for it (its first Apply
-   sends `{profileId, modelId, policy.name, load}`); "Remove profile" for a
+   name and an optional icon (text, P5), generates the id and opens
+   `ModelLoadSettings` for it (its first Apply sends
+   `{profileId, modelId, policy.name, policy.icon, load}`); "Rename" edits an
+   existing profile's name and icon through a policy-only change
+   (`policy.name`, `policy.icon`); "Remove profile" for a
    profile with a load sends `{profileId, remove: true}` through
    preview/apply. App engines keep the draft-based create/remove.
 6. `ModelLoadSettings.tsx`: role toggles read and write membership of this
@@ -724,8 +740,11 @@ exits 0 with no failed test.
 **Complexity:** judgment
 **Do:**
 1. Engine manager, `previewModelLoadChange` with `ImportPreset`:
-   - External `models-preset` and no typed loads: read the file with phase
-     01's lenient reader, run `previewTypedLlamaConversion`, set each converted
+   - External `models-preset` and no typed loads: run
+     `previewTypedLlamaConversion` (since phase 01 Task 8 it reads the file
+     with the exact `readLlamaPresetSections` and maps non-typed keys to
+     `extraFlags`; artifact lookup inside it uses the lenient
+     `readLlamaArtifactPreset`), set each converted
      load's `ProfileID` to its section name (`ModelID` stays the section
      name). Collect per-section failures: conversion refusals and section names
      that fail `modelconfig.ValidateProfileID` ("Rename this section: profile
@@ -887,6 +906,11 @@ the vault `Validation/` folder and WORKLOG):
 - If phase 01's identity type cannot be imported by `nodepolicy` or
   `enginesettings` without a cycle, stop and report the package path and the
   cycle; do not move phase 01's type in this phase.
+- The `nodepolicy → modelconfig → noderec → nodepolicy` cycle named in Context
+  is expected at Task 1. Unless the plan has been amended with a decision on
+  how to break it, stop before Task 1 and report it; do not invert the import,
+  duplicate `RequestedLoad` in `nodepolicy`, or store `load` as raw JSON on
+  your own.
 - If llama-server refuses two preset sections that point at one GGUF on a
   real machine, stop and report the server version and error; do not fall back
   to native aliases.

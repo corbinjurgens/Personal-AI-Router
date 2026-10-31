@@ -295,7 +295,8 @@ launches (vault `deferred.md`).
   the GPU". An unmeasured profile stays assignable and routable (the plan
   already says so).
 - Speed from a diagnostic run is written to the performance store under the
-  profile's `contentId`, which also feeds the smart-routing plan.
+  profile id, carrying the profile's `contentId`, which also feeds the
+  smart-routing plan.
 
 **Alternatives.** (a) Skip the estimator and only measure: cheaper now, but
 every new model needs a run before any guidance. (b) Keep the pin and ask the
@@ -383,11 +384,13 @@ Profile (per node, copyable)
   n-cpu-moe/cpu-moe/repack/tensor-split/device/extra flags),
   requestOptions + mode + localOnly, capabilities, limits,
   contextTokens := load.context (derived),
-  measurement? (diagnostic result bound to contentId, build_info, GPU, CPU, RAM)
+  measurement: engine-manager record bound to contentId, build_info, GPU, CPU,
+  RAM, shown through inspection, not stored on the profile
 
 Node
   roles[roleName] = [profileId, ...]
-  availability: available | paused (configured, peer-reversible) | halted (local-only)
+  availability: available | paused by a peer (peer-reversible) |
+  paused on this node, including Halt (local-only)
   engines: installed/running/errors, process settings (ports, env, cap, autostart);
   activation follows roles
 
@@ -412,8 +415,8 @@ the finders' estimates; nothing was measured.
 | 06 Routing and apps | Smart-routing plan on `contentId`/profile ids; context advertisement; `kind: app`; Strata acceptance | medium | — |
 
 Order: 01 first (it is what makes MSI and Joes inspectable at all and is
-independent), then 02, then 03 and 04 in parallel (disjoint files after 02),
-then 05 and 06. Phase 01 can start now. The owner's plan convention (debate,
+independent), then 02, then 03 and 04 in parallel (they share files; each
+phase file lists them and the rebase rule), then 05 and 06. Phase 01 can start now. The owner's plan convention (debate,
 execute, audit per phase) applies to each file.
 
 ## 6. Decisions for the owner
@@ -449,6 +452,18 @@ Each has a recommended default that the plan assumes. Edit the plan's
   from the device and buffer gates. Alternative: keep the pin and install
   `b11146` everywhere.
 - **D7 Freeze list (section 7).**
+- **D8 Breaking the import cycle for the profile's `load` section.** Phase
+  02 puts the typed `RequestedLoad` inside the node-policy `Profile`, but
+  `services/shared/modelconfig` imports `noderec` (`memory.go`), and
+  `noderec` imports `nodepolicy` (`noderec.go`), so `nodepolicy` cannot import
+  `modelconfig` (verified at `4eccd05d`). Default: move `RequestedLoad` and
+  its validation (`options.go` `RequestedLoad.Validate`, `selectedFields`,
+  `Clone`, `TotalContext`) into a new leaf package under `services/shared/`
+  that both `nodepolicy` and `modelconfig` import, with no other dependency
+  changes; `modelconfig` re-exports nothing and callers update their import.
+  Alternative: move `MemoryObservation` and `MemoryHop` (the reason
+  `modelconfig` needs `noderec`; nineteen files) into a leaf package instead.
+  Phase 02 Task 1 stops and reports if neither has been chosen.
 
 ## 7. What to stop doing
 

@@ -60,8 +60,8 @@ failed; tasks without that condition continue.
 | Needed by | Condition | How to observe it | If absent |
 | --- | --- | --- | --- |
 | Tasks 2, 5, 6, 7, 9 | Phase 02 landed (planned in `02-profiles.md`): node-policy profiles carry an `id`, an `engine`, a model identity and a `load`; `Profile.ServedModel()` is the profile id for a profile with a load; `Policy.ProfileByID` and `Policy.ProfileFor(engine, model)` (matching the served model) exist; roles map to ordered lists of profile ids; the advertisement publishes `AdvertisedProfile{ID, Name, Engine, ServedModel, ModelIdentity, ...}`. | Index row 02 ends with ` — done <sha>`; `git grep -nE "func \(pr Profile\) ServedModel|func \(p Policy\) ProfileByID|AdvertisedProfile" services/shared/nodepolicy` shows all three. | Stop Tasks 2, 5, 6, 7, 9 and 10. |
-| Tasks 8, 10 | Phase 03 landed: role names are strings (no `ROLE_TIERS`/`TierOrder` closed set); `RoleEditor` edits role name to profile list; `NodeDeclaredRoles` no longer iterates fixed tiers. | Index row 03 ends with ` — done <sha>`; `git grep -n "ROLE_TIERS" desktop/src` prints nothing. | Stop Tasks 8 and 10. |
-| Task 9 | Phase 01 landed: inventory rows (`ModelItem` in `desktop/src/shared/types/engines.ts`) carry the structured model identity (repository, file or quant label, content id) and the desktop has one identity-tag renderer. | Index row 01 ends with ` — done <sha>`; `01-identity-and-unblock.md` close-out names the field and the tag component. | Stop Task 9. |
+| Tasks 8, 10 | Phase 03 landed: role names are strings (no `ROLE_TIERS`/`TierOrder` closed set); `RoleEditor` edits role name to profile list; `NodeDeclaredRoles` no longer iterates fixed tiers; `roleNames`, `roleNameError` and `DEFAULT_ROLES` exist in `desktop/src/shared/utils/node-roles.ts`. | Index row 03 ends with ` — done <sha>`; `git grep -n "ROLE_TIERS" desktop/src` prints nothing; `git grep -n -e "export function roleNames" -e "export const DEFAULT_ROLES" desktop/src/shared/utils/node-roles.ts` prints two lines. | Stop Tasks 8 and 10. |
+| Tasks 8, 9 | Phase 01 landed: inventory rows (`ModelItem` in `desktop/src/shared/types/engines.ts`) carry `identity?: ModelIdentity` (repository, quant label, `contentId`) and the desktop has one identity-tag renderer, `ModelIdentityTags`. | Index row 01 ends with ` — done <sha>`; `git grep -n "identity?: ModelIdentity" desktop/src/shared/types/engines.ts` prints a line and `git ls-files desktop/src/ui/components/ModelIdentity/ModelIdentityTags.tsx` prints the path. | Stop Tasks 8 and 9. |
 | Task 10 | Phase 02's deploy exists. Phase 02 decided (its P11) that deploy is a desktop orchestration over existing RPCs, not a new JSON-RPC method: `deployProfileChange` and `targetModelFor` in `desktop/src/shared/utils/node-policy-model-copy.ts`, driven by the "Deploy profile" action of `ModelSettingsCopy.tsx` (copy with `engine:copy-model` when the target lacks the `contentId`, then target preview and apply). | `git grep -nE "deployProfileChange|targetModelFor" desktop/src` shows both, and `git grep -n "Deploy profile" desktop/src/ui/components/ModelSettings/ModelSettingsCopy.tsx` prints a line. | Stop Task 10. |
 
 Tasks that may start before phase 02 lands: Tasks 1 and 3 (availability,
@@ -71,6 +71,33 @@ second rebases that test file. Task 4 needs only Tasks 1 and 3, but it edits eng
 desktop files that phase 02 also edits, so start it after phase 02 lands. Tasks
 2, 5, 6 (activation and lock removal) and 7 (settings page) need only phase 02.
 Tasks 8 and 10 also need phase 03. Task 9 needs phase 01 and Task 7.
+
+Ordering with phase 03, which the index allows to run in parallel with this
+phase (the same list is in `03-roles.md`). These paths are in both phases'
+Files lists: `services/shared/noderec/noderec_test.go`,
+`services/shared/nodepolicy/wire_test.go`,
+`services/nvpair-engine-manager/nodeprojection_test.go`,
+`services/nvpair-ui-broker/policy_test.go`, `services/nvpair-ui-broker/README.md`,
+`services/nvpair-proxy/proxy.go`, `services/nvpair-proxy/tiers_test.go`,
+`services/nvpair-proxy/engine_binding_requests_test.go`,
+`services/nvpair-proxy/README.md`, `services/nvpair-proxy/spec.md`,
+`docs/node-availability.mdx`, `desktop/docs/services-api.md`,
+`desktop/docs/services-parity.md`, `desktop/src/ui/stores/node-configuration.store.ts`,
+`desktop/src/ui/components/NodeList/NodeDeclaredRoles.tsx`,
+`desktop/src/ui/components/ModelSettings/ModelSettingsCopy.tsx`,
+`desktop/src/ui/components/RoutingSettings/BulkNodeConfiguration.tsx`,
+`desktop/tests/modular/node-configuration.test.ts`,
+`desktop/tests/modular/node-configuration-bulk.test.ts`,
+`desktop/tests/modular/node-policy.test.ts`,
+`desktop/tests/modular/node-policy-precision.test.ts`,
+`desktop/tests/modular/remote-management.test.tsx`,
+`desktop/tests/modular/model-settings-copy.test.tsx`. Rule: on each shared
+path, the phase whose task lands second rebases onto the other phase's commit
+and re-runs its own task's Verify; neither phase reverts the other's change.
+Tasks 8 and 10 already wait for phase 03. If Task 7 lands before phase 03 Task
+6, phase 03 skips `BulkNodeConfiguration.tsx` and its test (they are deleted);
+if after, Task 7 deletes phase 03's version. `desktop/docs/services-api.md` is
+only regenerated, never merged by hand.
 
 ## Context the executor needs
 
@@ -259,6 +286,12 @@ delivery between the owner's machines, and the timing of peer exclusion.
 - Deploy to node reuses phase 02's desktop deploy orchestration (its P11: no new
   JSON-RPC method), extracted into a hook shared by `ModelSettingsCopy` and the
   Profiles tab, instead of the deploy RPC the batch brief assumed.
+- Profile cards show no measurement state in this phase: phase 05 keeps
+  measured records in the engine manager (`model-memory-profiles.json`, read
+  through model-settings inspection), not on the node-policy profile, and shows
+  them in Model Settings (phase 05 Task 9). A card-level "Measured / Not
+  measured" badge is deferred, because no advertised or policy field carries it
+  and adding one is outside this phase and phase 05.
 - `BulkNodeConfiguration` and the store's bulk state are deleted in Task 7;
   Deploy to node (Task 10) replaces them. Between the two tasks bulk role edits
   are unavailable.
@@ -686,9 +719,9 @@ delivery between the owner's machines, and the timing of peer exclusion.
    `n-cpu-moe`), formatted as short `key value` strings; pure, unit-tested.
    Profiles without a readable load are left out of the comparison.
 3. `ProfileCard.tsx`: KUI `Card` with icon (when set), name, identity tags,
-   engine label, the differing-settings summary, measurement state ("Not
-   validated" unless the profile carries a measurement record), usage list
-   "node → role", and "Deploy to node". Clicking the card opens the owning
+   engine label, the differing-settings summary, usage list
+   "node → role", and "Deploy to node" (no measurement state; see "Decisions
+   made while writing this plan"). Clicking the card opens the owning
    node's settings page at the profiles section (`openNodeSettings`).
 4. Move the per-target deploy orchestration out of `ModelSettingsCopy.tsx`
    into `useProfileDeploy.ts` without changing its behaviour (`targetModelFor`,
@@ -753,8 +786,16 @@ observed-pass, observed-fail or untested in the vault `Validation/` folder):
   rows with their state, the remaining limitations (pause hint depends on
   multicast; Start with PAIR is local-only; `engineBindings` still exists; the
   TUI still shows the engine switch; tray popup shows no pause state), and the
-  hand-over: phase 05 may now change the refusal that used `-32013`, and phase
-  06's Apps group builds on the node settings page's engine section.
+  hand-over: phase 05 may now change the refusal that used `-32013`; phase 05
+  treats a local-origin pause (`pausedLocally` in `engine:node-projection`,
+  which covers Halt) as halted and a peer-origin pause as the peer-reversible
+  configured Pause, the rule Task 1's `peerResumableLocked` implements; phase
+  06's Apps group builds on the node settings page's engine section
+  (`desktop/src/ui/components/NodeSettings/NodeEnginesSection.tsx`, tested in
+  `desktop/tests/modular/node-settings-page.test.tsx`) and its routing
+  preference control mounts in `NodeSettingsPage.tsx` beside
+  `NodePolicyJsonEditor.tsx`. `NodeEnginesInline` stays as the card's
+  display-only engine list (Task 8).
 - Any task dropped gets ` — dropped` and a vault `deferred.md` entry.
 
 ## Do not
