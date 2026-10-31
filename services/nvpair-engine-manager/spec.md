@@ -714,14 +714,14 @@ the child can inherit `LLAMA_ARG_CPU_MOE`. `n-cpu-moe` requires a canonical
 nonnegative decimal int32, without a sign or leading zeros (`0` is allowed).
 `repack` uses explicit booleans; negative preset keys (`nr`, `no-repack`)
 invert native truthiness (`on`, `enabled`, `true`, `1`). `load-mode` accepts
-  exactly `auto`, `none`, `mmap`, `mlock`, `mmap+mlock` or `dio`. The b12020
-  adapter also accepts canonical nonnegative int32 `moe-cache-mib`,
-  `lazy-mode` (`auto`, `on`, `off`) and `spec-type` (`none`, `draft-mtp`).
-  Built-in MTP uses the main model's head, without a separate draft artifact.
-  Each control is retained in placement readback. These controls
+exactly `auto`, `none`, `mmap`, `mlock`, `mmap+mlock` or `dio`. The b12020
+adapter also accepts canonical nonnegative int32 `moe-cache-mib`,
+`lazy-mode` (`auto`, `on`, `off`) and `spec-type` (`none`, `draft-mtp`).
+Built-in MTP uses the main model's head, without a separate draft artifact.
+Each control is retained in placement readback. These controls
 have no typed override and do not change memory estimation. Unsupported SWA,
 context-shift and scaling controls, tensor overrides, CPU FFN, host buffers,
-  NUMA/RPC placement, draft/projector allocation, router
+NUMA/RPC placement, draft/projector allocation, router
 autoload and built-in model preset controls are rejected on CLI, in environment
 and in source presets. A reserved `version` preset key is skipped; `threads` and
 `threads-batch` pass through presets unchanged. Main-model sampling offload,
@@ -743,6 +743,12 @@ the native INI grammar exactly; paths containing comment markers or line breaks
 are rejected after absolute resolution, with a model field error and no path.
 Actual loaded training-context caps and props
 are separate runtime evidence, not inferred from cold configuration.
+
+The same parser is used by custom-alias copy export. Presets containing these
+supported expert-cache, lazy-loading or built-in MTP controls no longer fail
+export solely because of those controls. The selected artifacts still require
+their existing checked bindings; the controls grant no copy permission and add
+no separate draft artifact.
 
 Preview performs no probe, spawn, load, persistence or snapshot creation. It
 reads bounded source/configuration data and model samples only, returning a

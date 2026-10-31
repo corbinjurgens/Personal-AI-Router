@@ -230,6 +230,14 @@ pre-replacement failure retains the old publication and exposes save failure.
 `durablefile.ErrReplaced` adopts the landed candidate and reports uncertainty,
 without rollback or retry duplication. Neither outcome controls model loading.
 
+An engine update can also make retained observations unavailable when their
+recorded upstream pin is no longer supported. This has the same fail-closed
+history behavior. Never edit an observation's pin, build or binding identities
+to make an old measurement appear to come from the new engine. Preserve the
+original file and resolve its retirement in an explicit quiescent maintenance
+step before expecting new history writes. There is no automatic migration or
+history-reset action in the current interface.
+
 The privacy allowlist contains opaque correlation and binding identities,
 bounded timestamps, artifact roles/order/sizes/assurance, upstream pin and
 source/options/topology digests, closed typed non-secret options, numeric frozen

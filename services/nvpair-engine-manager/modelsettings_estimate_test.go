@@ -736,7 +736,7 @@ func TestModelSettingsEstimatePinnedSpecialCaches(t *testing.T) {
 	}
 	n := func(v uint64) gguffacts.Numeric { return gguffacts.Numeric{Type: 10, Bits: v} }
 	mla := map[string]gguffacts.Numeric{"attention.head_count_kv": n(1), "attention.key_length": n(96), "attention.value_length": n(64), "attention.key_length_mla": n(48), "attention.value_length_mla": n(32), "attention.kv_lora_rank": n(64), "rope.dimension_count": n(32)}
-	// 0ec4027a src/llama-kv-cache.cpp:229-234: K only, 2*96*1024*2 = 393216.
+	// Historical 7fe450e1 src/llama-kv-cache.cpp:229-234: K only, 2*96*1024*2 = 393216.
 	// src/llama-model.cpp:1371-1380 loads the stored width, not the MLA query width.
 	test("MLA FA on", "deepseek2", mla, "on", false, "393216")
 	test("MLA FA off", "deepseek2", mla, "off", false, "393216")
