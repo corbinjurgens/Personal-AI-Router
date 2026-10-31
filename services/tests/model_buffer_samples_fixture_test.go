@@ -112,7 +112,7 @@ func runModelBufferFixture() error {
 			continue
 		}
 		if models[section] == nil {
-			models[section] = &modelBufferFixtureModel{slots: 1, status: "unloaded", build: "b11146-7fe450e"}
+			models[section] = &modelBufferFixtureModel{slots: 1, status: "unloaded", build: "b12020-0ec4027a2"}
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
@@ -173,7 +173,7 @@ func runModelBufferFixture() error {
 			line("[%5d] %s", model.port, message)
 		}
 		if initial {
-			line("[%5d] srv         main: model loaded", model.port)
+			line("[%5d] srv         server_run_i: model loaded", model.port)
 		}
 		model.status = "loaded"
 	}
@@ -206,14 +206,14 @@ func runModelBufferFixture() error {
 				allocations(name, model, false)
 			case "exit":
 				// server_monitor::run, not operator(): exact pinned exit emitter.
-				// https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-models.cpp#L235-L242
+				// https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/tools/server/server-models.cpp#L235-L242
 				line("srv          run: instance name=%s exited with status 0", name)
 				model.status = "unloaded"
 				model.port = 0
 			case "oversized":
 				line("%s", strings.Repeat("x", 70<<10))
 			case "unsupported":
-				model.build = "b11147-7fe450e"
+				model.build = "b11147-0ec4027a2"
 			default:
 				http.Error(w, "unknown private operation", http.StatusBadRequest)
 				return
@@ -236,7 +236,7 @@ func runModelBufferFixture() error {
 		switch r.URL.Path {
 		case "/props":
 			if name == "" {
-				fmt.Fprintln(w, `{"role":"router","build_info":"b11146-7fe450e"}`)
+				fmt.Fprintln(w, `{"role":"router","build_info":"b12020-0ec4027a2"}`)
 				return
 			}
 			if model == nil || model.status != "loaded" || r.URL.Query().Get("autoload") != "false" {
@@ -443,7 +443,7 @@ func newModelBufferProcessFixture(t *testing.T, configure ...func(*modelSettings
 		env["NVPAIR_TEST_MODEL_BUFFER_EFFECTS"] = f.effects
 		env["NVPAIR_TEST_MODEL_BUFFER_TOKEN"] = f.token
 	}
-	platform["install"] = map[string]any{"run": []string{"fixture-never-run"}, "artifacts": []map[string]string{{"name": "server", "url": "https://fixture.invalid/releases/download/b11146/native", "sha256": strings.Repeat("a", 64)}}}
+	platform["install"] = map[string]any{"run": []string{"fixture-never-run"}, "artifacts": []map[string]string{{"name": "server", "url": "https://fixture.invalid/releases/download/b12020/native", "sha256": strings.Repeat("a", 64)}}}
 	jointWriteJSON(t, path, manifest)
 	f.start(t)
 	request, _ := f.review(t, f.request(t, "model-buffer-finite", nil))

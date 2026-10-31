@@ -32,8 +32,8 @@ const modelDevicesHelperArg = "--private-model-devices"
 const modelDevicesLimit = 64
 const modelDevicesBytes = 64 << 10
 const modelDevicesBudget = 3 * time.Second
-const modelDevicesBuild = "b11146"
-const modelDevicesCommit = "7fe450e19305b828c199d602c23a8337aaa1f03b"
+const modelDevicesBuild = "b12020"
+const modelDevicesCommit = "0ec4027a2a0183de87c007069adddc06e665f7de"
 
 // This is an internal supplied-operation snapshot, not a public request or a
 // second telemetry owner. Task 5 supplies topology from the target broker and
@@ -392,7 +392,7 @@ func modelDeviceRuntimeSnapshotBound(ctx context.Context, st *engineState, build
 		}
 	}
 	if !pinned {
-		return modelDeviceRuntime{}, nil, errors.New("selected runtime is not pinned b11146")
+		return modelDeviceRuntime{}, nil, errors.New("selected runtime is not pinned b12020")
 	}
 	if bin == "" {
 		var err error
@@ -659,9 +659,9 @@ func armModelDeviceDeadline() {
 	time.AfterFunc(modelDevicesBudget, func() { os.Exit(124) })
 }
 
-// b11146 ggml-backend.h: ggml_backend_dev_props on 64-bit ABIs. Properties
+// b12020 ggml-backend.h: ggml_backend_dev_props on 64-bit ABIs. Properties
 // include memory but it is deliberately discarded, never telemetry authority.
-// https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/include/ggml-backend.h
+// https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/ggml/include/ggml-backend.h
 type modelGGMLProps struct {
 	Name, Description unsafe.Pointer
 	Free, Total       uintptr
@@ -736,7 +736,7 @@ func modelDeviceCString(p unsafe.Pointer) string {
 
 // ggml_backend_load checks GGML_BACKEND_API_VERSION before registering the
 // selected dynamic engine. It is given one exact path, never a search path.
-// https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-backend-reg.cpp
+// https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/ggml/src/ggml-backend-reg.cpp
 func loadModelDeviceCUDA(selected modelDeviceRuntime, symbol modelDeviceSymbols, register modelDeviceRegister) error {
 	// The dynamic backend API number alone does not pin the property layout.
 	// ggml_commit is a scalar API, checked before loading CUDA or reading props.

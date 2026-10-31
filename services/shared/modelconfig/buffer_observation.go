@@ -274,7 +274,7 @@ func (o BufferObservation) Validate() error {
 			return fmt.Errorf("loadObservation: invalid timestamp")
 		}
 	}
-	if o.UpstreamPin != "" && o.UpstreamPin != "7fe450e19305b828c199d602c23a8337aaa1f03b" {
+	if o.UpstreamPin != "" && o.UpstreamPin != "0ec4027a2a0183de87c007069adddc06e665f7de" {
 		return fmt.Errorf("loadObservation: unsupported pin")
 	}
 	if o.BuildAssurance != "" && o.BuildAssurance != "recognized-self-reported-pin" {

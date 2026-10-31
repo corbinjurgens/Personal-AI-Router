@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 ## Operation-scoped memory device map
 
 `mapModelSettingsDevices` is an internal, independently callable review adapter.
-It accepts a selected b11146 runtime/library snapshot, effective selection and
+It accepts a selected b12020 runtime/library snapshot, effective selection and
 environment, explicit native-initialization permission, and supplied target
 host/run/topology identity. It owns no telemetry cache and makes no capacity or
 Fits decision. CPU placement uses only the supplied host/shared pool.
@@ -272,7 +272,7 @@ stay Unknown. Device byte projections do not establish a launch binding.
 Library panics become Unknown. Runtime/driver/allocator costs, native scratch
 residuals, mmap residency and transient peaks remain unpriced warnings.
 
-Source owners at llama.cpp `7fe450e19305b828c199d602c23a8337aaa1f03b` are
+The estimator's historical source basis at llama.cpp `7fe450e19305b828c199d602c23a8337aaa1f03b` is
 `src/models/qwen2moe.cpp` and `qwen3moe.cpp` (expert tensor widths and native
 `n_ff/n_expert_used` fallback), `deepseek2.cpp` (query/KV low-rank and shared
 expert shapes), `lfm2.cpp` (attention versus convolution layers), and
@@ -353,7 +353,7 @@ declaration or qualification is required. Inspect reads a detached selected
 summary from retained history, adding no model-list/props request, load,
 inference or initialization beyond the surrounding operation's existing behavior.
 
-The b11146 adapter recognizes a pinned self-reported build tuple, not verified
+The b12020 adapter recognizes a pinned self-reported build tuple, not verified
 clean-source provenance. Two-decimal MiB reports and conservative byte intervals
 are allocation reports, not exact bytes, physical occupancy or a complete-process
 peak. Incomplete role/device/component coverage remains Unknown. The comparison

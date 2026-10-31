@@ -159,16 +159,19 @@ explicit envelope-option set is `llamaServingOptions` in `serving_llamacpp.go`:
   negative preset keys invert native truthiness (`on`, `enabled`, `true`, `1`).
   Load mode (`--load-mode`/`-lm`) accepts exactly `auto`, `none`, `mmap`,
   `mlock`, `mmap+mlock` or `dio`. These controls are surfaced as placement,
-  with no typed override or MoE-aware memory estimate.
+  with no typed override or MoE-aware memory estimate. The b12020 adapter also
+  accepts nonnegative int32 `--moe-cache-mib`, `--lazy-mode auto|on|off`, and
+  `--spec-type none|draft-mtp`. These appear in placement readback; MTP uses
+  the model's built-in head. Separate draft-model controls remain unsupported.
 - Unsupported allocation controls: continuous batching, full SWA cache,
   context shift, RoPE/YaRN scaling and metadata overrides. The adapter does not
   interpret their allocation semantics.
 - Unsupported placement controls: tensor overrides, CPU FFN,
-  main-model sampling offload, host buffers, lazy mode, NUMA and RPC devices;
+  main-model sampling offload, host buffers, NUMA and RPC devices;
   draft K/V types, tensor/MoE/device/GPU/sampling placement and draft batch size;
   projector auto-selection/offload/device and image token/batch allocation.
 - Unsupported startup controls: both router autoload switches, warmup switches,
-  speculative-type/default/sidecar selection and built-in model presets that also set
+  speculative default/sidecar selection and built-in model presets that also set
   context, parallelism or batch sizes.
 - Unsupported launch selections: model/draft paths (use local preset entries),
   model aliases, projector/LoRA/control-vector paths and control-vector layer
@@ -177,7 +180,7 @@ explicit envelope-option set is `llamaServingOptions` in `serving_llamacpp.go`:
   context checkpoints/spacing, prompt-cache files/all/read-only, slot-save path
   and startup loading.
   Every native alias and associated environment name in that set is checked.
-  The table is pinned to llama.cpp `7fe450e1` `common/arg.cpp`, including its
+  The table is pinned to llama.cpp `0ec4027a2` `common/arg.cpp`, including its
   paired-switch `LLAMA_ARG_NO_*` compatibility names. Such negative environment
   names act by presence, even with an empty value. Positive/negative environment
   aliases together are ambiguous. Projector placement's native

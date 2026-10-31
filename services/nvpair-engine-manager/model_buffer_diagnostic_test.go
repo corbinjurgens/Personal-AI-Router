@@ -134,7 +134,7 @@ func TestModelBufferComparisonDiagnosticsOncePerCapture(t *testing.T) {
 			logs := modelBufferDiagnosticLogs(t)
 			f.initial("medium-model", 31001)
 			frozen := f.capture.frozen["medium-model"]
-			p := modelBufferProps{Build: "b11146-7fe450e", RouterBuild: "b11146-7fe450e", Context: int64(frozen.context), Slots: int64(frozen.slots)}
+			p := modelBufferProps{Build: "b12020-0ec4027a2", RouterBuild: "b12020-0ec4027a2", Context: int64(frozen.context), Slots: int64(frozen.slots)}
 			change(&p)
 			for sweep := uint64(1); sweep <= 2; sweep++ {
 				f.load.ex.observeModelBuffers(context.Background(), f.load.st, f.capture, sweep, []string{"medium-model"}, true, json.RawMessage(`{"data":[{"id":"medium-model","status":{"value":"loaded"}}]}`), map[string]modelBufferProps{"medium-model": p})

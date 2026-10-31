@@ -721,7 +721,7 @@ func TestPerformanceFingerprintMatchesLegacyJSONHash(t *testing.T) {
 		encoded, err := json.Marshal(struct {
 			Run, Settings, Launch, Model, API, Schema string
 			Options                                   map[string]any
-		}{"runtime-1", strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), routeChatCompletions, "llamacpp:llamacpp-b11146-7fe450e1", options})
+		}{"runtime-1", strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), routeChatCompletions, "llamacpp:llamacpp-b12020-0ec4027a", options})
 		if err != nil {
 			t.Fatal(err)
 		}

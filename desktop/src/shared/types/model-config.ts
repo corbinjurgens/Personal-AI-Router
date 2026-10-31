@@ -336,7 +336,7 @@ type LoadBufferObservation = {
     sampleId?: string
     recordedAt?: string
     persistence?: 'pending' | 'saved' | 'uncertain' | 'failed' | 'history-unavailable'
-    upstreamPin?: '7fe450e19305b828c199d602c23a8337aaa1f03b'
+    upstreamPin?: '0ec4027a2a0183de87c007069adddc06e665f7de'
     buildAssurance?: 'recognized-self-reported-pin'
     estimatorRevision?: string
     inputIdentity?: string

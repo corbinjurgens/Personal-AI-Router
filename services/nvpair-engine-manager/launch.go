@@ -93,7 +93,7 @@ func llamaLaunchArgument(token string) (string, int) {
 		}
 	}
 	// Other pinned native server options take one value, except these
-	// switches (7fe450e1 common/arg.cpp). Consume values even when they
+	// switches (0ec4027a2 common/arg.cpp). Consume values even when they
 	// look like flags; e.g. --log-file --models-preset is a filename.
 	switch name {
 	case "-h", "--help", "--usage", "--version", "-cl", "--cache-list", "--completion-bash",

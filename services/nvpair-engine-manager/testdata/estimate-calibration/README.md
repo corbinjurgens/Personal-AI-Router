@@ -9,10 +9,13 @@ These fixtures exercise the advisory estimator and calibration harness. They
 are invented data, not native measurements, accuracy evidence or production
 calibration. The production `modelEstimateCalibrations` table remains empty.
 
+The synthetic identities were refreshed for b12020 on 2026-11-01. Invented
+byte values are unchanged; this refresh is not new native measurement evidence.
+
 | Fixture | Role | Provenance |
 | --- | --- | --- |
-| `synthetic-dense-cpu.json` | synthetic | Invented llama CPU weights and diagnostic cache/workspace/host peak, 2026-10-30, synthetic machine, b11146 |
-| `synthetic-moe-cuda.json` | synthetic | Invented qwen2moe allocation and diagnostic intervals/device peak, 2026-10-30, synthetic machine, b11146 |
+| `synthetic-dense-cpu.json` | synthetic | Invented llama CPU weights and diagnostic cache/workspace/host peak, 2026-11-01, synthetic machine, b12020 |
+| `synthetic-moe-cuda.json` | synthetic | Invented qwen2moe allocation and diagnostic intervals/device peak, 2026-11-01, synthetic machine, b12020 |
 
 The fixture contract is version 1, checked by
 `modelsettings_estimate_calibration_test.go`. JSON is bounded to 8 MiB and
@@ -25,7 +28,7 @@ unknown fields and trailing documents are rejected. Fields are:
 - `backend`, `nativePin`: finite backend family and full pinned native source
   revision. Provenance records the closed machine alias (`synthetic`, `pc3`,
   `msi`), ISO date and normalized recognized native build. The exporter uses
-  the stored recognized upstream pin as the full b11146 build alias, not an
+  the stored recognized upstream pin as the full b12020 build alias, not an
   executable hash or newly probed native build. These are source provenance,
   not a claim of native execution or complete accuracy.
 - `facts`: bounded `gguffacts.Facts` fields. The synthetic header test builds

@@ -73,7 +73,7 @@ const modelLoads: NonNullable<EngineSettingsConfig['modelLoads']> = [
                     sampleSha256: 'a'.repeat(64)
                 }
             ],
-            nativeBuildId: 'llama-b11146',
+            nativeBuildId: 'llama-b12020',
             sourceInputDigest: 'b'.repeat(64),
             presetDigest: 'c'.repeat(64)
         }

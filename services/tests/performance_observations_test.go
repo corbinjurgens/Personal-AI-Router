@@ -398,7 +398,7 @@ func TestPerformanceObservationMissingIdentity(t *testing.T) {
 	encoded, err := json.Marshal(struct {
 		Run, Settings, Launch, Model, API, Schema string
 		Options                                   map[string]any
-	}{id.EngineRunID, id.SettingsFingerprint, id.LaunchDigest, id.ModelDigests[observationModel], "/v1/chat/completions", "llamacpp:llamacpp-b11146-7fe450e1", map[string]any{"stream": true}})
+	}{id.EngineRunID, id.SettingsFingerprint, id.LaunchDigest, id.ModelDigests[observationModel], "/v1/chat/completions", "llamacpp:llamacpp-b12020-0ec4027a", map[string]any{"stream": true}})
 	if err != nil {
 		t.Fatal(err)
 	}

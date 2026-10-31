@@ -736,7 +736,7 @@ func TestModelSettingsEstimatePinnedSpecialCaches(t *testing.T) {
 	}
 	n := func(v uint64) gguffacts.Numeric { return gguffacts.Numeric{Type: 10, Bits: v} }
 	mla := map[string]gguffacts.Numeric{"attention.head_count_kv": n(1), "attention.key_length": n(96), "attention.value_length": n(64), "attention.key_length_mla": n(48), "attention.value_length_mla": n(32), "attention.kv_lora_rank": n(64), "rope.dimension_count": n(32)}
-	// 7fe450e1 src/llama-kv-cache.cpp:229-234: K only, 2*96*1024*2 = 393216.
+	// 0ec4027a src/llama-kv-cache.cpp:229-234: K only, 2*96*1024*2 = 393216.
 	// src/llama-model.cpp:1371-1380 loads the stored width, not the MLA query width.
 	test("MLA FA on", "deepseek2", mla, "on", false, "393216")
 	test("MLA FA off", "deepseek2", mla, "off", false, "393216")
@@ -1247,7 +1247,7 @@ func TestModelSettingsEstimateTensorPlacement(t *testing.T) {
 	}
 }
 
-// Conditional projections from b11146, not device measurements:
+// Historical conditional projections from b11146, not device measurements:
 // https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/src/llama-model-loader.cpp#L1363-L1385
 func TestModelSettingsEstimateTiedOutputProjection(t *testing.T) {
 	for _, tc := range []struct {

@@ -14,12 +14,12 @@ import (
 	"nvpair-shared/modelconfig"
 )
 
-const modelBufferPin = "7fe450e19305b828c199d602c23a8337aaa1f03b"
+const modelBufferPin = "0ec4027a2a0183de87c007069adddc06e665f7de"
 
 // Exact emitter forms from the pinned source, never arbitrary substrings.
 // Repeated identical reports are distinct allocation occurrences.
 var modelBufferEmitter = regexp.MustCompile(`^(load_tensors|llama_kv_cache|sched_reserve|llama_context|llama_memory_recurrent): +([A-Za-z0-9_]+) +(model|KV|compute|output|RS) buffer size = +([0-9]+\.[0-9]+) MiB$`)
-var modelBufferCandidate = regexp.MustCompile(`^(load_tensors|llama_kv_cache|sched_reserve|llama_context|llama_memory_recurrent): +[^ ]+ +(model|KV|compute|output|RS) buffer size`)
+var modelBufferCandidate = regexp.MustCompile(`^(load_tensors|llama_kv_cache|sched_reserve|llama_context|llama_memory_recurrent): +[^ ]+ +(model|KV|rotation|compute|output|RS) buffer size`)
 var modelBufferPort = regexp.MustCompile(`^\[ *([0-9]{1,5})\] (.*)$`)
 var modelBufferLogPrefix = regexp.MustCompile(`^(?:(?:\x1b\[34m)?[0-9]+\.[0-9]{2}\.[0-9]{3}\.[0-9]{3}(?:\x1b\[0m)? )?(?:(?:\x1b\[32m)?I (?:\x1b\[0m)?|(?:\x1b\[35m)?W |(?:\x1b\[31m)?E |(?:\x1b\[33m)?D )(.*?)(?:\x1b\[0m)?$`)
 var modelBufferReserveEnd = regexp.MustCompile(`^sched_reserve: reserve took [0-9]+\.[0-9]{2} ms, sched copies = [0-9]+$`)
@@ -36,7 +36,7 @@ type modelBufferParser struct {
 }
 
 func modelBufferBuildSupported(build string) bool {
-	return build == "b11146-7fe450e" || build == "b11146-"+modelBufferPin
+	return build == "b12020-0ec4027a2" || build == "b12020-"+modelBufferPin
 }
 
 // JSONL is an envelope around a diagnostic message, not an exact-byte API.

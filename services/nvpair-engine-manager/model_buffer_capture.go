@@ -92,7 +92,7 @@ func modelBufferPropsFields(data []byte, wanted []string) map[string]json.RawMes
 var modelBufferSpawn = regexp.MustCompile(`^srv +load: spawning server instance with name=(.{1,256}) on port ([0-9]{1,5})$`)
 var modelBufferExit = regexp.MustCompile(`^srv +run: instance name=(.{1,256}) exited with status -?[0-9]+$`)
 var modelBufferLoading = regexp.MustCompile(`^srv +load_model: loading model '.+'$`)
-var modelBufferReady = regexp.MustCompile(`^srv +main: model loaded$`)
+var modelBufferReady = regexp.MustCompile(`^srv +server_run_i: model loaded$`)
 var modelBufferSleep = regexp.MustCompile(`^srv +handle_sleep: server is (entering|exiting) sleeping state$`)
 
 type modelBufferFrozen struct {

@@ -256,13 +256,14 @@ type llamaServingOption struct {
 	unsupported   bool
 }
 
-// Envelope boundary derived from llama.cpp 7fe450e1 common/arg.cpp. Every
+// Envelope boundary derived from llama.cpp 0ec4027a2 common/arg.cpp. Every
 // allocation/placement/startup control is interpreted here or rejected, including
 // the parser's LLAMA_ARG_NO_ compatibility names for paired boolean switches.
 // Other native options pass through unchanged. Unsupported controls also fail
 // in presets; local model/draft paths and disabled startup loading are exceptions.
 // Batch sizes, K/V cache types, Flash Attention, KV/operation offload, cpu-moe,
-// n-cpu-moe, repack and load-mode are accepted and surfaced as placement;
+// n-cpu-moe, moe-cache-mib, repack, load-mode, lazy-mode and built-in MTP are
+// accepted and surfaced as placement;
 // memory bounds stay operator declarations.
 var llamaServingOptions = []llamaServingOption{
 	{key: "models-preset", flags: []string{"--models-preset"}, env: "LLAMA_ARG_MODELS_PRESET"},
@@ -304,13 +305,14 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "override-tensor", flags: []string{"-ot", "--override-tensor"}, env: "LLAMA_ARG_OVERRIDE_TENSOR", unsupported: true},
 	{key: "cpu-moe", flags: []string{"-cmoe", "--cpu-moe"}, env: "LLAMA_ARG_CPU_MOE", bool: true},
 	{key: "n-cpu-moe", flags: []string{"-ncmoe", "--n-cpu-moe"}, env: "LLAMA_ARG_N_CPU_MOE"},
+	{key: "moe-cache-mib", flags: []string{"--moe-cache-mib"}, env: "LLAMA_ARG_MOE_CACHE_MIB"},
 	{key: "n-cpu-ffn", flags: []string{"-ncffn", "--n-cpu-ffn"}, env: "LLAMA_ARG_N_CPU_FFN", unsupported: true},
 	{key: "kv-offload", flags: []string{"-kvo", "--kv-offload", "-nkvo", "--no-kv-offload"}, negativeFlags: []string{"-nkvo", "--no-kv-offload"}, env: "LLAMA_ARG_KV_OFFLOAD", negEnv: "LLAMA_ARG_NO_KV_OFFLOAD", bool: true},
 	{key: "op-offload", flags: []string{"--op-offload", "--no-op-offload"}, negativeFlags: []string{"--no-op-offload"}, bool: true},
 	{key: "repack", flags: []string{"--repack", "-nr", "--no-repack"}, negativeFlags: []string{"-nr", "--no-repack"}, env: "LLAMA_ARG_REPACK", negEnv: "LLAMA_ARG_NO_REPACK", bool: true},
 	{key: "no-host", flags: []string{"--no-host"}, env: "LLAMA_ARG_NO_HOST", bool: true, unsupported: true},
 	{key: "load-mode", flags: []string{"-lm", "--load-mode"}, env: "LLAMA_ARG_LOAD_MODE"},
-	{key: "lazy-mode", flags: []string{"-lzm", "--lazy-mode"}, env: "LLAMA_ARG_LAZY_MODE", unsupported: true},
+	{key: "lazy-mode", flags: []string{"-lzm", "--lazy-mode"}, env: "LLAMA_ARG_LAZY_MODE"},
 	{key: "numa", flags: []string{"--numa"}, env: "LLAMA_ARG_NUMA", unsupported: true},
 	{key: "rpc", flags: []string{"--rpc"}, env: "LLAMA_ARG_RPC", unsupported: true},
 	{key: "models-autoload", flags: []string{"--models-autoload", "--no-models-autoload"}, env: "LLAMA_ARG_MODELS_AUTOLOAD", negEnv: "LLAMA_ARG_NO_MODELS_AUTOLOAD", bool: true, unsupported: true},
@@ -346,7 +348,7 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "spec-draft-ngl", flags: []string{"--spec-draft-ngl", "-ngld", "--gpu-layers-draft", "--n-gpu-layers-draft"}, env: "LLAMA_ARG_N_GPU_LAYERS_DRAFT", unsupported: true},
 	{key: "spec-draft-backend-sampling", flags: []string{"--spec-draft-backend-sampling", "--no-spec-draft-backend-sampling"}, env: "LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING", negEnv: "LLAMA_ARG_NO_SPEC_DRAFT_BACKEND_SAMPLING", bool: true, unsupported: true},
 	{key: "spec-draft-n-max", flags: []string{"--spec-draft-n-max"}, env: "LLAMA_ARG_SPEC_DRAFT_N_MAX", unsupported: true},
-	{key: "spec-type", flags: []string{"--spec-type"}, env: "LLAMA_ARG_SPEC_TYPE", unsupported: true},
+	{key: "spec-type", flags: []string{"--spec-type"}, env: "LLAMA_ARG_SPEC_TYPE"},
 	{key: "spec-default", flags: []string{"--spec-default"}, bool: true, unsupported: true},
 	{key: "mtp", flags: []string{"--mtp"}, bool: true, unsupported: true},
 	{key: "dflash", flags: []string{"--dflash"}, bool: true, unsupported: true},
@@ -429,7 +431,7 @@ func validateLlamaValue(key, value string) error {
 		if boolean != "true" {
 			return &ServingFieldError{Field: "cpu-moe", Reason: "Omit cpu-moe to leave experts unpinned."}
 		}
-	case "n-cpu-moe":
+	case "n-cpu-moe", "moe-cache-mib":
 		n, err := strconv.ParseInt(value, 10, 32)
 		if err != nil || n < 0 || strconv.FormatInt(n, 10) != value {
 			return &ServingFieldError{Field: key, Reason: "Use a canonical nonnegative decimal int32 value."}
@@ -439,6 +441,14 @@ func validateLlamaValue(key, value string) error {
 		case "auto", "none", "mmap", "mlock", "mmap+mlock", "dio":
 		default:
 			return &ServingFieldError{Field: key, Reason: "Use auto, none, mmap, mlock, mmap+mlock or dio."}
+		}
+	case "lazy-mode":
+		if value != "auto" && value != "on" && value != "off" {
+			return &ServingFieldError{Field: key, Reason: "Use auto, on or off."}
+		}
+	case "spec-type":
+		if value != "none" && value != "draft-mtp" {
+			return &ServingFieldError{Field: key, Reason: "Use none or draft-mtp with the model's built-in MTP head."}
 		}
 	case "fit":
 		if value != "off" && value != "false" && value != "0" {
@@ -728,7 +738,7 @@ func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) 
 			}
 		}
 		if negative && (key == "kv-offload" || key == "op-offload" || key == "repack") {
-			// Pinned 7fe450e1 preset.cpp parse_bool_arg reverses args_neg using
+			// Pinned 0ec4027a2 preset.cpp parse_bool_arg reverses args_neg using
 			// is_truthy, including repack's nr/no-repack keys; every other value
 			// becomes true. Positive offload values remain native-owned.
 			value = strconv.FormatBool(value != "on" && value != "enabled" && value != "true" && value != "1")
@@ -1032,7 +1042,7 @@ func compileLlamaServingSectionsExpected(ctx context.Context, rt Runtime, requir
 			result.evidence.artifacts[path] = file
 		}
 		placement := []string{"kv-unified=" + unified}
-		for _, key := range []string{"kv-unified-per-slot", "gpu-layers", "split-mode", "tensor-split", "main-gpu", "device", "fit", "cache-ram", "batch-size", "ubatch-size", "cache-type-k", "cache-type-v", "flash-attn", "kv-offload", "op-offload", "cpu-moe", "n-cpu-moe", "repack", "load-mode"} {
+		for _, key := range []string{"kv-unified-per-slot", "gpu-layers", "split-mode", "tensor-split", "main-gpu", "device", "fit", "cache-ram", "batch-size", "ubatch-size", "cache-type-k", "cache-type-v", "flash-attn", "kv-offload", "op-offload", "cpu-moe", "n-cpu-moe", "moe-cache-mib", "repack", "load-mode", "lazy-mode", "spec-type"} {
 			if v, ok := options[key]; ok {
 				placement = append(placement, key+"="+v)
 			}

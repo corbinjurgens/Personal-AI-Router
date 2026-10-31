@@ -16,7 +16,7 @@ package main
 //     models--<owner>--<repo>/{refs/<branch>, snapshots/<commit>/<files>,
 //     blobs/<oid>}. A model id "owner/repo:TAG" names the snapshot GGUF that
 //     matches TAG (all of its splits), plus the multimodal projector beside it.
-//     The selection mirrors llama.cpp's own (common/download.cpp, b11146).
+//     The selection's source basis is common/download.cpp at b11146.
 //   - LM Studio keeps models under its models root, where `lms ls --json` maps a
 //     model id to a path: a GGUF file, or a directory for MLX models.
 

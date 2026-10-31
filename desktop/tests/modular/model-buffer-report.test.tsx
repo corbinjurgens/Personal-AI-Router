@@ -30,7 +30,7 @@ function observation(): LoadBufferObservation {
         sampleId: 'a'.repeat(64),
         recordedAt: '2026-10-28T00:00:00Z',
         loadPhase: 'wakeup',
-        upstreamPin: '7fe450e19305b828c199d602c23a8337aaa1f03b',
+        upstreamPin: '0ec4027a2a0183de87c007069adddc06e665f7de',
         buildAssurance: 'recognized-self-reported-pin',
         estimatorRevision:
             'pair-gguf/2;gguf-parser-go/v0.27.0@9257743a3c1775b882ba1b58ec7f5a856c2cc385',

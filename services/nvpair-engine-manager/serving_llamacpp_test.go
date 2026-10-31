@@ -557,7 +557,7 @@ func TestLlamaServingMoEPlacementPreset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeServingFixture(t, f.source, append(data, []byte("\nn-cpu-moe = 38\nno-repack = true\nload-mode = mmap\n")...))
+	writeServingFixture(t, f.source, append(data, []byte("\nn-cpu-moe = 38\nmoe-cache-mib = 512\nno-repack = true\nload-mode = mmap\nlazy-mode = off\nspec-type = draft-mtp\n")...))
 	preview := approveLlamaServing(t, f)
 	var weak *engines.ServingEnvelope
 	for i := range preview.Serving.Configured {
@@ -568,7 +568,7 @@ func TestLlamaServingMoEPlacementPreset(t *testing.T) {
 	if weak == nil {
 		t.Fatal("missing weak envelope")
 	}
-	for _, want := range []string{"n-cpu-moe=38", "repack=false", "load-mode=mmap"} {
+	for _, want := range []string{"n-cpu-moe=38", "moe-cache-mib=512", "repack=false", "load-mode=mmap", "lazy-mode=off", "spec-type=draft-mtp"} {
 		if !slices.Contains(weak.Placement, want) {
 			t.Fatalf("placement=%v, want %s", weak.Placement, want)
 		}
@@ -598,6 +598,12 @@ func TestLlamaServingMoEPlacementLaunch(t *testing.T) {
 		})
 	}
 	test("CPU expert layers CLI", "-ncmoe 38", "n-cpu-moe=38")
+	test("GPU expert cache CLI", "--moe-cache-mib 512", "moe-cache-mib=512")
+	test("GPU expert cache environment", "LLAMA_ARG_MOE_CACHE_MIB=512", "moe-cache-mib=512")
+	test("lazy loading CLI", "--lazy-mode off", "lazy-mode=off")
+	test("lazy loading environment", "LLAMA_ARG_LAZY_MODE=off", "lazy-mode=off")
+	test("built-in MTP CLI", "--spec-type draft-mtp", "spec-type=draft-mtp")
+	test("built-in MTP environment", "LLAMA_ARG_SPEC_TYPE=draft-mtp", "spec-type=draft-mtp")
 	test("CPU expert layers environment", "LLAMA_ARG_N_CPU_MOE=38", "n-cpu-moe=38")
 	test("disable repack CLI", "--no-repack", "repack=false")
 	test("short disable repack CLI", "-nr", "repack=false")
@@ -615,6 +621,10 @@ func TestLlamaServingMoEPlacementValues(t *testing.T) {
 		})
 	}
 	accept("zero CPU expert layers", "n-cpu-moe", "0")
+	accept("disabled expert cache", "moe-cache-mib", "0")
+	accept("GPU expert cache", "moe-cache-mib", "512")
+	accept("lazy loading off", "lazy-mode", "off")
+	accept("built-in MTP", "spec-type", "draft-mtp")
 	accept("maximum CPU expert layers", "n-cpu-moe", "2147483647")
 	for _, value := range []string{"auto", "none", "mmap", "mlock", "mmap+mlock", "dio"} {
 		accept("load mode "+value, "load-mode", value)
@@ -632,6 +642,9 @@ func TestLlamaServingMoEPlacementValues(t *testing.T) {
 		})
 	}
 	reject("negative CPU expert layers", "n-cpu-moe = -1", "n-cpu-moe", "nonnegative")
+	reject("negative expert cache", "moe-cache-mib = -1", "moe-cache-mib", "nonnegative")
+	reject("invalid lazy mode", "lazy-mode = maybe", "lazy-mode", "Use auto")
+	reject("external draft selection", "spec-type = draft-simple", "spec-type", "built-in MTP")
 	reject("leading zeros", "n-cpu-moe = 0038", "n-cpu-moe", "canonical")
 	reject("explicit positive sign", "n-cpu-moe = +38", "n-cpu-moe", "canonical")
 	reject("overflow", "n-cpu-moe = 2147483648", "n-cpu-moe", "int32")
@@ -970,6 +983,7 @@ func TestLlamaServingOptionTableRejectsConflictsWithoutEffects(t *testing.T) {
 		"batch-size": {"512", "1024"}, "ubatch-size": {"128", "256"},
 		"cache-type-k": {"f16", "q8_0"}, "cache-type-v": {"f16", "q8_0"}, "flash-attn": {"on", "off"},
 		"n-cpu-moe": {"0", "38"}, "load-mode": {"auto", "mmap"},
+		"moe-cache-mib": {"0", "512"}, "lazy-mode": {"auto", "off"}, "spec-type": {"none", "draft-mtp"},
 	}
 	for _, option := range llamaServingOptions {
 		t.Run(option.key, func(t *testing.T) {
@@ -1094,7 +1108,7 @@ func TestLlamaServingRejectsPinnedAllocationControls(t *testing.T) {
 		{"yarn slow beta", "--yarn-beta-slow 1"}, {"yarn fast beta", "--yarn-beta-fast 32"},
 		{"metadata context override", "--override-kv llama.context_length=int:32768"},
 		{"tensor placement", "-ot blk.*=CPU"}, {"CPU FFN", "-ncffn 2"},
-		{"host buffer", "--no-host"}, {"lazy placement", "-lzm off"},
+		{"host buffer", "--no-host"}, {"invalid lazy placement", "-lzm invalid"},
 		{"automatic fit target", "--fit-target 512"},
 		{"CPU MoE CLI environment conflict", "LLAMA_ARG_N_CPU_MOE=38 -ncmoe 38"},
 		{"NUMA placement", "--numa isolate"}, {"RPC placement", "--rpc 127.0.0.1:1"},

@@ -630,7 +630,7 @@ func compileTypedLlamaInputsExpected(ctx context.Context, st *engineState, comma
 	if _, err := modelConstrainCommand(command, loads); err != nil {
 		return nil, err
 	}
-	// b11146 common/common.h initializes swa_full to false. Only the existing
+	// b12020 common/common.h initializes swa_full to false. Only the existing
 	// file-verified pinned native source can supply that advisory default.
 	if estimates != nil {
 		constrained, constrainErr := modelConstrainCommand(command, loads)
@@ -1714,6 +1714,7 @@ func modelSettingsNativeLabels() map[string]string {
 		"yarn-beta-fast": "YaRN fast correction", "override-kv": "Metadata overrides",
 		"override-tensor": "Tensor placement overrides", "cpu-moe": "CPU expert placement",
 		"n-cpu-moe": "CPU expert layers", "n-cpu-ffn": "CPU feed-forward layers",
+		"moe-cache-mib": "GPU expert cache (MiB)",
 		"kv-offload": "Offload KV cache", "op-offload": "Offload operations",
 		"repack": "Weight repacking", "no-host": "Disable host buffers",
 		"load-mode": "Model loading mode", "lazy-mode": "Lazy loading mode",

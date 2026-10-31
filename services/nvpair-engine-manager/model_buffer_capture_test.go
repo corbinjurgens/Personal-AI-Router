@@ -170,7 +170,7 @@ func (f *modelBufferTestFixture) allocations(port int, ready bool) {
 		f.line("stdout", fmt.Sprintf("[%5d] %s", port, message))
 	}
 	if ready {
-		f.line("stdout", fmt.Sprintf("[%5d] srv         main: model loaded", port))
+		f.line("stdout", fmt.Sprintf("[%5d] srv         server_run_i: model loaded", port))
 	}
 }
 func (f *modelBufferTestFixture) confirm(t *testing.T, model string, sweep uint64) modelconfig.BufferObservation {
@@ -180,7 +180,7 @@ func (f *modelBufferTestFixture) confirm(t *testing.T, model string, sweep uint6
 		t.Fatal(err)
 	}
 	frozen := f.capture.frozen[model]
-	props := map[string]modelBufferProps{model: {Build: "b11146-7fe450e", RouterBuild: "b11146-7fe450e", Context: int64(frozen.context), Slots: int64(frozen.slots)}}
+	props := map[string]modelBufferProps{model: {Build: "b12020-0ec4027a2", RouterBuild: "b12020-0ec4027a2", Context: int64(frozen.context), Slots: int64(frozen.slots)}}
 	f.load.ex.observeModelBuffers(context.Background(), f.load.st, f.capture, sweep, []string{model}, true, raw, props)
 	f.load.ex.modelBuffers.mu.Lock()
 	done := f.load.ex.modelBuffers.done
@@ -212,7 +212,7 @@ func TestModelBufferLoadCorrelation(t *testing.T) {
 		f.allocations(31001, false)
 		f.line("stdout", "[31001] load_tensors: CPU model buffer size = 1.00 MiB")
 		f.line("stdout", "[31001] llama_kv_cache: CPU KV buffer size = 0.25 MiB")
-		f.line("stdout", "[31001] srv         main: model loaded")
+		f.line("stdout", "[31001] srv         server_run_i: model loaded")
 		o := f.confirm(t, "medium-model", 1)
 		if len(o.Artifacts) != 2 || o.Artifacts[1].Role != "draft" || len(o.Rows) != 5 {
 			t.Fatalf("mixed role report lost occurrences: %+v", o)
@@ -281,7 +281,7 @@ func TestModelBufferLoadCorrelation(t *testing.T) {
 func TestModelBufferDeviceBinding(t *testing.T) {
 	f := newModelBufferTestFixture(t)
 	f.line("stderr", "srv         load: spawning server instance with name=medium-model on port 31001")
-	for _, message := range []string{"srv   load_model: loading model 'not-an-identity'", "load_tensors: CUDA0 model buffer size = 1.00 MiB", "load_tensors: MTL0_Mapped model buffer size = 2.00 MiB", "sched_reserve: reserving ...", "sched_reserve: CUDA0 compute buffer size = 0.25 MiB", "sched_reserve: reserve took 1.00 ms, sched copies = 1", "srv         main: model loaded"} {
+	for _, message := range []string{"srv   load_model: loading model 'not-an-identity'", "load_tensors: CUDA0 model buffer size = 1.00 MiB", "load_tensors: MTL0_Mapped model buffer size = 2.00 MiB", "sched_reserve: reserving ...", "sched_reserve: CUDA0 compute buffer size = 0.25 MiB", "sched_reserve: reserve took 1.00 ms, sched copies = 1", "srv         server_run_i: model loaded"} {
 		f.line("stdout", "[31001] "+message)
 	}
 	o := f.confirm(t, "medium-model", 1)
@@ -333,8 +333,8 @@ func modelBufferTestTargetMemory() *modelconfig.TargetMemory {
 func TestModelBufferCaptureLifetime(t *testing.T) {
 	t.Run("contradictory child or router props override historical numbers", func(t *testing.T) {
 		for _, change := range []func(*modelBufferProps){
-			func(p *modelBufferProps) { p.Build = "b11147-7fe450e" },
-			func(p *modelBufferProps) { p.Build = "b11146-7fe450e-dirty" },
+			func(p *modelBufferProps) { p.Build = "b11147-0ec4027a2" },
+			func(p *modelBufferProps) { p.Build = "b12020-0ec4027a2-dirty" },
 			func(p *modelBufferProps) { p.RouterBuild = "other" },
 			func(p *modelBufferProps) { p.Context++ },
 			func(p *modelBufferProps) { p.Slots++ },
@@ -346,7 +346,7 @@ func TestModelBufferCaptureLifetime(t *testing.T) {
 			f.line("stdout", "[31001] srv handle_sleep: server is exiting sleeping state")
 			f.allocations(31001, false)
 			frozen := f.capture.frozen["medium-model"]
-			props := modelBufferProps{Build: "b11146-7fe450e", RouterBuild: "b11146-7fe450e", Context: int64(frozen.context), Slots: int64(frozen.slots)}
+			props := modelBufferProps{Build: "b12020-0ec4027a2", RouterBuild: "b12020-0ec4027a2", Context: int64(frozen.context), Slots: int64(frozen.slots)}
 			change(&props)
 			f.load.ex.observeModelBuffers(context.Background(), f.load.st, f.capture, 2, []string{"medium-model"}, true, json.RawMessage(`{"data":[{"id":"medium-model","status":{"value":"loaded"}}]}`), map[string]modelBufferProps{"medium-model": props})
 			got := f.load.ex.projectModelBufferObservation(f.load.st, "fake", "medium-model", frozen.artifacts)
@@ -387,7 +387,7 @@ func TestModelBufferCaptureLifetime(t *testing.T) {
 		f.line("stdout", "[31001] srv handle_sleep: server is exiting sleeping state")
 		f.allocations(31001, false)
 		frozen := f.capture.frozen["medium-model"]
-		props := map[string]modelBufferProps{"medium-model": {Build: "b11146-7fe450e", RouterBuild: "b11146-7fe450e", Context: int64(frozen.context), Slots: int64(frozen.slots)}}
+		props := map[string]modelBufferProps{"medium-model": {Build: "b12020-0ec4027a2", RouterBuild: "b12020-0ec4027a2", Context: int64(frozen.context), Slots: int64(frozen.slots)}}
 		f.load.ex.observeModelBuffers(context.Background(), f.load.st, f.capture, 1, []string{"medium-model"}, true, json.RawMessage(`{"data":[{"id":"medium-model","status":{"value":"loaded"}}]}`), props, boundary)
 		if o := f.load.ex.projectModelBufferObservation(f.load.st, "fake", "medium-model", frozen.artifacts); o.Current {
 			t.Fatal("old loaded response confirmed a new generation")
@@ -512,7 +512,7 @@ func TestModelBufferInspectionHasNoNativeEffects(t *testing.T) {
 		f.st.plat.Runtime.Bin = f.st.binPath
 		writeTestFile(t, f.st.binPath, []byte("synthetic executable binding, never executed"))
 		writeTestFile(t, filepath.Join(f.root, "libggml-base.dylib"), []byte("synthetic library, never loaded"))
-		f.st.plat.Install = &Install{Artifacts: []InstallArtifact{{Name: "server", URL: "https://fixture.invalid/releases/download/b11146/native", SHA256: strings.Repeat("a", 64)}}}
+		f.st.plat.Install = &Install{Artifacts: []InstallArtifact{{Name: "server", URL: "https://fixture.invalid/releases/download/b12020/native", SHA256: strings.Repeat("a", 64)}}}
 		helpers := 0
 		runner := func(ctx context.Context, _ modelDeviceRuntime, _ []string) (modelDeviceReply, error) {
 			helpers++
@@ -714,7 +714,7 @@ func TestModelBufferSweepSharesNonLoadingProps(t *testing.T) {
 			return
 		}
 		calls = append(calls, r.URL.Query().Get("model"))
-		fmt.Fprint(w, `{"build_info":"b11146-7fe450e","total_slots":2,"default_generation_settings":{"n_ctx":8192}}`)
+		fmt.Fprint(w, `{"build_info":"b12020-0ec4027a2","total_slots":2,"default_generation_settings":{"n_ctx":8192}}`)
 	}))
 	defer server.Close()
 	assertFixtureRejectsProbe(t, server.URL)
@@ -728,7 +728,7 @@ func TestModelBufferSweepSharesNonLoadingProps(t *testing.T) {
 	}
 	raw := json.RawMessage(`{"data":[{"id":"medium-model","status":{"value":"loaded"}}]}`)
 	frozen := f.capture.frozen["medium-model"]
-	shared := map[string]modelBufferProps{"medium-model": {Build: "b11146-7fe450e", Context: int64(frozen.context), Slots: int64(frozen.slots)}}
+	shared := map[string]modelBufferProps{"medium-model": {Build: "b12020-0ec4027a2", Context: int64(frozen.context), Slots: int64(frozen.slots)}}
 	f.load.ex.observeModelBufferSweep(context.Background(), f.load.st, f.capture, 1, []string{"medium-model"}, true, raw, shared)
 	if len(calls) != 1 || calls[0] != "" {
 		t.Fatalf("shared child props were queried twice: %v", calls)
@@ -808,19 +808,19 @@ func TestModelBufferMalformedBuildDoesNotWithdrawServing(t *testing.T) {
 
 func TestModelBufferPropsAllowlist(t *testing.T) {
 	for _, data := range []string{
-		`{"build_info":"b11146-7fe450e"}`,
-		`{"build_info":"b11146-7fe450e","default_generation_settings":{"n_ctx":8192,"temperature":0.7},"total_slots":2,"chat_template":"private template"}`,
+		`{"build_info":"b12020-0ec4027a2"}`,
+		`{"build_info":"b12020-0ec4027a2","default_generation_settings":{"n_ctx":8192,"temperature":0.7},"total_slots":2,"chat_template":"private template"}`,
 	} {
-		if got := modelBufferReadProps([]byte(data)); got.Build != "b11146-7fe450e" {
+		if got := modelBufferReadProps([]byte(data)); got.Build != "b12020-0ec4027a2" {
 			t.Fatalf("supported props lost build tuple: %+v", got)
 		}
 	}
 	for _, data := range []string{
-		`{"build_info":"bad","build_info":"b11146-7fe450e"}`,
-		`{"build_info":"b11146-7fe450e","BUILD_INFO":"bad"}`,
-		`{"build_info":"b11146-7fe450e","default_generation_settings":{"n_ctx":1,"n_ctx":8192},"total_slots":2}`,
-		`{"build_info":"b11146-7fe450e","default_generation_settings":{"N_CTX":8192},"total_slots":2}`,
-		`{"build_info":"b11146-7fe450e","total_slots":1.5}`,
+		`{"build_info":"bad","build_info":"b12020-0ec4027a2"}`,
+		`{"build_info":"b12020-0ec4027a2","BUILD_INFO":"bad"}`,
+		`{"build_info":"b12020-0ec4027a2","default_generation_settings":{"n_ctx":1,"n_ctx":8192},"total_slots":2}`,
+		`{"build_info":"b12020-0ec4027a2","default_generation_settings":{"N_CTX":8192},"total_slots":2}`,
+		`{"build_info":"b12020-0ec4027a2","total_slots":1.5}`,
 	} {
 		if got := modelBufferReadProps([]byte(data)); got.Build != "" {
 			t.Fatalf("ambiguous observation props accepted: %+v", got)
@@ -843,7 +843,7 @@ func TestModelBufferPublicationPressure(t *testing.T) {
 		props := map[string]modelBufferProps{}
 		for _, name := range []string{"medium-model", "weak-model"} {
 			frozen := f.capture.frozen[name]
-			props[name] = modelBufferProps{Build: "b11146-7fe450e", RouterBuild: "b11146-7fe450e", Context: int64(frozen.context), Slots: int64(frozen.slots)}
+			props[name] = modelBufferProps{Build: "b12020-0ec4027a2", RouterBuild: "b12020-0ec4027a2", Context: int64(frozen.context), Slots: int64(frozen.slots)}
 		}
 		f.load.ex.observeModelBuffers(context.Background(), f.load.st, f.capture, sweep, []string{"medium-model", "weak-model"}, true, json.RawMessage(`{"data":[{"id":"medium-model","status":{"value":"loaded"}},{"id":"weak-model","status":{"value":"loaded"}}]}`), props)
 	}

@@ -264,7 +264,7 @@ func exportFixtures(ctx context.Context, store io.Reader, paths []namedArtifact,
 		f.Sample.Artifacts = summaries
 		f.Provenance.Machine = machine
 		f.Provenance.Date = at.UTC().Format("2006-01-02")
-		f.Provenance.Build = "b11146-" + o.UpstreamPin
+		f.Provenance.Build = "b12020-" + o.UpstreamPin
 		f.Observed, err = exportIntervals(o, backend)
 		if err != nil {
 			return nil, err

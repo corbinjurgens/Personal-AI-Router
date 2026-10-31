@@ -63,7 +63,7 @@ func TestModelBufferSamplesProcess(t *testing.T) {
 		f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
 		f.control(t, "medium-model", "initial")
 		first := f.observed(t, "medium-model", "initial")
-		if first.BuildAssurance != "recognized-self-reported-pin" || first.UpstreamPin != "7fe450e19305b828c199d602c23a8337aaa1f03b" || first.SourceIdentity == first.UpstreamPin {
+		if first.BuildAssurance != "recognized-self-reported-pin" || first.UpstreamPin != "0ec4027a2a0183de87c007069adddc06e665f7de" || first.SourceIdentity == first.UpstreamPin {
 			t.Fatal("native source digest became clean-source attestation")
 		}
 		var stored *modelconfig.BufferObservation
@@ -204,8 +204,11 @@ func TestModelBufferSamplesProcessRestart(t *testing.T) {
 	}
 	f.start(t)
 	value := f.inspect(t, "medium-model").LoadObservation
-	if value == nil || value.Reason != "history-unavailable" || value.Current {
-		t.Fatal("corrupt recovery fabricated an observation")
+	if value == nil {
+		t.Fatal("corrupt recovery omitted the unavailable observation")
+	}
+	if value.Reason != "history-unavailable" || value.Current {
+		t.Fatalf("corrupt recovery fabricated an observation: status=%q reason=%q current=%t", value.Status, value.Reason, value.Current)
 	}
 	f.rpcOK(t, "engine:start", map[string]string{"engine": "llamacpp"})
 	f.control(t, "medium-model", "initial")

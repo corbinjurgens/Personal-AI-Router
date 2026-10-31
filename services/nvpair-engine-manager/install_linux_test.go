@@ -25,8 +25,8 @@ func TestLlamaCPPInstallPreservesShellArtifactArguments(t *testing.T) {
 	// the whole artifact. The install strips one component from each so the
 	// binaries and their libraries land side by side in the install directory,
 	// which is where detect and runtime.bin look.
-	serverArchive := testTarGZIP(t, "llama-b11146/llama-server", "server")
-	cudartArchive := testTarGZIP(t, "cudart-llama-b11146-bin-ubuntu-cuda-12.8-x64/libcudart.so.12", "runtime")
+	serverArchive := testTarGZIP(t, "llama-b12020/llama-server", "server")
+	cudartArchive := testTarGZIP(t, "cudart-llama-b12020-bin-ubuntu-cuda-12.8-x64/libcudart.so.12", "runtime")
 	archives := map[string][]byte{
 		"/server.tar.gz": serverArchive,
 		"/cudart.tar.gz": cudartArchive,

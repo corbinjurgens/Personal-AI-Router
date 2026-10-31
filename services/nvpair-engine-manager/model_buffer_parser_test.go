@@ -37,7 +37,7 @@ func TestModelBufferPinnedReports(t *testing.T) {
 			}
 		}
 	})
-	// Native emitters: llama.cpp 7fe450e19305b828c199d602c23a8337aaa1f03b,
+	// Native emitters: llama.cpp 0ec4027a2a0183de87c007069adddc06e665f7de,
 	// src/llama-model.cpp:1849 and src/llama-kv-cache.cpp:274.
 	p := &modelBufferParser{}
 	for i, line := range []string{
@@ -63,16 +63,24 @@ func TestModelBufferPinnedReports(t *testing.T) {
 }
 
 func TestModelBufferUnsupportedBuild(t *testing.T) {
-	for _, build := range []string{"", "b11147-7fe450e", "b11146-7fe450e-dirty", "7fe450e", "b11146-7fe450"} {
+	for _, build := range []string{"", "b11147-0ec4027a2", "b12020-0ec4027a2-dirty", "0ec4027a2", "b12020-7fe450"} {
 		if modelBufferBuildSupported(build) {
 			t.Fatalf("accepted unsupported tuple %q", build)
 		}
 	}
-	if !modelBufferBuildSupported("b11146-7fe450e") {
+	if !modelBufferBuildSupported("b12020-0ec4027a2") {
 		t.Fatal("explicit mapped tuple unsupported")
 	}
 	// A modified binary can self-report the same tuple. This predicate proves
 	// recognition only; it must never be represented as clean-source attestation.
+}
+
+func TestModelBufferUnmappedRotationIsPartial(t *testing.T) {
+	p := &modelBufferParser{}
+	p.consume(managedOutputFrame{Stream: "stderr", Sequence: 1, Line: "llama_kv_cache: CUDA0 rotation buffer size = 1.00 MiB"})
+	if !p.partial || len(p.rows) != 0 {
+		t.Fatalf("unmapped rotation must remain partial: %+v", p)
+	}
 }
 
 type modelBufferFailedReader struct{ read bool }

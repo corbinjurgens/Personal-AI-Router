@@ -498,7 +498,7 @@ func autoTestNativeSource(t *testing.T, f *modelLoadFixture) {
 	f.st.binPath = f.st.plat.Runtime.Bin
 	writeTestFile(t, f.st.binPath, []byte("first synthetic Auto native build"))
 	f.st.installDir = f.root
-	f.st.plat.Install = &Install{Run: []string{"fixture-never-run"}, Artifacts: []InstallArtifact{{Name: "server", URL: "https://fixture.invalid/releases/download/b11146/native", SHA256: strings.Repeat("a", 64)}}}
+	f.st.plat.Install = &Install{Run: []string{"fixture-never-run"}, Artifacts: []InstallArtifact{{Name: "server", URL: "https://fixture.invalid/releases/download/b12020/native", SHA256: strings.Repeat("a", 64)}}}
 	writeTestFile(t, filepath.Join(f.root, "libggml-base.dylib"), []byte("synthetic native library, never loaded"))
 }
 

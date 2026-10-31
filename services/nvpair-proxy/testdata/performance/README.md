@@ -58,11 +58,11 @@ The following fixtures are synthetic source-derived protocol examples, retrieved
 generated text, reasoning text and tool arguments/results are absent. Empty
 message/delta objects and empty reasoning strings retain placement evidence only.
 
-- Schema `llamacpp-b11146-7fe450e1` binds llama.cpp b11146 at
-  `7fe450e19305b828c199d602c23a8337aaa1f03b`:
-  [stats serialization](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-common.cpp),
-  [decode-step basis and per-token times](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-common.h),
-  [Chat serialization](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/tools/server/server-task.cpp).
+- Schema `llamacpp-b12020-0ec4027a` binds llama.cpp b12020 at
+  `0ec4027a2a0183de87c007069adddc06e665f7de`:
+  [stats serialization](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/tools/server/server-common.cpp),
+  [decode-step basis and per-token times](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/tools/server/server-common.h),
+  [Chat serialization](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/tools/server/server-task.cpp).
   `llamacpp-chat-stream-usage.txt` places timings on the final empty-choices
   usage object. `llamacpp-chat-stream-no-usage.txt` places them on the finish
   object, with a tool finish and empty reasoning event. Both precede `[DONE]`.

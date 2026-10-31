@@ -288,12 +288,15 @@ func TestModelCopyCustomAlias(t *testing.T) {
 			t.Fatalf("MoE preset lost model artifact: %+v", list)
 		}
 	})
-	t.Run("unconfigured MoE preset still refuses lazy mode", func(t *testing.T) {
+	t.Run("unconfigured MoE preset preserves artifacts with native loading controls", func(t *testing.T) {
 		f := newCustomCopyFixture(t)
-		writeTestFile(t, f.preset, []byte("["+reportedCopyAlias+"]\nmodel = huggingface/hub/model.gguf\nn-cpu-moe = 38\nno-repack = true\nload-mode = mmap\nlazy-mode = off\n"))
-		_, err := f.source.modelSourceFiles(context.Background(), "llamacpp", reportedCopyAlias)
-		if err == nil || !strings.Contains(err.Error(), "custom artifact configuration is unsupported") {
-			t.Fatalf("want custom artifact configuration refusal, got %v", err)
+		writeTestFile(t, f.preset, []byte("["+reportedCopyAlias+"]\nmodel = huggingface/hub/model.gguf\nn-cpu-moe = 38\nmoe-cache-mib = 512\nno-repack = true\nload-mode = mmap\nlazy-mode = off\nspec-type = draft-mtp\n"))
+		list, err := f.source.modelSourceFiles(context.Background(), "llamacpp", reportedCopyAlias)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list.Files) != 1 || list.Files[0].Path != "model/model.gguf" {
+			t.Fatalf("loading controls changed artifact identity: %+v", list)
 		}
 	})
 	plentyOfDisk(t)

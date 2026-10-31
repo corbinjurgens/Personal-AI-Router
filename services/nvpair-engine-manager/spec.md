@@ -51,7 +51,7 @@ member capped. A stalled or stopped watcher also reports `unverified`.
 `mapModelSettingsDevices(ctx, operation, runner)` consumes an operation snapshot,
 not public settings or an uploaded capacity claim. Inputs are bounded host/run/
 topology identity, physical pools, selected native selector, complete effective
-environment, selected b11146 library hashes, and an explicit native-init gate.
+environment, selected b12020 library hashes, and an explicit native-init gate.
 The runtime snapshot resolver accepts the existing managed llama.cpp state and
 checks the pinned install declaration; it does not accept a public library path.
 The adapter is review-only and has no startup, Apply or recovery caller.
@@ -96,9 +96,9 @@ verifying the character device, excluding implicit default-directory MPS.
 
 Primary ABI/selection sources:
 
-- [Pinned ggml metadata declarations](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/include/ggml-backend.h)
-- [Pinned ggml module ABI check](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/src/ggml-backend-reg.cpp)
-- [Pinned ggml revision export](https://github.com/ggml-org/llama.cpp/blob/7fe450e19305b828c199d602c23a8337aaa1f03b/ggml/include/ggml.h)
+- [Pinned ggml metadata declarations](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/ggml/include/ggml-backend.h)
+- [Pinned ggml module ABI check](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/ggml/src/ggml-backend-reg.cpp)
+- [Pinned ggml revision export](https://github.com/ggml-org/llama.cpp/blob/0ec4027a2a0183de87c007069adddc06e665f7de/ggml/include/ggml.h)
 - [MPS pipe directory](https://docs.nvidia.com/deploy/mps/latest/appendix-environment-variables.html#cuda-mps-pipe-directory)
 - [CUDA driver UUID/LUID APIs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__DEVICE.html)
 - [CUDA visibility and enumeration contract](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html)
@@ -284,7 +284,7 @@ without another props/model-list request or history write. Missing, unsupported,
 stale, ambiguous and incomplete observations remain Unknown/partial. Recovered
 history cannot restore currentness.
 
-The b11146 mapping carries recognized self-reported pin assurance only, not
+The b12020 mapping carries recognized self-reported pin assurance only, not
 proof of an undisclosed clean build. Rows retain reported decimal MiB, precision,
 conservative intervals, phase and coverage; repeated buffers are occurrences,
 and later scheduler reservations are not additive. Compatible comparisons use
@@ -705,7 +705,7 @@ reject auto/zero/negative/overflow, except `sleep-idle-seconds = -1`, which
 disables idle retention in the pinned build. Positive retention remains valid;
 zero and values below -1 are refused. Retention stays string-valued (`"-1"`).
 The single `llamaServingOptions` table derives native spellings/environment names
-from pinned llama.cpp `7fe450e1` `common/arg.cpp`. Logical/physical batch sizes,
+from pinned llama.cpp `0ec4027a` `common/arg.cpp`. Logical/physical batch sizes,
 K/V cache types, Flash Attention, KV/operation offload, CPU MoE placement,
 weight repacking and load mode are supported and retained in placement entries.
 `cpu-moe` accepts only `true`, `1` or `on`; omit it to leave experts unpinned.
@@ -714,10 +714,14 @@ the child can inherit `LLAMA_ARG_CPU_MOE`. `n-cpu-moe` requires a canonical
 nonnegative decimal int32, without a sign or leading zeros (`0` is allowed).
 `repack` uses explicit booleans; negative preset keys (`nr`, `no-repack`)
 invert native truthiness (`on`, `enabled`, `true`, `1`). `load-mode` accepts
-exactly `auto`, `none`, `mmap`, `mlock`, `mmap+mlock` or `dio`. These controls
+  exactly `auto`, `none`, `mmap`, `mlock`, `mmap+mlock` or `dio`. The b12020
+  adapter also accepts canonical nonnegative int32 `moe-cache-mib`,
+  `lazy-mode` (`auto`, `on`, `off`) and `spec-type` (`none`, `draft-mtp`).
+  Built-in MTP uses the main model's head, without a separate draft artifact.
+  Each control is retained in placement readback. These controls
 have no typed override and do not change memory estimation. Unsupported SWA,
 context-shift and scaling controls, tensor overrides, CPU FFN, host buffers,
-lazy mode, NUMA/RPC placement, draft/projector allocation, router
+  NUMA/RPC placement, draft/projector allocation, router
 autoload and built-in model preset controls are rejected on CLI, in environment
 and in source presets. A reserved `version` preset key is skipped; `threads` and
 `threads-batch` pass through presets unchanged. Main-model sampling offload,

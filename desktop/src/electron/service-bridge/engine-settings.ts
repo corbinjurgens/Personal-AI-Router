@@ -1250,7 +1250,7 @@ function loadObservation(value: JsonValue | undefined): LoadBufferObservation {
         upstreamPin:
             row.upstreamPin === undefined
                 ? undefined
-                : choice(row.upstreamPin, ['7fe450e19305b828c199d602c23a8337aaa1f03b']),
+                : choice(row.upstreamPin, ['0ec4027a2a0183de87c007069adddc06e665f7de']),
         buildAssurance:
             row.buildAssurance === undefined
                 ? undefined

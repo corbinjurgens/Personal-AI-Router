@@ -46,7 +46,7 @@ function resolvedLoad(): ResolvedLoad {
                 sampleSha256: 'a'.repeat(64)
             }
         ],
-        nativeBuildId: 'llama-b11146',
+        nativeBuildId: 'llama-b12020',
         sourceInputDigest: 'b'.repeat(64),
         presetDigest: 'c'.repeat(64),
         resolverRevision: 'auto/fixture',
@@ -216,7 +216,7 @@ function inspection() {
         estimate: {
             status: 'partial',
             source: 'bounded-metadata-estimate',
-            buildId: 'llama-b11146',
+            buildId: 'llama-b12020',
             timestamp: '2026-10-27T00:00:00Z',
             memorySource: 'target-memory',
             memoryTimestamp: '2026-10-27T00:00:00Z',

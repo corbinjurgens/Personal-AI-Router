@@ -23,7 +23,7 @@ type performanceExtractQualification struct {
 }
 
 const (
-	performanceExtractLlamaSchema  = "llamacpp-b11146-7fe450e1"
+	performanceExtractLlamaSchema  = "llamacpp-b12020-0ec4027a"
 	performanceExtractStrataSchema = "strata-f6726098"
 )
 

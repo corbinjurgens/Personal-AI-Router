@@ -3,7 +3,7 @@
   "role": "synthetic",
   "class": "dense",
   "backend": "cpu",
-  "nativePin": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+  "nativePin": "0ec4027a2a0183de87c007069adddc06e665f7de",
   "configurationKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "facts": {
     "Shards": [{
@@ -35,5 +35,5 @@
     {"correspondence": "diagnostic", "comparison": {"component": "compute-workspace", "status": "unknown", "lowerBytes": "1000000", "upperBytes": "1100000"}}
   ],
   "poolPeaks": [{"pool": "host", "bytes": "9000000", "correspondence": "diagnostic"}],
-  "provenance": {"machine": "synthetic", "date": "2026-10-30", "build": "b11146-7fe450e"}
+  "provenance": {"machine": "synthetic", "date": "2026-11-01", "build": "b12020-0ec4027a2"}
 }
