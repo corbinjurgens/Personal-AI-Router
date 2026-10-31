@@ -25,31 +25,39 @@ convention: debate, execute, audit.
 | Phase | File | Entry conditions | Size | Status |
 | --- | --- | --- | --- | --- |
 | 01 | `01-identity-and-unblock.md` | none (baseline) | medium | proposed |
-| 02 | `02-profiles.md` | 01 landed | large | proposed |
-| 03 | `03-roles.md` | 02 landed | medium to large | proposed |
-| 04 | `04-desktop.md` | 02 landed (Tasks 1 and 3 may start earlier); 03 for Tasks 8 (card roles) and 10 (Profiles tab) | large | proposed |
-| 05 | `05-estimate-and-validate.md` | 01 and 02 landed; 04 (lock removal, peer-Resume rule) for Task 6 and later; Tasks 1-5 and 10 do not wait for 04 | large | proposed |
-| 06 | `06-routing-and-apps.md` | 01, 02, 03 landed; 04 for Tasks 7 and 9; 05 optional, and Task 11 never while a 05 session is open | medium | proposed |
+| 02a | `02a-profiles-services.md` | 01 landed | large | proposed |
+| 02b | `02b-profiles-desktop-and-import.md` | 01 and 02a landed | large | proposed |
+| 03 | `03-roles.md` | 02a and 02b landed | medium | proposed |
+| 04 | `04-desktop.md` | 03 landed (and through it 01, 02a, 02b); no early start | large | proposed |
+| 05 | `05-estimate-and-validate.md` | 01 landed for Tasks 1-4 (visible estimate); 02a and 02b for Task 5 and later; 04 (lock removal, peer-Resume rule) for Task 6 and later | large | proposed |
+| 06 | `06-routing-and-apps.md` | 01, 02a, 02b, 03 landed; 04 for Tasks 7 and 9; 05 optional, and Task 11 never while a 05 session is open | medium | proposed |
 
-Dependency graph (acyclic): 01 -> 02 -> {03, 04, 05}; 03 -> 04 (Tasks 8 and 10
-only); 04 -> 05 (Task 6 onward); 03 -> 06; 04 -> 06 (Tasks 7 and 9: routing
-preference control and Apps group); 05 -> 06 (optional: measured speeds;
-Task 11 waits for 05 to close). 03 and 04 may run in parallel after 02, but
-their files are not disjoint: both phase files list the shared paths and the
-rule (on each shared path the phase that lands second rebases onto the other
-and re-runs its task's Verify). The same rule applies wherever 05 runs
-beside 03, 04 or 06 (shared engine-manager, broker, `modelconfig`,
-`nodepolicy` and desktop bridge files). Each phase file names the tasks that
-may start early.
+Dependency graph (acyclic): 01 -> 02a -> 02b -> 03 -> 04; 01 -> 05 (Tasks 1-4);
+02b -> 05 (Task 5 onward); 04 -> 05 (Task 6 onward); 03 -> 06; 04 -> 06 (Tasks
+7 and 9: routing preference control and Apps group); 05 -> 06 (optional:
+measured speeds; Task 11 waits for 05 to close). 03 runs before 04, never in
+parallel: 04 rebases onto 03 on the paths both edit and never reverts 03's
+change. 02a and 02b ship to the owner's machines together (02a alone leaves the
+desktop unable to read the new shapes). Wherever 05 runs beside 02a, 02b, 03,
+04 or 06 (shared engine-manager, broker, `modelconfig`, `nodepolicy` and
+desktop bridge files), the phase that lands second on a shared path rebases
+onto the other and re-runs its task's Verify. Phase 05 names the tasks that may
+start early.
 
 ## Owner decisions this batch assumes
 
-`README.md` section 6: D1 user-defined role names with defaults and fallback
-lists; D2 profiles live in node policy with the engine manager keyed by profile
-id; D3 MSI and Joes presets are imported into profiles once; D4 engine toggles,
-locks and the switch UI are removed in favour of role-driven activation; D5
-Halt is the existing immediate local pause, promoted and renamed, local-only;
-D6 any llama.cpp build is accepted and `build_info` is recorded. A changed
+`README.md` section 6, as amended by the 2026-10-31 debate adjudication
+(README section 8): D1 user-defined role names with the defaults kept, custom
+roles without fallback, roles declarable before they have profiles; D2 the
+profile (user-chosen key, display name, icon, identity, derived context) lives
+in node policy and its launch settings stay in the engine manager under the
+same key; D3 MSI and Joes presets, including native fit, are imported into
+profiles once; D4 engine toggles,
+locks and the switch UI are removed in favour of role-driven activation on the
+non-exclusive start-on-demand path; D5 Halt is the existing immediate local
+pause, promoted and renamed, local-only; D6 any llama.cpp build is accepted and
+`build_info` is recorded, with device enumeration limited to verified ggml
+layouts. A changed
 decision requires amending the affected phase before it is executed.
 
 ## Whole-plan acceptance (external; keeps this index open)
@@ -86,7 +94,8 @@ with the commit range that landed it.
 ## Investigation evidence
 
 `investigation/L1.md` to `L8.md` are the finder reports; `verify-A.md` and
-`verify-B.md` are the adversarial verification passes. They are snapshots at
+`verify-B.md` are the adversarial verification passes; `debate.md` is the
+design review whose adjudication README section 8 records. They are snapshots at
 `4eccd05d` and are not updated as code changes.
 
 ## Note lifecycle

@@ -150,21 +150,29 @@ has no reader beyond a collision check; `Profile.ContextTokens` and the typed
 load's `context` are two values that typed Apply never synchronises (B5);
 roles are `map[tier]{engine, model}` (L1).
 
-**Fundamental fix.** Introduce a profile id (stable, node-independent, user
-visible as a name with optional icon) and make it the join key:
-- node policy: `profiles[]` gains `id`, `modelIdentity` (section T-A), a
-  `load` section (the typed `RequestedLoad`, moved here as the single source of
-  launch intent) and keeps request options, capabilities and limits;
-  `contextTokens` becomes derived from `load.context`, never typed by hand;
-- engine-manager: typed loads keyed by profile id; the generated preset uses
-  the profile id as the section name (so N configurations of one GGUF are N
-  sections of one file, which llama-server already supports), and the served
-  model id for that section is `<profile id>`; the advertisement maps profile
-  id to `{modelIdentity, served name, engine, contextTokens, capabilities}`;
-- roles: `roles[roleName] = [profileId, ...]` (ordered list; the router tries
-  them in order, warm first under the existing comparator).
+**Fundamental fix.** Introduce a profile key (a user-chosen slug with the
+role-name grammar, unique per node, immutable, shown with a free-text display
+name and optional icon) and make it the join key:
+- node policy: `profiles[]` gains `key`, `displayName`, `icon` and
+  `modelIdentity` (section T-A), keeps request options, mode, `localOnly`,
+  capabilities and limits, and holds `contextTokens` as a derived value that
+  the broker's coupled operation writes from the reviewed per-slot context and
+  a raw `policy:set` cannot change;
+- engine-manager: launch settings stay here as typed loads keyed by the
+  profile key (no copy in policy); the generated preset uses the key as the
+  section name (so N configurations of one GGUF are N sections of one file,
+  which llama-server already supports), and the served model id is the key;
+  remote edits and deploy use the existing engine-settings relay; the
+  advertisement maps the key to `{modelIdentity, served model, engine,
+  contextTokens, capabilities}`;
+- roles: `roles[roleName] = [profileKey, ...]` (ordered list, possibly empty so
+  a role can be declared before it has profiles; the router tries them in
+  order, warm first under the existing comparator).
 The broker's coupled model-change operation already updates both stores in
-one journaled transaction (A1) and is the glue.
+one journaled transaction (A1) and is the glue. A profile with llama.cpp native
+fit (`fit: auto`, `fitTarget`, `fitCtx`, typed in phase 01) has no finite
+allocation, so it gets no configuration key, no estimate verdict and no
+buffer-based memory claim, but it is routable, importable and deployable.
 
 **Alternatives.** (a) Keep the two records and add a mapping table: less
 movement, but the context duplication and the one-per-model rule remain.
@@ -192,12 +200,13 @@ that the desktop hides, so the two disagree about who is authoritative (B1).
 The desktop cannot edit `tiers` entries at all (L1).
 
 **Fundamental fix.** Roles become names declared per node (`roles` map keyed by
-string) and the cluster's role list is the union of names any node advertises
-plus the local defaults; keep `weak`, `medium`, `strong` as the default names;
-replace the implicit strength order with an explicit optional per-role
-`fallback` list (a role may name which other roles may answer for it) so
-`allowStronger`/`allowWeaker` still have a meaning for the defaults. Routing
-history stores the role as a string. Router `tiers` entries (local and `-api`)
+string, a role may be declared with no profiles yet) and the cluster's role
+list is the union of names any node declares plus the local defaults; keep
+`weak`, `medium`, `strong` as the default names, whose order among themselves
+stays fixed and which `allowStronger`/`allowWeaker` keep widening exactly as
+today; a custom role has no fallback and is answered only by itself (later:
+fallback for custom roles, deferred because not requested). Routing history
+stores the role as a string. Router `tiers` entries (local and `-api`)
 are retired from the routing path for local models (API entries stay for the
 hybrid feature, frozen).
 
@@ -229,11 +238,14 @@ path refuses while another engine runs (A6). The immediate local pause exists
 with the right semantics but as "Stop local models now" (B2).
 
 **Fundamental fix.**
-- Activation follows roles: when a profile assigned to a role on this node is
-  needed and its engine is not running, the engine is started (reusing the
-  binding path's activation, generalised from "engine binding" to "profile
-  needs engine"); saved On/Off intent and the switch transaction stop being
-  user-facing. Install, update, running state and errors remain visible per
+- Activation follows roles through the existing non-exclusive path: a profile
+  assigned to a role on this node makes its engine's saved intent On (set when
+  the broker commits the role assignment, and on policy load for existing
+  assignments), so start-on-demand (`wakeOnDemand`/`Wake`, the proxy's
+  `dormantSelfCandidate`) starts the engine when a request needs it, beside
+  other engines where the resident cap allows. The binding path keeps its
+  one-engine exclusivity for `engineBindings`. Saved On/Off intent becomes
+  "Start with PAIR" and the switch transaction stops being user-facing. Install, update, running state and errors remain visible per
   engine, inside the node's settings.
 - One settings page per node (opened from the card and from Cluster's "Edit
   node"): availability, roles with profiles, profiles on this node, engine
@@ -283,10 +295,14 @@ launches (vault `deferred.md`).
   (telemetry Task 6, estimation Task 12, both already specified).
 - Replace the `b11146` install pin with a build identity read from the engine
   (`/props` `build_info`, already read in two places) plus the ggml library
-  directory found by `detect`, so a user-installed build enumerates devices and
-  captures buffers; record `build_info` in the measurement binding.
+  directory found by `detect`, so a user-installed build captures buffers and
+  gets a configuration key; record `build_info` in the measurement binding.
+  Device enumeration keeps an allow-list of verified `ggml_backend_dev_props`
+  layouts (b11146 now, one entry per verified build), so an unknown build shows
+  "devices unknown" instead of risking a misread.
 - Give preset-mode and unconfigured models a configuration key once they are
-  profiles (T-P makes every served model a typed load, so this falls out).
+  profiles (T-P makes every served model a typed load, so this falls out),
+  except native-fit profiles, which have no finite allocation.
 - Validate: execute the diagnostic-run plan's tasks as written, reusing
   `drainNode`, `model-memory-profiles.json` and `modelConfigurationKey`, with
   two amendments the owner asked for: the result binds CPU and RAM identity as
@@ -295,7 +311,7 @@ launches (vault `deferred.md`).
   the GPU". An unmeasured profile stays assignable and routable (the plan
   already says so).
 - Speed from a diagnostic run is written to the performance store under the
-  profile id, carrying the profile's `contentId`, which also feeds the
+  profile key, carrying the profile's `contentId`, which also feeds the
   smart-routing plan.
 
 **Alternatives.** (a) Skip the estimator and only measure: cheaper now, but
@@ -326,7 +342,7 @@ residency, so any sync must cover those (B5).
 
 **Fundamental fix.** Execute the already debated smart-routing plan
 (`Todo/2026-10-31-pair-smart-tier-routing.md`) after T-A, substituting
-`contentId` for its name-based measurement identity and the profile id for
+`contentId` for its name-based measurement identity and the profile key for
 its (host, engine, model) evidence key; derive `contextTokens` from the
 profile's load; advertise per role the maximum `contextTokens` among its
 profiles across nodes as a `context_length` field on the alias record; gate
@@ -372,31 +388,34 @@ them; the cost of keeping is small once they are grouped as apps.
 
 ```
 Cluster
-  roles: union of names declared by nodes (defaults: weak, medium, strong)
-  role fallback: optional list per role (replaces strength order)
+  roles: union of names declared by nodes, empty declarations included
+  (defaults: weak, medium, strong, widened by allowStronger/allowWeaker as today;
+  custom roles have no fallback)
 
 Model identity (computed, node-independent)
   repository, file/quant label, contentId (= servingContentDigest formula),
   architecture, trained context, size
 
 Profile (per node, copyable)
-  id, name, icon?, engine, modelIdentity, load (typed RequestedLoad incl.
-  n-cpu-moe/cpu-moe/repack/tensor-split/device/extra flags),
+  key (user-chosen slug = preset section = served model id), displayName,
+  icon?, engine, model (served id), modelIdentity,
+  load: typed RequestedLoad held by the engine manager under the same key
+  (incl. n-cpu-moe/cpu-moe/repack/tensor-split/device/native fit/extra flags),
   requestOptions + mode + localOnly, capabilities, limits,
-  contextTokens := load.context (derived),
+  contextTokens := reviewed per-slot context (derived, written by the broker),
   measurement: engine-manager record bound to contentId, build_info, GPU, CPU,
   RAM, shown through inspection, not stored on the profile
 
 Node
-  roles[roleName] = [profileId, ...]
+  roles[roleName] = [profileKey, ...]  (may be empty)
   availability: available | paused by a peer (peer-reversible) |
   paused on this node, including Halt (local-only)
   engines: installed/running/errors, process settings (ports, env, cap, autostart);
-  activation follows roles
+  activation follows roles (role assignment turns autostart on; start on demand)
 
 Router
   candidate = (node, profile); eligibility by capabilities and contextTokens;
-  order: warm, role rank/fallback, then expected completion (smart-routing plan)
+  order: warm, role rank (default-role widening), then expected completion (smart-routing plan)
   advertisement: per role, max contextTokens across nodes
 ```
 
@@ -407,16 +426,19 @@ the finders' estimates; nothing was measured.
 
 | Phase | Outcome | Size | Needs owner decision |
 | --- | --- | --- | --- |
-| 01 Identity and unblock | Lenient preset read; structured model identity in inventory and labels; gguffacts general keys; typed `n-cpu-moe`, `cpu-moe`, `repack`, `tensor-split`, `device`; build identity from the engine instead of the `b11146` pin | medium | D6 |
-| 02 Profiles | Profile id as join key across node policy and engine manager; multiple profiles per model; derived context; roles map to profile lists; advertisement by profile; deploy-to-node | large | D2 |
-| 03 Roles | User-defined role names with defaults and fallback lists; retire `TierOrder` and router local entries; history as strings | medium to large | D1 |
+| 01 Identity and unblock | Lenient preset read; structured model identity in inventory and labels; gguffacts general keys; typed `n-cpu-moe`, `cpu-moe`, `repack`, `tensor-split`, `device` and native fit; build identity from the engine instead of the `b11146` pin, with device enumeration on verified ggml layouts | medium | D6 |
+| 02a Profiles: services | User-chosen profile key as join key across node policy and engine manager; launch settings stay in the engine manager; multiple profiles per model; derived context; roles map to (possibly empty) profile lists; advertisement by profile; cross-process tests | large | D2 |
+| 02b Profiles: desktop and import | Desktop editors on profile keys and role lists; deploy-to-node; one-time preset import including native fit; user docs | large | D2, D3 |
+| 03 Roles | User-defined role names with the defaults kept; custom roles without fallback; retire `TierOrder` and router local entries; history as strings | medium | D1 |
 | 04 Desktop | Models tab, Profiles tab, per-node settings page, toolbar Halt and symmetric Pause, removal of engine toggles, locks and switch UI, role-driven activation | large | D4, D5 |
 | 05 Estimate and Validate | Visible estimate; diagnostic run per its Todo with CPU/RAM binding and the owner's thresholds; speed into the performance store | large | — |
-| 06 Routing and apps | Smart-routing plan on `contentId`/profile ids; context advertisement; `kind: app`; Strata acceptance | medium | — |
+| 06 Routing and apps | Smart-routing plan on `contentId`/profile keys; context advertisement; `kind: app`; Strata acceptance | medium | — |
 
 Order: 01 first (it is what makes MSI and Joes inspectable at all and is
-independent), then 02, then 03 and 04 in parallel (they share files; each
-phase file lists them and the rebase rule), then 05 and 06. Phase 01 can start now. The owner's plan convention (debate,
+independent), then 02a, then 02b (they ship to the owner's machines together),
+then 03, then 04 (it rebases onto 03; no parallel run), then 05 and 06. Phase
+05 Tasks 1-4 (the visible estimate) may start after phase 01 if their entry
+conditions hold, without waiting for 02a. Phase 01 can start now. The owner's plan convention (debate,
 execute, audit per phase) applies to each file.
 
 ## 6. Decisions for the owner
@@ -425,20 +447,29 @@ Each has a recommended default that the plan assumes. Edit the plan's
 "Decisions made while writing this plan" sections to veto.
 
 - **D1 Role names.** Default: user-defined names, union across nodes, with
-  `weak`/`medium`/`strong` pre-created and an optional per-role fallback list
-  instead of a global strength order. Alternative: keep the three names and
+  `weak`/`medium`/`strong` pre-created and keeping their order and
+  `allowStronger`/`allowWeaker` widening; a custom role has no fallback; a role
+  may be declared before it has profiles. Alternative: keep the three names and
   add only profiles.
-- **D2 Profile placement.** Default: the profile lives in node policy
-  (broker-owned, CAS-protected, remotely editable, advertised), and the engine
-  manager keys its typed loads by profile id. Alternative: engine-manager-owned
-  profiles mirrored into policy.
+- **D2 Profile placement.** Default: the profile (user-chosen key, display
+  name, icon, identity, request options, derived context) lives in node policy
+  (broker-owned, CAS-protected, remotely editable, advertised); its launch
+  settings stay in the engine manager as typed loads keyed by the same profile
+  key and are edited remotely through the existing settings relay. The key is a
+  slug with the role-name grammar, immutable, and is the preset section name
+  and served model id. Alternative: engine-manager-owned profiles mirrored into
+  policy.
 - **D3 Migrate MSI and Joes to PAIR-owned configuration.** Default: yes, as a
-  one-time import of each preset section into a profile (phase 02's last
-  task), after which hand-written presets are not used. Alternative: keep
-  running unconfigured and accept no identity, estimate or measurement on
-  those machines.
+  one-time import of each preset section into a profile (phase 02b's import
+  task), after which hand-written presets are not used. The import carries
+  Joes's native-fit sections (`fit-target`) as they are: they become native-fit
+  profiles with no configuration key or estimate verdict that still serve,
+  route and deploy. Alternative: keep running unconfigured and accept no
+  identity, estimate or measurement on those machines.
 - **D4 Engine toggles, locks and switch.** Default: remove locks and the
-  switch UI; replace toggles with role-driven activation plus install/update,
+  switch UI; replace toggles with role-driven activation (a role assignment
+  turns the engine's Start with PAIR on and start-on-demand starts it,
+  non-exclusively; engine bindings stay exclusive) plus install/update,
   running state and a per-engine "stop now" inside the node settings page.
   Alternative: keep toggles as an advanced control.
 - **D5 Halt semantics.** Default: rename the immediate local pause to Halt,
@@ -447,28 +478,19 @@ Each has a recommended default that the plan assumes. Edit the plan's
   force-killing them; push a pause hint to peers instead of waiting for the 15
   s poll. Alternative: reverse Q5 and force-stop app engines.
 - **D6 Supported builds.** Default: accept any llama.cpp build that answers
-  `/props` and whose ggml libraries are found beside the detected binary;
-  record `build_info` with every measurement; drop the `b11146` manifest pin
-  from the device and buffer gates. Alternative: keep the pin and install
+  `/props` for readiness, `build_info` recording, buffer capture and the
+  configuration key; find ggml libraries beside the detected binary; record
+  `build_info` with every measurement; drop the `b11146` manifest pin; keep an
+  allow-list of verified `ggml_backend_dev_props` layouts for device
+  enumeration only (b11146 now; add an entry per verified build), so an unknown
+  build degrades to "devices unknown". Alternative: keep the pin and install
   `b11146` everywhere.
 - **D7 Freeze list (section 7).**
-- **D8 Breaking the import cycle for the profile's `load` section.** Phase
-  02 puts the typed `RequestedLoad` inside the node-policy `Profile`, but
-  `services/shared/modelconfig` imports `noderec` (`memory.go`), and
-  `noderec` imports `nodepolicy` (`noderec.go`), so `nodepolicy` cannot import
-  `modelconfig` (verified at `4eccd05d`). Default: move `RequestedLoad` and
-  its validation (`options.go` `RequestedLoad.Validate`, `selectedFields`,
-  `Clone`, `TotalContext`) into a new leaf package under `services/shared/`
-  that both `nodepolicy` and `modelconfig` import, with no other dependency
-  changes; `modelconfig` re-exports nothing and callers update their import.
-  Alternative: move `MemoryObservation` and `MemoryHop` (the reason
-  `modelconfig` needs `noderec`; nineteen files) into a leaf package instead.
-  Phase 02 Task 1 stops and reports if neither has been chosen.
 
 ## 7. What to stop doing
 
 Freeze, do not delete: hybrid and public (provider) routing beyond what is
-landed; strict local qualification beyond what phase 02 needs for context;
+landed; strict local qualification beyond what phase 02a needs for context;
 linked-model follow-ups; LM Studio part 3; new fixture-isolation campaigns;
 Ollama-specific memory evidence. None of these is on the owner's list and each
 has consumed multi-day cycles. Anything in the open Todos that phases 01 to 06
@@ -502,3 +524,25 @@ Not verifiable here and left as acceptance items on the owner's machines:
 MSI's actual launch text (the `-ctx131072` cause), whether Windows HF caches
 link into `blobs/`, whether llama-server's `/models` carries paths, and every
 native outcome.
+
+**Debate adjudication (2026-10-31).** The design review
+(`investigation/debate.md`) was adjudicated by the orchestrator and applied to
+this README, the index and the phase files. Adopted: F1 (typed native fit:
+`fit`, `fitTarget`, `fitCtx`; native-fit profiles are keyless, unpriced and
+routable; the import carries Joes's `fit-target`), F2 (role activation through
+saved intent and start-on-demand, not the binding path), F3 (launch settings
+stay in the engine manager keyed by the profile key; derived `contextTokens`
+written by the broker; the former D8 import cycle no longer arises and D8 is
+removed), F4 with modification (user-chosen slug key plus free-text
+`displayName`), F5 (roles declarable with empty lists), F6 (no `roleFallback`;
+the defaults keep `allowStronger`/`allowWeaker`; custom roles have no
+fallback), F7 (any build except for device enumeration, which keeps a layout
+allow-list), F8 (03 before 04; phase 02 split into 02a and 02b; phase 05 Tasks
+1-4 may start after 01). Not adopted:
+- Use `Name` directly as the profile key: adopted instead as a slug key plus a
+  separate `displayName`, so display text can be free while the served id stays
+  a stable slug.
+- Stop retiring router local tier entries: kept, because the debate found it
+  affects only nodes that declare nothing (F10).
+- Shorten the freeze list (D7, section 7): kept as written, because it cuts
+  nothing the owner named (F11).

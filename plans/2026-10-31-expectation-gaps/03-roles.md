@@ -3,67 +3,67 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Execution plan: Phase 03: user-defined role names with defaults and fallback lists
+# Execution plan: Phase 03: user-defined role names with the default roles kept
 
 ## Goal
 Overall goal of the batch (`README.md` in this folder): PAIR matches the owner's model of
 role -> profile -> engine on MSI, Joes, PC3 and the Mac, so the machinery already landed
 becomes visible and usable. This phase's goal (README section 3 T-E, section 5 row 03,
 owner decision D1): role names are free strings that each node declares; the cluster's role
-list is the union of the names any node advertises plus the defaults `weak`, `medium` and
-`strong`, which every policy starts with. The implicit strength order is replaced by an
-optional per-role fallback list (`tierPolicy.roleFallback[role] = [otherRole, ...]`) on the
-router, so the search order for a request is "the role, then its fallback list in order" and
-`tierRank` is the position in that list. Router-side local `tiers` entries no longer route
-local models: a node is a candidate for a role only when it declares that role. Routing
-history stores the requested role as a string. When the phase is done, the owner can add a
-role `coder` on Joes from the Mac, send a request with model `coder` from the Mac, see it
-routed to Joes and see `coder` in routing history; `weak` falls back to `medium` when the
-router's fallback list says so.
+list is the union of the names any node declares (a node may declare a role with no
+profiles yet) plus the defaults `weak`, `medium` and `strong`, which every policy starts with.
+The three default roles keep their fixed order among themselves and `TierPolicy.allowStronger`/
+`allowWeaker` keep widening them exactly as today; a custom role has no fallback and is answered
+only by itself (debate adjudication F6, README section 8). Router-side local `tiers` entries no
+longer route local models: a node is a candidate for a role only when it declares that role
+with at least one profile. Routing history stores the requested role as a string. When the
+phase is done, the owner can declare a role `coder` on the Mac before any node has a profile
+for it, assign one of Joes's profiles to `coder` from the Mac, send a request with model
+`coder` from the Mac, see it routed to Joes and see `coder` in routing history; `weak` still
+widens to `medium` as `allowStronger` says.
 
 ## Change scope
 Intent: the role vocabulary stops being a closed, ordered, hand-spelled set (`TierOrder`,
 `IsTier`, `isTier`, `ROLE_TIERS`, the history enum) and becomes data.
-Scope: Structural change — the role vocabulary, its validation, the router's role search
-order, router local tier entries, the routing-history role field and the desktop's
-role-name handling change; the smart-routing scorer, profiles, hybrid/API routing and the
-desktop information architecture stay as they are.
+Scope: Structural change — the role vocabulary, its validation, the router's search order
+for a custom role (the role alone), router local tier entries, the routing-history role field
+and the desktop's role-name handling change; `TierPolicy`, the default roles' widening, the
+smart-routing scorer, profiles, hybrid/API routing and the desktop information architecture
+stay as they are.
 Basis: owner decision D1 (README section 6) and the phase brief; repo rules
 `.cursor/rules/no-legacy-fallbacks.mdc`, `services-change-propagation.mdc`,
 `type-discipline.mdc`; the fork rule "pre-release fork: no compatibility work".
-Compatibility: stored policies that use only the default names keep parsing because
-`Default()` fills `roleFallback` and the three default roles; API (`kind: "api"`) tier entries,
-`routing.tiers` and the nine reserved aliases keep their exact behaviour; `preferLoaded`
-keeps its meaning. No version bump, capability marker or migration is added; the only data
+Compatibility: stored policies that use only the default names keep parsing and routing
+unchanged because `Default()` fills the three default roles and `TierPolicy` keeps its fields;
+API (`kind: "api"`) tier entries, `routing.tiers` and the nine reserved aliases keep their exact
+behaviour; `preferLoaded`, `allowStronger` and `allowWeaker` keep their meaning. No version bump, capability marker or migration is added; the only data
 handling is the existing disk-load repair dropping retired local tier entries (Task 4).
 Non-goals: the smart-routing scorer (phase 06); context advertisement (phase 06); a role
 editor redesign and the Profiles tab (phase 04); rendering the requested role in the history
-table (phase 06 Task 4); a fallback-list editor (deferred, see "Decisions made while writing
-this plan"); renaming `TierPolicy`, `tierSearchOrder`, `tierRank`, the
+table (phase 06 Task 4); fallback for custom roles (deferred because the owner has not asked
+for it, README D1); renaming `TierPolicy`, `tierSearchOrder`, `tierRank`, the
 `requested.tier` history field, `X-PAIR-Tier` or the "no eligible model for tier" text;
 any change to hybrid/public routing beyond restricting it to the default names (frozen, D7).
 
 ## Entry conditions
-Phase 02 (`02-profiles.md`) must have landed. Check all of these on the branch before Task 1:
-1. `plans/2026-10-31-expectation-gaps/00-index.md`: the row for phase 02 ends with
-   ` — done <sha>`, and the vault `WORKLOG.md`
-   (`/home/user/wasabi/4. Projects/Personal-AI-Router/WORKLOG.md`) has phase 02's close-out entry.
-2. `services/shared/nodepolicy/policy.go`: `git grep -n -e 'Roles map\[string\]\[\]string' -e 'func (pr Profile) ServedModel' -e 'func (p Policy) ProfileByID' -- services/shared/nodepolicy/policy.go`
-   prints all three (`Policy.Roles` maps a role name to an ordered list of `Profile.ID` values;
-   this plan calls them "the profile id" and "the role's profile list").
+Phases 02a (`02a-profiles-services.md`) and 02b (`02b-profiles-desktop-and-import.md`) must have
+landed. Check all of these on the branch before Task 1:
+1. `plans/2026-10-31-expectation-gaps/00-index.md`: the rows for phases 02a and 02b end with
+   ` — done <sha>` (or 02b's ` — local gate done <sha>; machine acceptance pending`), and the vault
+   `WORKLOG.md` (`/home/user/wasabi/4. Projects/Personal-AI-Router/WORKLOG.md`) has both close-out
+   entries.
+2. `services/shared/nodepolicy/policy.go`: `git grep -n -e 'Roles map\[string\]\[\]string' -e 'func (p Policy) ProfileByKey' -e 'func ValidateProfileKey' -- services/shared/nodepolicy/policy.go`
+   prints all three (`Policy.Roles` maps a role name to an ordered, possibly empty list of
+   `Profile.Key` values; this plan calls them "the profile key" and "the role's profile list").
 3. `services/shared/nodepolicy/advertise.go`: `git grep -n -e 'type AdvertisedProfile struct' -e 'map\[string\]\[\]AdvertisedProfile' -- services/shared/nodepolicy/advertise.go`
    prints both (`Advertisement.Roles` is keyed by role name and lists `AdvertisedProfile`).
 4. `services/nvpair-proxy/tiers.go` `facade.resolveTierCandidates` builds role candidates from
-   the declared profiles: `git grep -n 'profileID' -- services/nvpair-proxy/proxy.go services/nvpair-proxy/tiers.go`
-   prints the `candidate.profileID` field and its use (phase 02 Task 4).
-If any of these is absent, stop and report: do not implement phase 02's work here.
-Phase 04 (`04-desktop.md`) is allowed to run in parallel with this phase and touches some of the same desktop files
-(Task 6). Base on the current integration head; if phase 04 has already moved or deleted
-`RoleEditor.tsx`, `NodeDeclaredRoles.tsx`, `BulkNodeConfiguration.tsx`,
-`ModelSettingsCopy.tsx` or `ModelLoadSettings.tsx`, apply Task 6's change to the file that
-now owns that behaviour and record the substitution in the close-out entry.
-Ordering with phase 04 (the same list is in `04-desktop.md`). These paths are in both phases'
-Files lists: `services/shared/noderec/noderec_test.go`, `services/shared/nodepolicy/wire_test.go`,
+   the declared profiles: `git grep -n 'profileKey' -- services/nvpair-proxy/proxy.go services/nvpair-proxy/tiers.go`
+   prints the `candidate.profileKey` field and its use (phase 02a Task 4).
+If any of these is absent, stop and report: do not implement phase 02a's or 02b's work here.
+Ordering with phase 04 (`04-desktop.md`): phase 04 starts after this phase lands and rebases
+onto it (index order 03 → 04, no parallel run). This phase therefore edits the shared files
+first and does not adapt to phase 04. These paths are in both phases' Files lists: `services/shared/noderec/noderec_test.go`, `services/shared/nodepolicy/wire_test.go`,
 `services/nvpair-engine-manager/nodeprojection_test.go`, `services/nvpair-ui-broker/policy_test.go`,
 `services/nvpair-ui-broker/README.md`, `services/nvpair-proxy/proxy.go`, `services/nvpair-proxy/tiers_test.go`,
 `services/nvpair-proxy/engine_binding_requests_test.go`, `services/nvpair-proxy/README.md`,
@@ -75,16 +75,11 @@ Files lists: `services/shared/noderec/noderec_test.go`, `services/shared/nodepol
 `desktop/tests/modular/node-configuration.test.ts`, `desktop/tests/modular/node-configuration-bulk.test.ts`,
 `desktop/tests/modular/node-policy.test.ts`, `desktop/tests/modular/node-policy-precision.test.ts`,
 `desktop/tests/modular/remote-management.test.tsx`, `desktop/tests/modular/model-settings-copy.test.tsx`.
-Rule: on each shared path, the phase whose task lands second rebases onto the other phase's
-commit and re-runs its own task's Verify; neither phase reverts the other's change. Phase 04
-Tasks 8 and 10 (`NodeDeclaredRoles.tsx`, `ModelSettingsCopy.tsx`) wait for this phase by their
-entry condition. When phase 04 Task 7 has already deleted `BulkNodeConfiguration.tsx` and
-`node-configuration-bulk.test.ts`, Task 6 skips them; `desktop/docs/services-api.md` is only
-regenerated, never merged by hand.
+`desktop/docs/services-api.md` is only regenerated, never merged by hand.
 
 ## Context the executor needs
 Repository: the PAIR fork, executors branch from `origin/integration/join33` (`4eccd05d` or
-later; this plan was written against `4eccd05d` plus phase 02's described interfaces). Line
+later; this plan was written against `4eccd05d` plus phase 02a's and 02b's described interfaces). Line
 numbers below are navigation aids at `4eccd05d`; re-find every symbol with `git grep` first.
 Repo rules to follow: `.cursor/rules/services-change-propagation.mdc`,
 `service-contracts.mdc`, `renderer-stores.mdc`, `type-discipline.mdc`,
@@ -108,9 +103,10 @@ Verified facts (investigation `L1`, `L7`, `verify-B` at `4eccd05d`; re-checked w
 - `services/shared/modelconfig/wire.go` `isTier` (about line 503) is a literal copy used by
   the `modelId` reserved-alias check (about line 498) and `PolicyPatch.Validate`
   ("roles: unknown tier", about line 621). At `4eccd05d` `nodepolicy` does not import
-  `modelconfig`, but phase 02 Task 1 makes it do so (`Profile.Load *modelconfig.RequestedLoad`,
-  `modelconfig.ValidateProfileID`), so `modelconfig` must not import `nodepolicy` (Task 2).
-- Fallback: `TierPolicy{AllowStronger, AllowWeaker, PreferLoaded}` (`policy.go` about line
+  `modelconfig`, and phase 02a keeps it that way (the policy profile holds no load); phase 02a
+  makes `modelconfig` import `nodepolicy` for `ValidateProfileKey`, so `modelconfig` can call
+  `nodepolicy`'s role grammar directly (Task 2; no import cycle, debate adjudication F3).
+- Widening: `TierPolicy{AllowStronger, AllowWeaker, PreferLoaded}` (`policy.go` about line
   569), `Default()` sets `AllowStronger: true, AllowWeaker: false, PreferLoaded: "tier"`.
   `tiers.go` `tierSearchOrder` derives order by index in `TierOrder`; `resolveTierCandidates`
   assigns `tierRank` = index in that order and sorts by `preferLoaded`, `tierRank`, warmth, the
@@ -169,23 +165,30 @@ keep passing unchanged because the defaults keep the same names):
 2. alias construction and listing (`values_test.go` `ParseAlias`, proxy `hybrid_alias_test.go`);
 3. the history enum (`routing_events_test.go`, `routing_facts_test.go`, `routing_wire_test.go`,
    desktop `routing-projection.test.ts`);
-4. `AllowStronger`/`AllowWeaker` fixtures (Task 3's list);
+4. the search order of a custom name (Task 3); `AllowStronger`/`AllowWeaker` fixtures keep
+   passing unchanged;
 5. router local tier entries and node-wide authority (Task 4's list), including
    `subscribed_test.go` `TestUnknownTierDeclarationPreventsRouterFallback`;
 6. mechanical symbol renames (Task 1's list).
 
-Not verifiable while writing: phase 02's exact field names; every native outcome on the
-owner's machines; whether the owner's stored policies changed `allowStronger`/`allowWeaker`
-from the defaults (Task 3 makes such a change revert to the default fallback lists).
+Not verifiable while writing: phase 02a's exact field names; every native outcome on the
+owner's machines.
 
 ## Decisions (settled — do not revisit)
 - Role names are user-defined strings declared per node; the cluster's role list is the union
   of names nodes advertise plus `weak`, `medium`, `strong`, which `Default()` pre-creates (D1).
   Not "keep the three names and add only profiles", because the owner's expectation 1 asks for
   user-defined roles.
-- An optional per-role fallback list replaces the global strength order; `tierRank` is the
-  position in "the role, then its fallback list" (D1; keeps the smart-routing plan's
-  "tier rank is a hard leading class" valid, L7-C34).
+- The default roles keep their fixed order among themselves and `TierPolicy.allowStronger`/
+  `allowWeaker` keep widening them exactly as today; a custom role has no fallback, so a request
+  for it is answered only by that role (D1 as amended by debate adjudication F6). `tierRank`
+  stays the position in `tierSearchOrder` (keeps the smart-routing plan's "tier rank is a hard
+  leading class" valid, L7-C34). Not per-role fallback lists, because they were not requested
+  and would have discarded stored `allowStronger`/`allowWeaker` (debate F6, `policy.go:569-579`,
+  `tiers.go:387`, `:469`). Fallback for custom roles is deferred until the owner asks for it.
+- A node may declare a role with an empty profile list; it is a declared name (advertised,
+  listed by the desktop, a request for it is a role request) that contributes no candidates
+  (debate adjudication F5).
 - The nine reserved `-api`/`-local` aliases, API tier entries and `routing.tiers` exist only for
   the three default names; hybrid/public routing is frozen (D7, README section 7).
 - Router local `tiers` entries are retired from local-model routing; declared roles are the only
@@ -193,30 +196,18 @@ from the defaults (Task 3 makes such a change revert to the default fallback lis
 - `preferLoaded` keeps its two values and meaning; the smart-routing scorer is untouched.
 - No compatibility shims, version bumps or capability markers; `Default()` fills the defaults so
   existing policies parse (fork rule, `no-legacy-fallbacks.mdc`).
-- Roles map to profile lists as phase 02 left them; this phase does not change that shape.
+- Roles map to profile lists as phase 02a left them (possibly empty lists); this phase does not change that shape.
 
 ## Decisions made while writing this plan
 - Role-name grammar: `^[a-z0-9][a-z0-9._-]{0,63}$` (1 to 64 bytes, lower case), and the name must
   not end in `-api` or `-local`. Lower case only, so `Coder` and `coder` cannot both exist; no
   `:` so Ollama's `:latest` handling never touches a role name.
-- A role name must not equal a profile id of the same node (checked in `Policy.Validate`). Across
+- A role name must not equal a profile key of the same node (phase 02a's `Policy.Validate` check,
+  which now matters for custom names). Across
   nodes the router cannot check, so a role request wins over a concrete model of the same name
   elsewhere; this is documented in Task 8.
 - The router treats a request `model` as a role when it is a default name, or when it passes the
   grammar and this node or any visible peer declares it; otherwise it is a concrete model name.
-- `tierPolicy.roleFallback` is router-side (applies to requests entering that node), like
-  `TierPolicy` today; peers still cannot change it (`MergePeerSet` keeps refusing). It is
-  edited through the desktop's existing "Advanced policy JSON" editor, which phase 04 Task 7
-  moves into the node settings page as `NodePolicyJsonEditor.tsx`.
-- A dedicated fallback-list editor is deferred, because no phase of this batch plans one
-  (phase 04 does not redesign the role editor) and D1 only requires the list to exist; the
-  owner's acceptance step edits it as JSON.
-- Fallback is one level, not transitive; duplicates are removed keeping the first; a list must not
-  name its own key; names no node declares are allowed and simply contribute no candidates.
-- Default fallback lists mirror today's defaults (`allowStronger: true`, `allowWeaker: false`):
-  `weak: [medium, strong]`, `medium: [strong]`, `strong: []`. A stored `allowStronger`/`allowWeaker`
-  is ignored after this phase, so a node whose owner had changed them reverts to these lists;
-  the acceptance step checks the owner's routers.
 - Keep the identifiers `TierPolicy` (JSON `tierPolicy`), `tierSearchOrder`, `tierRank`, the
   history field `requested.tier`, the header `X-PAIR-Tier` and the error "no eligible model for
   tier X": renaming them is churn with no behaviour, and the smart-routing plan cites them.
@@ -230,9 +221,9 @@ from the defaults (Task 3 makes such a change revert to the default fallback lis
   carrying a `tiers` member in any spelling is refused like `routing`.
 - The routing-history native fact stores the role in a fixed 64-byte buffer
   (`nodepolicy.MaxRoleNameBytes`).
-- Desktop: an added role is a draft row and is saved only once it has at least one profile (an
-  empty role is omitted, as unset tiers are today); role rows list defaults first, then other
-  names alphabetically; the label is the role name itself. The "Suggest" button and its copy are
+- Desktop: an added role is saved as a declared role with an empty profile list (F5), so the
+  Mac can define `coder` before any node has a profile for it; role rows list defaults first,
+  then other names alphabetically; the label is the role name itself. The "Suggest" button and its copy are
   removed because they read retired local tier entries.
 - Packaging: eight tasks. Tasks 1, 3, 4, 5 are serial because they share `policy.go` and
   `tiers.go`; Task 2 can run after Task 1 in parallel with 3 to 5; Task 6 needs Tasks 1 and 4;
@@ -242,7 +233,7 @@ from the defaults (Task 3 makes such a change revert to the default fallback lis
 
 ### Task 1 — Role-name grammar and default roles replace TierOrder in nodepolicy
 **Files:** services/shared/nodepolicy/policy.go, services/shared/nodepolicy/values.go, services/shared/nodepolicy/routing.go, services/shared/nodepolicy/policy_load.go, services/shared/nodepolicy/policy_test.go, services/shared/nodepolicy/values_test.go, services/shared/nodepolicy/routing_test.go, services/shared/nodepolicy/policy_load_test.go, services/shared/nodepolicy/projection_test.go, services/shared/nodepolicy/advertise_test.go, services/shared/nodepolicy/model_controls_test.go, services/shared/nodepolicy/wire_test.go, services/shared/noderec/noderec_test.go, services/nvpair-proxy/discovery.go, services/nvpair-proxy/http_handler.go, services/nvpair-proxy/routing.go, services/nvpair-proxy/tiers.go, services/nvpair-proxy/availability_test.go, services/nvpair-proxy/subscribed_test.go, services/nvpair-ui-broker/discovery_test.go, services/nvpair-ui-broker/policy_projection_test.go, services/nvpair-ui-broker/policy_roles_test.go, services/nvpair-ui-broker/policy_test.go, services/nvpair-engine-manager/nodeprojection_test.go, services/nvpair-node-scanner/availability_test.go, services/nvpair-node-scanner/inventory_capability_test.go, services/nvpair-node-scanner/refresh_test.go, services/nvpair-node-scanner/reverse_peer_test.go
-**Depends on:** none — phase 02 is an entry condition, not a task
+**Depends on:** none — phases 02a and 02b are entry conditions, not a task
 **Complexity:** judgment
 **Do:**
 1. In `services/shared/nodepolicy/policy.go`, replace the "Tier names" constant block, `TierOrder`
@@ -256,8 +247,8 @@ from the defaults (Task 3 makes such a change revert to the default fallback lis
    	RoleStrong = "strong"
    )
 
-   // DefaultRoles lists the default role names, weakest first. The order is used
-   // only for listing; routing order comes from TierPolicy.RoleFallback.
+   // DefaultRoles lists the default role names, weakest first. TierPolicy widens a
+   // default role along this order; any other role has no order and no fallback.
    var DefaultRoles = []string{RoleWeak, RoleMedium, RoleStrong}
 
    // MaxRoleNameBytes bounds a role name; routing history stores it in a fixed buffer.
@@ -280,9 +271,9 @@ from the defaults (Task 3 makes such a change revert to the default fallback lis
    func IsDefaultRole(name string) bool { return slices.Contains(DefaultRoles, name) }
    ```
 2. `Policy.Validate`: in the roles loop replace the `TierOrder` membership check with
-   `ValidateRoleName(name)` (error `roles: %w`), and add a check that the role name is not equal
-   to the profile id of any profile in `p.Profiles` (error
-   `roles: role name %q is also a profile id on this node`). In the `p.Tiers` loop replace the
+   `ValidateRoleName(name)` (error `roles: %w`); an empty profile list stays valid (phase 02a,
+   F5). Keep phase 02a's check that no profile key equals a declared role name and make its
+   error `roles: role name %q is also a profile key on this node`. In the `p.Tiers` loop replace the
    membership check with `IsDefaultRole(tier)` (error
    `tiers: %q is not a default role; only weak, medium and strong have API entries`).
 3. `routing.go`: `defaultRouting` iterates `DefaultRoles`; `Routing.validate` checks keys with
@@ -303,92 +294,43 @@ from the defaults (Task 3 makes such a change revert to the default fallback lis
    "suffixed alias as tier" (`weak-local`) now expects "must not end in -api or -local". Add
    table tests for `ValidateRoleName` (accepts `weak`, `coder`, `r1.fast_v2`, a 64-byte name;
    rejects empty, `Coder`, `-x`, `coder-api`, `coder-local`, `co:der`, a 65-byte name), a
-   `Validate` case accepting `roles.coder`, a case rejecting a role named like one of the node's
-   profile ids, cases rejecting `tiers.coder` and `routing.tiers.coder`, and a `ParseAlias`
+   `Validate` case accepting `roles.coder` with an empty list, a case rejecting a role named like
+   one of the node's profile keys, cases rejecting `tiers.coder` and `routing.tiers.coder`, and a `ParseAlias`
    case where `coder-api` is not an alias.
 **Verify:** `git grep -nw "TierOrder\|IsTier\|TierWeak\|TierMedium\|TierStrong" -- services` prints
 nothing; `cd services/shared && go vet ./... && go test ./...` passes; in each of
 `services/nvpair-proxy`, `services/nvpair-ui-broker`, `services/nvpair-engine-manager`,
 `services/nvpair-node-scanner`: `go build ./... && go vet ./... && go test ./...` passes.
 
-### Task 2 — Model-settings patches validate role names with the same grammar as nodepolicy
-**Files:** services/shared/modelconfig/wire.go, services/shared/modelconfig/wire_test.go, services/shared/modelconfig/options_test.go, services/shared/nodepolicy/role_grammar_parity_test.go (new)
-**Depends on:** 1 — mirrors `nodepolicy.ValidateRoleName` and `nodepolicy.IsReservedAlias`
+### Task 2 — Model-settings patches validate role names with nodepolicy's grammar
+**Files:** services/shared/modelconfig/wire.go, services/shared/modelconfig/wire_test.go, services/shared/modelconfig/options_test.go
+**Depends on:** 1 — calls `nodepolicy.ValidateRoleName` and `nodepolicy.IsReservedAlias`
 **Complexity:** mechanical
 **Do:**
-1. In `services/shared/modelconfig/wire.go` delete `isTier`. Do not import `nvpair-shared/nodepolicy`:
-   since phase 02, `nodepolicy` imports `modelconfig`, so the reverse import is a cycle. Add two
-   private helpers with doc comments naming their `nodepolicy` counterparts and the parity test:
-   `validRoleName(name string) error` (Task 1's pattern and suffix rule, same messages) and
-   `reservedRoleAlias(id string) bool` (`weak`, `medium` or `strong`, bare or with `-api`/`-local`).
+1. In `services/shared/modelconfig/wire.go` delete `isTier`. `modelconfig` already imports
+   `nvpair-shared/nodepolicy` since phase 02a (for `ValidateProfileKey`) and `nodepolicy` does not
+   import `modelconfig`, so call `nodepolicy` directly; add no private copy of the grammar.
 2. In the `modelId` check, replace the hand-written suffix strip and `isTier` call with
-   `if reservedRoleAlias(id) { return fmt.Errorf("modelId: reserved routing alias") }`.
+   `if nodepolicy.IsReservedAlias(id) { return fmt.Errorf("modelId: reserved routing alias") }`.
 3. In `PolicyPatch.Validate`, replace the `isTier` loop with
-   `for role := range p.Roles { if err := validRoleName(role); err != nil { return fmt.Errorf("roles: %w", err) } }`.
+   `for role := range p.Roles { if err := nodepolicy.ValidateRoleName(role); err != nil { return fmt.Errorf("roles: %w", err) } }`.
 4. `options_test.go`: the case named "unknown tier" (`{"fast":true}`) becomes "invalid role name"
    with input `{"Fast":true}`; add an accepted case `{"coder":true}`. `wire_test.go`: keep the
    reserved-alias cases for `weak`, `weak-api`, `medium-local`; add `coder` accepted as a
    `modelId` (a role name is not reserved).
-5. `services/shared/nodepolicy/role_grammar_parity_test.go` (`nodepolicy` may import `modelconfig`):
-   for every name in Task 1's `ValidateRoleName` table plus `weak-api`, `medium-local` and
-   `strong`, assert that `modelconfig.PolicyPatch{Roles: map[string]bool{name: true}}.Validate()`
-   fails exactly when `ValidateRoleName(name)` fails, and that an otherwise valid
-   `modelconfig.ModelChange` with that `ModelID` is refused as a reserved alias exactly when
-   `IsReservedAlias(name)` is true.
-**Verify:** `git grep -n "func isTier" -- services/shared/modelconfig` and
-`git grep -n '"nvpair-shared/nodepolicy"' -- services/shared/modelconfig ':!*_test.go'` print nothing;
+**Verify:** `git grep -n -e "func isTier" -e "func validRoleName" -e "func reservedRoleAlias" -- services/shared/modelconfig` prints nothing;
+`git grep -n '"nvpair-shared/modelconfig"' -- services/shared/nodepolicy ':!*_test.go'` prints nothing;
 `cd services/shared && go build ./... && go vet ./... && go test ./modelconfig/... ./nodepolicy/...` passes.
 
-### Task 3 — Per-role fallback lists replace allowStronger and allowWeaker
-**Files:** services/shared/nodepolicy/policy.go, services/shared/nodepolicy/projection.go, services/shared/nodepolicy/policy_test.go, services/shared/nodepolicy/projection_test.go, services/nvpair-proxy/tiers.go, services/nvpair-proxy/tiers_test.go, services/nvpair-proxy/routing_test.go, services/nvpair-proxy/routing_listener_test.go, services/nvpair-proxy/served_models_test.go, services/nvpair-proxy/engine_binding_candidates_test.go, services/nvpair-ui-broker/policy_test.go, services/tests/policy_relay_joint_test.go
-**Depends on:** 1 — same `policy.go`, `tiers.go` and test files
-**Complexity:** judgment
+### Task 3 — A custom role is answered only by itself; the default roles keep their widening
+**Files:** services/shared/nodepolicy/policy.go, services/nvpair-proxy/tiers.go, services/nvpair-proxy/tiers_test.go
+**Depends on:** 1 — same `policy.go`, `tiers.go` and `tiers_test.go`
+**Complexity:** mechanical
 **Do:**
-1. In `policy.go` replace `TierPolicy` with:
-   ```go
-   // TierPolicy controls how this router widens a role request.
-   type TierPolicy struct {
-   	// RoleFallback lists, per requested role, the other roles that may answer
-   	// when no candidate of the requested role is eligible, in the order tried.
-   	// It is not transitive. A role absent from the map has no fallback.
-   	RoleFallback map[string][]string `json:"roleFallback"`
-   	// PreferLoaded ranks candidates already loaded on their node ahead of cold
-   	// ones. "tier" keeps fallback order first and prefers loaded models within
-   	// each position; "any" prefers any loaded eligible model over a cold one.
-   	PreferLoaded string `json:"preferLoaded"`
-   }
-   ```
-   `Default()` sets `RoleFallback: map[string][]string{RoleWeak: {RoleMedium, RoleStrong}, RoleMedium: {RoleStrong}, RoleStrong: {}}`.
-   `normalize` makes a nil map an empty map and a nil list an empty list. `Validate` checks each
-   key and each listed name with `ValidateRoleName` (error `tierPolicy.roleFallback.%s: %w`),
-   refuses a list naming its own key and refuses a duplicate in one list.
-2. `projection.go` `MergePeerSet`: replace `incoming.TierPolicy != stored.TierPolicy` with
-   `!reflect.DeepEqual(incoming.TierPolicy, stored.TierPolicy)`; keep the refusal text.
-3. `services/nvpair-proxy/tiers.go`: rewrite `tierSearchOrder` (keep the name) to return the
-   role, then each name of `tp.RoleFallback[role]` not already in the order. It no longer
-   returns nil for an unknown name. Update its doc comment. `tierRank` stays the index in that
-   order; do not change the sort, `reserveRoundPrepared` or `hybridLocalCandidates`.
-4. Tests: replace every `AllowStronger`/`AllowWeaker` setting (Go struct fields and JSON
-   `allowStronger`/`allowWeaker` members) with the equivalent lists:
-   | allowStronger | allowWeaker | roleFallback |
-   | --- | --- | --- |
-   | true | false | weak: [medium, strong]; medium: [strong]; strong: [] (the default) |
-   | true | true | weak: [medium, strong]; medium: [strong, weak]; strong: [medium, weak] |
-   | false | true | weak: []; medium: [weak]; strong: [medium, weak] |
-   | false | false | weak: []; medium: []; strong: [] |
-   Where a test toggled `allowWeaker` only to make a peer change the tier policy
-   (`nvpair-ui-broker/policy_test.go`, `services/tests/policy_relay_joint_test.go`), change
-   `roleFallback.weak` instead and keep the expected refusal. Add `tiers_test.go` cases: a
-   custom order (`weak: [strong, medium]`) yields ranks 0, 1, 2 in that order; a duplicate-free
-   result when the list repeats the role; a fallback to an undeclared name contributes no
-   candidates; `preferLoaded: "any"` still lets a warm fallback candidate lead. Add
-   `policy_test.go` cases for the defaults after `Parse("{}")`, a self-reference refusal and a
-   file containing `allowStronger: false` parsing to the default lists.
-**Verify:** `git grep -n "AllowStronger\|AllowWeaker\|allowStronger\|allowWeaker" -- services ':!*.md' ':!services/shared/nodepolicy/policy_test.go'`
-prints nothing (the excluded file holds the new case that parses a stored `allowStronger`); `cd services/shared && go test ./nodepolicy/...` passes;
-`cd services/nvpair-proxy && go vet ./... && go test ./...` passes;
-`cd services/nvpair-ui-broker && go test ./...` passes;
-`cd services/tests && go test -run 'TestPolicyRelayJoint' ./...` passes.
+1. `services/nvpair-proxy/tiers.go` `tierSearchOrder(tier, tp)`: for `nodepolicy.IsDefaultRole(tier)` keep today's result exactly (the index in `DefaultRoles`, widened by `tp.AllowStronger` and `tp.AllowWeaker`); for any other name return `[]string{tier}` instead of nil. Update its doc comment: custom roles have no fallback. `tierRank` stays the index in that order; do not change the sort, `reserveRoundPrepared` or `hybridLocalCandidates`.
+2. `services/shared/nodepolicy/policy.go`: reword the `TierPolicy`, `AllowStronger` and `AllowWeaker` doc comments to say they widen only among `weak`, `medium` and `strong`, and that a custom role is answered only by itself. Change no field, `Default()` value, validation or `MergePeerSet` rule.
+3. Tests in `tiers_test.go`: `TestTierSearchOrderCustomRole` (`tierSearchOrder("coder", Default().TierPolicy)` is `[coder]`, also with `AllowWeaker: true`); `TestCustomRoleHasNoFallback` (a `coder` request with no eligible `coder` candidate and eligible `medium` and `strong` candidates gets no candidate); `TestDefaultRoleWideningUnchanged` (a `weak` request with only `medium` declared yields that candidate with `tierRank` 1; with `AllowStronger: false` it yields none).
+**Verify:** `cd services/nvpair-proxy && go test -run 'TestTierSearchOrderCustomRole|TestCustomRoleHasNoFallback|TestDefaultRoleWideningUnchanged' -v ./...` prints `--- PASS` for the three names and no `--- FAIL`; `cd services/nvpair-proxy && go vet ./... && go test ./...` passes; `cd services/shared && go test ./nodepolicy/...` passes; `git grep -n -e RoleFallback -e roleFallback -- services` prints nothing.
 
 ### Task 4 — Router local tier entries are retired; declared roles are the only local candidates
 **Files:** services/shared/nodepolicy/policy.go, services/shared/nodepolicy/routing.go, services/shared/nodepolicy/policy_load.go, services/shared/nodepolicy/projection.go, services/shared/nodepolicy/policy_test.go, services/shared/nodepolicy/policy_load_test.go, services/shared/nodepolicy/routing_test.go, services/shared/nodepolicy/projection_test.go, services/shared/nodepolicy/model_controls_test.go, services/nvpair-proxy/tiers.go, services/nvpair-proxy/proxy.go, services/nvpair-proxy/buffer_decrease_retry_test.go, services/nvpair-proxy/engine_binding_candidates_test.go, services/nvpair-proxy/engine_binding_requests_test.go, services/nvpair-proxy/hybrid_alias_test.go, services/nvpair-proxy/local_credential_test.go, services/nvpair-proxy/model_controls_test.go, services/nvpair-proxy/owned_buffers_test.go, services/nvpair-proxy/policy_test.go, services/nvpair-proxy/reverse_transport_test.go, services/nvpair-proxy/routing_listener_test.go, services/nvpair-proxy/routing_test.go, services/nvpair-proxy/served_model_body_test.go, services/nvpair-proxy/served_models_test.go, services/nvpair-proxy/subscribed_test.go, services/nvpair-proxy/tiers_test.go, services/nvpair-ui-broker/policy_test.go, services/tests/model_routing_interop_test.go, services/tests/policy_relay_joint_test.go, services/tests/public_egress_lease_test.go, services/tests/service_policy_test.go, services/tests/service_routing_listener_test.go, services/tests/unified_dispatch_test.go
@@ -419,7 +361,7 @@ prints nothing (the excluded file holds the new case that parses a stored `allow
    mention router tier entries or node-wide authority. `configuredAliases` keeps reading
    `pol.Tiers` (API entries only now).
 6. Tests, by category: (a) a test that used a local tier entry only to make a role request
-   resolve declares the role on the serving node instead (phase 02 shape: the role's profile list
+   resolve declares the role on the serving node instead (phase 02a shape: the role's profile list
    names an existing profile); (b) a test of router-entry behaviour (entries apply only to
    non-declaring nodes, entry context or capability bounds, declared-before-entry order, the
    unknown-tier marker disabling router fallback, `IsLocal`, and the comment "authoritative for
@@ -444,26 +386,28 @@ prints nothing; `cd services/shared && go vet ./... && go test ./...` passes; in
 **Do:**
 1. In `tiers.go` add `func (f *facade) roleRequested(model string) bool`: true when
    `nodepolicy.IsDefaultRole(model)`; otherwise true when `nodepolicy.ValidateRoleName(model) == nil`
-   and this node's policy declares `model` with a non-empty profile list, or any node in the
+   and this node's policy declares `model` (an empty profile list counts, F5), or any node in the
    discovery overlays of `f` and `f.host.enabledFacades()` advertises `model` in its roles (the
-   same sources `declaredRoles` reads). Read the declarations without building the whole
+   same sources `declaredRoles` reads). A declared role with no profiles is a role request that
+   finds no candidate (404 `no eligible model for tier <name>`), never a concrete-model request. Read the declarations without building the whole
    `declaredRoles` value, because this runs for every inference request.
 2. `http_handler.go` (the `tier` computed for `observeRequested`, about line 748) and
    `routing.go` (non-hybrid branch, about line 684): replace `nodepolicy.IsDefaultRole(model)`
    with `f.roleRequested(model)`. The hybrid branch keeps `nodepolicy.ParseAlias`.
 3. `discovery.go` `Node.filteredModels`: keep every role whose name passes `ValidateRoleName`
-   and whose value is valid under phase 02's rules; delete the unknown-tier marker branch and its
-   comment.
+   and whose value is valid under phase 02a's rules (an empty list is valid); delete the
+   unknown-tier marker branch and its comment.
 4. `configuredAliases` (rename its `peerTiers` parameter to `peerRoles`, and
    `declaredRoles.peerTiers` to `peerRoles`): for each default role, unchanged (bare name plus
    `-api` and `-local` when it has API entries, is declared here or by a peer); then each
    non-default name declared here or by a peer, bare only, sorted. Update its doc comment.
 5. Tests: replace `TestUnknownTierDeclarationPreventsRouterFallback` in `subscribed_test.go` with
-   a test that a peer declaring only `coder` keeps `coder` after `filteredModels` and that a
-   declaration of `Coder` is dropped. Add to `tiers_test.go`: a request for `coder` declared by a
-   peer resolves to that peer's profile; `coder` declared nowhere is not a role request (it takes
-   the concrete-model path); `weak` declared nowhere is still a role request and gets 404
-   `no eligible model for tier weak`; `X-PAIR-Tier: coder` is set on the committed attempt. Add
+   a test that a peer declaring only `coder` keeps `coder` after `filteredModels` (also with an
+   empty list) and that a declaration of `Coder` is dropped. Add to `tiers_test.go`: a request for
+   `coder` declared by a peer resolves to that peer's profile; `coder` declared only with an empty
+   list is a role request that gets 404 `no eligible model for tier coder`; `coder` declared nowhere is not a role request (it takes
+   the concrete-model path); `weak` declared nowhere, with no node declaring `medium` or `strong`,
+   is still a role request and gets 404 `no eligible model for tier weak`; `X-PAIR-Tier: coder` is set on the committed attempt. Add
    to `hybrid_alias_test.go`: `/v1/models` lists `coder` (no `coder-api`, no `coder-local`) when
    a peer declares it, after the default aliases.
 **Verify:** `git grep -n "marker" -- services/nvpair-proxy/discovery.go` prints nothing;
@@ -476,7 +420,7 @@ prints nothing; `cd services/shared && go vet ./... && go test ./...` passes; in
 **Complexity:** judgment
 **Do:**
 1. `shared/types/node-roles.ts`: delete `RoleTier`; `NodeRoles` is keyed by `string` (value type
-   as phase 02 left it).
+   as phase 02a left it).
 2. `shared/utils/node-roles.ts`: delete `ROLE_TIERS`; add, with doc comments naming the Go
    counterparts: `DEFAULT_ROLES = ['weak', 'medium', 'strong'] as const` (`nodepolicy.DefaultRoles`),
    `roleNameError(name: string): string | undefined` implementing exactly Task 1's
@@ -486,17 +430,18 @@ prints nothing; `cd services/shared && go vet ./... && go test ./...` passes; in
    in order, then every other key of the maps sorted, no duplicates). `parseNodeRoles` keeps
    every key with no `roleNameError` and a valid value; `sameNodeRoles` compares the union of
    both maps' keys.
-3. `node-configuration.store.ts`: `withRoles` iterates the draft's keys and omits roles with no
-   profile; `roleDifferences` and `setRole` take `role: string`; delete `suggestRoles` and every
+3. `node-configuration.store.ts`: `withRoles` iterates the draft's keys and keeps a declared
+   role with no profile as an empty list (F5); `roleDifferences` and `setRole` take `role: string`; delete `suggestRoles` and every
    use of it.
 4. `RoleEditor.tsx`: delete `TIER_LABELS`, the Suggest button, `suggesting`/`noSuggestion` state
    and their copy. Rows: `roleNames` over the draft and every discovered node's advertised
    roles, defaults first (read the advertisements from the same store `NodeDeclaredRoles.tsx` reads); each row's
    label is the role name. Add a text field (aria-label `New role name`) and a button `Add role`:
    it shows `roleNameError`, refuses a name already listed, refuses a name equal to one of this
-   node's profile ids (message `A profile on this node already uses that name.`), and otherwise adds
-   an unset row held in component state until a profile is chosen. Replace the authority copy with:
-   `A router sends a role's requests only to nodes that declare it. Roles left unset are not served by this node.`
+   node's profile keys (message `A profile on this node already uses that name.`), and otherwise adds
+   the role to the draft as a declared role with an empty list, which Save stores (F5). Replace the
+   authority copy with:
+   `A router sends a role's requests only to nodes that declare it with at least one profile. A role with no profiles is listed for the cluster but not served by this node.`
 5. `BulkNodeConfiguration.tsx` and `NodeDeclaredRoles.tsx`: iterate `roleNames(...)` over the maps
    they show instead of `ROLE_TIERS`; a `RoleTier` parameter becomes `string`.
 6. `shared/types/model-config.ts:75`: `roles?: Record<string, boolean>`.
@@ -504,14 +449,14 @@ prints nothing; `cd services/shared && go vet ./... && go test ./...` passes; in
    `shared/utils/node-policy-model-settings.ts` (about line 233): use `isReservedAlias`.
 7. `ModelLoadSettings.tsx`: list role rows from `roleNames` over the policy's roles (defaults
    first) instead of the literal arrays. `ModelSettingsCopy.tsx` (when the file still exists after
-   phase 02): hold role membership in a separate `roles: string[]` selection, not in the field
+   phase 02b): hold role membership in a separate `roles: string[]` selection, not in the field
    union with `served`/`resident`/`binding`, so a role named `served` cannot collide; list roles
    with `roleNames`.
 8. Tests: update the listed tests for the type and helper changes; delete `suggestRoles` tests;
    add tests that `parseNodeRoles` keeps `coder` and drops `Coder` and `coder-api`, that
-   `roleNameError` matches every case in Task 1's Go table, that `withRoles` omits an empty role,
-   and that the RoleEditor adds `coder`, rejects `coder-local` with the suffix message and
-   rejects a profile id.
+   `roleNameError` matches every case in Task 1's Go table, that `withRoles` keeps a declared
+   empty role, and that the RoleEditor adds `coder` with no profiles and saves it, rejects
+   `coder-local` with the suffix message and rejects a profile key.
 **Verify:** `git grep -n "ROLE_TIERS\|RoleTier\|TIER_LABELS\|suggestRoles\|'weak' | 'medium' | 'strong'" -- desktop/src`
 prints nothing; in `desktop/`: `npm run lint && npm run typecheck && npm run test:unit && npm run dead-code:check`
 passes.
@@ -551,7 +496,7 @@ passes.
 `cd services/tests && go test -run 'TestRoutingHistoryProductionChain' ./...` pass; in `desktop/`:
 `npm run typecheck && npm run test:unit` passes.
 
-### Task 8 — Docs describe user-defined roles, fallback lists and retired router entries
+### Task 8 — Docs describe user-defined roles and retired router entries
 **Files:** services/nvpair-proxy/README.md, services/nvpair-proxy/spec.md, services/nvpair-proxy/proxy.go, services/nvpair-workload-manager/README.md, services/nvpair-workload-manager/spec.md, services/nvpair-workload-manager/workload.go, services/nvpair-ui-broker/README.md, docs/hybrid-routing.mdx, docs/node-availability.mdx, desktop/docs/services-parity.md, desktop/docs/services-api.md
 **Depends on:** 3, 5, 6, 7 — documents their final behaviour
 **Complexity:** mechanical
@@ -559,11 +504,12 @@ passes.
 1. `services/nvpair-proxy/README.md` "Tiers" and "Hybrid aliases" bullets (about lines 661-700)
    and `spec.md` tier sections (about lines 1838-1900, history at about 1233): a role request is
    a default name or any role name a node declares; role-name grammar; candidates come only from
-   nodes declaring the role; search order is the role then `tierPolicy.roleFallback[role]`; the
-   default lists; reserved aliases and API entries exist only for `weak`, `medium`, `strong`; a
+   nodes declaring the role with at least one profile; a role may be declared with no profiles;
+   search order: a default role widens along `weak`, `medium`, `strong` as `allowStronger` and
+   `allowWeaker` allow, and any other role is answered only by itself (fallback for custom roles
+   is not available); reserved aliases and API entries exist only for `weak`, `medium`, `strong`; a
    role name wins over a concrete model of the same name on another node; `requested.tier`
-   records the role string. Delete the text about router tier entries, node-wide authority,
-   `allowStronger` and `allowWeaker`.
+   records the role string. Delete the text about router tier entries and node-wide authority.
 2. Comments: `services/nvpair-proxy/proxy.go` (about line 192) and
    `services/nvpair-workload-manager/workload.go` (about line 81) say "the role a request asked
    for" instead of listing the three names; `services/nvpair-workload-manager/README.md`
@@ -572,11 +518,11 @@ passes.
    say the peer projection has no `tiers` and that a peer write carrying `tiers` is refused.
 4. `docs/hybrid-routing.mdx:13`: the aliases exist for the default roles only.
    `docs/node-availability.mdx` (about line 227): the example becomes "a request for a role,
-   such as `strong`". `desktop/docs/services-parity.md:189`: "role/fallback order".
+   such as `strong`". `desktop/docs/services-parity.md:189`: "role order (default roles widen; custom roles do not)".
 5. Run `npm run service-contracts:check` in `desktop/`; only when it reports
    `desktop/docs/services-api.md` stale, run `npm run service-contracts:write` (never edit that
    file by hand).
-**Verify:** `git grep -n -i "allowStronger\|allowWeaker\|authoritative for itself" -- services docs desktop/docs ':!services/shared/nodepolicy/policy_test.go'`
+**Verify:** `git grep -n -i "authoritative for itself\|roleFallback" -- services docs desktop/docs`
 prints nothing; in `desktop/`: `npm run service-contracts:check` passes; at the repo root
 `node scripts/spdx-headers.mjs` passes; `cd services/nvpair-proxy && go build ./...` and
 `cd services/nvpair-workload-manager && go build ./...` pass.
@@ -598,23 +544,24 @@ recorded starting revision in a separate scratch worktree; otherwise the gate is
 Acceptance on the owner's machines (Mac, Joes, MSI; external, recorded in the vault):
 1. Install the phase build on every node. For each node, the desktop's Routing settings shows no
    recovery notice (its `policy:get` reports `recoveryRequired: false`).
-2. From the Mac, open Joes's RoleEditor, add role `coder`, assign one of Joes's profiles, save.
-   Joes's card shows `coder`.
+2. On the Mac (which has no profiles), add role `coder` in the Mac's RoleEditor and save: the
+   Mac's advertisement lists `coder` with an empty list. From the Mac, open Joes's RoleEditor:
+   `coder` is offered as a role name; assign one of Joes's profiles to it and save. Joes's card
+   shows `coder`.
 3. From the Mac, send to the Mac's OpenAI-compatible PAIR endpoint (the client URL the desktop
    shows): `curl -sS -D - <endpoint>/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"coder","messages":[{"role":"user","content":"hi"}],"max_tokens":8}'`.
    Pass: HTTP 200, `X-PAIR-Node` is Joes's node id, `X-PAIR-Tier: coder`, `X-PAIR-Model` is the
    assigned profile's served id. `<endpoint>/v1/models` lists `coder` and no `coder-api`.
 4. The Mac's routing history (desktop Routing history table and the TUI routing view) shows the
    request with requested model `coder` served by Joes.
-5. Fallback: note which nodes declare `weak` and their profile lists, then remove `weak` from
-   each of them through the RoleEditor. In the Mac's Advanced policy JSON set
-   `tierPolicy.roleFallback.weak` to `["medium"]` and save. A `weak` request from the Mac returns
-   200 with `X-PAIR-Tier: weak` and `X-PAIR-Model` naming a profile some node declares for
-   `medium`. Set `roleFallback.weak` to `[]`: the same request returns 404 with
-   `no eligible model for tier weak`. Restore the `weak` declarations and set the Mac's
-   `roleFallback.weak` back to `["medium", "strong"]`.
-6. On each router the owner uses (Mac, MSI, Joes), read `tierPolicy.roleFallback` and confirm it
-   matches what the owner wants (the old `allowStronger`/`allowWeaker` values are no longer read).
+5. Default widening unchanged: note which nodes declare `weak` and their profile lists, then
+   remove the profiles from `weak` on each of them through the RoleEditor (the role stays
+   declared, empty). A `weak` request from the Mac returns 200 with `X-PAIR-Tier: weak` and
+   `X-PAIR-Model` naming a profile some node declares for `medium` (the Mac's
+   `allowStronger: true`). Restore the `weak` profile lists.
+6. Custom roles do not fall back: remove the profile from Joes's `coder` (the role stays
+   declared, empty). A `coder` request from the Mac returns 404 `no eligible model for tier coder`
+   although `medium` and `strong` are served. Restore the assignment.
 
 ## Close-out
 - In `plans/2026-10-31-expectation-gaps/00-index.md`, append ` — done <sha>` to the phase 03 row,
@@ -622,12 +569,13 @@ Acceptance on the owner's machines (Mac, Joes, MSI; external, recorded in the va
 - Add a vault entry to `/home/user/wasabi/4. Projects/Personal-AI-Router/WORKLOG.md` with: the
   commit range, the local gate commands with exit codes and final `ok`/`FAIL` lines, any file
   substitution made because phase 04 moved a desktop file, the acceptance results (steps not yet run are
-  marked "pending on machines"), and the remaining limitations: no fallback-list editor in the desktop (deferred; JSON
-  only), the history table does not render the requested role yet (phase 06 Task 4), role names cannot be checked for
+  marked "pending on machines"), and the remaining limitations: custom roles have no fallback (deferred until the owner
+  asks), the history table does not render the requested role yet (phase 06 Task 4), role names cannot be checked for
   collisions with concrete model ids on other nodes.
-- Hand-over: phase 06 (`06-routing-and-apps.md`) relies on `tierRank` meaning "position in the
-  role's fallback chain" and on role names being strings; name the kept identifiers in the
-  WORKLOG entry: `TierPolicy.RoleFallback` (`tierPolicy.roleFallback`), `tierSearchOrder`,
+- Hand-over: phase 06 (`06-routing-and-apps.md`) relies on `tierRank` meaning "position in
+  `tierSearchOrder`" (for a default role the strength widening `allowStronger`/`allowWeaker`
+  allow; for a custom role always 0) and on role names being strings; name the kept identifiers
+  in the WORKLOG entry: `TierPolicy.AllowStronger`/`AllowWeaker` (unchanged), `tierSearchOrder`,
   `tierRank`, `resolveTierCandidates`, `requested.tier`, `X-PAIR-Tier`,
   `nodepolicy.ValidateRoleName`, `DefaultRoles`, `IsDefaultRole`, `MaxRoleNameBytes`; phase 04 builds its role surfaces on
   `roleNames`, `roleNameError` and `DEFAULT_ROLES` from `desktop/src/shared/utils/node-roles.ts`.
@@ -638,9 +586,12 @@ Acceptance on the owner's machines (Mac, Joes, MSI; external, recorded in the va
 - Do not touch the smart-routing scorer, `candidateChoiceLocked`, `reserveRoundPrepared` or the
   scheduler.
 - Do not extend hybrid/API routing, reserved aliases or `routing.tiers` to non-default role names.
-- Do not add compatibility shims: no reading of `allowStronger`/`allowWeaker`, no local-entry
-  routing path, no version bump, no capability marker.
-- Do not change the role-to-profile-list shape from phase 02 or implement any missing phase 02 work.
+- Do not add compatibility shims: no local-entry routing path, no version bump, no capability
+  marker.
+- Do not add fallback for custom roles or change how `allowStronger`/`allowWeaker` widen the
+  default roles.
+- Do not change the role-to-profile-list shape from phase 02a or implement any missing phase 02a
+  or 02b work.
 - Do not edit `desktop/docs/services-api.md` by hand, and do not edit anything in `/home/user/pair-join33`.
 - Do not change history frame limits in `services/shared/jsonrpc`.
 
@@ -651,7 +602,7 @@ Acceptance on the owner's machines (Mac, Joes, MSI; external, recorded in the va
   classify it under the categories in "Context the executor needs" and edit it as that category
   says. A test that fails for another reason is a real regression: fix the code, not the test.
 - Stop and report (do not improvise) when: an entry condition is missing; a maximum-size history record no longer fits the frame;
-  phase 02's role or advertisement shape makes a step here impossible as written; or the gate
+  phase 02a's role or advertisement shape makes a step here impossible as written; or the gate
   still fails after two fix attempts on the same failure.
 
 ## Note lifecycle

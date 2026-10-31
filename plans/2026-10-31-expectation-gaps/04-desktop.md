@@ -12,9 +12,11 @@ PAIR match the owner's model of role to profile to engine on their three
 machines, so that configuring the cluster from one node just works.
 
 This phase's goal (README section 3 T-U, section 5 row 04, owner decisions D4
-and D5 at their defaults): the service starts an engine because a profile on
-this node needs it, not because a user saved it On, and several engines can run
-at once; engine locks and the engine switch disappear from every user-facing
+and D5 at their defaults, debate adjudication F2): the service starts an engine
+because a profile assigned to a role on this node needs it (the assignment turns
+the engine's Start with PAIR on, and the existing non-exclusive start-on-demand
+path starts it), not because a user saved it On, and several engines can run at
+once where the resident cap allows; engine locks and the engine switch disappear from every user-facing
 surface; a peer may resume a pause that a peer made, while a local pause or Halt
 stays local; peers learn of a pause at once instead of after the 15 s poll. On
 the desktop, each node has one settings page, the Overview card shows roles and
@@ -27,9 +29,10 @@ in `## Verification (whole-plan)` pass on the Mac and MSI (and Joes for deploy).
 
 Intent: the owner sees nodes, roles, profiles and models, never engine toggles,
 padlocks or a switch transaction; engines start when a profile needs them.
-Scope: Structural change — activation authority moves from saved engine intent
-to profiles (proxy, broker, engine-manager bound path), the engine lock is
-deleted end to end, and the desktop information architecture is rebuilt from
+Scope: Structural change — role assignments drive saved engine intent
+(broker), which the existing non-exclusive wake path reads (proxy, broker,
+engine-manager), while the exclusive binding path is left unchanged; the engine
+lock is deleted end to end, and the desktop information architecture is rebuilt from
 existing components; leave routing order, scheduling, the estimate and Validate
 (phase 05), smart routing (phase 06) and the engine switch's Go owner unchanged.
 Basis: README section 5 row 04 and decisions D4/D5 (owner defaults); the brief's
@@ -59,45 +62,20 @@ failed; tasks without that condition continue.
 
 | Needed by | Condition | How to observe it | If absent |
 | --- | --- | --- | --- |
-| Tasks 2, 5, 6, 7, 9 | Phase 02 landed (planned in `02-profiles.md`): node-policy profiles carry an `id`, an `engine`, a model identity and a `load`; `Profile.ServedModel()` is the profile id for a profile with a load; `Policy.ProfileByID` and `Policy.ProfileFor(engine, model)` (matching the served model) exist; roles map to ordered lists of profile ids; the advertisement publishes `AdvertisedProfile{ID, Name, Engine, ServedModel, ModelIdentity, ...}`. | Index row 02 ends with ` — done <sha>`; `git grep -nE "func \(pr Profile\) ServedModel|func \(p Policy\) ProfileByID|AdvertisedProfile" services/shared/nodepolicy` shows all three. | Stop Tasks 2, 5, 6, 7, 9 and 10. |
-| Tasks 8, 10 | Phase 03 landed: role names are strings (no `ROLE_TIERS`/`TierOrder` closed set); `RoleEditor` edits role name to profile list; `NodeDeclaredRoles` no longer iterates fixed tiers; `roleNames`, `roleNameError` and `DEFAULT_ROLES` exist in `desktop/src/shared/utils/node-roles.ts`. | Index row 03 ends with ` — done <sha>`; `git grep -n "ROLE_TIERS" desktop/src` prints nothing; `git grep -n -e "export function roleNames" -e "export const DEFAULT_ROLES" desktop/src/shared/utils/node-roles.ts` prints two lines. | Stop Tasks 8 and 10. |
+| All tasks | Phases 02a and 02b landed (`02a-profiles-services.md`, `02b-profiles-desktop-and-import.md`): node-policy profiles carry `key`, `displayName`, `engine`, `model` (the served id, equal to the key for a typed llama.cpp profile) and a model identity; launch settings stay in the engine manager under the same key; `Policy.ProfileByKey` and `Policy.ProfileFor(engine, model)` exist; roles map to ordered, possibly empty lists of profile keys; the advertisement publishes `AdvertisedProfile{Key, DisplayName, Icon, Engine, Model, ModelIdentity, ...}`. In this plan "profile id" means that profile key. | Index rows 02a and 02b end with ` — done <sha>` (02b may carry ` — local gate done <sha>; machine acceptance pending`); `git grep -nE "func \(p Policy\) ProfileByKey|AdvertisedProfile" services/shared/nodepolicy` shows both. | Stop the phase and report. |
+| All tasks | Phase 03 landed (index order 03 → 04): role names are strings (no `ROLE_TIERS`/`TierOrder` closed set); `RoleEditor` edits role name to profile list; `NodeDeclaredRoles` no longer iterates fixed tiers; `roleNames`, `roleNameError` and `DEFAULT_ROLES` exist in `desktop/src/shared/utils/node-roles.ts`. | Index row 03 ends with ` — done <sha>`; `git grep -n "ROLE_TIERS" desktop/src` prints nothing; `git grep -n -e "export function roleNames" -e "export const DEFAULT_ROLES" desktop/src/shared/utils/node-roles.ts` prints two lines. | Stop the phase and report. |
 | Tasks 8, 9 | Phase 01 landed: inventory rows (`ModelItem` in `desktop/src/shared/types/engines.ts`) carry `identity?: ModelIdentity` (repository, quant label, `contentId`) and the desktop has one identity-tag renderer, `ModelIdentityTags`. | Index row 01 ends with ` — done <sha>`; `git grep -n "identity?: ModelIdentity" desktop/src/shared/types/engines.ts` prints a line and `git ls-files desktop/src/ui/components/ModelIdentity/ModelIdentityTags.tsx` prints the path. | Stop Tasks 8 and 9. |
-| Task 10 | Phase 02's deploy exists. Phase 02 decided (its P11) that deploy is a desktop orchestration over existing RPCs, not a new JSON-RPC method: `deployProfileChange` and `targetModelFor` in `desktop/src/shared/utils/node-policy-model-copy.ts`, driven by the "Deploy profile" action of `ModelSettingsCopy.tsx` (copy with `engine:copy-model` when the target lacks the `contentId`, then target preview and apply). | `git grep -nE "deployProfileChange|targetModelFor" desktop/src` shows both, and `git grep -n "Deploy profile" desktop/src/ui/components/ModelSettings/ModelSettingsCopy.tsx` prints a line. | Stop Task 10. |
+| Task 10 | Phase 02b's deploy exists. Phase 02b decided (its P11) that deploy is a desktop orchestration over existing RPCs, not a new JSON-RPC method: `deployProfileChange` and `targetModelFor` in `desktop/src/shared/utils/node-policy-model-copy.ts`, driven by the "Deploy profile" action of `ModelSettingsCopy.tsx` (copy with `engine:copy-model` when the target lacks the `contentId`, then target preview and apply). | `git grep -nE "deployProfileChange|targetModelFor" desktop/src` shows both, and `git grep -n "Deploy profile" desktop/src/ui/components/ModelSettings/ModelSettingsCopy.tsx` prints a line. | Stop Task 10. |
 
-Tasks that may start before phase 02 lands: Tasks 1 and 3 (availability,
-discovery advertisement, toolbar, AppBar and tray). Task 1 shares
-`services/shared/noderec/noderec_test.go` with phase 02 Task 1; whichever lands
-second rebases that test file. Task 4 needs only Tasks 1 and 3, but it edits engine-settings
-desktop files that phase 02 also edits, so start it after phase 02 lands. Tasks
-2, 5, 6 (activation and lock removal) and 7 (settings page) need only phase 02.
-Tasks 8 and 10 also need phase 03. Task 9 needs phase 01 and Task 7.
-
-Ordering with phase 03, which the index allows to run in parallel with this
-phase (the same list is in `03-roles.md`). These paths are in both phases'
-Files lists: `services/shared/noderec/noderec_test.go`,
-`services/shared/nodepolicy/wire_test.go`,
-`services/nvpair-engine-manager/nodeprojection_test.go`,
-`services/nvpair-ui-broker/policy_test.go`, `services/nvpair-ui-broker/README.md`,
-`services/nvpair-proxy/proxy.go`, `services/nvpair-proxy/tiers_test.go`,
-`services/nvpair-proxy/engine_binding_requests_test.go`,
-`services/nvpair-proxy/README.md`, `services/nvpair-proxy/spec.md`,
-`docs/node-availability.mdx`, `desktop/docs/services-api.md`,
-`desktop/docs/services-parity.md`, `desktop/src/ui/stores/node-configuration.store.ts`,
+Phase 04 starts only after phase 03 has landed: there is no early start and no
+parallel run with phase 03. On every path phase 03 also edits (listed in
+`03-roles.md` under its ordering paragraph: among them `services/nvpair-proxy/proxy.go`,
+`services/nvpair-proxy/tiers_test.go`, `desktop/src/ui/stores/node-configuration.store.ts`,
 `desktop/src/ui/components/NodeList/NodeDeclaredRoles.tsx`,
-`desktop/src/ui/components/ModelSettings/ModelSettingsCopy.tsx`,
-`desktop/src/ui/components/RoutingSettings/BulkNodeConfiguration.tsx`,
-`desktop/tests/modular/node-configuration.test.ts`,
-`desktop/tests/modular/node-configuration-bulk.test.ts`,
-`desktop/tests/modular/node-policy.test.ts`,
-`desktop/tests/modular/node-policy-precision.test.ts`,
-`desktop/tests/modular/remote-management.test.tsx`,
-`desktop/tests/modular/model-settings-copy.test.tsx`. Rule: on each shared
-path, the phase whose task lands second rebases onto the other phase's commit
-and re-runs its own task's Verify; neither phase reverts the other's change.
-Tasks 8 and 10 already wait for phase 03. If Task 7 lands before phase 03 Task
-6, phase 03 skips `BulkNodeConfiguration.tsx` and its test (they are deleted);
-if after, Task 7 deletes phase 03's version. `desktop/docs/services-api.md` is
-only regenerated, never merged by hand.
+`desktop/src/ui/components/ModelSettings/ModelSettingsCopy.tsx` and
+`desktop/src/ui/components/RoutingSettings/BulkNodeConfiguration.tsx`), this
+phase builds on phase 03's version and never reverts it.
+`desktop/docs/services-api.md` is only regenerated, never merged by hand.
 
 ## Context the executor needs
 
@@ -221,32 +199,37 @@ delivery between the owner's machines, and the timing of peer exclusion.
 
 ## Decisions made while writing this plan
 
-- Concurrent engines: yes. Bound activation no longer treats another running
-  engine as a conflict; it cold-starts the target beside it. The resident-model
-  cap (`admission.maxResidentModels`, default 1, and `memoryBudgetBytes`) stays the
-  only memory guard; with the default cap, loading on the second engine unloads
-  the first engine's idle model through the existing LRU path, and the idle
-  policy later stops the idle engine. Not "stop the other engine first", because
-  the owner wants engines to coexist when resources allow and the cap already
-  protects memory.
-- The automatic engine switch is removed from bound activation. The switch
-  transaction's Go owner stays (engine-manager `switchexecutor.go`,
+- Role-driven activation uses the existing non-exclusive path, not the binding
+  path (debate adjudication F2). A profile assigned to a role on this node makes
+  its engine's saved intent On: the broker sets it when the role assignment is
+  committed and on policy load for existing assignments. `wakeOnDemand`/`Wake`
+  (`wakesleep.go`) and the proxy's `dormantSelfCandidate` (`self.go`) then start
+  the engine on demand. Not the binding path generalised to profiles, because it
+  refuses (`engine-switch-busy`) or switches away while another engine runs
+  (debate F2: broker `bound_engine.go:95`, `:269`, `:399`; engine-manager
+  `bound_engine.go:39`, `:65`, `:173`; `switchexecutor.go:1156`).
+- Engines may run concurrently where the resident cap allows: the wake path has
+  no cross-engine exclusion (verify-A A6), so a second engine starts beside a
+  running one. The resident-model cap (`admission.maxResidentModels`, default 1,
+  and `memoryBudgetBytes`) stays the only memory guard; with the default cap,
+  loading on the second engine unloads the first engine's idle model through the
+  existing LRU path, and the idle policy later stops the idle engine.
+- The binding path stays exclusive and unchanged for its remaining callers:
+  `runBoundEngine`, the automatic switch, `switchBusyError` and `engineBindings`.
+  The switch transaction's Go owner stays (engine-manager `switchexecutor.go`,
   `switchrelay.go`, `switchremote.go`, `switchwatch.go`; broker `engineswitch*.go`;
-  `services/shared/enginesettings/switch.go`) because engine-settings apply,
-  model-settings apply, build-apply and bound offers use its admission and
-  reservation helpers and `engineswitch_recovery.go` recovers journal rows. The
-  TUI switch screen (`services/nvpair-tui/ui/engine_switch.go`) stays as the
-  operator and recovery surface; the desktop loses every switch control.
-- A profile on this node is activation authority: when the requested model is
-  the served name of a profile whose engine is this facade's engine, the proxy
-  takes the bound preparation path whatever the saved intent. `engineBindings`
-  stays for models that are not profiles and is edited through Advanced policy
-  JSON; its editor (`ModelEngineBindingsEditor.tsx`) is deleted. Retiring
-  `engineBindings` is left for a later plan.
+  `services/shared/enginesettings/switch.go`). The TUI switch screen
+  (`services/nvpair-tui/ui/engine_switch.go`) stays as the operator and recovery
+  surface; the desktop loses every switch control. `engineBindings` is edited
+  through Advanced policy JSON; its editor (`ModelEngineBindingsEditor.tsx`) is
+  deleted. Retiring `engineBindings` is left for a later plan.
 - Saved engine intent is re-purposed as "Start with PAIR" (autostart): it is read
   by `RestoreEnabled`, `Wake` (Resume and idle wake) and resident reconciliation
-  as today, and written only by a new local method `engine:set-autostart` plus
-  the existing install/uninstall reset and switch-journal writes. `engine:start`,
+  as today, and written only by a new local method `engine:set-autostart` (Task
+  2; called by the local desktop and by the broker's role rule, which only turns
+  it On) plus the existing install/uninstall reset and switch-journal writes.
+  While a role on this node uses the engine, the Start with PAIR control shows
+  On and cannot be turned off (Task 5). `engine:start`,
   `engine:stop`, `engine:remote-start`, `engine:remote-stop` and bound activation
   stop writing it. Start with PAIR is local-only in this phase; a peer's page
   shows it read-only with "Start with PAIR is set on the device running the
@@ -283,7 +266,7 @@ delivery between the owner's machines, and the timing of peer exclusion.
   `Breadcrumbs` "Overview" › node name. The Settings tab keeps Cluster and Service;
   "Routing & resources" is removed. Routing history appears on this PC's page only
   (it is this router's history).
-- Deploy to node reuses phase 02's desktop deploy orchestration (its P11: no new
+- Deploy to node reuses phase 02b's desktop deploy orchestration (its P11: no new
   JSON-RPC method), extracted into a hook shared by `ModelSettingsCopy` and the
   Profiles tab, instead of the deploy RPC the batch brief assumed.
 - Profile cards show no measurement state in this phase: phase 05 keeps
@@ -303,8 +286,9 @@ delivery between the owner's machines, and the timing of peer exclusion.
 - Per-engine model lists leave the card in Task 7 and stay in the node settings
   page's engine section until Task 9 replaces them with the Models tab.
 - Packaging: ten tasks. Go tasks 1, 2 and 6 and desktop tasks 3, 4, 7 to 10 are
-  separate; Task 5 (autostart) and Task 6 (lock wire removal) are the contract
-  tasks that change Go and desktop together. Shared docs force the order
+  separate; Task 5 (autostart UI and intent-neutral Start and Stop) and Task 6
+  (lock wire removal) are the contract tasks that change Go and desktop
+  together. Shared docs force the order
   1 → 2 → 5 → 6 on the Go side.
 
 ## Tasks
@@ -366,62 +350,18 @@ delivery between the owner's machines, and the timing of peer exclusion.
    run `npm run service-contracts:write`.
 **Verify:** In `services/nvpair-ui-broker`, `go test -run 'TestPeerResumesPeerPause|TestPeerCannotResumeLocalPause|TestPeerCannotResumeAfterLocalHalt|TestPeerRepeatPauseStillRefused|TestAvailabilityChangeSendsScannerHint' ./...` passes, then `go test ./... && go vet ./...` exit 0. In `services/shared`, `go test ./noderec/...` passes. In `services/nvpair-node-scanner`, `go test ./... && go vet ./...` exit 0. In `services/tests`, `go vet ./...` exits 0. In `desktop`, `npm run service-contracts:check` exits 0.
 
-### Task 2 — Profile-backed requests start their engine beside running engines
-**Files:** services/nvpair-proxy/bound_engine.go, services/nvpair-proxy/bound_engine_test.go, services/nvpair-proxy/self.go, services/nvpair-proxy/proxy.go, services/nvpair-proxy/tiers_test.go, services/nvpair-proxy/README.md, services/nvpair-proxy/spec.md, services/nvpair-ui-broker/bound_engine.go, services/nvpair-ui-broker/bound_engine_test.go, services/nvpair-ui-broker/bound_engine_offers.go, services/nvpair-ui-broker/bound_engine_offers_test.go, services/nvpair-ui-broker/engineswitch.go, services/nvpair-ui-broker/engineswitch_test.go, services/nvpair-ui-broker/README.md, services/nvpair-ui-broker/ENGINE_SETTINGS.md, services/nvpair-engine-manager/bound_engine.go, services/nvpair-engine-manager/bound_engine_test.go, services/nvpair-engine-manager/switchexecutor.go, services/nvpair-engine-manager/switchexecutor_test.go, services/nvpair-engine-manager/README.md, services/nvpair-engine-manager/spec.md, services/tests/engine_binding_test.go, docs/model-engine-bindings.mdx
-**Depends on:** 1 — both edit `services/nvpair-ui-broker/README.md`; also needs the phase 02 entry condition
+### Task 2 — Role assignments turn Start with PAIR on, and the non-exclusive wake path starts role engines
+**Files:** services/nvpair-engine-manager/manager.go, services/nvpair-engine-manager/manager_test.go, services/nvpair-engine-manager/desiredstate.go, services/nvpair-engine-manager/README.md, services/nvpair-engine-manager/spec.md, services/nvpair-ui-broker/role_autostart.go (new), services/nvpair-ui-broker/role_autostart_test.go (new), services/nvpair-ui-broker/policy.go, services/nvpair-ui-broker/modelsettings.go, services/nvpair-ui-broker/README.md, services/nvpair-proxy/self.go, services/nvpair-proxy/tiers.go, services/nvpair-proxy/role_wake_test.go (new), services/nvpair-proxy/spec.md, services/tests/role_activation_test.go (new), docs/model-engine-bindings.mdx
+**Depends on:** 1 — both edit `services/nvpair-ui-broker/README.md` and `policy.go`; also needs the phase entry conditions
 **Complexity:** judgment
 **Do:**
-1. Proxy. Make a profile count as a binding: `boundModel` (`bound_engine.go`)
-   and `boundSelfCandidate` (`self.go`) return true when the current policy has
-   a profile whose engine is `f.profile.Name` and whose served name (phase 02:
-   the profile id) equals the requested model after `normalizeModel`, in
-   addition to the existing `EngineBindings` match. Use phase 02's
-   `Policy.ProfileFor(f.profile.Name, model)` (it matches `Profile.ServedModel()`);
-   do not add a second lookup. For peers, `nodeOffersBinding` treats the peer's
-   advertised `AdvertisedProfile` whose `Engine` is this engine and whose
-   `ServedModel` equals the model as an offer, so a peer's stopped engine is a preparation candidate;
-   keep the existing `PausedBy`, `PolicyRevision` and `ServedModels` checks.
-   Exclude profile models from `dormantSelfCandidate` so one engine is never
-   offered twice for the same request. Keep `resolveConcreteCandidates`
-   ordering (warm before preparation).
-2. Broker. `boundAuthorityLocked` accepts the request when the policy has such a
-   profile or an `EngineBindings` entry (keep the `ServedModels` check).
-   `bound_engine_offers.go` offers profile-backed (engine, served name) pairs the
-   same way it offers bindings, unless phase 02's advertisement already
-   publishes them to peers — then read that and add no second list. In
-   `runBoundEngine`, delete the `len(running) > 1` refusal and the whole
-   automatic-switch branch (protected-resident `no-fit`, dwell, `acceptAutomaticEngineSwitch`,
-   `waitBoundSwitch`); when the target is not running, always take the cold
-   activation branch. After the edit, delete every function and type that
-   `git grep` shows has no remaining non-test caller (expected:
-   `acceptAutomaticEngineSwitch`, `automaticSwitchSubmission`, `boundDwellUntilLocked`,
-   `waitBoundSwitch`; in engine-manager, `automaticSwitchSource` and the
-   automatic-only branches that call it). Keep `acceptEngineSwitch` and the
-   journal and recovery code.
-3. Engine-manager. In `activateBoundEngine`'s `guard`, stop treating another
-   engine's `running` state as busy. Keep refusing when the target itself is
-   `stopping`, and keep the other-engine `reclaimFailed`/`reclaimPID` check only
-   when that engine's reclaim targets the same port as the target (otherwise
-   drop it). Keep `admitBoundEngineMutation`.
-4. Tests (add): proxy `TestProfileModelNeedsBoundPreparation` (profile on this
-   node, engine saved Off and stopped → `needsBoundPreparation` true) and
-   `TestPeerProfileOfferIsPreparationCandidate` in `bound_engine_test.go`;
-   broker `TestBoundEngineColdActivatesBesideRunningEngine` (another engine
-   running → cold activation, no switch submitted) in `bound_engine_test.go`;
-   engine-manager `TestActivateBoundEngineAdmitsWithOtherEngineRunning` in
-   `bound_engine_test.go`. Rewrite each existing test that asserts
-   `engine-switch-busy` for two running engines to assert cold activation beside
-   the running engine; delete a test only when its sole subject is the removed
-   automatic switch.
-   Extend `services/tests/engine_binding_test.go` with a profile-backed request
-   that starts a stopped engine while another engine runs.
-5. Docs: `docs/model-engine-bindings.mdx` opens with "A profile starts its engine
-   when a request needs it" and states that bindings remain for models that are
-   not profiles and that engines run concurrently under the resident-model cap;
-   update the one-running-engine statements in proxy `spec.md`/`README.md`,
-   broker `README.md`/`ENGINE_SETTINGS.md` ("Engine switching": manual only, TUI)
-   and engine-manager `README.md`/`spec.md`.
-**Verify:** `go test -run 'TestProfileModelNeedsBoundPreparation|TestPeerProfileOfferIsPreparationCandidate' ./...` passes in `services/nvpair-proxy`; `go test -run TestBoundEngineColdActivatesBesideRunningEngine ./...` passes in `services/nvpair-ui-broker`; `go test -run TestActivateBoundEngineAdmitsWithOtherEngineRunning ./...` passes in `services/nvpair-engine-manager`; then `go test ./... && go vet ./...` exit 0 in each of those three modules and in `services/shared`; `go vet ./...` exits 0 in `services/tests`; `git grep -n "acceptAutomaticEngineSwitch" -- services` prints nothing.
+1. Engine-manager: add `engine:set-autostart` to the request switch (`manager.go`): params `{"engine": "<manager name>", "enabled": true|false}`, local clients only (refuse a call that arrives through the peer relay), writes the saved intent with origin local through `setDesiredEnabled` (`desiredstate.go`), emits `engine:intent-changed` through `emitIntent`, and replies with the intent snapshot (`engine:intent` shape). It does not start or stop the engine. The broker's generic `engine:*` relay forwards it for local clients; do not add it to `internalClientMethods`.
+2. Broker, `role_autostart.go`: `roleEngines(p nodepolicy.Policy) []string` returns the sorted distinct engines of the profiles named in any non-empty role list of this node's policy. `ensureRoleAutostart(p nodepolicy.Policy)` calls `engine:set-autostart {engine, enabled: true}` on the local engine manager for each such engine whose saved intent in the runtime's `intent` map is not On (Off or unknown); it never sends `enabled: false`, logs a failure and leaves the retry to the next trigger. Triggers (debate adjudication F2): after every successful persist of this node's policy (`setLocalPolicy`, `setPeerPolicyAs` in `policy.go` and `commitModelPolicyLocked` in `modelsettings.go`; call it after the persist, outside the policy lock), and on policy load for existing assignments (after `loadNodePolicy`, once the engine manager connection is up).
+3. Proxy: `dormantSelfCandidate` (`self.go:80-110`) already offers this node's stopped engine for a model covered by one of its profiles when the engine is saved On and `Idle.StartOnDemand` holds, and `wakeOnDemand` (broker `idlepolicy.go`) and `Wake` (engine-manager `wakesleep.go`) start it with no cross-engine exclusion. Confirm with the test below that a role request whose candidate is a profile on this node's stopped engine reaches it. If the role path in `tiers.go` does not consult `dormantSelfCandidate`, make `resolveTierCandidates` offer the dormant self candidate for a stopped engine whose profile is in the requested role on this node, by calling `dormantSelfCandidate`; add no second profile lookup.
+4. Leave the binding path unchanged for its remaining callers: `runBoundEngine`, the automatic switch, `activateBoundEngine`'s `switchBusyError` guard and `engineBindings` keep their behaviour.
+5. Tests (add): engine-manager `TestSetAutostartWritesIntentOnly` and `TestSetAutostartRefusedFromPeer` in `manager_test.go`; broker `TestRoleAssignmentSetsAutostart` in `role_autostart_test.go` (a commit that assigns a profile of an engine saved Off to `medium` sends one `engine:set-autostart` with `enabled: true` for that engine; a commit whose roles are all empty sends none; no call ever carries `false`) and `TestPolicyLoadSetsRoleAutostart`; proxy `TestRoleProfileWakesStoppedEngineBesideRunning` in `role_wake_test.go` (this node's `medium` profile on stopped engine A saved On while engine B runs: a `medium` request wakes A and is served by A; B keeps running); cross-process `TestRoleProfileStartsStoppedEngine` in `services/tests/role_activation_test.go` (a node's engine is stopped and saved Off; assigning its profile to `medium` turns Start with PAIR On, and a `medium` request to that node starts the engine and is answered).
+6. Docs: `docs/model-engine-bindings.mdx` opens with "A profile assigned to a role turns on Start with PAIR for its engine, so the engine starts when a request needs it, beside other running engines within the resident-model cap" and states that engine bindings remain the exclusive, one-engine-at-a-time path for models that are not profiles; broker `README.md` documents the role rule; engine-manager `README.md`/`spec.md` add `engine:set-autostart` to the method table; proxy `spec.md` states that role requests wake stopped role engines through the start-on-demand path.
+**Verify:** `go test -run TestRoleProfileWakesStoppedEngineBesideRunning ./...` passes in `services/nvpair-proxy`; `go test -run 'TestRoleAssignmentSetsAutostart|TestPolicyLoadSetsRoleAutostart' ./...` passes in `services/nvpair-ui-broker`; `go test -run 'TestSetAutostartWritesIntentOnly|TestSetAutostartRefusedFromPeer' ./...` passes in `services/nvpair-engine-manager`; then `go test ./... && go vet ./...` exit 0 in each of those three modules and in `services/shared`; `cd services/tests && go vet ./... && go test -run TestRoleProfileStartsStoppedEngine ./...` exits 0; `git diff --stat <base> -- services/nvpair-ui-broker/bound_engine.go services/nvpair-engine-manager/bound_engine.go services/nvpair-proxy/bound_engine.go` prints nothing, where `<base>` is the commit before this task.
 
 ### Task 3 — Toolbar Halt and Resume with AppBar and tray state
 **Files:** desktop/src/ui/components/MainApp/HaltControl.tsx (new), desktop/src/ui/components/MainApp/ContentBar.tsx, desktop/src/ui/components/MainApp/MainApp.tsx, desktop/src/ui/components/AppBar/AppBar.tsx, desktop/src/ui/components/NodeList/NodeAvailabilityControls.tsx, desktop/src/electron/tray.ts, desktop/src/electron/service-bridge/node-availability.ts, desktop/src/shared/types/node-policy.ts, desktop/tests/modular/halt-control.test.tsx (new), desktop/tests/modular/node-availability-controls.test.tsx, desktop/tests/modular/node-availability.test.ts, desktop/tests/modular/stop-pause-contract.test.ts, desktop/docs/architecture.md, desktop/docs/frontend-api.md, README.md, docs/overview.mdx
@@ -503,8 +443,8 @@ delivery between the owner's machines, and the timing of peer exclusion.
 **Verify:** In `desktop`: `npm run lint && npm run typecheck && npm run test:unit && npm run dead-code:check && npm run service-contracts:check` exit 0; `git grep -nE "setLock|EngineLockControl|ENGINE_LOCKED|engine-locked|engine_locked|EngineSwitchControls|useEngineSwitchStore|engines:switch" -- desktop/src desktop/tests` prints nothing.
 
 ### Task 5 — Engine Start and Stop stop writing saved intent; Start with PAIR becomes a setting
-**Files:** services/nvpair-engine-manager/lifecycle.go, services/nvpair-engine-manager/desiredstate.go, services/nvpair-engine-manager/desiredstate_test.go, services/nvpair-engine-manager/wakesleep.go, services/nvpair-engine-manager/wakesleep_test.go, services/nvpair-engine-manager/controllifecycle.go, services/nvpair-engine-manager/manager.go, services/nvpair-engine-manager/manager_test.go, services/nvpair-engine-manager/README.md, services/nvpair-engine-manager/spec.md, services/nvpair-ui-broker/idlepolicy.go, services/nvpair-tui/ui/engineswire.go, services/nvpair-tui/ui/engineswire_test.go, services/tests/off_origin_test.go, desktop/src/shared/types/ws-channels.ts, desktop/src/electron/service-bridge/empty-handlers.ts, desktop/src/ui/api/engine-api.ts, desktop/src/ui/components/BackendRow/EngineSettingsSection.tsx, desktop/tests/modular/engine-autostart.test.tsx (new), desktop/tests/modular/engine-intent.test.ts, desktop/docs/frontend-api.md, desktop/docs/services-api.md, docs/node-availability.mdx, docs/terminal-interface.mdx
-**Depends on:** 2, 4 — task 2 also edits the engine-manager README and spec; task 4 also edits the desktop channel map, bridge handlers, renderer API, `EngineSettingsSection.tsx` and generated docs
+**Files:** services/nvpair-engine-manager/lifecycle.go, services/nvpair-engine-manager/desiredstate.go, services/nvpair-engine-manager/desiredstate_test.go, services/nvpair-engine-manager/wakesleep.go, services/nvpair-engine-manager/wakesleep_test.go, services/nvpair-engine-manager/controllifecycle.go, services/nvpair-engine-manager/README.md, services/nvpair-engine-manager/spec.md, services/nvpair-ui-broker/idlepolicy.go, services/nvpair-tui/ui/engineswire.go, services/nvpair-tui/ui/engineswire_test.go, services/tests/off_origin_test.go, desktop/src/shared/types/ws-channels.ts, desktop/src/electron/service-bridge/empty-handlers.ts, desktop/src/ui/api/engine-api.ts, desktop/src/ui/components/BackendRow/EngineSettingsSection.tsx, desktop/tests/modular/engine-autostart.test.tsx (new), desktop/tests/modular/engine-intent.test.ts, desktop/docs/frontend-api.md, desktop/docs/services-api.md, docs/node-availability.mdx, docs/terminal-interface.mdx
+**Depends on:** 2, 4 — task 2 adds `engine:set-autostart` and also edits the engine-manager README, spec and `desiredstate.go`; task 4 also edits the desktop channel map, bridge handlers, renderer API, `EngineSettingsSection.tsx` and generated docs
 **Complexity:** judgment
 **Do:**
 1. Engine-manager: `StartWith` no longer calls `setDesiredEnabled` after a
@@ -514,37 +454,34 @@ delivery between the owner's machines, and the timing of peer exclusion.
    covers local `engine:start`/`engine:stop`, `engine:remote-start`/`engine:remote-stop`
    (`controllifecycle.go`) and bound activation. `RestoreEnabled`, `Wake` and the
    switch executor's journal writes keep their current reads and writes.
-2. Add `engine:set-autostart` to the engine-manager request switch
-   (`manager.go`): params `{"engine": "<manager name>", "enabled": true|false}`,
-   local clients only (refuse a call that arrives through the peer relay), writes
-   the saved intent with origin local, emits `engine:intent-changed` through
-   `emitIntent`, and replies with the intent snapshot (`engine:intent` shape). It
-   does not start or stop the engine. The broker's generic `engine:*` relay
-   forwards it; do not add it to `internalClientMethods`.
+2. `engine:set-autostart` exists since Task 2; this task adds its desktop
+   caller (step 4).
 3. Rename the user-facing wording of saved intent to "Start with PAIR": TUI
    `engineswire.go` labels " (saved Off, local)"/" (saved Off, by peer)"/
    " (saved Off)" become " (not started with PAIR)"; update its tests.
-   `idlepolicy.go` header comment: a stopped engine keeps Start with PAIR, and
-   profile requests start any engine through the bound path.
+   `idlepolicy.go` header comment: a stopped engine keeps Start with PAIR, and a
+   role assignment on this node keeps Start with PAIR On for its engine (Task 2),
+   so role requests start it through start-on-demand.
 4. Desktop: channel `'engines:set-autostart': { request: { engineType: EngineType; enabled: boolean }; response: EngineIntentSnapshot | null }`
    in `ws-channels.ts`; handler in `empty-handlers.ts` calling the broker with
    `engine:set-autostart` (manager name via `engineManagerName`); renderer method
    `setAutostart(engineType, enabled)` in `ui/api/engine-api.ts`. In
    `EngineSettingsSection.tsx` add a KUI `Checkbox` "Start with PAIR" bound to the
-   local intent from `engine-status.store` (`intent`), local node only; remote
-   nodes show the text "Start with PAIR is set on the device running the engine."
-   Add `engine-autostart.test.tsx` (checkbox reflects intent, toggling sends one
-   request, remote shows the text) and update `engine-intent.test.ts`.
+   local intent from `engine-status.store` (`intent`), local node only; when this
+   node's policy assigns a profile of this engine to a non-empty role, the
+   checkbox is checked and disabled with the text "On because a role on this node
+   uses this engine."; remote nodes show the text "Start with PAIR is set on the
+   device running the engine." Add `engine-autostart.test.tsx` (checkbox reflects
+   intent, toggling sends one request, a role-used engine shows the disabled
+   state, remote shows the text) and update `engine-intent.test.ts`.
 5. Tests (Go): `TestStartDoesNotChangeSavedIntent` and
-   `TestStopDoesNotChangeSavedIntent` in `desiredstate_test.go`;
-   `TestSetAutostartWritesIntentOnly` and `TestSetAutostartRefusedFromPeer` in
-   `manager_test.go`; update `services/tests/off_origin_test.go` to the new
+   `TestStopDoesNotChangeSavedIntent` in `desiredstate_test.go`; update `services/tests/off_origin_test.go` to the new
    meaning (Stop no longer records Off).
 6. Docs: `docs/node-availability.mdx` replaces "Saved Off no longer blocks a
    granted peer" with a "Start with PAIR" section; `docs/terminal-interface.mdx`
    saved-intent passage; engine-manager `README.md`/`spec.md` method table;
    `desktop/docs/frontend-api.md`; then `npm run service-contracts:write`.
-**Verify:** In `services/nvpair-engine-manager`: `go test -run 'TestStartDoesNotChangeSavedIntent|TestStopDoesNotChangeSavedIntent|TestSetAutostartWritesIntentOnly|TestSetAutostartRefusedFromPeer' ./...` passes, then `go test ./... && go vet ./...` exit 0; the same pair exits 0 in `services/nvpair-ui-broker` and `services/nvpair-tui`; `go vet ./...` exits 0 in `services/tests`; in `desktop`, `npm run lint && npm run typecheck && npm run test:unit && npm run dead-code:check && npm run service-contracts:check` exit 0.
+**Verify:** In `services/nvpair-engine-manager`: `go test -run 'TestStartDoesNotChangeSavedIntent|TestStopDoesNotChangeSavedIntent' ./...` passes, then `go test ./... && go vet ./...` exit 0; the same pair exits 0 in `services/nvpair-ui-broker` and `services/nvpair-tui`; `go vet ./...` exits 0 in `services/tests`; in `desktop`, `npm run lint && npm run typecheck && npm run test:unit && npm run dead-code:check && npm run service-contracts:check` exit 0.
 
 ### Task 6 — Engine locks are removed from services, TUI, build-apply evidence and docs
 **Files:** services/nvpair-engine-manager/enginelock.go (delete), services/nvpair-engine-manager/enginelock_test.go (delete), services/nvpair-engine-manager/desiredstate.go, services/nvpair-engine-manager/desiredstate_test.go, services/nvpair-engine-manager/nodeprojection.go, services/nvpair-engine-manager/nodeprojection_test.go, services/nvpair-engine-manager/controllifecycle.go, services/nvpair-engine-manager/executor.go, services/nvpair-engine-manager/manager.go, services/nvpair-engine-manager/remoteclient.go, services/nvpair-engine-manager/remoteclient_test.go, services/nvpair-engine-manager/residency.go, services/nvpair-engine-manager/residency_test.go, services/nvpair-engine-manager/status.go, services/nvpair-engine-manager/wakesleep.go, services/nvpair-engine-manager/switchexecutor.go, services/nvpair-engine-manager/switchexecutor_test.go, services/nvpair-engine-manager/owner_evidence.go, services/nvpair-engine-manager/owner_evidence_test.go, services/nvpair-engine-manager/bound_engine_test.go, services/nvpair-engine-manager/modelcopy_control_test.go, services/nvpair-engine-manager/modelsettings_load_test.go, services/nvpair-engine-manager/pausegate_test.go, services/nvpair-engine-manager/policyrelay_test.go, services/nvpair-engine-manager/settingsremote_test.go, services/nvpair-engine-manager/stop_pause_test.go, services/nvpair-engine-manager/README.md, services/nvpair-engine-manager/spec.md, services/nvpair-ui-broker/bound_engine.go, services/nvpair-ui-broker/bound_engine_test.go, services/nvpair-ui-broker/bound_engine_offers.go, services/nvpair-ui-broker/modelsettings.go, services/nvpair-ui-broker/modelsettings_contract_test.go, services/nvpair-ui-broker/build_apply.go, services/nvpair-ui-broker/build_apply_test.go, services/nvpair-ui-broker/engineswitch.go, services/nvpair-ui-broker/engineswitch_test.go, services/nvpair-ui-broker/README.md, services/nvpair-ui-broker/ENGINE_SETTINGS.md, services/nvpair-proxy/bound_engine.go, services/nvpair-proxy/engine_binding_requests_test.go, services/nvpair-proxy/README.md, services/nvpair-proxy/spec.md, services/nvpair-service/build_apply_run.go, services/nvpair-service/build_apply_preview_test.go, services/shared/buildapply/engine_owner.go, services/shared/buildapply/engine_owner_test.go, services/shared/buildapply/wire.go, services/shared/enginesettings/switch.go, services/shared/enginesettings/switch_test.go, services/shared/nodepolicy/bound_engine.go, services/shared/nodepolicy/wire.go, services/shared/nodepolicy/wire_test.go, services/nvpair-tui/ui/engine_switch.go, services/nvpair-tui/ui/engine_switch_test.go, services/nvpair-tui/ui/engineswire.go, services/nvpair-tui/ui/engineswire_test.go, services/nvpair-tui/ui/nodedetail.go, services/nvpair-tui/ui/settingswire.go, services/nvpair-tui/README.md, services/tests/engine_binding_test.go, services/tests/off_origin_test.go, services/tests/remote_configuration_test.go, services/tests/stop_pause_controls_test.go, docs/architecture.mdx, docs/local-qualification.mdx, docs/model-engine-bindings.mdx, docs/node-availability.mdx, docs/terminal-interface.mdx, desktop/src/shared/types/build-apply.ts, desktop/src/electron/service-bridge/build-apply.ts, desktop/src/electron/build-apply/index.ts, desktop/src/ui/components/ServiceSettings/BuildApplyPreview.tsx, desktop/tests/modular/build-apply-contract.test.ts, desktop/tests/modular/build-apply-ui.test.tsx, desktop/tests/modular/build-apply-reconnect.test.ts, desktop/tests/modular/build-apply-status.test.ts, desktop/docs/services-api.md
@@ -589,7 +526,7 @@ delivery between the owner's machines, and the timing of peer exclusion.
 
 ### Task 7 — One settings page per node replaces Routing and resources and the card's engine settings
 **Files:** desktop/src/ui/components/NodeSettings/NodeSettingsPage.tsx (new), desktop/src/ui/components/NodeSettings/NodePolicyJsonEditor.tsx (new), desktop/src/ui/components/NodeSettings/NodeEnginesSection.tsx (new), desktop/src/ui/components/RoutingSettings/RoutingSettings.tsx (delete), desktop/src/ui/components/RoutingSettings/BulkNodeConfiguration.tsx (delete), desktop/src/ui/components/RoutingSettings/ModelEngineBindingsEditor.tsx (delete), desktop/src/ui/components/NodeList/NodeEngineSettings.tsx (delete), desktop/src/ui/components/NodeList/NodeCardDetails.tsx, desktop/src/ui/components/NodeList/NodeEnginesInline.tsx, desktop/src/ui/components/NodeList/NodeAvailabilityControls.tsx, desktop/src/ui/components/BackendRow/BackendRow.tsx, desktop/src/ui/components/BackendRow/BackendHeader.tsx, desktop/src/ui/components/BackendRow/EngineSettingsSection.tsx, desktop/src/ui/components/Settings.tsx, desktop/src/ui/types/settings-window.ts, desktop/src/ui/stores/overview-ui.store.ts, desktop/src/ui/stores/node-configuration.store.ts, desktop/src/ui/components/MainApp/Content.tsx, desktop/src/ui/components/ClusterSettings/ActiveNode.tsx, desktop/src/ui/components/Welcome/WelcomeModal.tsx, desktop/src/ui/hooks/useOverviewCommands.ts, desktop/tests/modular/node-settings-page.test.tsx (new), desktop/tests/modular/routing-settings-pause.test.tsx (delete), desktop/tests/modular/model-engine-bindings-editor.test.tsx (delete), desktop/tests/modular/node-configuration-bulk.test.ts (delete), desktop/tests/modular/node-availability-controls.test.tsx, desktop/tests/modular/remote-management.test.tsx, desktop/tests/modular/model-settings-panel.test.tsx, desktop/tests/modular/node-configuration.test.ts, desktop/tests/modular/node-policy-precision.test.ts, desktop/tests/modular/service-build-identity.test.tsx, desktop/tests/modular/lmstudio-credential.test.ts, desktop/tests/modular/engine-settings-state.test.ts, desktop/docs/architecture.md, docs/overview.mdx
-**Depends on:** 1, 3, 4, 5 — task 1 provides the peer Resume semantics shown here; tasks 3 and 4 also edit `NodeAvailabilityControls.tsx`, `NodeEnginesInline.tsx`, `BackendRow.tsx` and the docs; task 5 adds Start with PAIR to `EngineSettingsSection.tsx`; also needs the phase 02 entry condition
+**Depends on:** 1, 3, 4, 5 — task 1 provides the peer Resume semantics shown here; tasks 3 and 4 also edit `NodeAvailabilityControls.tsx`, `NodeEnginesInline.tsx`, `BackendRow.tsx` and the docs; task 5 adds Start with PAIR to `EngineSettingsSection.tsx`; also needs the phase 02a and 02b entry condition
 **Complexity:** judgment
 **Do:**
 1. Navigation state: in `overview-ui.store.ts` replace `focusNodeId`,
@@ -602,7 +539,7 @@ delivery between the owner's machines, and the timing of peer exclusion.
 2. `Content.tsx`: on the Overview tab, render `NodeSettingsPage` instead of the
    overview body while `nodeSettingsId` is set.
 3. `NodeSettingsPage.tsx`, composed in this order (each existing component as
-   it is after phases 02/03 unless stated): KUI `PageHeader` with `Breadcrumbs`
+   it is after phases 02a, 02b and 03 unless stated): KUI `PageHeader` with `Breadcrumbs`
    "Overview" (calls `closeNodeSettings`) › node name; `NodeAvailabilityControls`;
    `RoleEditor`; profiles on this node (`ModelSettingsPanel` with the props
    `RoutingSettings` passed); `NodeEnginesSection`; `NodePolicyJsonEditor`;
@@ -653,7 +590,7 @@ delivery between the owner's machines, and the timing of peer exclusion.
    name, then each profile in the role's ordered list as its display name plus
    the identity tags rendered by phase 01's tag component (repository and quant);
    a profile whose engine is not running gets a "Starts on request" tag. Read
-   from the advertisement in `discovered-nodes.store` exactly as phases 02/03
+   from the advertisement in `discovered-nodes.store` exactly as phases 02b and 03
    left it; no new store.
 3. `NodeCardDetails.tsx` keeps: chart, `NodeLabel`, `NodeEnginesInline`,
    `NodeDeclaredRoles`, `NodeAvailabilityControls`, service build, performance,
@@ -702,20 +639,23 @@ delivery between the owner's machines, and the timing of peer exclusion.
 
 ### Task 10 — Profiles tab shows profile cards, their usage and Deploy to node
 **Files:** desktop/src/ui/components/Profiles/ProfilesView.tsx (new), desktop/src/ui/components/Profiles/ProfileCard.tsx (new), desktop/src/ui/components/Profiles/DeployProfileModal.tsx (new), desktop/src/ui/hooks/useProfileDeploy.ts (new), desktop/src/ui/components/ModelSettings/ModelSettingsCopy.tsx, desktop/tests/modular/model-settings-copy.test.tsx, desktop/src/ui/utils/profile-summary.ts (new), desktop/src/ui/components/MainApp/ContentBar.tsx, desktop/src/ui/components/MainApp/Content.tsx, desktop/src/shared/types/overview.ts, desktop/tests/modular/profile-summary.test.ts (new), desktop/tests/modular/profiles-view.test.tsx (new), desktop/docs/architecture.md, docs/overview.mdx
-**Depends on:** 7, 9 — task 9 also edits the tab files and `architecture.md`; task 7 also edits `docs/overview.mdx`; also needs the phase 02 and 03 entry conditions
+**Depends on:** 7, 9 — task 9 also edits the tab files and `architecture.md`; task 7 also edits `docs/overview.mdx`; also needs the phase 02a, 02b and 03 entry conditions
 **Complexity:** judgment
 **Do:**
 1. Data: read every node's advertised profiles (`AdvertisedProfile`) and roles
-   from the projection phases 02/03 left in `discovered-nodes.store` (this PC's
-   from its policy read as those phases do). Group cards by profile id. Usage =
-   every (node, role name) whose role list contains the profile id. Load
-   settings come from node policy reads where readable (this PC, and peers whose
-   management is allowed, through the existing `node-configuration.store` policy
-   read); for other peers the card shows the advertised `ContextTokens` only. No
-   new store; when phase 02 left no renderer projection of advertised profiles,
-   stop and report (that projection belongs to phase 02).
+   from the projection phases 02b/03 left in `discovered-nodes.store` (this PC's
+   from its policy read as those phases do). Group cards by profile key. Usage =
+   every (node, role name) whose role list contains the profile key. Load
+   settings come from each node's engine settings, where launch settings live
+   (debate adjudication F3): the existing `engine-settings.store` entries keyed
+   `${nodeId}:${engine}`, read through the settings relay for this PC and for
+   peers whose management is allowed, matched to the profile by
+   `ModelLoad.profileKey`; for other peers the card shows the advertised
+   `ContextTokens` only. No new store; when phase 02b left no renderer
+   projection of advertised profiles, stop and report (that projection belongs to
+   phase 02b).
 2. `profile-summary.ts`: for profiles sharing one model identity, return the
-   `load` keys whose values differ (for example context, GPU layers,
+   typed load fields (`ModelLoad.requested`) whose values differ (for example context, GPU layers,
    `n-cpu-moe`), formatted as short `key value` strings; pure, unit-tested.
    Profiles without a readable load are left out of the comparison.
 3. `ProfileCard.tsx`: KUI `Card` with icon (when set), name, identity tags,
@@ -784,7 +724,8 @@ observed-pass, observed-fail or untested in the vault `Validation/` folder):
 - Add a vault entry to `/home/user/wasabi/4. Projects/Personal-AI-Router/WORKLOG.md`
   listing: commits per task, the local gate results, the machine-acceptance
   rows with their state, the remaining limitations (pause hint depends on
-  multicast; Start with PAIR is local-only; `engineBindings` still exists; the
+  multicast; Start with PAIR is local-only and a role assignment turns it On;
+  bindings stay exclusive; `engineBindings` still exists; the
   TUI still shows the engine switch; tray popup shows no pause state), and the
   hand-over: phase 05 may now change the refusal that used `-32013`; phase 05
   treats a local-origin pause (`pausedLocally` in `engine:node-projection`,
@@ -818,12 +759,12 @@ observed-pass, observed-fail or untested in the vault `Validation/` folder):
 
 - A failing check after a Do step is safe to retry after fixing the code; a
   flaky cross-process test is retried once and then reported with its output.
-- If phase 02's profile or deploy symbols differ from what Task 2 and Task 10
-  assume, adapt to phase 02's names; if the concept is missing (no profile id,
-  no deploy orchestration), stop the affected task and report.
-- If removing the bound path's other-engine guard (Task 2) breaks a switch or
-  settings-apply invariant that a test protects, stop and report the test and
-  invariant; do not re-add the sole-running refusal.
+- If phase 02a's or 02b's profile or deploy symbols differ from what Task 2
+  and Task 10 assume, adapt to their names; if the concept is missing (no
+  profile key, no deploy orchestration), stop the affected task and report.
+- If a role request on this node cannot reach `dormantSelfCandidate` without a
+  second profile lookup (Task 2 step 3), stop and report the call path; do not
+  route role activation through the binding path.
 - If the browse-event path cannot refetch a peer's policy without a larger
   scanner change (Task 1 step 4), land steps 1 to 3 and report the gap; the
   15 s sweep still applies.
