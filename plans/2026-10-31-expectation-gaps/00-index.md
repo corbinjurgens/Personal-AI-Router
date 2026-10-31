@@ -1,0 +1,98 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Execution plan index: PAIR expectation gaps batch
+
+Entry point for the batch described in `README.md` (causes, recommendations,
+owner decisions). This index routes execution; it holds no executable tasks.
+Each phase file is a self-contained, session-sized plan in the execution-plan
+format, written against `integration/join33` at `4eccd05d` (2026-10-31).
+Executors base their branch on current `origin/integration/join33` and re-read
+the source before implementing: the files are authoritative over the plans.
+
+## Status
+
+The owner has not yet approved or ordered the phases. Until they do, this
+folder is a proposal. Approval means: the owner edits `README.md` section 6
+(decisions) where they disagree, deletes or reorders phase rows below, and
+says so in the vault. Each approved phase then follows the owner's existing
+convention: debate, execute, audit.
+
+## Phases and order
+
+| Phase | File | Entry conditions | Size | Status |
+| --- | --- | --- | --- | --- |
+| 01 | `01-identity-and-unblock.md` | none (baseline) | medium | proposed |
+| 02 | `02-profiles.md` | 01 landed | large | proposed |
+| 03 | `03-roles.md` | 02 landed | medium to large | proposed |
+| 04 | `04-desktop.md` | 02 landed; 03 for the roles editor and Profiles tab | large | proposed |
+| 05 | `05-estimate-and-validate.md` | 01 and 02 landed; 04 lock removal for one refusal change | large | proposed |
+| 06 | `06-routing-and-apps.md` | 01, 02, 03 landed; 04 surfaces for the Apps group | medium | proposed |
+
+Dependency graph (acyclic): 01 -> 02 -> {03, 04, 05}; 03 -> 06; 04 -> 06 (Apps
+group only); 05 -> 06 (optional: measured speeds). 03 and 04 may run in
+parallel after 02 where their files are disjoint; each phase file names the
+tasks that may start early.
+
+## Owner decisions this batch assumes
+
+`README.md` section 6: D1 user-defined role names with defaults and fallback
+lists; D2 profiles live in node policy with the engine manager keyed by profile
+id; D3 MSI and Joes presets are imported into profiles once; D4 engine toggles,
+locks and the switch UI are removed in favour of role-driven activation; D5
+Halt is the existing immediate local pause, promoted and renamed, local-only;
+D6 any llama.cpp build is accepted and `build_info` is recorded. A changed
+decision requires amending the affected phase before it is executed.
+
+## Whole-plan acceptance (external; keeps this index open)
+
+All on the owner's machines, after the last phase lands, recorded in the vault
+(`WORKLOG.md` and a Validation folder):
+
+1. From the Mac, with no hand-edited file on any node: create a profile for
+   `unsloth/LFM2.5-24B-A2B-GGUF` `UD-Q4_K_XL` at 64k context, deploy it to the
+   `weak` role on MSI and Joes (model copy included), and see both nodes show
+   the identity tags, never the preset section names.
+2. Models tab shows Tiel 35B on MSI and Joes as one model with two locations;
+   Profiles tab shows which node and role use each profile.
+3. A `medium` request from the Mac goes to idle warm Joes and, with Joes busy,
+   to MSI; routing history explains the choice; `/v1/models` lists each role
+   with its highest `context_length`.
+4. Halt from the toolbar on Joes removes it from routing within one request
+   retry and cannot be undone from the Mac.
+5. Measure a profile on MSI from the Mac: consent preview with the resource
+   rundown, then a record bound to the GGUF, `build_info`, GPU, CPU and RAM,
+   with the estimate's ranges shown beside the measured values.
+6. No engine toggles or padlocks anywhere; node settings reachable from the
+   card in one click.
+
+## Retention rule
+
+This index stays until every phase file carries its `done` marks and the
+whole-plan acceptance above is recorded. "The last item" in the lifecycle
+section below means that full condition, not the last code task. Pending
+external acceptance keeps this index open after the code phases finish. When a
+phase file is deleted under its own lifecycle, replace its link in the table
+with the commit range that landed it.
+
+## Investigation evidence
+
+`investigation/L1.md` to `L8.md` are the finder reports; `verify-A.md` and
+`verify-B.md` are the adversarial verification passes. They are snapshots at
+`4eccd05d` and are not updated as code changes.
+
+## Note lifecycle
+
+This file is working state in a repository, not documentation.
+
+- When an item lands, append ` — done <sha>` to its heading, where
+  `<sha>` is the commit that landed it. An item consciously dropped gets
+  ` — dropped` and a `project-note deferred` entry.
+- When every item carries one of those marks, delete this file in the
+  commit that lands the last item. Nothing in it is kept: the commits and
+  the run archive are the record, and `project-note done` records the
+  completion.
+- In an execute run the orchestrator does this after each unit lands,
+  not the unit. A plain session does it as each item lands.
