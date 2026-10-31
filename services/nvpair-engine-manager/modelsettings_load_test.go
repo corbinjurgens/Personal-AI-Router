@@ -1395,6 +1395,21 @@ func TestModelSettingsLoadConversionRejectsCompleteRouter(t *testing.T) {
 	test("unified KV", "kv-unified = true\n")
 }
 
+func TestModelSettingsLoadConversionRefusesCPUExpertPlacement(t *testing.T) {
+	f := newModelLoadFixture(t)
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, f.source, append(data, []byte("\nn-cpu-moe = 38\n")...))
+	_, err = f.ex.previewTypedLlamaConversion(context.Background(), f.st, f.command, f.rt)
+	var typed *ServingFieldError
+	if !errors.As(err, &typed) || typed.Field != "modelLoads.n-cpu-moe" {
+		t.Fatalf("want n-cpu-moe field refusal, got %v", err)
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
 func TestModelSettingsLoadFiniteValidation(t *testing.T) {
 	layers := int32(4)
 	test := func(name string, r modelconfig.RequestedLoad, field string) {

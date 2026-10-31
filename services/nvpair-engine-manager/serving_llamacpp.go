@@ -261,8 +261,9 @@ type llamaServingOption struct {
 // the parser's LLAMA_ARG_NO_ compatibility names for paired boolean switches.
 // Other native options pass through unchanged. Unsupported controls also fail
 // in presets; local model/draft paths and disabled startup loading are exceptions.
-// Batch sizes, K/V cache types, Flash Attention and KV/operation offload are
-// accepted and surfaced as placement; memory bounds stay operator declarations.
+// Batch sizes, K/V cache types, Flash Attention, KV/operation offload, cpu-moe,
+// n-cpu-moe, repack and load-mode are accepted and surfaced as placement;
+// memory bounds stay operator declarations.
 var llamaServingOptions = []llamaServingOption{
 	{key: "models-preset", flags: []string{"--models-preset"}, env: "LLAMA_ARG_MODELS_PRESET"},
 	{key: "models-max", flags: []string{"--models-max"}, env: "LLAMA_ARG_MODELS_MAX"},
@@ -301,14 +302,14 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "yarn-beta-fast", flags: []string{"--yarn-beta-fast"}, env: "LLAMA_ARG_YARN_BETA_FAST", unsupported: true},
 	{key: "override-kv", flags: []string{"--override-kv"}, unsupported: true},
 	{key: "override-tensor", flags: []string{"-ot", "--override-tensor"}, env: "LLAMA_ARG_OVERRIDE_TENSOR", unsupported: true},
-	{key: "cpu-moe", flags: []string{"-cmoe", "--cpu-moe"}, env: "LLAMA_ARG_CPU_MOE", bool: true, unsupported: true},
-	{key: "n-cpu-moe", flags: []string{"-ncmoe", "--n-cpu-moe"}, env: "LLAMA_ARG_N_CPU_MOE", unsupported: true},
+	{key: "cpu-moe", flags: []string{"-cmoe", "--cpu-moe"}, env: "LLAMA_ARG_CPU_MOE", bool: true},
+	{key: "n-cpu-moe", flags: []string{"-ncmoe", "--n-cpu-moe"}, env: "LLAMA_ARG_N_CPU_MOE"},
 	{key: "n-cpu-ffn", flags: []string{"-ncffn", "--n-cpu-ffn"}, env: "LLAMA_ARG_N_CPU_FFN", unsupported: true},
 	{key: "kv-offload", flags: []string{"-kvo", "--kv-offload", "-nkvo", "--no-kv-offload"}, negativeFlags: []string{"-nkvo", "--no-kv-offload"}, env: "LLAMA_ARG_KV_OFFLOAD", negEnv: "LLAMA_ARG_NO_KV_OFFLOAD", bool: true},
 	{key: "op-offload", flags: []string{"--op-offload", "--no-op-offload"}, negativeFlags: []string{"--no-op-offload"}, bool: true},
-	{key: "repack", flags: []string{"--repack", "-nr", "--no-repack"}, env: "LLAMA_ARG_REPACK", negEnv: "LLAMA_ARG_NO_REPACK", bool: true, unsupported: true},
+	{key: "repack", flags: []string{"--repack", "-nr", "--no-repack"}, negativeFlags: []string{"-nr", "--no-repack"}, env: "LLAMA_ARG_REPACK", negEnv: "LLAMA_ARG_NO_REPACK", bool: true},
 	{key: "no-host", flags: []string{"--no-host"}, env: "LLAMA_ARG_NO_HOST", bool: true, unsupported: true},
-	{key: "load-mode", flags: []string{"-lm", "--load-mode"}, env: "LLAMA_ARG_LOAD_MODE", unsupported: true},
+	{key: "load-mode", flags: []string{"-lm", "--load-mode"}, env: "LLAMA_ARG_LOAD_MODE"},
 	{key: "lazy-mode", flags: []string{"-lzm", "--lazy-mode"}, env: "LLAMA_ARG_LAZY_MODE", unsupported: true},
 	{key: "numa", flags: []string{"--numa"}, env: "LLAMA_ARG_NUMA", unsupported: true},
 	{key: "rpc", flags: []string{"--rpc"}, env: "LLAMA_ARG_RPC", unsupported: true},
@@ -417,9 +418,28 @@ func validateLlamaValue(key, value string) error {
 	case "ctx-size", "parallel", "kv-unified-per-slot", "n-predict", "models-max", "sleep-idle-seconds", "cache-ram", "batch-size", "ubatch-size":
 		_, err := llamaPositive(value)
 		return err
-	case "kv-unified", "cache-prompt", "cache-idle-slots":
+	case "kv-unified", "cache-prompt", "cache-idle-slots", "repack":
 		_, err := llamaBool(value)
 		return err
+	case "cpu-moe":
+		boolean, err := llamaBool(value)
+		if err != nil {
+			return err
+		}
+		if boolean != "true" {
+			return &ServingFieldError{Field: "cpu-moe", Reason: "Omit cpu-moe to leave experts unpinned."}
+		}
+	case "n-cpu-moe":
+		n, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || n < 0 || strconv.FormatInt(n, 10) != value {
+			return &ServingFieldError{Field: key, Reason: "Use a canonical nonnegative decimal int32 value."}
+		}
+	case "load-mode":
+		switch value {
+		case "auto", "none", "mmap", "mlock", "mmap+mlock", "dio":
+		default:
+			return &ServingFieldError{Field: key, Reason: "Use auto, none, mmap, mlock, mmap+mlock or dio."}
+		}
 	case "fit":
 		if value != "off" && value != "false" && value != "0" {
 			return servingError("Automatic fitting cannot establish a finite allocation.")
@@ -446,6 +466,21 @@ func llamaOptionKey(name string) string {
 	switch name {
 	case "temp", "top-k", "top-p", "min-p", "seed", "threads", "threads-batch":
 		return name
+	}
+	return ""
+}
+
+// Pinned preset.cpp maps every argument spelling without its leading dashes,
+// so preset keys may also name short flags such as nr. Command-line tokens
+// keep exact flag matching.
+func llamaPresetOptionKey(name string) string {
+	if key := llamaOptionKey(name); key != "" {
+		return key
+	}
+	for _, opt := range llamaServingOptions {
+		if slices.Contains(opt.flags, "-"+name) {
+			return opt.key
+		}
 	}
 	return ""
 }
@@ -660,7 +695,7 @@ func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) 
 			return nil, servingError("Preset requires explicit sections and key=value options.")
 		}
 		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
-		key := llamaOptionKey(name)
+		key := llamaPresetOptionKey(name)
 		if key == "" || key == "models-preset" || key == "models-max" {
 			field := "option"
 			if len(name) <= 64 && regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(name) {
@@ -674,7 +709,9 @@ func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) 
 				return nil, &ServingFieldError{Field: "serving.models." + key, ModelID: section, Reason: "Unsupported envelope-affecting preset option."}
 			}
 			if key == option.key {
-				negative = slices.Contains(option.negativeFlags, "--"+name)
+				negative = slices.ContainsFunc(option.negativeFlags, func(flag string) bool {
+					return strings.TrimLeft(flag, "-") == name
+				})
 			}
 		}
 		if _, duplicate := sections[section][key]; duplicate {
@@ -690,10 +727,18 @@ func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) 
 				value = strconv.FormatBool(value != "true")
 			}
 		}
-		if negative && (key == "kv-offload" || key == "op-offload") {
-			// Pinned preset.cpp reverses args_neg using is_truthy; every other
-			// value becomes true. Positive offload values remain native-owned.
+		if negative && (key == "kv-offload" || key == "op-offload" || key == "repack") {
+			// Pinned 7fe450e1 preset.cpp parse_bool_arg reverses args_neg using
+			// is_truthy, including repack's nr/no-repack keys; every other value
+			// becomes true. Positive offload values remain native-owned.
 			value = strconv.FormatBool(value != "on" && value != "enabled" && value != "true" && value != "1")
+		}
+		if key == "repack" {
+			var err error
+			value, err = llamaBool(value)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if key == "load-on-startup" {
 			boolean, err := llamaBool(value)
@@ -987,7 +1032,7 @@ func compileLlamaServingSectionsExpected(ctx context.Context, rt Runtime, requir
 			result.evidence.artifacts[path] = file
 		}
 		placement := []string{"kv-unified=" + unified}
-		for _, key := range []string{"kv-unified-per-slot", "gpu-layers", "split-mode", "tensor-split", "main-gpu", "device", "fit", "cache-ram", "batch-size", "ubatch-size", "cache-type-k", "cache-type-v", "flash-attn", "kv-offload", "op-offload"} {
+		for _, key := range []string{"kv-unified-per-slot", "gpu-layers", "split-mode", "tensor-split", "main-gpu", "device", "fit", "cache-ram", "batch-size", "ubatch-size", "cache-type-k", "cache-type-v", "flash-attn", "kv-offload", "op-offload", "cpu-moe", "n-cpu-moe", "repack", "load-mode"} {
 			if v, ok := options[key]; ok {
 				placement = append(placement, key+"="+v)
 			}

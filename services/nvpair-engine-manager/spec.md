@@ -696,9 +696,18 @@ disables idle retention in the pinned build. Positive retention remains valid;
 zero and values below -1 are refused. Retention stays string-valued (`"-1"`).
 The single `llamaServingOptions` table derives native spellings/environment names
 from pinned llama.cpp `7fe450e1` `common/arg.cpp`. Logical/physical batch sizes,
-K/V cache types, Flash Attention and KV/operation offload are supported and
-retained in placement entries. Unsupported SWA, context-shift and scaling
-controls, tensor/MoE/loading placement, draft/projector allocation, router
+K/V cache types, Flash Attention, KV/operation offload, CPU MoE placement,
+weight repacking and load mode are supported and retained in placement entries.
+`cpu-moe` accepts only `true`, `1` or `on`; omit it to leave experts unpinned.
+False is refused because native drops the positive-only child switch while
+the child can inherit `LLAMA_ARG_CPU_MOE`. `n-cpu-moe` requires a canonical
+nonnegative decimal int32, without a sign or leading zeros (`0` is allowed).
+`repack` uses explicit booleans; negative preset keys (`nr`, `no-repack`)
+invert native truthiness (`on`, `enabled`, `true`, `1`). `load-mode` accepts
+exactly `auto`, `none`, `mmap`, `mlock`, `mmap+mlock` or `dio`. These controls
+have no typed override and do not change memory estimation. Unsupported SWA,
+context-shift and scaling controls, tensor overrides, CPU FFN, host buffers,
+lazy mode, NUMA/RPC placement, draft/projector allocation, router
 autoload and built-in model preset controls are rejected on CLI, in environment
 and in source presets. A reserved `version` preset key is skipped; `threads` and
 `threads-batch` pass through presets unchanged. Main-model sampling offload,

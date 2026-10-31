@@ -276,6 +276,26 @@ func assertCustomReceipt(t *testing.T, store engineModelStore, list modelFileLis
 }
 
 func TestModelCopyCustomAlias(t *testing.T) {
+	t.Run("unconfigured MoE preset resolves artifacts", func(t *testing.T) {
+		f := newCustomCopyFixture(t)
+		writeTestFile(t, f.preset, []byte("["+reportedCopyAlias+"]\nmodel = huggingface/hub/model.gguf\nn-cpu-moe = 38\nno-repack = true\nload-mode = mmap\n"))
+		list := customCopyList(t, f)
+		data, err := os.ReadFile(f.artifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if list.Layout != llamaArtifactsLayout || list.Model != reportedCopyAlias || len(list.Files) != 1 || list.Files[0].Path != "model/model.gguf" || list.Files[0].SHA256 != sha256Hex(data) {
+			t.Fatalf("MoE preset lost model artifact: %+v", list)
+		}
+	})
+	t.Run("unconfigured MoE preset still refuses lazy mode", func(t *testing.T) {
+		f := newCustomCopyFixture(t)
+		writeTestFile(t, f.preset, []byte("["+reportedCopyAlias+"]\nmodel = huggingface/hub/model.gguf\nn-cpu-moe = 38\nno-repack = true\nload-mode = mmap\nlazy-mode = off\n"))
+		_, err := f.source.modelSourceFiles(context.Background(), "llamacpp", reportedCopyAlias)
+		if err == nil || !strings.Contains(err.Error(), "custom artifact configuration is unsupported") {
+			t.Fatalf("want custom artifact configuration refusal, got %v", err)
+		}
+	})
 	plentyOfDisk(t)
 	t.Run("normalized preset flags retain exact custom alias precedence", func(t *testing.T) {
 		for _, flag := range []string{"--models_preset", "--models_preset="} {

@@ -551,6 +551,119 @@ func TestLlamaServingOwnerRouterPresetReachesChild(t *testing.T) {
 	}
 }
 
+func TestLlamaServingMoEPlacementPreset(t *testing.T) {
+	f := newLlamaServingFixture(t)
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeServingFixture(t, f.source, append(data, []byte("\nn-cpu-moe = 38\nno-repack = true\nload-mode = mmap\n")...))
+	preview := approveLlamaServing(t, f)
+	var weak *engines.ServingEnvelope
+	for i := range preview.Serving.Configured {
+		if preview.Serving.Configured[i].ModelID == "weak" {
+			weak = &preview.Serving.Configured[i]
+		}
+	}
+	if weak == nil {
+		t.Fatal("missing weak envelope")
+	}
+	for _, want := range []string{"n-cpu-moe=38", "repack=false", "load-mode=mmap"} {
+		if !slices.Contains(weak.Placement, want) {
+			t.Fatalf("placement=%v, want %s", weak.Placement, want)
+		}
+	}
+	assertNoLlamaSpawn(t, f)
+}
+
+func TestLlamaServingMoEPlacementLaunch(t *testing.T) {
+	test := func(name, text, want string) {
+		t.Run(name, func(t *testing.T) {
+			f := newLlamaServingFixture(t)
+			if strings.HasPrefix(text, "LLAMA_") {
+				f.request.Settings.LaunchText = text + " " + f.request.Settings.LaunchText
+			} else {
+				f.request.Settings.LaunchText += " " + text
+			}
+			preview := approveLlamaServing(t, f)
+			if len(preview.Serving.Configured) != 2 {
+				t.Fatalf("missing envelopes: %+v", preview.Serving.Configured)
+			}
+			for _, envelope := range preview.Serving.Configured {
+				if !slices.Contains(envelope.Placement, want) {
+					t.Fatalf("placement=%v, want %s", envelope.Placement, want)
+				}
+			}
+			assertNoLlamaSpawn(t, f)
+		})
+	}
+	test("CPU expert layers CLI", "-ncmoe 38", "n-cpu-moe=38")
+	test("CPU expert layers environment", "LLAMA_ARG_N_CPU_MOE=38", "n-cpu-moe=38")
+	test("disable repack CLI", "--no-repack", "repack=false")
+	test("short disable repack CLI", "-nr", "repack=false")
+	test("load mode CLI", "-lm mmap", "load-mode=mmap")
+	test("pin all CPU experts CLI", "--cpu-moe", "cpu-moe=true")
+	test("negative repack environment is presence based", "LLAMA_ARG_NO_REPACK=0", "repack=false")
+}
+
+func TestLlamaServingMoEPlacementValues(t *testing.T) {
+	accept := func(name, key, value string) {
+		t.Run(name, func(t *testing.T) {
+			if err := validateLlamaValue(key, value); err != nil {
+				t.Fatalf("valid %s rejected: %v", key, err)
+			}
+		})
+	}
+	accept("zero CPU expert layers", "n-cpu-moe", "0")
+	accept("maximum CPU expert layers", "n-cpu-moe", "2147483647")
+	for _, value := range []string{"auto", "none", "mmap", "mlock", "mmap+mlock", "dio"} {
+		accept("load mode "+value, "load-mode", value)
+	}
+	for _, value := range []string{"true", "1", "on"} {
+		accept("pin experts "+value, "cpu-moe", value)
+	}
+	reject := func(name, text, field, reason string) {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseLlamaServingPreset([]byte("[model]\n" + text + "\n"))
+			var typed *ServingFieldError
+			if !errors.As(err, &typed) || typed.Field != field || !strings.Contains(typed.Reason, reason) {
+				t.Fatalf("want %s refusal containing %q, got %v", field, reason, err)
+			}
+		})
+	}
+	reject("negative CPU expert layers", "n-cpu-moe = -1", "n-cpu-moe", "nonnegative")
+	reject("leading zeros", "n-cpu-moe = 0038", "n-cpu-moe", "canonical")
+	reject("explicit positive sign", "n-cpu-moe = +38", "n-cpu-moe", "canonical")
+	reject("overflow", "n-cpu-moe = 2147483648", "n-cpu-moe", "int32")
+	reject("invalid loading mode", "load-mode = fast", "load-mode", "Use auto")
+	for _, value := range []string{"false", "0", "off"} {
+		reject("unpin experts "+value, "cpu-moe = "+value, "cpu-moe", "Omit cpu-moe to leave experts unpinned.")
+	}
+	reject("invalid repack boolean", "repack = maybe", "serving", "boolean")
+}
+
+func TestLlamaServingRepackPresetPolarity(t *testing.T) {
+	test := func(name, key, value, want string) {
+		t.Run(name, func(t *testing.T) {
+			sections, err := parseLlamaServingPreset([]byte("[model]\n" + key + " = " + value + "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := sections["model"]["repack"]; got != want {
+				t.Fatalf("repack=%s, want %s", got, want)
+			}
+		})
+	}
+	test("positive on", "repack", "on", "true")
+	test("positive off", "repack", "off", "false")
+	test("negative true", "no-repack", "true", "false")
+	test("negative false", "no-repack", "false", "true")
+	test("negative enabled", "no-repack", "enabled", "false")
+	test("negative other native value", "no-repack", "native-value", "true")
+	test("short negative true", "nr", "true", "false")
+	test("short negative false", "nr", "false", "true")
+}
+
 // The pinned preset parser reverses negative aliases using is_truthy, which
 // recognizes enabled as well as on/true/1. Positive values stay native-owned.
 func TestLlamaServingOffloadPresetPolarity(t *testing.T) {
@@ -856,6 +969,7 @@ func TestLlamaServingOptionTableRejectsConflictsWithoutEffects(t *testing.T) {
 		"sleep-idle-seconds": {"60", "120"}, "cache-ram": {"512", "1024"}, "fit": {"off", "false"},
 		"batch-size": {"512", "1024"}, "ubatch-size": {"128", "256"},
 		"cache-type-k": {"f16", "q8_0"}, "cache-type-v": {"f16", "q8_0"}, "flash-attn": {"on", "off"},
+		"n-cpu-moe": {"0", "38"}, "load-mode": {"auto", "mmap"},
 	}
 	for _, option := range llamaServingOptions {
 		t.Run(option.key, func(t *testing.T) {
@@ -979,10 +1093,10 @@ func TestLlamaServingRejectsPinnedAllocationControls(t *testing.T) {
 		{"yarn extrapolation", "--yarn-ext-factor 1"}, {"yarn attention", "--yarn-attn-factor 1"},
 		{"yarn slow beta", "--yarn-beta-slow 1"}, {"yarn fast beta", "--yarn-beta-fast 32"},
 		{"metadata context override", "--override-kv llama.context_length=int:32768"},
-		{"tensor placement", "-ot blk.*=CPU"}, {"CPU MoE", "-cmoe"},
-		{"partial CPU MoE", "-ncmoe 2"}, {"CPU FFN", "-ncffn 2"},
-		{"weight repacking", "-nr"}, {"host buffer", "--no-host"},
-		{"loading placement", "-lm mmap"}, {"lazy placement", "-lzm off"},
+		{"tensor placement", "-ot blk.*=CPU"}, {"CPU FFN", "-ncffn 2"},
+		{"host buffer", "--no-host"}, {"lazy placement", "-lzm off"},
+		{"automatic fit target", "--fit-target 512"},
+		{"CPU MoE CLI environment conflict", "LLAMA_ARG_N_CPU_MOE=38 -ncmoe 38"},
 		{"NUMA placement", "--numa isolate"}, {"RPC placement", "--rpc 127.0.0.1:1"},
 		{"router autoload", "--models-autoload"}, {"router no autoload", "--no-models-autoload"},
 		{"router autoload environment", "LLAMA_ARG_MODELS_AUTOLOAD=1"},
@@ -2839,4 +2953,14 @@ func TestLlamaServingReplacementWinsBeforeLoadAdmission(t *testing.T) {
 		t.Fatal("rejected load retained operation lock")
 	}
 	st.opMu.Unlock()
+}
+
+func TestLlamaSnapshotCommandKeepsUnrelatedArgumentValues(t *testing.T) {
+	// A value that happens to look like key=value for a short flag (here -c)
+	// belongs to the preceding argument and must not be split.
+	got := llamaSnapshotCommand(launchCommand{Args: []string{"--log-file", "c=trace.log"}}, "snapshot.ini")
+	want := []string{"--log-file", "c=trace.log", "--models-preset", "snapshot.ini"}
+	if !slices.Equal(got.Args, want) {
+		t.Fatalf("snapshot args = %q, want %q", got.Args, want)
+	}
 }

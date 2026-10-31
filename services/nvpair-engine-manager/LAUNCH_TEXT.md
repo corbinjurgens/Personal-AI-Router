@@ -132,7 +132,8 @@ through unchanged in the actual launch, including `--log-disable` and inherited
 The supported subset includes context/parallelism, KV mode/per-slot cap,
 prediction default, GPU layers/device/split settings, idle sleep, prompt cache,
 logical/physical batch sizes, K/V cache types, Flash Attention, KV/operation
-offload, local model/draft paths and disabled startup loading. A reserved
+offload, CPU MoE placement, weight repacking, load mode, local model/draft paths
+and disabled startup loading. A reserved
 top-level `version` preset key is skipped, as the pinned native parser does.
 `threads` and `threads-batch` pass through presets unchanged, like the sampling
 keys. Placement stays opaque;
@@ -150,11 +151,20 @@ explicit envelope-option set is `llamaServingOptions` in `serving_llamacpp.go`:
   `--no-op-offload`), retained in placement entries. Batch sizes must be
   explicit positive integers; the other preset values reach the native parser
   unvalidated.
+- CPU experts (`--cpu-moe`/`-cmoe`) accept only `true`, `1` or `on`;
+  omit the option to leave experts unpinned. CPU expert layers
+  (`--n-cpu-moe`/`-ncmoe`) require a canonical nonnegative decimal int32,
+  without a sign or leading zeros (`0` is allowed). Weight repacking
+  (`--repack`, `--no-repack`/`-nr`) accepts explicit booleans in presets;
+  negative preset keys invert native truthiness (`on`, `enabled`, `true`, `1`).
+  Load mode (`--load-mode`/`-lm`) accepts exactly `auto`, `none`, `mmap`,
+  `mlock`, `mmap+mlock` or `dio`. These controls are surfaced as placement,
+  with no typed override or MoE-aware memory estimate.
 - Unsupported allocation controls: continuous batching, full SWA cache,
   context shift, RoPE/YaRN scaling and metadata overrides. The adapter does not
   interpret their allocation semantics.
-- Unsupported placement controls: tensor overrides, CPU MoE/FFN,
-  main-model sampling offload, weight repacking, host buffers, load/lazy modes, NUMA and RPC devices;
+- Unsupported placement controls: tensor overrides, CPU FFN,
+  main-model sampling offload, host buffers, lazy mode, NUMA and RPC devices;
   draft K/V types, tensor/MoE/device/GPU/sampling placement and draft batch size;
   projector auto-selection/offload/device and image token/batch allocation.
 - Unsupported startup controls: both router autoload switches, warmup switches,
