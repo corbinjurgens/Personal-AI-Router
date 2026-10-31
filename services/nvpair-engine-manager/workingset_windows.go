@@ -345,11 +345,11 @@ func (c *workingSetContainment) Close() error {
 	return c.closeErr
 }
 
-func startWorkingSetProcess(cmd *exec.Cmd, maxBytes uint64) (func() error, error) {
+func startWorkingSetProcess(cmd *exec.Cmd, maxBytes uint64) (func() error, func() bool, error) {
 	engine := filepath.Base(cmd.Path)
 	c, err := newWorkingSetContainment(engine, maxBytes)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -362,8 +362,8 @@ func startWorkingSetProcess(cmd *exec.Cmd, maxBytes uint64) (func() error, error
 		}
 		return err
 	}, c.Close); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	c.start()
-	return c.Close, nil
+	return c.Close, c.Verified, nil
 }

@@ -14,6 +14,22 @@ import (
 )
 
 func TestWorkingSetLimitWireAndValueEquality(t *testing.T) {
+	t.Run("unverified status", func(t *testing.T) {
+		var got Snapshot
+		if err := json.Unmarshal(settingsJSON(t, Snapshot{WorkingSetLimitStatus: "unverified"}), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.WorkingSetLimitStatus != "unverified" {
+			t.Fatalf("snapshot status = %q", got.WorkingSetLimitStatus)
+		}
+		var launch LaunchState
+		if err := json.Unmarshal(settingsJSON(t, LaunchState{WorkingSetLimitStatus: "unverified"}), &launch); err != nil {
+			t.Fatal(err)
+		}
+		if launch.WorkingSetLimitStatus != "unverified" {
+			t.Fatalf("launch status = %q", launch.WorkingSetLimitStatus)
+		}
+	})
 	limit := 12288
 	launch := LaunchState{WorkingSetLimitMiB: &limit, WorkingSetLimitStatus: "applied"}
 	config := ConfigFromLaunch(launch, 8081)

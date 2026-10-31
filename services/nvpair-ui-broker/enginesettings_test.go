@@ -267,6 +267,13 @@ func TestWorkingSetLimitStatusReachesPublishedSettings(t *testing.T) {
 	var published bytes.Buffer
 	h.b.codec = NewCodec(&published)
 	h.launchMu.Lock()
+	h.launchStatus = "unverified"
+	h.launchMu.Unlock()
+	unverified, unverifiedErr := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
+	if unverifiedErr != nil || unverified.WorkingSetLimitStatus != "unverified" {
+		t.Fatalf("unverified snapshot = %+v, error = %v", unverified, unverifiedErr)
+	}
+	h.launchMu.Lock()
 	h.launchStatus = "unenforced-adopted"
 	h.launchMu.Unlock()
 	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")

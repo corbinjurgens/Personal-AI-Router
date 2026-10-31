@@ -138,7 +138,10 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 		if result.Running {
 			result.WorkingSetLimitStatus = "unenforced-adopted"
 			if !result.Adopted && st.proc != nil && st.proc == st.plat.Runtime.workingSetProcess && st.plat.Runtime.workingSetLimitBytes == uint64(value)<<20 {
-				result.WorkingSetLimitStatus = "applied"
+				result.WorkingSetLimitStatus = "unverified"
+				if st.proc.workingSetVerified != nil && st.proc.workingSetVerified() {
+					result.WorkingSetLimitStatus = "applied"
+				}
 			}
 		}
 	}

@@ -788,9 +788,17 @@ sweep, with periodic sweeps on a 250 ms target cadence covering lost notificatio
 Processes may fault in pages before their first cap; a late cap trims the working
 set. An unopenable member terminates the job; a live member whose cap fails is
 terminated (see [spec.md](spec.md)). Changing or clearing it restarts a running engine.
-Readback `workingSetLimitStatus` is `applied`, `not-running`, or
+Readback `workingSetLimitStatus` is `applied`, `unverified`, `not-running`, or
 `unenforced-adopted`, and is omitted when no limit is saved. An adopted process
 requires a restart for enforcement of new descendants.
+
+`unverified` means this manager started the running engine with the saved value,
+but its containment has not verified every live member: a member could not be
+capped (it is terminated, and the status returns to `applied` after the next clean
+sweep), or the job could not be read (the engine job is terminated). `applied`
+means a full verification (the root cap before resume, then each sweep on a
+250 ms target cadence) completed within the last second and found every live
+member capped. A stalled or stopped watcher also reports `unverified`.
 
 The worker
 checks basic argument syntax and adapter-declared networking/CORS controls

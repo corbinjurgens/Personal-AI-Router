@@ -1807,6 +1807,7 @@ export function parseEngineSettings(value: JsonValue | undefined): EngineSetting
                 ? undefined
                 : choice(row.workingSetLimitStatus, [
                       'applied',
+                      'unverified',
                       'not-running',
                       'unenforced-adopted'
                   ]),

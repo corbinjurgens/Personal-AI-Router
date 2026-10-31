@@ -58,8 +58,8 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func startWorkingSetProcess(_ *exec.Cmd, _ uint64) (func() error, error) {
-	return nil, errors.New("working-set limit is available only on Windows")
+func startWorkingSetProcess(_ *exec.Cmd, _ uint64) (func() error, func() bool, error) {
+	return nil, nil, errors.New("working-set limit is available only on Windows")
 }
 
 func makeMemoryPlanTempDir() (string, error) {

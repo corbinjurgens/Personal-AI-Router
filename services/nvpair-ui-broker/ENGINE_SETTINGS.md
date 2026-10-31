@@ -224,7 +224,7 @@ llama.cpp engines in process mode. Absence or null removes the limit. Preview
 returns field errors under `workingSetLimitMiB`, includes changes in `diff`,
 and marks a running engine for restart. Apply persists `working_set_limit_mib`
 through the manager's runtime write. Snapshots project the manager's
-`workingSetLimitStatus`: `applied`, `not-running`, or `unenforced-adopted`,
+`workingSetLimitStatus`: `applied`, `unverified`, `not-running`, or `unenforced-adopted`,
 omitted when no limit is saved. Adopted processes require restart for descendant
 enforcement. Root cap failure fails start. Job notifications trigger immediate
 member sweeps; a 250 ms target sweep cadence covers lost notifications. Processes
@@ -237,6 +237,14 @@ startup subcommand. The argument grammar is
 [`pair-arguments-v1`](../nvpair-engine-manager/LAUNCH_TEXT.md). Preview does not
 change component configuration or runtime. A snapshot read may persist the
 initial revision baseline or reconcile an external component change.
+
+`unverified` means this manager started the running engine with the saved value,
+but its containment has not verified every live member: a member could not be
+capped (it is terminated, and the status returns to `applied` after the next clean
+sweep), or the job could not be read (the engine job is terminated). `applied`
+means a full verification (the root cap before resume, then each sweep on a
+250 ms target cadence) completed within the last second and found every live
+member capped. A stalled or stopped watcher also reports `unverified`.
 
 Each full snapshot includes desired `settings`, `revision`, `appliedRevision`,
 `phase` (`idle`, `applying`, `succeeded`, `failed`), `requestId`, `error`,

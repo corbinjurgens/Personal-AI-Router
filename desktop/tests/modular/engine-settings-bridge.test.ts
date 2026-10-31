@@ -92,7 +92,7 @@ const baseline = {
 }
 
 describe('working-set settings decoding', () => {
-    it.each(['applied', 'not-running', 'unenforced-adopted'])(
+    it.each(['applied', 'unverified', 'not-running', 'unenforced-adopted'])(
         'preserves the limit and %s status',
         status => {
             const snapshot = parseEngineSettings({

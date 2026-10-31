@@ -171,6 +171,29 @@ func TestWorkingSetLimitReadbackDoesNotClaimUnenforcedProcess(t *testing.T) {
 	}
 }
 
+func TestWorkingSetLimitReadbackRequiresVerifiedContainment(t *testing.T) {
+	test := func(name string, verified func() bool, want string) {
+		t.Run(name, func(t *testing.T) {
+			e := workingSetSettingsExecutor(t)
+			st := settingsState(t, e)
+			limit := 256
+			st.plat.Runtime.WorkingSetLimitMiB = &limit
+			st.proc = &managedProc{workingSetVerified: verified}
+			st.plat.Runtime.workingSetProcess = st.proc
+			st.plat.Runtime.workingSetLimitBytes = uint64(limit) << 20
+			st.running = true
+			t.Cleanup(func() { st.running = false; st.proc = nil })
+			result, err := e.LaunchSettings("fake")
+			if err != nil || result.WorkingSetLimitStatus != want {
+				t.Fatalf("readback=%+v error=%v, want status %q", result, err, want)
+			}
+		})
+	}
+	test("unverified containment", func() bool { return false }, "unverified")
+	test("verified containment", func() bool { return true }, "applied")
+	test("missing verifier", nil, "unverified")
+}
+
 func TestWorkingSetLimitAbsentPreservesLaunch(t *testing.T) {
 	e := workingSetSettingsExecutor(t)
 	request := settingsRequest(t, e)
