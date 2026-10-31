@@ -25,8 +25,9 @@ import (
 // graceful signal, force kill) live in proc_windows.go / proc_unix.go
 // so the same logic here runs on every platform.
 type managedProc struct {
-	cmd  *exec.Cmd
-	done chan struct{}
+	cmd                *exec.Cmd
+	done               chan struct{}
+	workingSetVerified func() bool
 }
 
 // childEnv is the environment of every process engine-manager starts: the
@@ -72,8 +73,9 @@ func startManagedProcObserved(bin string, args []string, env map[string]string, 
 		return nil, err
 	}
 	var cleanup func() error
+	var verified func() bool
 	if workingSetLimitBytes != 0 {
-		cleanup, err = startWorkingSetProcess(cmd, workingSetLimitBytes)
+		cleanup, verified, err = startWorkingSetProcess(cmd, workingSetLimitBytes)
 	} else {
 		err = cmd.Start()
 	}
@@ -83,7 +85,7 @@ func startManagedProcObserved(bin string, args []string, env map[string]string, 
 		return nil, err
 	}
 
-	mp := &managedProc{cmd: cmd, done: make(chan struct{})}
+	mp := &managedProc{cmd: cmd, done: make(chan struct{}), workingSetVerified: verified}
 	var scanWg sync.WaitGroup
 	scanWg.Add(2)
 	readLines := func(r io.Reader, stream string) {

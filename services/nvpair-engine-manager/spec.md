@@ -20,21 +20,31 @@ Windows applies the same hard maximum, in bytes, to each owned engine process
 and descendant. The root starts suspended, is assigned to a limit-free job,
 capped through `SetProcessWorkingSetSizeEx` and verified by readback before
 resuming. Failure kills and reaps the root and fails start. Job notifications
-cap descendants after confirming job membership; a descendant whose cap fails is
-terminated, and if it cannot be opened or the notification read fails, the whole
-engine job is terminated. Windows delivers job notifications best-effort, so a
-lost notification leaves that descendant uncapped. This limits each process
+trigger an immediate sweep of the engine job's members, and the manager also
+sweeps on a 250 ms target cadence, so a lost notification delays a descendant's
+cap by about one interval rather than indefinitely. A process can fault in pages
+before its first cap; the late cap trims its working set to the maximum. A member
+that cannot be opened terminates the engine job; a live member whose cap fails
+is terminated. A notification read or job enumeration failure terminates the
+engine job. This limits each process
 working set, not aggregate tree memory or committed memory. The engine job has
 no kill-on-close lifetime policy.
 
 `LaunchState` includes the saved `workingSetLimitMiB` and
 `workingSetLimitStatus`; the broker projects the status onto its settings
 snapshot. Status is omitted when no limit is saved. `not-running` means stopped;
-`applied` means this manager started the current owned process with the saved
-value; `unenforced-adopted` means the running engine is adopted or was started
+`unenforced-adopted` means the running engine is adopted or was started
 without the current value. Adoption cannot enforce new descendants after a
 manager restart, so an engine restart is required. A failed spawn leaves the
 saved limit in place and reports the failed start, as with other runtime keys.
+
+`unverified` means this manager started the running engine with the saved value,
+but its containment has not verified every live member: a member could not be
+capped (it is terminated, and the status returns to `applied` after the next clean
+sweep), or the job could not be read (the engine job is terminated). `applied`
+means a full verification (the root cap before resume, then each sweep on a
+250 ms target cadence) completed within the last second and found every live
+member capped. A stalled or stopped watcher also reports `unverified`.
 
 ## Private model memory device metadata
 

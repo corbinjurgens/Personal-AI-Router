@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -21,10 +22,13 @@ import (
 )
 
 const (
-	quotaLimitsHardWSMaxEnable  = windows.QUOTA_LIMITS_HARDWS_MAX_ENABLE  // 0x4
-	quotaLimitsHardWSMinDisable = windows.QUOTA_LIMITS_HARDWS_MIN_DISABLE // 0x2
-	jobObjectMsgNewProcess      = 6
-	jobObjectMsgActiveZero      = 4
+	quotaLimitsHardWSMaxEnable   = windows.QUOTA_LIMITS_HARDWS_MAX_ENABLE  // 0x4
+	quotaLimitsHardWSMinDisable  = windows.QUOTA_LIMITS_HARDWS_MIN_DISABLE // 0x2
+	workingSetLimitFlags         = quotaLimitsHardWSMaxEnable | quotaLimitsHardWSMinDisable
+	jobObjectMsgNewProcess       = 6
+	jobObjectMsgActiveZero       = 4
+	workingSetSweepInterval      = 250 * time.Millisecond
+	workingSetVerificationMaxAge = time.Second
 )
 
 var workingSetPrivilegeOnce sync.Once
@@ -77,7 +81,41 @@ func processInJob(process, job windows.Handle) (bool, error) {
 }
 
 func openWorkingSetProcess(pid uint32) (windows.Handle, error) {
-	return windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE, false, pid)
+	return windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, pid)
+}
+
+// JOBOBJECT_BASIC_PROCESS_ID_LIST has a DWORD header and a variable-length
+// array of pointer-sized process IDs.
+type workingSetJobProcessIDList struct {
+	numberOfAssignedProcesses uint32
+	numberOfProcessIDsInList  uint32
+	processIDs                [1]uintptr
+}
+
+func jobMemberPIDs(job windows.Handle) ([]uint32, error) {
+	for capacity := 16; ; {
+		const headerSize = unsafe.Offsetof(workingSetJobProcessIDList{}.processIDs)
+		const idSize = unsafe.Sizeof(uintptr(0))
+		buffer := make([]uintptr, int(headerSize/idSize)+capacity)
+		list := (*workingSetJobProcessIDList)(unsafe.Pointer(&buffer[0]))
+		err := windows.QueryInformationJobObject(job, windows.JobObjectBasicProcessIdList, uintptr(unsafe.Pointer(list)), uint32(headerSize)+uint32(capacity)*uint32(idSize), nil)
+		if errors.Is(err, windows.ERROR_MORE_DATA) {
+			capacity = max(capacity*2, int(list.numberOfAssignedProcesses)+16)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if int(list.numberOfProcessIDsInList) > capacity {
+			return nil, errors.New("job member query returned too many process IDs")
+		}
+		ids := unsafe.Slice(&list.processIDs[0], int(list.numberOfProcessIDsInList))
+		pids := make([]uint32, len(ids))
+		for i, pid := range ids {
+			pids[i] = uint32(pid)
+		}
+		return pids, nil
+	}
 }
 
 func capWorkingSet(pid uint32, maxBytes uint64) error {
@@ -100,14 +138,13 @@ func capProcessWorkingSet(process windows.Handle, maxBytes uint64) error {
 	if err != nil {
 		return err
 	}
-	const flags = quotaLimitsHardWSMaxEnable | quotaLimitsHardWSMinDisable
-	err = windows.SetProcessWorkingSetSizeEx(process, min, uintptr(maxBytes), flags)
+	err = windows.SetProcessWorkingSetSizeEx(process, min, uintptr(maxBytes), workingSetLimitFlags)
 	if errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) {
 		workingSetPrivilegeOnce.Do(func() { workingSetPrivilegeError = enableWorkingSetPrivilege() })
 		if workingSetPrivilegeError != nil {
 			return errors.Join(err, workingSetPrivilegeError)
 		}
-		err = windows.SetProcessWorkingSetSizeEx(process, min, uintptr(maxBytes), flags)
+		err = windows.SetProcessWorkingSetSizeEx(process, min, uintptr(maxBytes), workingSetLimitFlags)
 	}
 	if err != nil {
 		return err
@@ -116,7 +153,7 @@ func capProcessWorkingSet(process windows.Handle, maxBytes uint64) error {
 	if err != nil {
 		return err
 	}
-	if uint64(max) != maxBytes || gotFlags&flags != flags {
+	if uint64(max) != maxBytes || gotFlags&workingSetLimitFlags != workingSetLimitFlags {
 		return fmt.Errorf("working-set cap readback mismatch: max=%d flags=%#x", max, gotFlags)
 	}
 	return nil
@@ -125,14 +162,16 @@ func capProcessWorkingSet(process windows.Handle, maxBytes uint64) error {
 // Engine jobs deliberately have no limits, including kill-on-close. Closing
 // the manager's handles must preserve the existing engine/orphan lifetime.
 type workingSetContainment struct {
-	job      windows.Handle
-	port     windows.Handle
-	engine   string
-	maxBytes uint64
-	stop     chan struct{}
-	done     chan struct{}
-	once     sync.Once
-	closeErr error
+	job        windows.Handle
+	port       windows.Handle
+	engine     string
+	maxBytes   uint64
+	stop       chan struct{}
+	done       chan struct{}
+	once       sync.Once
+	startOnce  sync.Once
+	verifiedAt atomic.Int64 // workingSetClock reading; 0 means unverified
+	closeErr   error
 }
 
 func newWorkingSetContainment(engine string, maxBytes uint64) (*workingSetContainment, error) {
@@ -155,9 +194,46 @@ func newWorkingSetContainment(engine string, maxBytes uint64) (*workingSetContai
 		windows.CloseHandle(job)
 		return nil, err
 	}
-	c := &workingSetContainment{job: job, port: port, engine: engine, maxBytes: maxBytes, stop: make(chan struct{}), done: make(chan struct{})}
-	go c.watch()
-	return c, nil
+	return &workingSetContainment{job: job, port: port, engine: engine, maxBytes: maxBytes, stop: make(chan struct{}), done: make(chan struct{})}, nil
+}
+
+func (c *workingSetContainment) start() {
+	c.startOnce.Do(func() { go c.watch() })
+}
+
+// Verification age is measured on the monotonic clock, so a wall-clock step
+// cannot extend stale evidence. Readings are offsets from process start plus
+// one, keeping zero free to mean unverified.
+var workingSetClockBase = time.Now()
+
+func workingSetClock() int64 { return int64(time.Since(workingSetClockBase)) + 1 }
+
+func (c *workingSetContainment) markVerified() { c.verifiedAt.Store(workingSetClock()) }
+
+func (c *workingSetContainment) Verified() bool {
+	at := c.verifiedAt.Load()
+	return at != 0 && time.Duration(workingSetClock()-at) <= workingSetVerificationMaxAge
+}
+
+func (c *workingSetContainment) sweep(onInterval bool) error {
+	pids, err := jobMemberPIDs(c.job)
+	if err != nil {
+		return err
+	}
+	allVerified := true
+	for _, pid := range pids {
+		verified, capped := c.capMember(pid)
+		allVerified = allVerified && verified
+		if onInterval && capped {
+			slog.Info("working-set interval sweep capped member", "engine", c.engine, "pid", pid)
+		}
+	}
+	if allVerified {
+		c.markVerified()
+	} else {
+		c.verifiedAt.Store(0)
+	}
+	return nil
 }
 
 func (c *workingSetContainment) watch() {
@@ -166,6 +242,20 @@ func (c *workingSetContainment) watch() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(c.done)
+	defer c.verifiedAt.Store(0)
+	sweep := func(onInterval bool) bool {
+		if err := c.sweep(onInterval); err != nil {
+			c.verifiedAt.Store(0)
+			err = errors.Join(err, windows.TerminateJobObject(c.job, 1))
+			slog.Warn("working-set sweep failed", "engine", c.engine, "error", err)
+			return false
+		}
+		return true
+	}
+	lastSweep := time.Now()
+	if !sweep(false) {
+		return
+	}
 	for {
 		select {
 		case <-c.stop:
@@ -176,20 +266,27 @@ func (c *workingSetContainment) watch() {
 		var key, pid uintptr
 		// Job messages carry a PID value in the OVERLAPPED slot, not a Go
 		// pointer. Keep it in integer storage, without dereferencing it.
-		err := windows.GetQueuedCompletionStatus(c.port, &message, &key, (**windows.Overlapped)(unsafe.Pointer(&pid)), 1000)
-		if errors.Is(err, windows.WAIT_TIMEOUT) {
-			continue
-		}
-		if err != nil {
+		remaining := max(time.Duration(0), workingSetSweepInterval-time.Since(lastSweep))
+		err := windows.GetQueuedCompletionStatus(c.port, &message, &key, (**windows.Overlapped)(unsafe.Pointer(&pid)), uint32(remaining/time.Millisecond))
+		if err != nil && !errors.Is(err, windows.WAIT_TIMEOUT) {
+			c.verifiedAt.Store(0)
 			err = errors.Join(err, windows.TerminateJobObject(c.job, 1))
-			slog.Warn("working-set notification failed", "engine", c.engine, "pid", 0, "error", err)
+			slog.Warn("working-set notification failed", "engine", c.engine, "error", err)
 			return
 		}
 		switch message {
 		case jobObjectMsgActiveZero:
 			return
 		case jobObjectMsgNewProcess:
-			c.capMember(uint32(pid))
+			if !sweep(false) {
+				return
+			}
+		}
+		if time.Since(lastSweep) >= workingSetSweepInterval {
+			lastSweep = time.Now()
+			if !sweep(true) {
+				return
+			}
 		}
 	}
 }
@@ -197,10 +294,10 @@ func (c *workingSetContainment) watch() {
 // A notification can arrive after its process exited and the PID was reused,
 // so the opened handle must still name a member of this job before it is
 // capped or, on cap failure, terminated.
-func (c *workingSetContainment) capMember(pid uint32) {
+func (c *workingSetContainment) capMember(pid uint32) (verified, capped bool) {
 	process, err := openWorkingSetProcess(pid)
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
-		return // Already exited.
+		return true, false // Already exited.
 	}
 	if err != nil {
 		// Without a handle the member can be neither capped nor terminated
@@ -210,11 +307,21 @@ func (c *workingSetContainment) capMember(pid uint32) {
 		defer windows.CloseHandle(process)
 		member, memberErr := processInJob(process, c.job)
 		if memberErr == nil && !member {
-			return
+			return true, false
 		}
 		err = memberErr
 		if err == nil {
+			_, maximum, flags, queryErr := processWorkingSetLimits(process)
+			if queryErr == nil && uint64(maximum) == c.maxBytes && flags&workingSetLimitFlags == workingSetLimitFlags {
+				return true, false
+			}
 			err = capProcessWorkingSet(process, c.maxBytes)
+			if err == nil {
+				return true, true
+			}
+			if status, waitErr := windows.WaitForSingleObject(process, 0); waitErr == nil && status == windows.WAIT_OBJECT_0 {
+				return true, false
+			}
 		}
 		if err != nil {
 			err = errors.Join(err, windows.TerminateProcess(process, 1))
@@ -223,25 +330,35 @@ func (c *workingSetContainment) capMember(pid uint32) {
 	if err != nil {
 		slog.Warn("working-set cap failed", "engine", c.engine, "pid", pid, "error", err)
 	}
+	return false, false
 }
 
 func (c *workingSetContainment) Close() error {
 	c.once.Do(func() {
 		close(c.stop)
+		// Claim an unstarted watcher so Close never waits for work that was
+		// not launched, and a later start cannot use closed handles.
+		c.startOnce.Do(func() { close(c.done) })
 		// Wake the reader before closing either handle. The timeout also bounds
 		// shutdown if posting fails, avoiding a close/use race on reused handles.
-		wakeErr := windows.PostQueuedCompletionStatus(c.port, 0, 0, nil)
+		var wakeErr error
+		select {
+		case <-c.done:
+		default:
+			wakeErr = windows.PostQueuedCompletionStatus(c.port, 0, 0, nil)
+		}
 		<-c.done
+		c.verifiedAt.Store(0)
 		c.closeErr = errors.Join(wakeErr, windows.CloseHandle(c.port), windows.CloseHandle(c.job))
 	})
 	return c.closeErr
 }
 
-func startWorkingSetProcess(cmd *exec.Cmd, maxBytes uint64) (func() error, error) {
+func startWorkingSetProcess(cmd *exec.Cmd, maxBytes uint64) (func() error, func() bool, error) {
 	engine := filepath.Base(cmd.Path)
 	c, err := newWorkingSetContainment(engine, maxBytes)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -249,10 +366,13 @@ func startWorkingSetProcess(cmd *exec.Cmd, maxBytes uint64) (func() error, error
 		err := capRootWorkingSet(pid, maxBytes)
 		if err != nil {
 			slog.Warn("working-set cap failed", "engine", engine, "pid", pid, "error", err)
+		} else {
+			c.markVerified()
 		}
 		return err
 	}, c.Close); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return c.Close, nil
+	c.start()
+	return c.Close, c.Verified, nil
 }

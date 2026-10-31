@@ -96,7 +96,7 @@ export interface EngineSettingsRequest extends EngineSettingsTarget {
 }
 
 export interface EngineSettingsSnapshot extends EngineSettingsTarget {
-    workingSetLimitStatus?: 'applied' | 'not-running' | 'unenforced-adopted'
+    workingSetLimitStatus?: 'applied' | 'unverified' | 'not-running' | 'unenforced-adopted'
     serving?: EngineServingReadback
     revision: number
     appliedRevision: number
