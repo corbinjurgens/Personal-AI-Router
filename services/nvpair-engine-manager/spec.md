@@ -5,6 +5,37 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Windows engine working-set limit
+
+Engine settings accept optional integer `workingSetLimitMiB`, from 256 through
+1048576 inclusive. Absent or null means no limit. The target refuses a non-null
+value on non-Windows hosts, non-llama.cpp engine families, or runtime modes other
+than `process`, with a field error keyed `workingSetLimitMiB`. Preview reports
+the value change in `diff` and requires a restart when the engine is running.
+Apply validates before stopping or writing, then uses the existing stop,
+persist, rebind and conditional restart operation. The host runtime override
+stores `working_set_limit_mib`; clearing it masks an inherited limit with null.
+
+Windows applies the same hard maximum, in bytes, to each owned engine process
+and descendant. The root starts suspended, is assigned to a limit-free job,
+capped through `SetProcessWorkingSetSizeEx` and verified by readback before
+resuming. Failure kills and reaps the root and fails start. Job notifications
+cap descendants after confirming job membership; a descendant whose cap fails is
+terminated, and if it cannot be opened or the notification read fails, the whole
+engine job is terminated. Windows delivers job notifications best-effort, so a
+lost notification leaves that descendant uncapped. This limits each process
+working set, not aggregate tree memory or committed memory. The engine job has
+no kill-on-close lifetime policy.
+
+`LaunchState` includes the saved `workingSetLimitMiB` and
+`workingSetLimitStatus`; the broker projects the status onto its settings
+snapshot. Status is omitted when no limit is saved. `not-running` means stopped;
+`applied` means this manager started the current owned process with the saved
+value; `unenforced-adopted` means the running engine is adopted or was started
+without the current value. Adoption cannot enforce new descendants after a
+manager restart, so an engine restart is required. A failed spawn leaves the
+saved limit in place and reports the failed start, as with other runtime keys.
+
 ## Private model memory device metadata
 
 `mapModelSettingsDevices(ctx, operation, runner)` consumes an operation snapshot,
@@ -665,9 +696,18 @@ disables idle retention in the pinned build. Positive retention remains valid;
 zero and values below -1 are refused. Retention stays string-valued (`"-1"`).
 The single `llamaServingOptions` table derives native spellings/environment names
 from pinned llama.cpp `7fe450e1` `common/arg.cpp`. Logical/physical batch sizes,
-K/V cache types, Flash Attention and KV/operation offload are supported and
-retained in placement entries. Unsupported SWA, context-shift and scaling
-controls, tensor/MoE/loading placement, draft/projector allocation, router
+K/V cache types, Flash Attention, KV/operation offload, CPU MoE placement,
+weight repacking and load mode are supported and retained in placement entries.
+`cpu-moe` accepts only `true`, `1` or `on`; omit it to leave experts unpinned.
+False is refused because native drops the positive-only child switch while
+the child can inherit `LLAMA_ARG_CPU_MOE`. `n-cpu-moe` requires a canonical
+nonnegative decimal int32, without a sign or leading zeros (`0` is allowed).
+`repack` uses explicit booleans; negative preset keys (`nr`, `no-repack`)
+invert native truthiness (`on`, `enabled`, `true`, `1`). `load-mode` accepts
+exactly `auto`, `none`, `mmap`, `mlock`, `mmap+mlock` or `dio`. These controls
+have no typed override and do not change memory estimation. Unsupported SWA,
+context-shift and scaling controls, tensor overrides, CPU FFN, host buffers,
+lazy mode, NUMA/RPC placement, draft/projector allocation, router
 autoload and built-in model preset controls are rejected on CLI, in environment
 and in source presets. A reserved `version` preset key is skipped; `threads` and
 `threads-batch` pass through presets unchanged. Main-model sampling offload,

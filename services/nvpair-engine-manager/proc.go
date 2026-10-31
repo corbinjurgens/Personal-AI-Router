@@ -46,7 +46,7 @@ func childEnv(overrides map[string]string) []string {
 // and streams stdout/stderr lines to onLine. The returned proc's done
 // channel closes once the process exits.
 func startManagedProc(bin string, args []string, env map[string]string, onLine func(stream, line string)) (*managedProc, error) {
-	return startManagedProcObserved(bin, args, env, onLine, nil)
+	return startManagedProcObserved(bin, args, env, onLine, nil, 0)
 }
 
 // Output observations are internal and precede the public diagnostic callback.
@@ -58,7 +58,7 @@ type managedOutputFrame struct {
 	Failure  string
 }
 
-func startManagedProcObserved(bin string, args []string, env map[string]string, onLine func(stream, line string), observe func(managedOutputFrame)) (*managedProc, error) {
+func startManagedProcObserved(bin string, args []string, env map[string]string, onLine func(stream, line string), observe func(managedOutputFrame), workingSetLimitBytes uint64) (*managedProc, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Env = childEnv(env)
 	configureSysProcAttr(cmd)
@@ -71,7 +71,15 @@ func startManagedProcObserved(bin string, args []string, env map[string]string, 
 	if err != nil {
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
+	var cleanup func() error
+	if workingSetLimitBytes != 0 {
+		cleanup, err = startWorkingSetProcess(cmd, workingSetLimitBytes)
+	} else {
+		err = cmd.Start()
+	}
+	if err != nil {
+		_ = stdout.Close()
+		_ = stderr.Close()
 		return nil, err
 	}
 
@@ -94,6 +102,12 @@ func startManagedProcObserved(bin string, args []string, env map[string]string, 
 		_ = cmd.Wait()
 		close(mp.done)
 	}()
+	if cleanup != nil {
+		go func() {
+			<-mp.done
+			_ = cleanup()
+		}()
+	}
 	return mp, nil
 }
 

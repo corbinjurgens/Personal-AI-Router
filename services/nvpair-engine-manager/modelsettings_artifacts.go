@@ -282,7 +282,8 @@ func inspectionSnapshot(st *engineState, engine string) (modelInspectionSnapshot
 func (s modelInspectionSnapshot) equal(other modelInspectionSnapshot) bool {
 	return s.store == other.store && s.state.gen == other.state.gen && s.state.manifest == other.state.manifest &&
 		reflect.DeepEqual(s.command, other.command) && reflect.DeepEqual(s.state.plat.Runtime.EditableLaunch, other.state.plat.Runtime.EditableLaunch) &&
-		s.state.plat.Runtime.Serving.Equal(other.state.plat.Runtime.Serving) && modelconfig.EqualLoads(s.state.plat.Runtime.ModelLoads, other.state.plat.Runtime.ModelLoads)
+		s.state.plat.Runtime.Serving.Equal(other.state.plat.Runtime.Serving) && modelconfig.EqualLoads(s.state.plat.Runtime.ModelLoads, other.state.plat.Runtime.ModelLoads) &&
+		reflect.DeepEqual(s.state.plat.Runtime.WorkingSetLimitMiB, other.state.plat.Runtime.WorkingSetLimitMiB)
 }
 
 func artifactPathSafe(path string) bool {

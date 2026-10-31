@@ -291,6 +291,7 @@ func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine strin
 	snapshot.EffectiveServerPort = launch.EffectivePort
 	snapshot.EffectiveProxyPort = proxyPort
 	snapshot.Running = launch.Running
+	snapshot.WorkingSetLimitStatus = launch.WorkingSetLimitStatus
 	snapshot.Adopted = launch.Adopted
 	snapshot.Format = launch.Format
 	snapshot.Editable = launch.Editable && ready
@@ -524,6 +525,7 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 	if launch.Engine != "" {
 		record.Snapshot.Serving = launch.ServingReadback.Clone()
 		record.Snapshot.Running = launch.Running
+		record.Snapshot.WorkingSetLimitStatus = launch.WorkingSetLimitStatus
 		record.Snapshot.Adopted = launch.Adopted
 		record.Snapshot.EffectiveServerPort = launch.EffectivePort
 		record.Snapshot.Editable = launch.Editable

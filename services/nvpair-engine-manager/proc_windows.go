@@ -131,44 +131,8 @@ func startMemoryPlanProcess(ctx context.Context, cmd *exec.Cmd) (func(context.Co
 		windows.CloseHandle(job)
 		return nil, err
 	}
-	configureSysProcAttr(cmd)
-	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
-	if err := cmd.Start(); err != nil {
-		windows.CloseHandle(job)
+	if err := startSuspendedJobProcess(ctx, cmd, job, nil, func() error { return windows.CloseHandle(job) }); err != nil {
 		return nil, err
-	}
-
-	// No query code runs before assignment, so every failure here can kill
-	// and reap the suspended parent without an uncontained descendant race.
-	fail := func(err error) (func(context.Context) error, error) {
-		killErr := cmd.Process.Kill()
-		if errors.Is(killErr, os.ErrProcessDone) {
-			killErr = nil
-		}
-		closeErr := windows.CloseHandle(job)
-		reapErr := reapMemoryPlanStartFailure(ctx, cmd.Wait)
-		return nil, errors.Join(err, killErr, closeErr, reapErr)
-	}
-	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
-	if err != nil {
-		return fail(err)
-	}
-	err = windows.AssignProcessToJobObject(job, process)
-	windows.CloseHandle(process)
-	if err != nil {
-		return fail(err)
-	}
-	thread, err := memoryPlanSuspendedThread(uint32(cmd.Process.Pid))
-	if err != nil {
-		return fail(err)
-	}
-	previous, err := windows.ResumeThread(thread)
-	windows.CloseHandle(thread)
-	if err != nil {
-		return fail(err)
-	}
-	if previous != 1 {
-		return fail(errors.New("unexpected planning thread suspension state"))
 	}
 
 	var once sync.Once
@@ -182,10 +146,63 @@ func startMemoryPlanProcess(ctx context.Context, cmd *exec.Cmd) (func(context.Co
 	}, nil
 }
 
+// The job and any completion port must be configured before assignment. On
+// failure cleanup releases containment before reaping, including kill-on-close
+// jobs whose explicit process kill failed. The caller owns Wait on success.
+func startSuspendedJobProcess(ctx context.Context, cmd *exec.Cmd, job windows.Handle, beforeResume func(uint32) error, cleanup func() error) error {
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, cleanup())
+	}
+	configureSysProcAttr(cmd)
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
+	if err := cmd.Start(); err != nil {
+		return errors.Join(err, cleanup())
+	}
+
+	// No child code runs before assignment, so every failure here can kill
+	// and reap the suspended parent without an uncontained descendant race.
+	fail := func(err error) error {
+		killErr := cmd.Process.Kill()
+		if errors.Is(killErr, os.ErrProcessDone) {
+			killErr = nil
+		}
+		closeErr := cleanup()
+		reapErr := reapMemoryPlanStartFailure(ctx, cmd.Wait)
+		return errors.Join(err, killErr, closeErr, reapErr)
+	}
+	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+	if err != nil {
+		return fail(err)
+	}
+	err = windows.AssignProcessToJobObject(job, process)
+	windows.CloseHandle(process)
+	if err != nil {
+		return fail(err)
+	}
+	if beforeResume != nil {
+		if err := beforeResume(uint32(cmd.Process.Pid)); err != nil {
+			return fail(err)
+		}
+	}
+	thread, err := suspendedProcessThread(uint32(cmd.Process.Pid))
+	if err != nil {
+		return fail(err)
+	}
+	previous, err := windows.ResumeThread(thread)
+	windows.CloseHandle(thread)
+	if err != nil {
+		return fail(err)
+	}
+	if previous != 1 {
+		return fail(errors.New("unexpected process thread suspension state"))
+	}
+	return nil
+}
+
 // exec.Cmd retains the process handle but closes the primary thread handle.
 // CREATE_SUSPENDED leaves exactly that thread, so a Toolhelp snapshot lets us
 // reopen it without an undocumented NtResumeProcess call or a PID kill tree.
-func memoryPlanSuspendedThread(pid uint32) (windows.Handle, error) {
+func suspendedProcessThread(pid uint32) (windows.Handle, error) {
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
 	if err != nil {
 		return 0, err
@@ -202,13 +219,13 @@ func memoryPlanSuspendedThread(pid uint32) (windows.Handle, error) {
 		}
 		if entry.OwnerProcessID == pid {
 			if threadID != 0 {
-				return 0, errors.New("ambiguous planning process primary thread")
+				return 0, errors.New("ambiguous process primary thread")
 			}
 			threadID = entry.ThreadID
 		}
 	}
 	if threadID == 0 {
-		return 0, errors.New("planning process primary thread unavailable")
+		return 0, errors.New("process primary thread unavailable")
 	}
 	return windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, threadID)
 }

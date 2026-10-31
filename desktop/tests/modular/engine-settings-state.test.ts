@@ -146,14 +146,33 @@ describe('model load and serving preservation in the settings editor', () => {
             label: 'Engine arguments',
             value: 'managed serve --keep',
             field: 'launchText'
+        },
+        {
+            name: 'working-set limit',
+            label: 'Working-set limit (MiB, Windows)',
+            value: '8192',
+            field: 'workingSetLimitMiB'
+        },
+        {
+            name: 'cleared working-set limit',
+            label: 'Working-set limit (MiB, Windows)',
+            value: '',
+            field: 'workingSetLimitMiB'
         }
     ])(
         'carries full model loads and serving through a $name edit and failed apply',
         async ({ label, value, field }) => {
             const snapshot: EngineSettingsSnapshot = {
                 ...baseline,
-                settings: { ...baseline.settings, serving: structuredClone(serving) }
+                engine: 'llamacpp',
+                workingSetLimitStatus: 'applied',
+                settings: {
+                    ...baseline.settings,
+                    workingSetLimitMiB: 4096,
+                    serving: structuredClone(serving)
+                }
             }
+            const key = engineSettingsKey(snapshot)
             const get = vi.fn<IEngineApi['getSettings']>().mockResolvedValue(snapshot)
             const preview = vi
                 .fn<IEngineApi['previewSettings']>()
@@ -204,16 +223,17 @@ describe('model load and serving preservation in the settings editor', () => {
                     root.render(
                         createElement(EngineSettingsSection, {
                             nodeId: 'remote',
-                            engineType: 'ollama',
+                            engineType: 'llama-cpp',
                             disabled: false
                         })
                     )
                 )
                 const input = container.querySelector(`[aria-label="${label}"]`)
+                expect(container.textContent).toContain('applied')
                 const prototype =
-                    field === 'proxyPort'
-                        ? HTMLInputElement.prototype
-                        : HTMLTextAreaElement.prototype
+                    field === 'launchText'
+                        ? HTMLTextAreaElement.prototype
+                        : HTMLInputElement.prototype
                 const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
                 if (!input || !setter) throw new Error(`${label} input missing`)
                 await act(async () => {
@@ -225,7 +245,14 @@ describe('model load and serving preservation in the settings editor', () => {
                 await act(async () => button.click())
                 const expectedSettings = {
                     ...snapshot.settings,
-                    [field]: field === 'proxyPort' ? 12500 : value
+                    [field]:
+                        field === 'proxyPort'
+                            ? 12500
+                            : field === 'workingSetLimitMiB'
+                              ? value === ''
+                                  ? undefined
+                                  : 8192
+                              : value
                 }
                 expect(preview).toHaveBeenCalledWith(
                     expect.objectContaining({ settings: expectedSettings })
@@ -238,6 +265,9 @@ describe('model load and serving preservation in the settings editor', () => {
                 if (!previewRequest || !applyRequest) throw new Error('Settings requests missing')
                 expect(previewRequest.settings.modelLoads).toEqual(modelLoads)
                 expect(applyRequest.settings.modelLoads).toEqual(modelLoads)
+                expect(applyRequest.settings.workingSetLimitMiB).toBe(
+                    field === 'workingSetLimitMiB' ? (value === '' ? undefined : 8192) : 4096
+                )
                 expect(applyRequest.settings.modelLoads).not.toBe(
                     store.getState().entries[key].snapshot?.settings.modelLoads
                 )
@@ -249,6 +279,79 @@ describe('model load and serving preservation in the settings editor', () => {
                     modelLoads
                 )
                 expect(store.getState().entries[key].snapshot?.settings.serving).toEqual(serving)
+            } finally {
+                await act(async () => root.unmount())
+                container.remove()
+            }
+        }
+    )
+
+    it.each(['1e', '8191.5', '-1'])(
+        'refuses malformed working-set limit %s without previewing',
+        async value => {
+            const snapshot: EngineSettingsSnapshot = {
+                ...baseline,
+                engine: 'llamacpp',
+                settings: { ...baseline.settings, workingSetLimitMiB: 4096 }
+            }
+            const preview = vi.fn<IEngineApi['previewSettings']>()
+            const apply = vi.fn<IEngineApi['applySettings']>()
+            Object.defineProperty(window, 'pairApi', {
+                configurable: true,
+                value: {
+                    engines: {
+                        getSettings: vi.fn<IEngineApi['getSettings']>().mockResolvedValue(snapshot),
+                        previewSettings: preview,
+                        applySettings: apply,
+                        onSettingsChanged: () => () => {},
+                        onSettingsDisconnected: () => () => {}
+                    }
+                }
+            })
+            vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+            vi.stubGlobal('CSS', { supports: () => false })
+            Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+                configurable: true,
+                value: function (this: HTMLDialogElement) {
+                    this.open = true
+                }
+            })
+            useConnectionStore.setState({ connected: true, selfId: 'remote' })
+            store.setState({ entries: {} })
+            usePendingActionsStore.setState({ pending: new Map() })
+            const container = document.createElement('div')
+            document.body.appendChild(container)
+            const root = createRoot(container)
+            try {
+                await act(async () =>
+                    root.render(
+                        createElement(EngineSettingsSection, {
+                            nodeId: 'remote',
+                            engineType: 'llama-cpp',
+                            disabled: false
+                        })
+                    )
+                )
+                const input = container.querySelector(
+                    '[aria-label="Working-set limit (MiB, Windows)"]'
+                )
+                const setter = Object.getOwnPropertyDescriptor(
+                    HTMLInputElement.prototype,
+                    'value'
+                )?.set
+                if (!input || !setter) throw new Error('Working-set input missing')
+                await act(async () => {
+                    setter.call(input, value)
+                    input.dispatchEvent(new Event('input', { bubbles: true }))
+                })
+                const button = container.querySelector('button[aria-label="Apply"]')
+                if (!(button instanceof HTMLButtonElement)) throw new Error('Apply button missing')
+                await act(async () => button.click())
+                expect(preview).not.toHaveBeenCalled()
+                expect(apply).not.toHaveBeenCalled()
+                expect(document.body.textContent).toContain(
+                    'Enter the working-set limit as whole MiB, or leave it empty.'
+                )
             } finally {
                 await act(async () => root.unmount())
                 container.remove()

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,6 +25,176 @@ import (
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 )
+
+// noserve sleeps without opening a listener or loading a model. The existing
+// settings fixture reserves its port briefly on loopback during setup only.
+func workingSetSettingsExecutor(t *testing.T) *Executor {
+	t.Helper()
+	e := settingsExecutor(t, false)
+	st := settingsState(t, e)
+	st.manifest.Family = "llamacpp"
+	st.plat.Runtime.Args = []string{"noserve"}
+	st.plat.Runtime.EditableLaunch.FixedArgs = []string{"noserve"}
+	st.plat.Runtime.Ready = nil
+	st.plat.Runtime.Health = nil
+	return e
+}
+
+func TestWorkingSetLimitRefusedApplyHasNoEffects(t *testing.T) {
+	test := func(name string, command bool, family string, limit int) {
+		t.Run(name, func(t *testing.T) {
+			e := settingsExecutor(t, command)
+			st := settingsState(t, e)
+			st.manifest.Family = family
+			path := filepath.Join(e.overrideDir, "fake.json")
+			before := []byte("{\"engine\":\"fake\",\"runtime\":{\"port\":54321}}\n")
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			st.running, st.adopted = true, true
+			request := settingsRequest(t, e)
+			request.Settings.WorkingSetLimitMiB = &limit
+			preview := previewSettings(t, e, request)
+			if preview.Errors["workingSetLimitMiB"] == "" {
+				t.Fatalf("missing field error: %+v", preview.Errors)
+			}
+			_, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: request.Settings}, func() error {
+				t.Fatal("refused apply rebound proxy")
+				return nil
+			})
+			var field *ServingFieldError
+			if !errors.As(err, &field) || field.Field != "workingSetLimitMiB" {
+				t.Fatalf("apply error = %v, want workingSetLimitMiB field error", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) || !st.running || !st.adopted || st.plat.Runtime.WorkingSetLimitMiB != nil {
+				t.Fatal("refused apply changed disk or engine state")
+			}
+			st.running, st.adopted = false, false
+		})
+	}
+	test("below minimum", false, "llamacpp", 255)
+	test("above maximum", false, "llamacpp", 1048577)
+	test("zero is not absence", false, "llamacpp", 0)
+	test("other engine family", false, "ollama", 256)
+	test("command mode", true, "llamacpp", 256)
+}
+
+func TestWorkingSetLimitApplyPersistsAndRestartsOwnedProcess(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("working-set enforcement is Windows-only")
+	}
+	e := workingSetSettingsExecutor(t)
+	limit := 256
+	request := settingsRequest(t, e)
+	request.Settings.WorkingSetLimitMiB = &limit
+	preview := previewSettings(t, e, request)
+	if len(preview.Errors) != 0 || preview.Restart || len(preview.Diff) != 1 || preview.Diff[0].Field != "workingSetLimitMiB" || string(preview.Diff[0].Before) != "null" || string(preview.Diff[0].After) != "256" {
+		t.Fatalf("cold preview = %+v", preview)
+	}
+	result, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+	if err != nil || result.WorkingSetLimitStatus != "not-running" || result.WorkingSetLimitMiB == nil || *result.WorkingSetLimitMiB != 256 {
+		t.Fatalf("cold apply = %+v, error = %v", result, err)
+	}
+	if got := readSettingsOverride(t, e); got.WorkingSetLimitMiB == nil || *got.WorkingSetLimitMiB != 256 {
+		t.Fatalf("saved limit = %v", got.WorkingSetLimitMiB)
+	}
+	if err := e.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	result, err = e.LaunchSettings("fake")
+	if err != nil || !result.Running || result.WorkingSetLimitStatus != "applied" {
+		t.Fatalf("running readback = %+v, error = %v", result, err)
+	}
+	st := settingsState(t, e)
+	st.mu.Lock()
+	before := st.proc
+	st.mu.Unlock()
+	request = settingsRequest(t, e)
+	preview = previewSettings(t, e, request)
+	if len(preview.Errors) != 0 || preview.Restart || len(preview.Diff) != 0 {
+		t.Fatalf("unchanged preview = %+v", preview)
+	}
+	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	unchanged := st.proc == before
+	st.mu.Unlock()
+	if !unchanged {
+		t.Fatal("unchanged apply restarted the process")
+	}
+	changed := 512
+	request.Settings.WorkingSetLimitMiB = &changed
+	preview = previewSettings(t, e, request)
+	if len(preview.Errors) != 0 || !preview.Restart || len(preview.Diff) != 1 || string(preview.Diff[0].Before) != "256" || string(preview.Diff[0].After) != "512" {
+		t.Fatalf("changed preview = %+v", preview)
+	}
+	result, err = e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+	if err != nil || result.WorkingSetLimitStatus != "applied" || result.WorkingSetLimitMiB == nil || *result.WorkingSetLimitMiB != 512 {
+		t.Fatalf("changed apply = %+v, error = %v", result, err)
+	}
+	st.mu.Lock()
+	restarted := st.proc != nil && st.proc != before
+	st.mu.Unlock()
+	if !restarted {
+		t.Fatal("changed limit did not restart process")
+	}
+	request = settingsRequest(t, e)
+	request.Settings.WorkingSetLimitMiB = nil
+	preview = previewSettings(t, e, request)
+	if !preview.Restart || len(preview.Diff) != 1 || string(preview.Diff[0].After) != "null" {
+		t.Fatalf("clearing preview = %+v", preview)
+	}
+	result, err = e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+	if err != nil || !result.Running || result.WorkingSetLimitMiB != nil || result.WorkingSetLimitStatus != "" || readSettingsOverride(t, e).WorkingSetLimitMiB != nil {
+		t.Fatalf("clearing limit = %+v, error = %v", result, err)
+	}
+}
+
+func TestWorkingSetLimitReadbackDoesNotClaimUnenforcedProcess(t *testing.T) {
+	e := workingSetSettingsExecutor(t)
+	st := settingsState(t, e)
+	limit := 256
+	st.plat.Runtime.WorkingSetLimitMiB = &limit
+	st.running = true
+	t.Cleanup(func() { st.running = false; st.adopted = false })
+	for _, adopted := range []bool{false, true} {
+		st.adopted = adopted
+		result, err := e.LaunchSettings("fake")
+		if err != nil || result.WorkingSetLimitStatus != "unenforced-adopted" {
+			t.Fatalf("adopted=%v readback=%+v error=%v", adopted, result, err)
+		}
+	}
+}
+
+func TestWorkingSetLimitAbsentPreservesLaunch(t *testing.T) {
+	e := workingSetSettingsExecutor(t)
+	request := settingsRequest(t, e)
+	preview := previewSettings(t, e, request)
+	if len(preview.Errors) != 0 || preview.Restart || len(preview.Diff) != 0 || preview.Settings.WorkingSetLimitMiB != nil {
+		t.Fatalf("absent preview = %+v", preview)
+	}
+	if err := e.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	st := settingsState(t, e)
+	st.mu.Lock()
+	proc := st.proc
+	st.mu.Unlock()
+	result, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+	if err != nil || !result.Running || result.WorkingSetLimitMiB != nil || result.WorkingSetLimitStatus != "" {
+		t.Fatalf("absent apply = %+v, error = %v", result, err)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.proc != proc || st.plat.Runtime.workingSetLimitBytes != 0 {
+		t.Fatal("absent limit changed launch")
+	}
+}
 
 func TestServingDriftClearsOnlyAfterSuccessfulApply(t *testing.T) {
 	f := ownedServingFixture(t)

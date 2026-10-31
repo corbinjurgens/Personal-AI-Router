@@ -46,6 +46,7 @@ import {
 } from '@/ui/stores/node-configuration.store'
 
 interface Draft {
+    workingSetLimitMiB: string
     serverPort: string
     proxyPort: string
     launchText: string
@@ -54,11 +55,16 @@ interface Draft {
 }
 const asDraft = (config: EngineSettingsConfig): Draft => ({
     ...structuredClone(config),
+    workingSetLimitMiB:
+        config.workingSetLimitMiB === undefined ? '' : String(config.workingSetLimitMiB),
     serverPort: String(config.serverPort),
     proxyPort: String(config.proxyPort)
 })
 const sameDraft = (a: Draft, b: Draft): boolean =>
-    a.serverPort === b.serverPort && a.proxyPort === b.proxyPort && a.launchText === b.launchText
+    a.serverPort === b.serverPort &&
+    a.proxyPort === b.proxyPort &&
+    a.launchText === b.launchText &&
+    a.workingSetLimitMiB === b.workingSetLimitMiB
 
 export function EngineSettingsSection({
     nodeId,
@@ -81,7 +87,12 @@ export function EngineSettingsSection({
     const management = useNodeConfigurationStore(state => state.management.get(nodeId))
     const permissionReadOnly = !isLocalNode && management?.state !== 'allowed'
     const [base, setBase] = useState<EngineSettingsSnapshot>()
-    const [draft, setDraft] = useState<Draft>({ serverPort: '', proxyPort: '', launchText: '' })
+    const [draft, setDraft] = useState<Draft>({
+        serverPort: '',
+        proxyPort: '',
+        launchText: '',
+        workingSetLimitMiB: ''
+    })
     const [errorDialog, setErrorDialog] = useState('')
     const [confirmation, setConfirmation] = useState<EngineSettingsRequest>()
     const [checking, setChecking] = useState(false)
@@ -134,7 +145,10 @@ export function EngineSettingsSection({
         }
     }, [snapshot, base, dirty])
 
-    function change(field: 'serverPort' | 'proxyPort' | 'launchText', value: string): void {
+    function change(
+        field: 'serverPort' | 'proxyPort' | 'launchText' | 'workingSetLimitMiB',
+        value: string
+    ): void {
         generation.current++
         if (field === 'serverPort') serverPortEdited.current = true
         setDraft(current => ({ ...current, [field]: value }))
@@ -162,6 +176,16 @@ export function EngineSettingsSection({
             if (commit) reportError('Enter ports from 1 to 65535.')
             return
         }
+        // Range checks belong to the target; only reject text that is not a
+        // whole number so a typo cannot silently clear or round the limit.
+        const workingSetLimit = draft.workingSetLimitMiB.trim()
+        if (
+            workingSetLimit !== '' &&
+            !(/^\d+$/.test(workingSetLimit) && Number(workingSetLimit) <= 2147483647)
+        ) {
+            if (commit) reportError('Enter the working-set limit as whole MiB, or leave it empty.')
+            return
+        }
         if (commit) setChecking(true)
         const useServerPort = serverPortEdited.current
         const request: EngineSettingsRequest = {
@@ -172,6 +196,7 @@ export function EngineSettingsSection({
                 serverPort,
                 proxyPort,
                 launchText: draft.launchText,
+                workingSetLimitMiB: workingSetLimit === '' ? undefined : Number(workingSetLimit),
                 ...(draft.serving ? { serving: structuredClone(draft.serving) } : {})
             },
             resolution: useServerPort ? 'server' : 'launch'
@@ -328,6 +353,24 @@ export function EngineSettingsSection({
                         />
                     </FormField>
                 </Flex>
+                {engineType === 'llama-cpp' && (
+                    <FormField slotLabel="Working-set limit (MiB, Windows)">
+                        <TextInput
+                            size="small"
+                            aria-label="Working-set limit (MiB, Windows)"
+                            value={draft.workingSetLimitMiB}
+                            onValueChange={value => change('workingSetLimitMiB', value)}
+                            onBlur={() => {
+                                if (dirty) void check()
+                            }}
+                            disabled={locked}
+                            inputMode="numeric"
+                        />
+                        {snapshot?.workingSetLimitStatus && (
+                            <Text kind="body/regular/sm">{snapshot.workingSetLimitStatus}</Text>
+                        )}
+                    </FormField>
+                )}
                 <FormField slotLabel="Engine arguments">
                     <TextArea
                         size="small"

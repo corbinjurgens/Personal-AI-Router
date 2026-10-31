@@ -16,6 +16,7 @@ export interface EngineSettingsConfig {
     proxyPort: number
     /** Arguments and leading environment assignments, without an executable/subcommand. */
     launchText: string
+    workingSetLimitMiB?: number
     serving?: EngineServingConfig
     modelLoads?: ModelLoad[]
 }
@@ -95,6 +96,7 @@ export interface EngineSettingsRequest extends EngineSettingsTarget {
 }
 
 export interface EngineSettingsSnapshot extends EngineSettingsTarget {
+    workingSetLimitStatus?: 'applied' | 'not-running' | 'unenforced-adopted'
     serving?: EngineServingReadback
     revision: number
     appliedRevision: number

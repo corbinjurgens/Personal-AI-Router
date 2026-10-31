@@ -91,6 +91,47 @@ const baseline = {
     editable: true
 }
 
+describe('working-set settings decoding', () => {
+    it.each(['applied', 'not-running', 'unenforced-adopted'])(
+        'preserves the limit and %s status',
+        status => {
+            const snapshot = parseEngineSettings({
+                ...baseline,
+                workingSetLimitStatus: status,
+                settings: { ...baseline.settings, workingSetLimitMiB: 4096 }
+            })
+            expect(snapshot.settings.workingSetLimitMiB).toBe(4096)
+            expect(snapshot.workingSetLimitStatus).toBe(status)
+        }
+    )
+    it.each([1.5, -1, '4096'])('rejects an invalid limit %s', limit => {
+        expect(() =>
+            parseEngineSettings({
+                ...baseline,
+                settings: { ...baseline.settings, workingSetLimitMiB: limit }
+            })
+        ).toThrow()
+    })
+    it('keeps the target range error for a zero limit in a preview', () => {
+        const preview = parseEngineSettingsPreview({
+            settings: { ...baseline.settings, workingSetLimitMiB: 0 },
+            revision: 4,
+            restart: false,
+            rebind: false,
+            errors: { workingSetLimitMiB: 'Enter a working-set limit from 256 to 1048576 MiB.' }
+        })
+        expect(preview.settings.workingSetLimitMiB).toBe(0)
+        expect(preview.errors).toEqual({
+            workingSetLimitMiB: 'Enter a working-set limit from 256 to 1048576 MiB.'
+        })
+    })
+    it('rejects an unknown enforcement status', () => {
+        expect(() =>
+            parseEngineSettings({ ...baseline, workingSetLimitStatus: 'unknown' })
+        ).toThrow()
+    })
+})
+
 function memoryPlanFixture(): MemoryPlan {
     const config: MemoryPlan['requested'] = {
         contextTokens: 8192,

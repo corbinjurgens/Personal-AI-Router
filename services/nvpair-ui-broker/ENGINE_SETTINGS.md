@@ -217,8 +217,19 @@ propagation is not part of this API.
 | `engine:preview-settings` | `{engine, nodeId?, expectedRevision, settings, modelChange?, resolution?}` | Normalized settings, errors, conflict, selected diff, review digest and runtime impact |
 | `engine:apply-settings` | Preview request plus `requestId`, and reviewed `modelChange.previewDigest` for selected edits | `{revision, phase}` attempt receipt after target-owned execution; lost replies require readback |
 
-`engine` is `ollama`, `lmstudio`, or `llamacpp`. `settings` contains all three
-fields: `serverPort`, `proxyPort`, `launchText`. The last field contains
+`engine` is `ollama`, `lmstudio`, or `llamacpp`. `settings` contains
+`serverPort`, `proxyPort`, `launchText`, and optional `workingSetLimitMiB`.
+The limit is an integer from 256 through 1048576, accepted only by Windows
+llama.cpp engines in process mode. Absence or null removes the limit. Preview
+returns field errors under `workingSetLimitMiB`, includes changes in `diff`,
+and marks a running engine for restart. Apply persists `working_set_limit_mib`
+through the manager's runtime write. Snapshots project the manager's
+`workingSetLimitStatus`: `applied`, `not-running`, or `unenforced-adopted`,
+omitted when no limit is saved. Adopted processes require restart for descendant
+enforcement. Root cap failure fails start; a descendant that cannot be capped is
+terminated, or the whole engine job when the descendant cannot be opened. Windows
+delivers the descendant notifications best-effort (see the manager spec). The
+`launchText` field contains
 arguments and leading environment assignments, without the executable or
 startup subcommand. The argument grammar is
 [`pair-arguments-v1`](../nvpair-engine-manager/LAUNCH_TEXT.md). Preview does not

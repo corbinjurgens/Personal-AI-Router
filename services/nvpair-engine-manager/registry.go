@@ -179,6 +179,10 @@ type InstallArtifact struct {
 //     (e.g. LM Studio's `lms`); liveness = the readiness/health probe,
 //     and Stop.Cmd brings it down.
 type Runtime struct {
+	WorkingSetLimitMiB *int `json:"working_set_limit_mib,omitempty"`
+	// The owned process and value capped at its successful spawn.
+	workingSetProcess    *managedProc
+	workingSetLimitBytes uint64
 	// Owned launch preparation is process-local, never manifest configuration.
 	servingLaunch           *llamaServingLaunch
 	servingSnapshot         *llamaServingSnapshot
