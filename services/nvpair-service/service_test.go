@@ -149,8 +149,8 @@ func TestSubscribeIsForwardedAndBaselineReplayed(t *testing.T) {
 	c1.call("1", "discovery:subscribe", "")
 	c1.notification("discovery:nodes-changed")
 	c2.notification("discovery:nodes-changed") // broadcast, not just to c1
-	c1.call("2", "ollama-proxy:subscribe", "")
-	c1.notification("ollama-proxy:ready")
+	c1.call("2", "llamacpp-proxy:subscribe", "")
+	c1.notification("llamacpp-proxy:ready")
 
 	// The broker treats the second subscription as redundant and pushes no
 	// baseline; the service supplies its cached copies after the answer.
@@ -161,8 +161,8 @@ func TestSubscribeIsForwardedAndBaselineReplayed(t *testing.T) {
 	if !strings.Contains(string(m.Params), "node-1") {
 		t.Fatalf("replayed baseline = %s", m.Params)
 	}
-	c3.call("10", "ollama-proxy:subscribe", "")
-	c3.notification("ollama-proxy:ready")
+	c3.call("10", "llamacpp-proxy:subscribe", "")
+	c3.notification("llamacpp-proxy:ready")
 
 	if n := len(b.receivedIDs("discovery:subscribe")); n != 2 {
 		t.Fatalf("broker got %d discovery:subscribe, want 2 (forwarded each time)", n)
@@ -478,11 +478,11 @@ func TestSlowClientIsDisconnectedNotBlocking(t *testing.T) {
 }
 
 func TestParseRunArgs(t *testing.T) {
-	opts, err := parseRunArgs([]string{"--log-level", "debug", "--", "--proxy-engines", "ollama"}, os.Stderr)
+	opts, err := parseRunArgs([]string{"--log-level", "debug", "--", "--proxy-engines", "llamacpp"}, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--proxy-engines", "ollama", "--log-level", "debug"}
+	want := []string{"--proxy-engines", "llamacpp", "--log-level", "debug"}
 	if strings.Join(opts.brokerArgs, " ") != strings.Join(want, " ") {
 		t.Fatalf("broker args = %v, want %v", opts.brokerArgs, want)
 	}

@@ -321,7 +321,7 @@ func TestNodeInfoRPCOpenManualDetailAdoptsSelfLoopback(t *testing.T) {
 	if d == nil || d.node.self || d.telemetrySelf || d.hostUUID != "" {
 		t.Fatalf("initial manual detail = %+v", d)
 	}
-	d.engines = []engineStatus{{Engine: "ollama", Port: 11434}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Port: 8081}}
 	d.refreshEngines()
 	assertStructure := func(stage string) {
 		t.Helper()
@@ -339,8 +339,8 @@ func TestNodeInfoRPCOpenManualDetailAdoptsSelfLoopback(t *testing.T) {
 			}
 		}
 		rows := d.engineTable.Rows()
-		if len(rows) != 1 || len(rows[0]) != 5 || rows[0][4] != "11434" {
-			t.Fatalf("%s: engine rows = %+v, want one five-cell row with engine port 11434", stage, rows)
+		if len(rows) != 1 || len(rows[0]) != 5 || rows[0][4] != "8081" {
+			t.Fatalf("%s: engine rows = %+v, want one five-cell row with engine port 8081", stage, rows)
 		}
 	}
 	assertStructure("before merge")

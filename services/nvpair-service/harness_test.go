@@ -129,7 +129,7 @@ func (b *fakeBroker) run() {
 			}
 			b.wmu.Unlock()
 			b.write(`{"jsonrpc":"2.0","id":%s,"result":null}`, id)
-		case "discovery:subscribe", "ollama-proxy:subscribe":
+		case "discovery:subscribe", "llamacpp-proxy:subscribe":
 			b.mu.Lock()
 			fresh := !b.subbed[m.Method]
 			b.subbed[m.Method] = true
@@ -138,8 +138,8 @@ func (b *fakeBroker) run() {
 			if fresh && m.Method == "discovery:subscribe" {
 				b.write(`{"jsonrpc":"2.0","method":"discovery:nodes-changed","params":[{"id":"node-%d"}]}`, b.gen)
 			}
-			if fresh && m.Method == "ollama-proxy:subscribe" {
-				b.write(`{"jsonrpc":"2.0","method":"ollama-proxy:ready","params":{"port":11434}}`)
+			if fresh && m.Method == "llamacpp-proxy:subscribe" {
+				b.write(`{"jsonrpc":"2.0","method":"llamacpp-proxy:ready","params":{"port":8080}}`)
 			}
 		case "crash":
 			b.exit(3)

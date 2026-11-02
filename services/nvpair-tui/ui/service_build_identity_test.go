@@ -92,7 +92,7 @@ func TestServiceBuildDiscoveryUpdatesOpenDetail(t *testing.T) {
 	push := func(field string) {
 		v.Update(NotificationMsg{Msg: &rpc.Message{
 			Method: "discovery:nodes-changed",
-			Params: []byte(`[{"hostUuid":"peer","name":"Peer","ipAddress":"192.0.2.1","port":14318,"models":["model"],"modelsByEngine":{"ollama":["model"]},"trusted":true` + field + `}]`),
+			Params: []byte(`[{"hostUuid":"peer","name":"Peer","ipAddress":"192.0.2.1","port":14318,"models":["model"],"modelsByEngine":{"llamacpp":["model"]},"trusted":true` + field + `}]`),
 		}})
 	}
 	push(`,"serviceBuildId":"` + clean + `"`)
@@ -273,7 +273,7 @@ func TestServiceBuildAndActionStatusSurviveManyGPUFrameBudget(t *testing.T) {
 				key: "host", name: "Host", self: tc.self,
 				presence: presenceOnline, serviceBuildID: build,
 			})
-			d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true}}
+			d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true}}
 			d.enginesStale = tc.stale
 			gpus := make([]noderec.GPUInfo, 8)
 			for i := range gpus {
