@@ -94,7 +94,7 @@ func TestRemoteClient_ModelFilesUseFreshConnections(t *testing.T) {
 
 	const rounds = 5
 	for i := 0; i < rounds; i++ {
-		if _, gerr := client.modelFiles(context.Background(), "ollama", "fixture", nil); gerr != nil {
+		if _, gerr := client.modelFiles(context.Background(), "llamacpp", "fixture", nil); gerr != nil {
 			t.Fatalf("round %d: %v", i, gerr)
 		}
 	}

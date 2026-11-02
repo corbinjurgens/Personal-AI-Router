@@ -204,7 +204,7 @@ func TestLifecycleUsesResolvedLaunchBuilder(t *testing.T) {
 				if mode == "process" {
 					// Keep the process alive through readiness and durable PID save.
 					// The normal server records argv before opening its listener.
-					platform.Runtime.Env = map[string]string{"FAKE_START_LOG": path, "OLLAMA_HOST": "127.0.0.1:{port}"}
+					platform.Runtime.Env = map[string]string{"FAKE_START_LOG": path, "FAKE_ADDR": "127.0.0.1:{port}"}
 					platform.Runtime.Ready = &Probe{TCP: "127.0.0.1:{port}"}
 				}
 				manifest.Platforms[key] = platform

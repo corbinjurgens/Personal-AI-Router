@@ -21,10 +21,10 @@ func TestStreamOpEmitsProgressThenResult(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", controlInstallPath, nil)
 
-	st := EngineStatus{Engine: "ollama", Installed: true, Running: true}
-	s.streamOp(rec, req, "op1", "ollama", "install", func(ctx context.Context) (streamFrame, error) {
-		exec.progress.publish(ProgressEvent{Engine: "ollama", Op: "install", Stage: "downloading", Percent: 42})
-		return streamFrame{Type: "result", OpID: "op1", Engine: "ollama", Op: "install", Status: &st}, nil
+	st := EngineStatus{Engine: "llamacpp", Installed: true, Running: true}
+	s.streamOp(rec, req, "op1", "llamacpp", "install", func(ctx context.Context) (streamFrame, error) {
+		exec.progress.publish(ProgressEvent{Engine: "llamacpp", Op: "install", Stage: "downloading", Percent: 42})
+		return streamFrame{Type: "result", OpID: "op1", Engine: "llamacpp", Op: "install", Status: &st}, nil
 	})
 
 	frames := decodeFrames(t, rec.Body.String())
@@ -51,7 +51,7 @@ func TestStreamOpEmitsErrorFrame(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", controlInstallPath, nil)
 
-	s.streamOp(rec, req, "op2", "ollama", "install", func(ctx context.Context) (streamFrame, error) {
+	s.streamOp(rec, req, "op2", "llamacpp", "install", func(ctx context.Context) (streamFrame, error) {
 		return streamFrame{}, context.DeadlineExceeded
 	})
 

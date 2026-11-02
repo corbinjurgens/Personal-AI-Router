@@ -47,8 +47,7 @@ func spawnFakeListener(t *testing.T, binPath string, port int) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(binPath)
 	cmd.Env = overrideEnv(map[string]string{
-		"FAKE_ADDR":   "127.0.0.1:" + strconv.Itoa(port),
-		"OLLAMA_HOST": "127.0.0.1:" + strconv.Itoa(port),
+		"FAKE_ADDR": "127.0.0.1:" + strconv.Itoa(port),
 	})
 	configureSysProcAttr(cmd)
 	if err := cmd.Start(); err != nil {

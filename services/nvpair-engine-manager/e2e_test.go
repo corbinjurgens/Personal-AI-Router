@@ -92,7 +92,7 @@ func TestE2EPortSavePreservesLaunchOverrides(t *testing.T) {
 	cfg, home := t.TempDir(), t.TempDir()
 	port := privateTestPorts(t, 1)[0]
 	override := map[string]any{
-		"engine": "ollama",
+		"engine": "llamacpp",
 		"runtime": map[string]any{
 			"args": []string{"serve", "--custom-option"},
 			"env":  map[string]string{"CUSTOM_SETTING": "retained"},
@@ -105,19 +105,19 @@ func TestE2EPortSavePreservesLaunchOverrides(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := writeJSONAtomic(filepath.Join(dir, "ollama.json"), override); err != nil {
+		if err := writeJSONAtomic(filepath.Join(dir, "llamacpp.json"), override); err != nil {
 			t.Fatal(err)
 		}
 	}
 	first := startE2EManager(t, cfg, home)
-	send(t, first.stdin, 1, "engine:set-port", map[string]any{"engine": "ollama", "port": port})
+	send(t, first.stdin, 1, "engine:set-port", map[string]any{"engine": "llamacpp", "port": port})
 	var saved EngineStatus
 	if err := json.Unmarshal(waitResult(t, first.frames, "1", 10*time.Second), &saved); err != nil || saved.Port != port || saved.Running {
 		t.Fatalf("saved status=%+v, err=%v", saved, err)
 	}
 	first.stop(t)
 	second := startE2EManager(t, cfg, home)
-	send(t, second.stdin, 1, "engine:describe", map[string]any{"engine": "ollama"})
+	send(t, second.stdin, 1, "engine:describe", map[string]any{"engine": "llamacpp"})
 	var manifest Manifest
 	if err := json.Unmarshal(waitResult(t, second.frames, "1", 10*time.Second), &manifest); err != nil {
 		t.Fatal(err)
@@ -746,7 +746,7 @@ func TestE2ESettingsRebindRelayAndWorkerReload(t *testing.T) {
 	if err := json.Unmarshal(waitResult(t, manager.frames, "2", 5*time.Second), &launch); err != nil {
 		t.Fatal(err)
 	}
-	desired := settings.Config{ServerPort: launch.ServerPort, ProxyPort: 54301, LaunchText: `OLLAMA_ORIGINS="http://localhost" PAIR_TEST_LITERAL="$HOME {port}" ` + launch.LaunchText}
+	desired := settings.Config{ServerPort: launch.ServerPort, ProxyPort: 54301, LaunchText: `PAIR_TEST_ORIGINS="http://localhost" PAIR_TEST_LITERAL="$HOME {port}" ` + launch.LaunchText}
 	send(t, manager.stdin, 3, "engine:configure-launch", settings.Configure{Engine: "fake", Settings: desired, OperationID: "operation"})
 	var relay settings.Relay
 	timer := time.NewTimer(5 * time.Second)

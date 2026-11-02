@@ -117,18 +117,18 @@ func TestDetectRequiredUserOverrideVersion(t *testing.T) {
 				t.Fatal(err)
 			}
 			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "ollama.json"), []byte(override), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "llamacpp.json"), []byte(override), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if err := reg.LoadOverrideDir(dir); err != nil {
 				t.Fatal(err)
 			}
-			m, ok := reg.Get("ollama")
+			m, ok := reg.Get("llamacpp")
 			if wantVersion == 1 {
 				// Invalid overrides now disable the engine instead of retaining
 				// a bundled manifest that silently ignores detect_required.
-				if ok || reg.invalid["ollama"] == nil || !strings.Contains(reg.invalid["ollama"].Error(), "requires manifest_version 2") {
-					t.Fatalf("invalid override = %v, %v", m, reg.invalid["ollama"])
+				if ok || reg.invalid["llamacpp"] == nil || !strings.Contains(reg.invalid["llamacpp"].Error(), "requires manifest_version 2") {
+					t.Fatalf("invalid override = %v, %v", m, reg.invalid["llamacpp"])
 				}
 				return
 			}
@@ -142,6 +142,6 @@ func TestDetectRequiredUserOverrideVersion(t *testing.T) {
 			}
 		})
 	}
-	test("version 1 cannot silently ignore requirement", `{"engine":"ollama","detect_required":["config.json"]}`, 1, nil)
-	test("version 2 adds shared requirement", `{"engine":"ollama","manifest_version":2,"detect_required":["config.json"]}`, 2, []string{"config.json"})
+	test("version 1 cannot silently ignore requirement", `{"engine":"llamacpp","detect_required":["config.json"]}`, 1, nil)
+	test("version 2 adds shared requirement", `{"engine":"llamacpp","manifest_version":2,"detect_required":["config.json"]}`, 2, []string{"config.json"})
 }
