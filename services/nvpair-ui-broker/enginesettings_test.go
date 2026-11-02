@@ -97,6 +97,7 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 func newServingSettingsHarness(t *testing.T, engine string, serving *engines.ServingConfig) *settingsHarness {
 	t.Helper()
 	h := &settingsHarness{engine: engine, b: &Broker{codec: NewCodec(&bytes.Buffer{}), nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}, settingsReplies: make(chan json.RawMessage, 8)}
+	h.b.setDynamicEngines([]engines.Descriptor{customEngineDescriptor()}, func(int) bool { return true })
 	ports := make([]int, 4)
 	for i := range ports {
 		ports[i] = h.reservePort(t)
@@ -114,9 +115,10 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 	h.b.setEngineMgr(worker)
 	proxyWorker, proxyCodec := newTestRPCWorkerPipe(t)
 	proxy := &proxyProcess{peer: proxyWorker.peer, facadeState: map[string]proxyFacadeState{
-		"ollama":   {ready: true, port: ports[1]},
-		"lmstudio": {ready: true, port: ports[2]},
-		"llamacpp": {ready: true, port: ports[3]},
+		"ollama":          {ready: true, port: ports[1]},
+		"lmstudio":        {ready: true, port: ports[2]},
+		"llamacpp":        {ready: true, port: ports[3]},
+		"llamacpp-custom": {ready: true, port: ports[2]},
 	}}
 	publishTestProxy(h.b, proxy)
 	go func() {

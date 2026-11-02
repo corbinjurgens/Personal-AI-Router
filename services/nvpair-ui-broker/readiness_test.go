@@ -50,8 +50,8 @@ func newStrictFixtureWithFile(t *testing.T, data []byte) *strictFixture {
 	b.replayPolicyToProxy(context.Background(), pp)
 	ab := &activatedBroker{b: b, out: out, pp: pp, proxy: proxy, acks: acks, path: path}
 	ab.wantActivation(t, "0", activationActive, "")
-	seedStrictIdentity(b, "ollama")
-	seedStrictIdentity(b, "lmstudio")
+	seedStrictIdentity(b, "llamacpp")
+	seedStrictIdentity(b, "llamacpp-custom")
 	return &strictFixture{activatedBroker: ab, done: done, engine: engine}
 }
 
@@ -125,7 +125,7 @@ func TestPolicyIdentityReplacedSourceCannotChangeReadiness(t *testing.T) {
 	if !fx.b.replayPolicyToProxy(context.Background(), current) {
 		t.Fatal("replacement replay failed")
 	}
-	params, err := json.Marshal(nodepolicy.StrictAdmissionReadiness{PolicyRevision: "0", ProxyRunID: acks.runID, Capability: strictCapability(t, "ollama", "m:latest")})
+	params, err := json.Marshal(nodepolicy.StrictAdmissionReadiness{PolicyRevision: "0", ProxyRunID: acks.runID, Capability: strictCapability(t, "llamacpp", "m:latest")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func (f *strictFixture) advertise(t *testing.T, capability *nodepolicy.StrictAdm
 }
 
 func TestStrictReadinessAdvertisedOnlyWithMatchingRevisionAndRun(t *testing.T) {
-	capability := strictCapability(t, "ollama", "m:latest")
+	capability := strictCapability(t, "llamacpp", "m:latest")
 
 	t.Run("report from another proxy run is discarded", func(t *testing.T) {
 		f := newStrictFixture(t)
@@ -235,7 +235,7 @@ func TestStrictReadinessAdvertisedOnlyWithMatchingRevisionAndRun(t *testing.T) {
 }
 
 func TestStrictReadinessWithdrawn(t *testing.T) {
-	capability := strictCapability(t, "ollama", "m:latest")
+	capability := strictCapability(t, "llamacpp", "m:latest")
 	withdrawn := func(name string, act func(t *testing.T, f *strictFixture)) {
 		t.Run(name, func(t *testing.T) {
 			f := newStrictFixture(t)
@@ -279,13 +279,13 @@ func TestStrictReadinessWithdrawn(t *testing.T) {
 		}
 	})
 	withdrawn("when its only engine is saved Off", func(t *testing.T, f *strictFixture) {
-		f.b.observeIntent(map[string]bool{"ollama": false})
+		f.b.observeIntent(map[string]bool{"llamacpp": false})
 	})
 }
 
 func TestStrictReadinessNotAdvertisedWhileActivationIsPending(t *testing.T) {
 	f := newStrictFixture(t)
-	f.advertise(t, strictCapability(t, "ollama", "m:latest"))
+	f.advertise(t, strictCapability(t, "llamacpp", "m:latest"))
 	f.b.nodePolicy.mu.Lock()
 	f.b.nodePolicy.activationTimeout = 100 * time.Millisecond
 	f.b.nodePolicy.mu.Unlock()
@@ -303,7 +303,7 @@ func TestStrictReadinessNotAdvertisedWhileActivationIsPending(t *testing.T) {
 	if set.Activation == activationActive {
 		t.Fatalf("policy:set reported %+v without an acknowledgement", set.policyActivation)
 	}
-	reportStrict(t, f.b, set.Policy.Revision, f.acks.runID, strictCapability(t, "ollama", "m:latest"))
+	reportStrict(t, f.b, set.Policy.Revision, f.acks.runID, strictCapability(t, "llamacpp", "m:latest"))
 	requireNotReady(t, f.b, "the new revision is not acknowledged")
 	if got := waitWithdrawn(t, f); got.Revision != set.Policy.Revision {
 		t.Fatalf("withdrawal projection revision = %q, want %s", got.Revision, set.Policy.Revision)
@@ -320,7 +320,7 @@ func TestStrictReadinessWithdrawnOnPauseDuringRecovery(t *testing.T) {
 	if _, err := f.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	capability := strictCapability(t, "ollama", "m:latest")
+	capability := strictCapability(t, "llamacpp", "m:latest")
 	revision := f.advertise(t, capability).Revision
 	if _, err := f.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil {
 		t.Fatalf("pause: %v", err)
@@ -334,7 +334,7 @@ func TestStrictReadinessWithdrawnOnPauseDuringRecovery(t *testing.T) {
 // A report can reach the broker before the acknowledgement it follows, while
 // the new incarnation has acknowledged nothing yet.
 func TestStrictReadinessReportedBeforeTheFirstAcknowledgement(t *testing.T) {
-	capability := strictCapability(t, "ollama", "m:latest")
+	capability := strictCapability(t, "llamacpp", "m:latest")
 	restart := func(t *testing.T, f *strictFixture, reportRun func(next *proxyAcks) string) *proxyAcks {
 		t.Helper()
 		close(f.done)
@@ -373,7 +373,7 @@ func TestStrictReadinessReportedBeforeTheFirstAcknowledgement(t *testing.T) {
 
 func TestStrictReadinessReadvertisedAfterResume(t *testing.T) {
 	f := newStrictFixture(t)
-	capability := strictCapability(t, "ollama", "m:latest")
+	capability := strictCapability(t, "llamacpp", "m:latest")
 	f.advertise(t, capability)
 	if _, err := f.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil {
 		t.Fatalf("pause: %v", err)
@@ -390,21 +390,21 @@ func TestStrictReadinessReadvertisedAfterResume(t *testing.T) {
 
 func TestStrictReadinessDropsModelsOfEnginesSavedOff(t *testing.T) {
 	f := newStrictFixture(t)
-	seedStrictIdentity(f.b, "lmstudio", "n")
-	both := strictCapability(t, "ollama", "m:latest")
-	both.Models = append(both.Models, strictCapability(t, "lmstudio", "n").Models...)
+	seedStrictIdentity(f.b, "llamacpp-custom", "n")
+	both := strictCapability(t, "llamacpp", "m:latest")
+	both.Models = append(both.Models, strictCapability(t, "llamacpp-custom", "n").Models...)
 	f.advertise(t, both)
 
-	f.b.observeIntent(map[string]bool{"ollama": false, "lmstudio": true})
-	waitAdvertised(t, f, strictCapability(t, "lmstudio", "n"))
+	f.b.observeIntent(map[string]bool{"llamacpp": false, "llamacpp-custom": true})
+	waitAdvertised(t, f, strictCapability(t, "llamacpp-custom", "n"))
 
-	f.b.observeIntent(map[string]bool{"ollama": true, "lmstudio": true})
+	f.b.observeIntent(map[string]bool{"llamacpp": true, "llamacpp-custom": true})
 	waitAdvertised(t, f, both)
 }
 
 func TestStrictReadinessReplayedAfterProxyRestart(t *testing.T) {
 	f := newStrictFixture(t)
-	capability := strictCapability(t, "ollama", "m:latest")
+	capability := strictCapability(t, "llamacpp", "m:latest")
 	f.advertise(t, capability)
 	close(f.done)
 	waitWithdrawn(t, f)
@@ -430,8 +430,8 @@ func TestStrictReadinessReplayedAfterProxyRestart(t *testing.T) {
 func TestStrictReadinessConcurrentSavesNeverAdvertiseStale(t *testing.T) {
 	f := newStrictFixture(t)
 	forRevision := func(t *testing.T, revision string) *nodepolicy.StrictAdmissionCapability {
-		seedStrictIdentity(f.b, "ollama", "m-"+revision+":latest")
-		return strictCapability(t, "ollama", "m-"+revision)
+		seedStrictIdentity(f.b, "llamacpp", "m-"+revision)
+		return strictCapability(t, "llamacpp", "m-"+revision)
 	}
 	const writers, saves = 4, 4
 	stop := make(chan struct{})

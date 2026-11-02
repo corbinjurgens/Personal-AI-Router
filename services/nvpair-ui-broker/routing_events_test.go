@@ -784,7 +784,7 @@ func TestRoutingHistoryPrivateRefusal(t *testing.T) {
 	b, p, out := historyFixture(t)
 	row := historyRecord("9", 10, 1)
 	raw := historyMarshal(t, row)
-	for _, method := range []string{nodepolicy.NotifyRoutingHistoryWindow, nodepolicy.NotifyRoutingRequest, nodepolicy.NotifyRoutingHistoryWindowEnd, nodepolicy.NotifyRoutingHistoryAccepted, nodepolicy.NotifyRoutingChanged, engines.AddressMethod("ollama", nodepolicy.NotifyRoutingRequest)} {
+	for _, method := range []string{nodepolicy.NotifyRoutingHistoryWindow, nodepolicy.NotifyRoutingRequest, nodepolicy.NotifyRoutingHistoryWindowEnd, nodepolicy.NotifyRoutingHistoryAccepted, nodepolicy.NotifyRoutingChanged, engines.AddressMethod("llamacpp", nodepolicy.NotifyRoutingRequest)} {
 		b.handleMessage(routingBrokerRequest("1", method, string(raw)))
 		b.handleMessage(&Message{JSONRPC: "2.0", Method: method, Params: raw})
 		b.forwardClusterManagerNotification(method, raw)
@@ -1566,22 +1566,22 @@ func TestRoutingHistoryLocalOwnedAliasesUseOrdinaryRefusal(t *testing.T) {
 	}{
 		{
 			name:   "object ID",
-			frame:  `{"jsonrpc":"2.0","id":{},"method":"ollama:routing/request","params":{}}`,
+			frame:  `{"jsonrpc":"2.0","id":{},"method":"llamacpp:routing/request","params":{}}`,
 			wantID: `{}`,
 		},
 		{
 			name:   "aliased duplicate ID keeps ordinary last-wins behavior",
-			frame:  `{"jsonrpc":"2.0","id":"first","ID":"second","method":"ollama:routing/request","params":{}}`,
+			frame:  `{"jsonrpc":"2.0","id":"first","ID":"second","method":"llamacpp:routing/request","params":{}}`,
 			wantID: `"second"`,
 		},
 		{
 			name:   "literal HTML-sensitive ordinary ID",
-			frame:  `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", 86) + `","method":"ollama:routing/request","params":{"synthetic-private-key":"local-alias-payload-sentinel"}}`,
+			frame:  `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", 86) + `","method":"llamacpp:routing/request","params":{"synthetic-private-key":"local-alias-payload-sentinel"}}`,
 			wantID: `"` + strings.Repeat(`\u003c`, 86) + `"`,
 		},
 		{
 			name:   "ordinary ID above history ID and error-frame bounds remains ordinary",
-			frame:  `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", 1024) + `","method":"ollama:routing/request","params":{"synthetic-private-key":"local-alias-payload-sentinel"}}`,
+			frame:  `{"jsonrpc":"2.0","id":"` + strings.Repeat("<", 1024) + `","method":"llamacpp:routing/request","params":{"synthetic-private-key":"local-alias-payload-sentinel"}}`,
 			wantID: `"` + strings.Repeat(`\u003c`, 1024) + `"`,
 		},
 	}
@@ -1633,7 +1633,7 @@ func TestRoutingHistoryLocalOwnedAliasesUseOrdinaryRefusal(t *testing.T) {
 				logs.mu.Lock()
 				captured := logs.buf.String()
 				logs.mu.Unlock()
-				for _, sentinel := range []string{"ollama:routing/request", "first", "second", "synthetic-private-key", "local-alias-payload-sentinel", strings.Repeat("<", 86)} {
+				for _, sentinel := range []string{"llamacpp:routing/request", "first", "second", "synthetic-private-key", "local-alias-payload-sentinel", strings.Repeat("<", 86)} {
 					if strings.Contains(captured, sentinel) {
 						t.Fatalf("ordinary private rejection logged input sentinel %s", sentinel)
 					}
@@ -1651,7 +1651,7 @@ func TestRoutingHistoryLocalOwnedAliasesUseOrdinaryRefusal(t *testing.T) {
 func TestRoutingHistoryOwnedAddressedRequestHasZeroHistoryEffects(t *testing.T) {
 	b, p, _ := historyFixture(t)
 	out := &syncBuffer{}
-	frame := `{"jsonrpc":"2.0","id":"first","ID":"second","method":"ollama:routing/request","params":{}}` + "\n" +
+	frame := `{"jsonrpc":"2.0","id":"first","ID":"second","method":"llamacpp:routing/request","params":{}}` + "\n" +
 		`{"jsonrpc":"2.0","method":"ordinary-barrier","params":{}}` + "\n"
 	if err := p.attachRoutingHistoryPeer(b, readWriter{strings.NewReader(frame), out}, func() {}); err != nil {
 		t.Fatal(err)

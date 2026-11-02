@@ -358,7 +358,7 @@ func TestNotificationLifetimeBoundSourceFailure(t *testing.T) {
 	source := b.activateEngineManagerSource()
 	b.setEngineMgr(f.w)
 	b.bindEngineMgr(f.w, source)
-	req := nodepolicy.ModelMutationRequest{RequestID: "blocked-reply", Engine: "ollama"}
+	req := nodepolicy.ModelMutationRequest{RequestID: "blocked-reply", Engine: "llamacpp"}
 	b.replyModelMutation(source, f.w, req, nodepolicy.ModelMutationUnavailable, errors.New(strings.Repeat("x", 4<<20)))
 	if !errors.Is(notificationError(t, pending), errPeerClosed) {
 		t.Fatal("failed reply did not retire worker")
@@ -519,9 +519,9 @@ func TestEngineNotificationRelayDrainsBlockedClient(t *testing.T) {
 	f := newNotificationForwardFixture(t, 2*time.Second)
 	state, identity := make(chan error, 1), make(chan error, 1)
 	go func() {
-		state <- f.publisher.notify(engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":true}`))
+		state <- f.publisher.notify(engineStateChangedMethod, json.RawMessage(`{"engine":"llamacpp","running":true}`))
 	}()
-	go func() { identity <- f.publisher.notify(engineModelIdentityMethod, engineManagerSnapshot("ollama")) }()
+	go func() { identity <- f.publisher.notify(engineModelIdentityMethod, engineManagerSnapshot("llamacpp")) }()
 	if err := notificationError(t, state); err != nil {
 		t.Fatalf("state blocked behind the service reader: %v", err)
 	}
@@ -537,9 +537,9 @@ func TestEngineNotificationRelayDrainsBlockedClient(t *testing.T) {
 	}
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
-	run := r.engineIdentity["ollama"].EngineRunID
+	run := r.engineIdentity["llamacpp"].EngineRunID
 	r.mu.Unlock()
-	if run != "run-ollama" {
+	if run != "run-llamacpp" {
 		t.Fatalf("identity before service reader resumed=%s", run)
 	}
 	// Only resume the service reader after both later engine frames have been
@@ -561,7 +561,7 @@ func TestEngineNotificationRelayOverflowDropsOnlyClientSubscription(t *testing.T
 		}
 	}
 	// Engine-internal observations keep draining after the subscription drops.
-	if err := f.publisher.notify(engineModelIdentityMethod, engineManagerSnapshot("ollama")); err != nil {
+	if err := f.publisher.notify(engineModelIdentityMethod, engineManagerSnapshot("llamacpp")); err != nil {
 		t.Fatalf("engine publisher after subscription overflow: %v", err)
 	}
 	for range engineNotificationQueueFrames + 4 {

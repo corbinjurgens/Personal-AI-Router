@@ -24,7 +24,7 @@ func TestIntentSubscribedRelayPreservesSnapshot(t *testing.T) {
 	source := b.activateEngineManagerSource()
 	id := json.RawMessage(`1`)
 	b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "engine:subscribe"})
-	raw := json.RawMessage(`{"enabledByEngine":{"ollama":true,"lmstudio":false,"llamacpp":false},"offByEngine":{"lmstudio":"local","llamacpp":"peer"},"relayMarker":"unchanged"}`)
+	raw := json.RawMessage(`{"enabledByEngine":{"llamacpp":true,"llamacpp-custom":false,"strata":false},"offByEngine":{"llamacpp-custom":"local","strata":"peer"},"relayMarker":"unchanged"}`)
 	b.forwardEngineNotificationFrom(source, engineIntentChanged, raw)
 	frame := out.waitFrame(t, "subscribed intent snapshot", func(m Message) bool { return m.Method == engineIntentChanged })
 	requireIntentRelayPayload(t, frame.Params, raw)
@@ -404,7 +404,7 @@ func TestPolicyReplayRetainsPushSlotAcrossUnacknowledgedRPC(t *testing.T) {
 				return len(calls) != 0 && calls[len(calls)-1].method == heldMethod
 			})
 			go func() {
-				b.pushPolicyNow(context.Background(), pushDrainPrefix+"ollama")
+				b.pushPolicyNow(context.Background(), pushDrainPrefix+"llamacpp")
 				close(pushed)
 			}()
 			t.Cleanup(func() {

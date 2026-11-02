@@ -83,14 +83,14 @@ func (f *brokerPerformanceFixture) admitPeer(t *testing.T, host string, epoch ui
 
 func performanceTestSample(seq uint64) performancewire.Sample {
 	return performancewire.Sample{Scope: performancewire.ScopeLocalExecution, Producer: "proxy-process", Seq: seq,
-		Key:         performancewire.ProfileKey{Host: "self", Engine: "ollama", Model: "model", Fingerprint: "profile"},
+		Key:         performancewire.ProfileKey{Host: "self", Engine: "llamacpp", Model: "model", Fingerprint: "profile"},
 		Measurement: performancewire.Measurement{Outcome: performancewire.OutcomeCompleted}}
 }
 
 func performanceTestSummary(revision int64) performancewire.Summary {
 	return performancewire.Summary{Version: 2, MeasuringHost: "peer", AdmissionIncarnation: "7", Revision: revision,
 		Window: performancewire.Window{MaxAgeMs: performancewire.RetentionMs, MaxSamplesPerKey: 64},
-		Entries: []performancewire.Entry{{Key: performancewire.ProfileKey{Host: "peer", Engine: "ollama", Model: "model", Fingerprint: "profile"},
+		Entries: []performancewire.Entry{{Key: performancewire.ProfileKey{Host: "peer", Engine: "llamacpp", Model: "model", Fingerprint: "profile"},
 			Samples: 1, Completed: 1, NewestAgeMs: 100, OldestAgeMs: 100, NewestObservedAtMs: 1000}}}
 }
 

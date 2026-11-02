@@ -110,7 +110,7 @@ func TestBrokerLlamaCPPProxySetPortRejectsConflicts(t *testing.T) {
 		return 25001
 	})
 	test("another proxy listener", func(t *testing.T, h *settingsHarness, before settings.Snapshot) int {
-		_, port := h.b.getProxy().Status("ollama")
+		_, port := h.b.getProxy().Status("llamacpp-custom")
 		return port
 	})
 	test("occupied listener", func(t *testing.T, h *settingsHarness, before settings.Snapshot) int {
@@ -130,12 +130,12 @@ func TestBrokerLlamaCPPProxySetPortPersistsOnlyRequestedFacade(t *testing.T) {
 		t.Fatalf("read initial settings: %v", err)
 	}
 	otherPorts := make(map[string]int)
-	for _, engine := range []string{"ollama", "lmstudio"} {
+	for _, engine := range []string{"llamacpp-custom"} {
 		_, otherPorts[engine] = h.b.getProxy().Status(engine)
 	}
 	target := h.reservePort(t)
 	// The namespace determines the engine, even if parameters name another.
-	response := callBrokerPortRequest(t, h.b, "llamacpp-proxy:set-port", settingsJSON(map[string]any{"engine": "ollama", "port": target}))
+	response := callBrokerPortRequest(t, h.b, "llamacpp-proxy:set-port", settingsJSON(map[string]any{"engine": "llamacpp-custom", "port": target}))
 	if response.Error != nil {
 		t.Fatalf("set proxy port: %+v", response.Error)
 	}

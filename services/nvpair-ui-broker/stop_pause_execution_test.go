@@ -425,15 +425,15 @@ func TestStopPauseExecutionKnownStopsPrecedeInventoryBarrier(t *testing.T) {
 }
 
 func TestStopPauseExecutionRetryAndLocalResume(t *testing.T) {
-	rb, manager := stopPauseExecutionFixture(t, "ollama")
+	rb, manager := stopPauseExecutionFixture(t, "llamacpp")
 	r := rb.b.nodePolicyRuntime()
 	r.mu.Lock()
-	role := nodepolicy.Role{Engine: "ollama", Model: "tiny"}
+	role := nodepolicy.Role{Engine: "llamacpp", Model: "tiny"}
 	r.current.Roles = map[string]nodepolicy.Role{"weak": role}
 	r.current.ResidentModels = nodepolicy.ResidentModels{role}
 	r.current.EngineBindings = nodepolicy.EngineBindings{role}
-	r.intent["ollama"] = true
-	r.loaded["ollama"] = []string{"tiny"}
+	r.intent["llamacpp"] = true
+	r.loaded["llamacpp"] = []string{"tiny"}
 	r.mu.Unlock()
 	before := rb.b.localPolicy().Policy
 	manager.mu.Lock()
@@ -466,7 +466,7 @@ func TestStopPauseExecutionRetryAndLocalResume(t *testing.T) {
 	}
 	r.mu.Lock()
 	blocked := r.managementBlockedLocked()
-	intent := r.intent["ollama"]
+	intent := r.intent["llamacpp"]
 	r.mu.Unlock()
 	if blocked || !intent {
 		t.Fatalf("local Resume: blocked=%v preserved On intent=%v", blocked, intent)

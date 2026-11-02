@@ -326,7 +326,7 @@ func TestSettingsFingerprintCoversOnlyAppliedRevisions(t *testing.T) {
 }
 
 func TestStrictReadinessWithdrawnWhenIdentityChanges(t *testing.T) {
-	capability := strictCapability(t, "ollama", "m:latest")
+	capability := strictCapability(t, "llamacpp", "m:latest")
 	for _, tc := range []struct {
 		name   string
 		change func(*Broker)
@@ -334,21 +334,21 @@ func TestStrictReadinessWithdrawnWhenIdentityChanges(t *testing.T) {
 		{"a new engine run", func(b *Broker) {
 			r := b.nodePolicyRuntime()
 			r.mu.Lock()
-			id := r.engineIdentity["ollama"]
+			id := r.engineIdentity["llamacpp"]
 			id.EngineRunID = "engine-run-2"
-			r.engineIdentity = map[string]engineManagerIdentity{"ollama": id}
+			r.engineIdentity = map[string]engineManagerIdentity{"llamacpp": id}
 			r.mu.Unlock()
 			b.identityChanged()
 		}},
 		{"new settings", func(b *Broker) {
-			b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("ollama", 7)})
+			b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("llamacpp", 7)})
 		}},
 		{"a replaced model", func(b *Broker) {
 			r := b.nodePolicyRuntime()
 			r.mu.Lock()
-			id := r.engineIdentity["ollama"]
+			id := r.engineIdentity["llamacpp"]
 			id.ModelDigests = map[string]string{"m:latest": strings.Repeat("e", 64)}
-			r.engineIdentity = map[string]engineManagerIdentity{"ollama": id}
+			r.engineIdentity = map[string]engineManagerIdentity{"llamacpp": id}
 			r.mu.Unlock()
 			b.identityChanged()
 		}},

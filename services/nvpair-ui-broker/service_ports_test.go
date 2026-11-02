@@ -279,7 +279,7 @@ func TestServicePortsReservationsFollowTheConfiguredPlan(t *testing.T) {
 	}
 
 	for _, port := range []int{25318, 25319, 25320, 25321} {
-		err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: port, ProxyPort: 25400}, settings.Snapshot{})
+		err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: port, ProxyPort: 25400}, settings.Snapshot{})
 		if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
 			t.Fatalf("settings validation for %d = %v, want PAIR reservation", port, err)
 		}
@@ -298,7 +298,7 @@ func TestServicePortsReservationsFollowTheConfiguredPlan(t *testing.T) {
 		}
 	}()
 	current := settings.Snapshot{Running: true, EffectiveServerPort: 14318, EffectiveProxyPort: 14319}
-	if err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: 14318, ProxyPort: 14319}, current); err != nil {
+	if err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: 14318, ProxyPort: 14319}, current); err != nil {
 		t.Fatalf("unused default service ports remain reserved: %v", err)
 	}
 }
