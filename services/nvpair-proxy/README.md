@@ -362,7 +362,20 @@ upstream Content-Length and integrity metadata that would no longer describe
 the body, while retaining endpoint content type, routing metadata and
 engine-owned CORS permissions.
 
-SC-a never dispatches again after commit. Qualified same-model continuation
+One `routingSpend` owns acceptance, attempts, cancellation and raw-byte
+commitment; one `responseSink` owns delivery and distinguishes genuine output,
+synthetic endings, protocol completion and successful delivery. Parsing and
+reader allocation cannot move the first accepted raw-byte commit point or
+authorize fallback after it. A normalized peer response ends with the internal
+`X-PAIR-Stream-Framing` trailer `v1;completed` or
+`v1;interrupted;<reason>`. The origin validates and strips it, so a synthetic
+`[DONE]` from a destination cannot make an interrupted peer workload completed.
+Missing or invalid disposition is a peer interruption, not completion.
+
+SC-a never dispatches again after commit. A peer or engine loss mid-stream
+ends a managed OpenAI stream with an error frame plus `[DONE]`, not a pause,
+until SC-b (Ollama uses its error object). Endings are best effort when delivery
+fails. Qualified same-model continuation
 (SC-b), its attempt history and UI, and real-engine/native acceptance remain
 pending. Destination ingress remains local-only with no onward dispatch;
 recognizing a terminal frame does not resolve an uncertain strict admission
@@ -438,6 +451,31 @@ active. It is the only request that activates a revision: the broker follows a
 persisted availability change with a `node/set-policy` of the same revision. A
 `node/set-policy` older than the active revision is refused as out of order and
 the previous policy stays. Until the first request arrives the proxy runs on `nodepolicy.Default()` with no active revision.
+
+**Inference buffers.** `routing.buffers.capacityMiB` accepts 192..1024 MiB
+(default 256), and `routing.buffers.waitSeconds` accepts 0..600 seconds
+(default 5; 0 disables waiting). These bound owned inference allocation
+capacity process-wide, including retained bodies, rewrites, parsing and response
+storage across facades and paired ingress; they do not bound process RSS or
+engine memory. Storage is charged before allocation and through the last
+borrower, including overlapping old/new arrays during growth. Activation
+requires `capacityBytes >= 2 * effectiveIndividualLimitBytes + 1` (the
+individual body limit defaults to 64 MiB); otherwise `node/set-policy` keeps
+the previous active settings.
+
+Aggregate acquisitions wait in FIFO order, bounded to 1,024 waiter records,
+with head-of-line blocking: a small request cannot bypass a larger head.
+Each wait observes cancellation and the earlier of its snapshotted allowance
+and context deadline, including the overall pre-output deadline. An oversized
+body is 413 immediately once its size is known; aggregate busy, full queue or
+wait expiry is 503. An impossible per-request footprint is also 413. A live
+cap decrease leaves existing storage to drain, possibly above the new cap;
+impossible queued proposals become 413, and new/growing allocations and retries
+must fit current capacity. Existing wait deadlines do not restart. Stream
+grants and immediate category refusals are detailed in `spec.md` §§5.2 and
+12.1. Settings persist in node policy and activate live through the broker.
+The desktop's Node policy JSON editor supports them; the TUI exposes no buffer
+controls. [Hybrid routing](../../docs/hybrid-routing.mdx) includes an edit example.
 
 Engine switching also has two internal process-scoped requests:
 
@@ -567,8 +605,11 @@ Engine switching also has two internal process-scoped requests:
   `X-PAIR-Engine`, `X-PAIR-Node`, and `X-PAIR-Tier` for a tier request.
   Workloads carry the concrete `model` and, for a tier request,
   `requestedModel`.
-- **Cancel.** `workload/cancel {workloadId, engine?, regenerate?}` cancels an
-  in-flight workload this node originated. Before the response commits,
+- **Cancel.** `workload/cancel {originatedFrom, runId, engine, workloadId, regenerate?}`
+  requires the complete target at every hop and cancels an in-flight workload
+  this node originated. Missing/malformed keys are invalid params; a valid key
+  for another origin/run or an ended workload finds nothing. Records missing
+  a run ID are displayable but not cancellable. Before the response commits,
   `regenerate` re-dispatches it to another node; otherwise, or after the
   commit, it ends as `cancelled`.
 - **Provider account ledger.** The proxy is the only writer of provider
