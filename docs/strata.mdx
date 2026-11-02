@@ -237,13 +237,27 @@ of the credential path are listed in the fixture and checked to still exist.
    - The first `runtime.args` entry is `server.py`, and the argument after
      `--config` is the configuration file.
    - `runtime.editable_launch.fixed_args` uses that same `server.py` path.
-   - Each retained platform's `detect` entry is the `server.py` path. Delete
-     the platforms you do not use.
+   - `detect_required` names the server and config. Add the package files
+     required by the planning invocation to that list so detection also checks
+     their presence. Delete the platforms you do not use.
+   - In the retained platform's `memory_plan`, set the command's interpreter
+     and working directory to the prepared interpreter and package root. Keep
+     the remaining arguments unchanged.
 
    Arguments are literal strings. Do not use environment variables or `~`, and
    escape backslashes in JSON on Windows. Keep `--host 127.0.0.1`,
    `--port {port}` and `--lazy`, and choose a free `runtime.port` (the template
    uses 18082).
+
+   The planning source contract covers `serve/__init__.py`, `serve/server.py`,
+   `serve/memory_plan.py`, `serve/launch_plan.py`, `serve/mcp.py`,
+   `serve/runconfig.py`, `serve/credentials.py`, `serve/winjob.py`,
+   `serve/structured.py`, `tools/build_provenance.py`, `tools/gguf_reader.py`,
+   `tools/prepare_unsloth_q2.py` and `setup.py`. A `tools/__init__.py` changes
+   the reviewed package contract. System and third-party imports are not attested.
+   The initial planning slice requires explicit finite settings and sends no memory
+   budget or allowances. Unsupported settings or unbound inputs produce Unknown;
+   the template does not establish installation, readiness or hardware support.
 4. Restart PAIR so `nvpair-engine-manager` reads the manifest and the broker
    fronts the engine. A manifest it cannot parse is logged and skipped rather
    than stopping startup.

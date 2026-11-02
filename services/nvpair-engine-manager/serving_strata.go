@@ -108,6 +108,16 @@ func prepareStrataRuntimeHashes(ctx context.Context, command launchCommand, rt R
 	if err != nil {
 		return err
 	}
+	return prepareStrataInputRuntimeHashes(ctx, &strataServingInput{launch: prepared})
+}
+
+// Hash only the already admitted closure. Pricing passes its credential-free
+// input here; launch preparation retains its credential-enforcing derivation.
+func prepareStrataInputRuntimeHashes(ctx context.Context, input *strataServingInput) error {
+	if input == nil || input.launch == nil || input.launch.evidence == nil {
+		return servingError("Missing prepared Strata input evidence.")
+	}
+	prepared := input.launch
 	paths, err := strataRuntimePaths(prepared.Config)
 	if err != nil {
 		return err
@@ -506,6 +516,53 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 }
 
 func deriveStrataServingExpected(ctx context.Context, command launchCommand, rt Runtime, access servingFileAccess, expected *llamaServingEvidence) (*llamaServingLaunch, error) {
+	return deriveStrataServingAccessExpected(ctx, command, rt, strataServingAccess{files: access}, expected)
+}
+
+// Key access belongs only to ordinary launch derivation. It is instance-owned
+// so tests can refuse every credential read without changing process state.
+type strataServingAccess struct {
+	files   servingFileAccess
+	readKey func(string, []engines.ServingArtifact) (string, *strataKeyIdentity, error)
+}
+
+type strataServingInput struct {
+	launch        *llamaServingLaunch
+	config        strataServingConfig
+	options       map[string]string
+	sourceBytes   []byte
+	sourceBinding *engines.ServingBinding
+	command       launchCommand
+}
+
+func deriveStrataServingAccessExpected(ctx context.Context, command launchCommand, rt Runtime, access strataServingAccess, expected *llamaServingEvidence) (*llamaServingLaunch, error) {
+	input, err := deriveStrataServingInputExpected(ctx, command, rt, access, expected)
+	if err != nil {
+		return nil, err
+	}
+	var identity *strataKeyIdentity
+	if input.config.APIKeyFile != nil {
+		readKey := access.readKey
+		if readKey == nil {
+			readKey = readStrataKeyFile
+		}
+		key, keyIdentity, err := readKey(*input.config.APIKeyFile, input.launch.Config.Models[0].Artifacts)
+		if err != nil {
+			return nil, err
+		}
+		input.launch.Credential, identity = key, keyIdentity
+	}
+	if err := bindStrataServingInput(input, identity); err != nil {
+		return nil, err
+	}
+	return input.launch, nil
+}
+
+// Derive selected configuration and artifacts without inspecting APIKeyFile.
+// Its literal declaration remains in the bound config bytes, but neither its
+// path authority nor its contents are needed by pure memory pricing.
+func deriveStrataServingInputExpected(ctx context.Context, command launchCommand, rt Runtime, inputAccess strataServingAccess, expected *llamaServingEvidence) (*strataServingInput, error) {
+	access := inputAccess.files
 	if rt.modeOrDefault() != "process" || rt.Serving == nil || len(servingDeclarationErrors(rt.Serving)) != 0 || len(rt.Serving.Models) != 1 {
 		return nil, servingError("Prepared Strata requires one declared model and an owned process launch.")
 	}
@@ -591,6 +648,16 @@ func deriveStrataServingExpected(ctx context.Context, command launchCommand, rt 
 	config, err := parseStrataServingConfig(data)
 	if err != nil {
 		return nil, err
+	}
+	// Reject a directly named credential before sampling or hashing any
+	// declaration. Do not open or resolve the credential path here.
+	if config.APIKeyFile != nil {
+		key := filepath.Clean(*config.APIKeyFile)
+		for _, artifact := range rt.Serving.Models[0].Artifacts {
+			if artifact.Binding != nil && (filepath.Clean(artifact.Binding.SourcePath) == key || filepath.Clean(artifact.Binding.ResolvedTarget) == key) {
+				return nil, servingError("Strata api_key_file must not be a declared artifact.")
+			}
+		}
 	}
 	if err := strataDirectory(config.CWD); err != nil {
 		return nil, err
@@ -845,19 +912,24 @@ func deriveStrataServingExpected(ctx context.Context, command launchCommand, rt 
 		placement = append(placement, "env:"+name+"="+config.Env[name])
 	}
 	forwarded := config
-	var keyIdentity *strataKeyIdentity
-	if config.APIKeyFile != nil {
-		key, identity, err := readStrataKeyFile(*config.APIKeyFile, model.Artifacts)
-		if err != nil {
-			return nil, err
-		}
-		result.Credential, keyIdentity = key, identity
-	}
 	forwarded.BuildMetadata, forwarded.GPUsAsked, forwarded.Port, forwarded.Host, forwarded.OpenBrowser, forwarded.APIKeyFile = nil, nil, nil, nil, nil, nil
 	result.Snapshot, err = json.Marshal(forwarded)
 	if err != nil || len(result.Snapshot) > servingSmallFileLimit {
 		return nil, servingError("Cannot prepare bounded Strata config snapshot.")
 	}
+	result.Envelopes = []engines.ServingEnvelope{{ModelID: model.ModelID, PerSlotContextTokens: contextTokens, TotalContextTokens: contextTokens * slots, Slots: slots, MaxOutputTokens: model.MaxOutputTokens, Memory: model.Memory, Placement: placement, Retention: strconv.FormatInt(config.IdleUnloadS, 10), RouterCapacity: 1}}
+	input := &strataServingInput{launch: result, config: config, options: options, sourceBytes: data, sourceBinding: binding, command: command}
+	if err := bindStrataServingInput(input, nil); err != nil {
+		return nil, err
+	}
+	return input, nil
+}
+
+// Preserve the ordinary launch digest byte-for-byte, including the optional
+// key-file identity, while allowing pricing to bind only noncredential inputs.
+func bindStrataServingInput(input *strataServingInput, keyIdentity *strataKeyIdentity) error {
+	result := input.launch
+	model := &result.Config.Models[0]
 	model.ExpectedNativeSourceDigest = ""
 	encoded, err := json.Marshal(struct {
 		Version int
@@ -868,15 +940,31 @@ func deriveStrataServingExpected(ctx context.Context, command launchCommand, rt 
 		// The key file by identity, never content: changing the key changes
 		// the approval without any advertised field deriving from the key.
 		Key *strataKeyIdentity `json:",omitempty"`
-	}{1, binding, data, result.Config, command, keyIdentity})
+	}{1, input.sourceBinding, input.sourceBytes, result.Config, input.command, keyIdentity})
 	if err != nil {
-		return nil, servingError("Cannot bind prepared Strata inputs.")
+		return servingError("Cannot bind prepared Strata inputs.")
 	}
 	digest := sha256.Sum256(encoded)
 	result.Digest = hex.EncodeToString(digest[:])
 	model.ExpectedNativeSourceDigest = result.Digest
-	result.Envelopes = []engines.ServingEnvelope{{ModelID: model.ModelID, PerSlotContextTokens: contextTokens, TotalContextTokens: contextTokens * slots, Slots: slots, MaxOutputTokens: model.MaxOutputTokens, Memory: model.Memory, Placement: placement, Retention: strconv.FormatInt(config.IdleUnloadS, 10), RouterCapacity: 1, NativeSourceDigest: result.Digest}}
-	return result, nil
+	result.Envelopes[0].NativeSourceDigest = result.Digest
+	return nil
+}
+
+func recheckStrataServingInput(ctx context.Context, command launchCommand, rt Runtime, input *strataServingInput, access strataServingAccess) error {
+	if input == nil || input.launch == nil || input.launch.evidence == nil {
+		return servingError("Missing prepared Strata input evidence.")
+	}
+	current, err := deriveStrataServingInputExpected(ctx, command, rt, access, input.launch.evidence)
+	if err != nil {
+		return err
+	}
+	copyCurrent, copyPrepared := *current.launch, *input.launch
+	copyCurrent.evidence, copyPrepared.evidence = nil, nil
+	if !reflect.DeepEqual(&copyCurrent, &copyPrepared) || !reflect.DeepEqual(current.config, input.config) || !reflect.DeepEqual(current.options, input.options) {
+		return servingError("Strata pricing inputs changed during preparation.")
+	}
+	return nil
 }
 
 // strataExpertTable binds the fork packer's native_experts.txt: a header naming

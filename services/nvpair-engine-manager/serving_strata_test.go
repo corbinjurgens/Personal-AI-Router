@@ -31,6 +31,47 @@ type strataServingFixture struct {
 	config strataServingConfig
 }
 
+func TestStrataServingInputRecheckRetainsOriginalEvidence(t *testing.T) {
+	for _, name := range []string{"config.json", "strata", "profile.bin", "model-00001-of-00002.gguf"} {
+		t.Run(name, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			st := settingsState(t, f.ex)
+			command, err := launchForState(st, f.request.Settings.ServerPort)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt := st.plat.Runtime
+			rt.Serving = f.request.Settings.Serving
+			input, err := deriveStrataServingInputExpected(context.Background(), command, rt, strataServingAccess{}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(f.root, name)
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacement := filepath.Join(f.root, "replacement")
+			if err := os.WriteFile(replacement, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(replacement, path); err != nil {
+				t.Fatal(err)
+			}
+			if err := recheckStrataServingInput(context.Background(), command, rt, input, strataServingAccess{}); err == nil {
+				t.Fatal("replacement with identical bytes, size and mtime passed the original evidence recheck")
+			}
+		})
+	}
+}
+
 func (f *strataServingFixture) prepareRuntimeHashes(t *testing.T, ctx context.Context, config *engines.ServingConfig) error {
 	t.Helper()
 	st := settingsState(t, f.ex)

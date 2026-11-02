@@ -26,6 +26,127 @@ import (
 
 const strataAuthKey = "FAKE-AUTH-KEY-0123456789abcdef"
 
+func TestStrataServingInputRejectsDeclaredKeyBeforeRead(t *testing.T) {
+	f, st := preparedStrataSourceFixture(t)
+	key := writeStrataKeyFile(t, f, strataAuthKey)
+	f.config.APIKeyFile = &key
+	f.request.Settings.Serving.Models[0].Artifacts = append(f.request.Settings.Serving.Models[0].Artifacts, strataArtifact(t, key, "runtime:extra"))
+	f.saveConfig(t)
+	st.plat.Runtime.Serving = f.request.Settings.Serving
+	reads := 0
+	access := strataServingAccess{files: servingFileAccess{open: func(path string) (servingArtifactFile, error) {
+		if path == key {
+			reads++
+		}
+		return os.Open(path)
+	}}}
+	if _, err := prepareStrataMemoryPlanSource(context.Background(), st, access); err == nil || reads != 0 {
+		t.Fatalf("declared key: error %v, file opens %d", err, reads)
+	}
+}
+
+func TestStrataServingInputNeverReadsCredentials(t *testing.T) {
+	f := newStrataServingFixture(t)
+	keyFile := writeStrataKeyFile(t, f, strataAuthKey)
+	f.config.APIKeyFile = &keyFile
+	f.saveConfig(t)
+	st := settingsState(t, f.ex)
+	command, err := launchForState(st, f.request.Settings.ServerPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := st.plat.Runtime
+	rt.Serving = f.request.Settings.Serving
+	reads := 0
+	access := strataServingAccess{readKey: func(string, []engines.ServingArtifact) (string, *strataKeyIdentity, error) {
+		reads++
+		return "", nil, errors.New("credential read refused")
+	}}
+	input, err := deriveStrataServingInputExpected(context.Background(), command, rt, access, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareStrataInputRuntimeHashes(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if err := recheckStrataServingInput(context.Background(), command, rt, input, access); err != nil {
+		t.Fatal(err)
+	}
+	if reads != 0 || input.launch.Credential != "" {
+		t.Fatalf("pricing read credentials %d times or attached a credential", reads)
+	}
+	if _, err := deriveStrataServingAccessExpected(context.Background(), command, rt, access, nil); err == nil || reads != 1 {
+		t.Fatalf("ordinary launch credential enforcement: reads %d, error %v", reads, err)
+	}
+}
+
+func TestStrataServingInputAllowsUnavailableKey(t *testing.T) {
+	test := func(name string, keyFile func(strataServingFixture) string) {
+		t.Run(name, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			path := keyFile(f)
+			f.config.APIKeyFile = &path
+			f.saveConfig(t)
+			st := settingsState(t, f.ex)
+			command, err := launchForState(st, f.request.Settings.ServerPort)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt := st.plat.Runtime
+			rt.Serving = f.request.Settings.Serving
+			input, err := deriveStrataServingInputExpected(context.Background(), command, rt, strataServingAccess{}, nil)
+			if err != nil {
+				t.Fatalf("credential-free derivation: %v", err)
+			}
+			if err := prepareStrataInputRuntimeHashes(context.Background(), input); err != nil {
+				t.Fatalf("credential-free hashing: %v", err)
+			}
+			if err := recheckStrataServingInput(context.Background(), command, rt, input, strataServingAccess{}); err != nil {
+				t.Fatalf("credential-free recheck: %v", err)
+			}
+			if _, err := deriveStrataServing(command, rt); err == nil || !strings.Contains(err.Error(), "api_key_file is missing") {
+				t.Fatalf("ordinary launch accepted unavailable key: %v", err)
+			}
+		})
+	}
+	test("missing key", func(f strataServingFixture) string { return filepath.Join(f.root, "missing.key") })
+	test("unreadable key target", func(f strataServingFixture) string { return filepath.Join(f.root, "lib") })
+}
+
+func TestStrataServingInputKeyReplacementDoesNotChangePricing(t *testing.T) {
+	f := newStrataServingFixture(t)
+	keyFile := writeStrataKeyFile(t, f, strataAuthKey)
+	f.config.APIKeyFile = &keyFile
+	f.saveConfig(t)
+	st := settingsState(t, f.ex)
+	command, err := launchForState(st, f.request.Settings.ServerPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := st.plat.Runtime
+	rt.Serving = f.request.Settings.Serving
+	input, err := deriveStrataServingInputExpected(context.Background(), command, rt, strataServingAccess{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := deriveStrataServing(command, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(input.launch.Snapshot, launch.Snapshot) || launch.Credential != strataAuthKey {
+		t.Fatal("ordinary launch changed the prepared snapshot or lost its credential")
+	}
+	if err := os.Remove(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := recheckStrataServingInput(context.Background(), command, rt, input, strataServingAccess{}); err != nil {
+		t.Fatalf("key removal affected pricing: %v", err)
+	}
+	if _, err := deriveStrataServing(command, rt); err == nil {
+		t.Fatal("ordinary launch accepted removed key")
+	}
+}
+
 // startKeyedStrata approves, applies and starts the fake prepared Strata with
 // a native API key, recording the key the server process receives.
 func startKeyedStrata(t *testing.T) (strataServingFixture, string) {

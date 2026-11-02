@@ -6,6 +6,7 @@
   "family": "strata",
   "protocols": ["openai-chat"],
   "model_naming": "exact",
+  "memory_plan": { "adapter": "strata" },
   "detect": ["/REPLACE_WITH_ABSOLUTE_PATH/python"],
   "detect_required": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py", "/REPLACE_WITH_ABSOLUTE_PATH/config.json"],
   "runtime": {
@@ -26,9 +27,9 @@
     "stop": { "signal": "term", "grace_s": 10 }
   },
   "platforms": {
-    "windows/amd64": {},
-    "darwin/arm64": {},
-    "linux/amd64": {}
+    "windows/amd64": { "memory_plan": { "command": ["C:/REPLACE_WITH_ABSOLUTE_PATH/python.exe", "-B", "-s", "-m", "serve.server", "--estimate-memory", "--memory-plan-request", "{memory_plan_request}"], "working_directory": "C:/REPLACE_WITH_ABSOLUTE_PATH" } },
+    "darwin/arm64": { "memory_plan": { "command": ["/REPLACE_WITH_ABSOLUTE_PATH/python", "-B", "-s", "-m", "serve.server", "--estimate-memory", "--memory-plan-request", "{memory_plan_request}"], "working_directory": "/REPLACE_WITH_ABSOLUTE_PATH" } },
+    "linux/amd64": { "memory_plan": { "command": ["/REPLACE_WITH_ABSOLUTE_PATH/python", "-B", "-s", "-m", "serve.server", "--estimate-memory", "--memory-plan-request", "{memory_plan_request}"], "working_directory": "/REPLACE_WITH_ABSOLUTE_PATH" } }
   },
   "operations": {
     "load": { "action": "load_model", "response_timeout_s": 600 },

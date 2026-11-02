@@ -113,6 +113,22 @@ func TestStrataManifestDescriptor(t *testing.T) {
 	}
 }
 
+func TestStrataManifestMemoryPlanInvocation(t *testing.T) {
+	m := strataManifest(t)
+	if m.MemoryPlan == nil || m.MemoryPlan.Adapter != "strata" {
+		t.Fatal("missing Strata memory plan adapter")
+	}
+	for name, platform := range m.Platforms {
+		if platform.MemoryPlan == nil {
+			t.Errorf("%s: missing memory plan invocation", name)
+			continue
+		}
+		if err := platform.MemoryPlan.validate(name); err != nil {
+			t.Errorf("%s: invalid invocation: %v", name, err)
+		}
+	}
+}
+
 func TestStrataManifestDetectionSelectsInterpreter(t *testing.T) {
 	data, err := os.ReadFile("testdata/strata/strata.json")
 	if err != nil {
