@@ -353,7 +353,7 @@ func runOwnerEvidenceBridge(role string) (resultErr error) {
 }
 
 // A pure Go fake records every launch and every HTTP contact at the parent.
-// No model bytes, credential store, inference or child processes exist.
+// No model bytes, inference or child processes exist.
 func runOwnerEvidenceEngine() error {
 	control := os.Getenv("NVPAIR_OWNER_CONTROL")
 	client := &http.Client{Timeout: 2 * time.Minute, Transport: &http.Transport{Proxy: nil}}
@@ -566,7 +566,7 @@ func ownerEvidenceServiceOverlay(t *testing.T, dir string) string {
 
 // Generated overlay sources are disposable test inputs outside the checkout.
 // Like managerFixtureOverlay in engine-manager/main_test.go, this confines
-// registry and credential I/O to private fixtures. Initialization is observed;
+// registry I/O to private fixtures. Initialization is observed;
 // the descendantless fake's signal boundary uses its retained process handle.
 // Evidence production, manager identity and lifecycle authority stay real.
 func ownerEvidenceManagerOverlay(t *testing.T, dir, fake string) string {
@@ -594,11 +594,6 @@ func ownerEvidenceManagerOverlay(t *testing.T, dir, fake string) string {
 	}
 	replace("main.go", "reg := buildRegistry(manifestDir)", `reg := NewRegistry()
 	if err := reg.LoadOverrideDir(manifestDir); err != nil { log.Fatalf("private registry: %v", err) }`)
-	replace("credentialstore.go", "var newCredentialBackend = func() credentialBackend { return secretstore.New() }", `var newCredentialBackend = func() credentialBackend { return &ownerFixtureCredentials{} }
-type ownerFixtureCredentials struct{}
-func (*ownerFixtureCredentials) Set(context.Context, string, string, []byte) error { return secretstore.ErrNotFound }
-func (*ownerFixtureCredentials) Get(context.Context, string, string) ([]byte, error) { return nil, secretstore.ErrNotFound }
-func (*ownerFixtureCredentials) Delete(context.Context, string, string) error { return secretstore.ErrNotFound }`)
 	// This observation is after actual lazy creation, not an inferred absence
 	// from PID snapshots or a substituted owner-evidence result.
 	replace("executor.go", "e.engines[engine] = st", fmt.Sprintf(`e.engines[engine] = st

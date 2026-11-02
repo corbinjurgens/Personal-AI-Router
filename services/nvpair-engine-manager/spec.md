@@ -194,43 +194,19 @@ evidence refuses, and this method supplies no production start adapter.
 
 ## Host-local credentials
 
-Only broker stdio accepts `engine:set-credential` (`{engine,credential}`) and
-`engine:credential-state` (`{engine}`). They return
-`{supported:boolean,configured:boolean}` and never a key. The host runtime's
-`user_credential` flag owns support. State for an unsupported known engine is
-`{supported:false,configured:false}`; unsupported Set and malformed names,
-keys or any `node`/`nodeId` selector return -32602 with fixed text
-`Invalid engine or credential.` Empty Set means Delete. Credentials are empty
-or at most 512 printable non-space ASCII bytes. Native failures return -32000
-with fixed text:
-`Credential store is unavailable. Unlock the operating system credential store and try again.`
-No false absence is returned on failure.
+The manager holds no user-entered key and has no method that sets or reads
+one. The only key it attaches is the one it generates for a process it
+launched. Credentials are at most 512 printable non-space ASCII bytes.
 
-The executor owns a lazy shared native secret store adapter, fixed purpose
-`engine-api-key` and validated engine id. Its credential mutex serializes load,
-Set and Clear through native completion, separately from engine state. Snapshot
-`st.mu` first, release it before credential I/O, and never take `st.mu` while
-holding the credential mutex. Successful mutations publish only after native
-completion; failed mutations retain the previous confirmed entry and force a
-Get reconciliation before eligibility. Refresh failure is unavailable, never
-stale key use. Unknown/unavailable reads retry at the next operation and
-health/presence sweep. Confirmed presence or absence is cached until successful
-Set/Clear or executor teardown. External store edits require service restart.
-In-flight snapshots can finish with their previous key. Teardown drops cache
-and adapter references without a native write; no secure-erasure claim applies.
-There is no secondary plaintext/settings/override store or retry goroutine.
-
-A key-bearing `candidateCredential` binds selection to a valid operation port
-independently of `running` and `proc`, so cold command readiness and first adoption use saved
-keys. An owned prepared Strata launch credential takes priority. A saved key is
-eligible only when the host runtime declares support. Broker retrieval and HTTP
-actions additionally require running on the exact current port; stopped engines
-export nothing, and Strata export retains owned-process eligibility. CLI actions
-receive no user credential. Probe helpers take an explicit immutable candidate
-snapshot; they do not select a credential. Readiness, health, presence and
-diagnosis use the same selection owner, preserve HTTP/JSON identity and bounded
-readiness, and propagate unavailable instead of a misleading no-key/app/process
-diagnosis. Only an attached key receiving a declared auth status yields
+A key-bearing `candidateCredential` binds selection to a valid operation port.
+The owned prepared Strata launch credential is selected only for the process
+that serves that port. Broker retrieval and HTTP actions additionally require
+running on the exact current port; stopped and adopted engines export nothing,
+and Strata export retains owned-process eligibility. CLI actions receive no
+credential. Probe helpers take an explicit immutable candidate snapshot; they
+do not select a credential. Readiness, health, presence and diagnosis use the
+same selection owner and preserve HTTP/JSON identity and bounded readiness.
+Only an attached key receiving a declared auth status yields
 `The API key saved in PAIR was rejected by <Name>. Enter its current key, or turn off API authentication in <Name>'s server settings.`
 
 Probes and actions attach keys through the same helper. Before network I/O the
@@ -248,13 +224,11 @@ Local authorization is the existing `ipc.ListenPrivate` same-user 0600 Unix
 socket or user-SID Windows pipe, then service multiplexing, broker stdio and
 manager stdio. The ec pinned mTLS direct/reverse registry exposes no credential
 or generic JSON-RPC route, even to peers allowed to manage engines. Settings,
-policy and switch relays do not carry credentials. The separate broker-only
+policy and switch relays do not carry credentials. The broker-only
 `internal:local-engine-credential` path is intentionally retained for the local
 proxy, with the broker refusing public client retrieval before generic relay.
 No credential state notification is emitted. Public status/diagnostics/models
 and peer snapshots carry no keys. Same-user code is inside the trust boundary.
-Native OS/session availability and persistence acceptance remain untested by
-the fake and mTLS fixture checks.
 
 ## Model settings contract
 

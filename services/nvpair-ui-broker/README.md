@@ -402,13 +402,10 @@ process and canonical backend entry point: it supervises the worker subprocesses
 on the UI's behalf, speaking JSON-RPC over stdio.
 
 `nvpair-service` accepts same-user clients through `ipc.ListenPrivate` (a 0600
-Unix socket or a named pipe restricted to the process user's SID), multiplexes
-their requests to broker stdio, and the broker's local dispatcher relays
-`engine:set-credential` and `engine:credential-state` through the generic engine
-relay to engine-manager's stdio dispatcher. Set accepts an empty credential to
-Clear; both methods return only `supported` and `configured`, or a sanitized
-store error. Relay diagnostics contain operational metadata, never request or
-response bodies. Engine-manager owns the credential cache and native store.
+Unix socket or a named pipe restricted to the process user's SID), and
+multiplexes their requests to broker stdio. The broker holds and relays no
+user-entered engine API key. Relay diagnostics contain operational metadata,
+never request or response bodies.
 
 Peer HTTP requests instead enter engine-manager's pinned mTLS control server,
 including its reverse transport, through the explicit `controlServer.routes`

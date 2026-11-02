@@ -95,37 +95,20 @@ are not an atomic reservation. This RPC supplies no production `WithLocked`
 adapter; build-apply starts remain refused until separately owned atomic
 acceptance and the other transaction proofs exist.
 
-## Local engine API keys
+## Serving credential
 
-`engine:set-credential` takes `{engine, credential}`; an empty credential
-deletes it. `engine:credential-state` takes `{engine}`. Both return only
-`{supported, configured}`. Support comes from the host runtime's
-`user_credential` declaration (LM Studio). Unsupported state returns both
-booleans false; unsupported Set, invalid names/keys and any supplied `node` or
-`nodeId` field are invalid params (-32602, `Invalid engine or credential.`).
-Keys contain at most 512 printable non-space ASCII bytes.
-
-The executor lazily uses `shared/secretstore` with purpose `engine-api-key` and
-the validated engine id, backed by the current user's native credential store.
-There is no plaintext or environment fallback. An unavailable or locked store
-returns -32000 with the fixed unavailable message documented in the spec,
-without claiming the key is absent. The next
-operation or health/presence sweep retries unknown or unavailable reads. A
-confirmed value or absence stays cached for this executor's lifetime; external
-keychain edits require restarting the service. Successful Set/Clear replaces
-the cached reference only after native completion. Failed mutations retain the
-previous confirmed entry but require Get before further eligibility; a failed
-refresh never serves its old key. Teardown drops references without writing to
-the store. Go memory is not guaranteed to be securely erased.
+PAIR accepts, stores and relays no user-entered engine API key. The only key
+the manager attaches is the one it generates for a process it launched
+(Strata and other serving launches). Keys contain at most 512 printable
+non-space ASCII bytes.
 
 Candidate selection works before start and adoption, using the operation's
-effective port, including a one-shot `StatusAtPort` port. An owned prepared
-Strata key takes priority over a saved user key. HTTP actions and broker-only
-`internal:local-engine-credential` retrieval additionally require a running
-engine on its current port; adopted command-mode LM Studio may use its saved
-key. Stopped engines export no key. CLI actions/start commands receive no saved
-key in arguments or environment; Strata's existing private launch contract is
-unchanged.
+effective port, including a one-shot `StatusAtPort` port. The owned prepared
+key is selected only for the process that serves that port. HTTP actions and
+broker-only `internal:local-engine-credential` retrieval additionally require
+a running engine on its current port; adopted and stopped engines export no
+key. CLI actions/start commands receive no key in arguments or environment;
+Strata's existing private launch contract is unchanged.
 
 Authenticated probes and HTTP actions share endpoint validation: initial URL
 must be explicit `http://127.0.0.1:<effective-port>` without userinfo, fragment
@@ -134,20 +117,17 @@ proxies and refuses every redirect. Failures carry fixed diagnostics or HTTP
 status, never an engine response body or transport diagnostic. Successful
 keyed action JSON field names/string values and non-JSON text redact the active
 key. HTTP status and JSON identity still establish readiness; process presence
-is only diagnosis. A declared auth response after attaching the saved key says
-the saved key was rejected, while a known-absent key keeps the no-key diagnosis.
-With no key attached, existing port handling, HTTP transport and errors remain
-unchanged; credential endpoint eligibility is not applied.
+is only diagnosis. A declared auth response after attaching the key says the
+key was rejected, while no key keeps the no-key diagnosis. With no key
+attached, existing port handling, HTTP transport and errors remain unchanged;
+credential endpoint eligibility is not applied.
 
 Trust follows `nvpair-service`'s private same-user socket/pipe, broker stdio,
-then manager stdio. Set/state have no ec route, remote method, settings/policy
+then manager stdio. Retrieval has no ec route, remote method, settings/policy
 relay or notification. The broker refuses client retrieval before its generic
 engine relay; its own existing retrieval intentionally supplies the local
 proxy. No key enters public status, inventory, diagnostics or peer payloads.
-Same-user processes remain inside this trust boundary. Fake-store/HTTP and
-pinned direct/reverse peer tests do not establish native store acceptance;
-macOS, Windows and Linux native/session/persistence/prompt checks remain
-untested.
+Same-user processes remain inside this trust boundary.
 
 `engine:inspect-model` accepts only the parent broker's strict worker envelope,
 with an exact local engine/model in `request`. It calls `Executor.InspectModel`

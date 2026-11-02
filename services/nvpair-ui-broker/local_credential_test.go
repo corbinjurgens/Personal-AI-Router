@@ -38,8 +38,8 @@ func TestLocalCredentialMethodIsRefusedToClients(t *testing.T) {
 		})
 	}
 	test("omitted engine", nil)
-	test("owned Strata", engines.CredentialParams{Engine: "strata"})
-	test("local LM Studio without node selector", engines.CredentialParams{Engine: "lmstudio"})
+	test("owned Strata", map[string]string{"engine": "strata"})
+	test("local LM Studio without node selector", map[string]string{"engine": "lmstudio"})
 	test("self node selector", map[string]string{"engine": "lmstudio", "nodeId": "self-node"})
 	test("remote node selector", map[string]string{"engine": "lmstudio", "nodeId": "remote"})
 	test("malformed params", json.RawMessage(`[]`))
@@ -140,5 +140,17 @@ func TestEngineHealthProbeCarriesTheKey(t *testing.T) {
 	}
 	if checkEngineHealth(engineProxyProfile{HealthProbePath: "/redirect"}, server.Client(), port, brokerTestKey) || landed.Load() != 0 {
 		t.Fatalf("redirect followed with the key: landing hits %d", landed.Load())
+	}
+}
+
+func TestBrokerRelaysGenericEngineMethodToManager(t *testing.T) {
+	b, out := newPolicyBroker(t)
+	engine := attachFakeEngine(t, b)
+	b.handleMessage(clientRequest(1, "engine:fixture-operation", map[string]string{"engine": "fixture"}))
+	if out.waitFrame(t, "generic response", isResponse(1)).Error != nil {
+		t.Fatal("generic engine relay refused a local request")
+	}
+	if calls := engine.snapshot(); len(calls) != 1 || calls[0].method != "engine:fixture-operation" {
+		t.Fatal("generic private relay was not retained")
 	}
 }

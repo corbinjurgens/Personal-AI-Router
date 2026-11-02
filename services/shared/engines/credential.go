@@ -3,30 +3,8 @@
 
 package engines
 
-// These methods are for local clients only. Neither returns a key; the separate
-// LocalCredentialMethod is reserved for the broker.
-const (
-	SetCredentialMethod   = "engine:set-credential"
-	CredentialStateMethod = "engine:credential-state"
-	MaxCredentialBytes    = 512
-)
-
-// SetCredentialParams selects an engine and its credential. Empty clears it.
-type SetCredentialParams struct {
-	Engine     string `json:"engine"`
-	Credential string `json:"credential"`
-}
-
-// CredentialParams selects an engine for a credential state request.
-type CredentialParams struct {
-	Engine string `json:"engine"`
-}
-
-// CredentialState reports whether an engine supports and has a credential.
-type CredentialState struct {
-	Supported  bool `json:"supported"`
-	Configured bool `json:"configured"`
-}
+// MaxCredentialBytes bounds the manager-generated serving credential.
+const MaxCredentialBytes = 512
 
 // ValidCredential accepts an empty credential or up to 512 printable ASCII bytes.
 func ValidCredential(s string) bool {

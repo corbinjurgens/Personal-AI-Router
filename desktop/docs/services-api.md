@@ -155,7 +155,6 @@
 | `engine:configure-launch` | request (we call) | ⚠️ not called |
 | `engine:configured-ports` | request (we call) | ⚠️ not called |
 | `engine:copy-model` | request (we call) | ✅ yes |
-| `engine:credential-state` | request (we call) | ✅ yes |
 | `engine:delete-model` | request (we call) | ✅ yes |
 | `engine:describe` | request (we call) | ⚠️ not called |
 | `engine:descriptors` | request (we call) | ✅ yes |
@@ -193,7 +192,6 @@
 | `engine:remote-switch-status` | request (we call) | ⚠️ not called |
 | `engine:remote-unload-model` | request (we call) | ✅ yes |
 | `engine:restart` | request (we call) | ⚠️ not called |
-| `engine:set-credential` | request (we call) | ✅ yes |
 | `engine:set-lock` | request (we call) | ✅ yes |
 | `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:set-stated-memory` | request (we call) | ✅ yes |

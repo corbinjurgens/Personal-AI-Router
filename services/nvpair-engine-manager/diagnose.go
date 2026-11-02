@@ -76,7 +76,7 @@ func (e *Executor) diagnoseStartFailure(ctx context.Context, st *engineState, po
 	if ctx.Err() != nil {
 		return fallback
 	}
-	if errors.Is(cause, errCredentialUnavailable) || errors.Is(cause, errCredentialRequest) || errors.Is(cause, errCredentialHTTP) {
+	if errors.Is(cause, errCredentialRequest) || errors.Is(cause, errCredentialHTTP) {
 		return cause
 	}
 	d := diagnosisAuthRequired

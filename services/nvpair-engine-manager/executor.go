@@ -120,7 +120,6 @@ type engineState struct {
 // layer runs the long ones (install, start) in goroutines so the read
 // loop stays responsive.
 type Executor struct {
-	credentials         credentialStore
 	modelInspection     modelInspectionState
 	modelEstimates      modelEstimateState
 	modelBuffers        modelBufferOwner
@@ -241,7 +240,6 @@ type Executor struct {
 
 func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), baseDir string) *Executor {
 	e := &Executor{
-		credentials:         credentialStore{factory: newCredentialBackend},
 		switchIncarnation:   newOpID(),
 		reg:                 reg,
 		reporter:            reporter,

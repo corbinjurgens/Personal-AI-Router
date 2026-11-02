@@ -1465,7 +1465,6 @@ func (e *Executor) StopAll() {
 	}
 	wg.Wait()
 	e.modelBuffers.close()
-	e.credentials.close()
 }
 
 func (e *Executor) runHealth(ctx context.Context, st *engineState, engine string, port int, gen int64) {
