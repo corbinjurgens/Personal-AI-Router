@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -103,7 +104,7 @@ func (fx *continuityFixture) terminal(t *testing.T, state, reason string) Worklo
 		if terminal.Error == nil || *terminal.Error != want {
 			t.Fatalf("workload failure = %v, want %q", terminal.Error, want)
 		}
-		requests := notificationsOf(t, fx.w, "ollama:proxy/request")
+		requests := notificationsOf(t, fx.w, engines.AddressMethod(fx.p.soleFacade().profile.Name, "proxy/request"))
 		if len(requests) != 1 {
 			t.Fatalf("proxy/request count=%d", len(requests))
 		}
@@ -511,7 +512,7 @@ func TestStreamContinuityStrictLocalHidesPeerMetadata(t *testing.T) {
 		w.Header().Set(peerStreamFramingHeader, "late-engine-spoof")
 	}))
 	defer upstream.Close()
-	p := testProxy(ollamaOnlyProfile(t), NewDiscovery(), 0)
+	p := testProxy(anyProfile(t), NewDiscovery(), 0)
 	configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
 	setBackend(t, p.soleFacade(), upstream.URL, true)
 	rec := httptest.NewRecorder()

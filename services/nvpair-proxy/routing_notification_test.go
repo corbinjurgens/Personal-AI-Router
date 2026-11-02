@@ -156,7 +156,7 @@ func TestRoutingHistoryAcknowledgementDispatch(t *testing.T) {
 	}
 	test("exact parent notification", nodepolicy.NotifyRoutingHistoryAccepted, `{"schema":1,"generation":"1"}`, false, true)
 	test("old generation", nodepolicy.NotifyRoutingHistoryAccepted, `{"schema":1,"generation":"2"}`, false, false)
-	test("addressed alias", engines.AddressMethod("ollama", nodepolicy.NotifyRoutingHistoryAccepted), `{"schema":1,"generation":"1"}`, false, false)
+	test("addressed alias", engines.AddressMethod("llamacpp", nodepolicy.NotifyRoutingHistoryAccepted), `{"schema":1,"generation":"1"}`, false, false)
 	test("request is not an acknowledgement", nodepolicy.NotifyRoutingHistoryAccepted, `{"schema":1,"generation":"1"}`, true, false)
 	test("duplicate field", nodepolicy.NotifyRoutingHistoryAccepted, `{"schema":1,"generation":"2","generation":"1"}`, false, false)
 	test("missing schema", nodepolicy.NotifyRoutingHistoryAccepted, `{"generation":"1"}`, false, false)
@@ -492,7 +492,7 @@ func TestRoutingHistoryBlockedWrite(t *testing.T) {
 		t.Run(boundary.name, func(t *testing.T) {
 			w := newHistoryBoundaryWriter(boundary.frame)
 			root, _, codec := historyOwnedCodec(t, w)
-			profile, ok := profileFor("ollama")
+			profile, ok := profileFor("llamacpp")
 			if !ok {
 				t.Fatal("missing fixture profile")
 			}
@@ -559,7 +559,7 @@ func TestRoutingHistoryBlockedWrite(t *testing.T) {
 			// ingress validation during a physically blocked Write. Valid inference
 			// uses ordinary notifications and retains their existing pipe coupling;
 			// the separate between-frame test covers its progress guarantee.
-			decision := p.admission.admit(context.Background(), admissionRequest{engine: "ollama", model: "m", waitCap: 0})
+			decision := p.admission.admit(context.Background(), admissionRequest{engine: "llamacpp", model: "m", waitCap: 0})
 			if decision.reject != nodepolicy.RejectOff || decision.ticket != nil || decision.err != nil {
 				t.Fatalf("admission changed under history pressure: %+v", decision)
 			}
@@ -627,7 +627,7 @@ func TestRoutingHistoryBetweenFramesAllowsInference(t *testing.T) {
 			w := newHistoryBoundaryWriter(0)
 			root, _, codec := historyOwnedCodec(t, w)
 			codec.budget = time.Second // A leaked gate fails promptly under the ordinary Notify owner.
-			profile := ollamaCase(t).profile
+			profile := llamacppCase(t).profile
 			const model = "history-boundary:tag"
 			engine := newRecordingEngine(t, http.StatusOK)
 			discovery := NewDiscovery()
@@ -682,7 +682,7 @@ func TestRoutingHistoryBetweenFramesAllowsInference(t *testing.T) {
 				t.Fatal("fixture paused an active Write instead of a frame boundary")
 			}
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"history-boundary:tag","stream":false}`)).WithContext(root)
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"history-boundary:tag","stream":false}`)).WithContext(root)
 			done := make(chan struct{})
 			go func() { defer close(done); p.soleFacade().handleHTTP(rec, req) }()
 			lifetimeReceive(t, done) // History remains paused until AFTER the entire handler returns.
@@ -729,7 +729,7 @@ func TestRoutingHistoryBetweenFramesAllowsInference(t *testing.T) {
 					if err := json.Unmarshal(msg.Params, &event); err != nil {
 						t.Fatal(err)
 					}
-					if event.ID != "1" || event.NodeID != "self" || event.Path != "/api/chat" {
+					if event.ID != "1" || event.NodeID != "self" || event.Path != "/v1/chat/completions" {
 						t.Fatal("ordinary request-started identity changed")
 					}
 					started++
@@ -958,7 +958,7 @@ func TestParentNotificationHistoryPinsUntilActualCompletion(t *testing.T) {
 	_, pinned := w.snapshot()
 	cancel()
 	lifetimeReceive(t, w.closed)
-	r.owner.observeRequested(requestedDescriptor("new", "", "/api/chat"))
+	r.owner.observeRequested(requestedDescriptor("new", "", "/v1/chat/completions"))
 	historyTestScan(t, h)
 	_, after := w.snapshot()
 	if !h.active || root.Err() == nil || !reflect.DeepEqual(before, h.frozen.cells[0].facts) || !bytes.Equal(pinned, after) || h.generation.Low != 1 {

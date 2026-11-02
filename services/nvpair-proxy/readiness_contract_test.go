@@ -441,7 +441,7 @@ func TestRequestOptionsReadinessModeInvalidation(t *testing.T) {
 }
 
 func TestRequestOptionsInstalledQualificationMode(t *testing.T) {
-	q := testQualification("mode", "ollama", "m")
+	q := testQualification("mode", "llamacpp", "m")
 	before := installedQualification{q: q, profile: nodepolicy.Profile{RequestOptions: json.RawMessage(`{"temperature":0.1}`)}}
 	after := before
 	after.profile.RequestOptionsMode = nodepolicy.RequestOptionsDefaults

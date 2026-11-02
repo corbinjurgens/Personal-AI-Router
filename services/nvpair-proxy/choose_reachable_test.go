@@ -246,7 +246,7 @@ func TestUpstreamTransportFailureReprobesTheNextSelection(t *testing.T) {
 	p, n, fake := confirmedDeadPeer(t, replacement)
 
 	rec := httptest.NewRecorder()
-	p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"llama"}`)))
+	p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama"}`)))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 from the only, unreachable candidate", rec.Code)
 	}
@@ -262,7 +262,7 @@ func TestModelListTransportFailureReprobesTheNextSelection(t *testing.T) {
 	p, n, fake := confirmedDeadPeer(t, replacement)
 
 	rec := httptest.NewRecorder()
-	p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tags", nil))
+	p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 when the only inventory source is unreachable", rec.Code)
 	}

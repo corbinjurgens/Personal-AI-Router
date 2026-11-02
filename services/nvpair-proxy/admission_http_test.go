@@ -33,9 +33,9 @@ func strictHTTPFixture(t *testing.T) (*Proxy, *recordingEngine) {
 
 func strictHTTPFixtureWithEngine(t *testing.T, e *recordingEngine) (*Proxy, *recordingEngine) {
 	t.Helper()
-	profile, ok := profileFor("ollama")
+	profile, ok := profileFor("llamacpp")
 	if !ok {
-		t.Fatal("missing ollama profile")
+		t.Fatal("missing llamacpp profile")
 	}
 	p := testProxy(profile, NewDiscovery(), profile.FacadePort)
 	configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))

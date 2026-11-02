@@ -23,7 +23,7 @@ func TestCandidateTransportReusesPlainTransport(t *testing.T) {
 }
 
 func TestCandidateTransportPeerUsesFreshPinnedConnections(t *testing.T) {
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	f.directHealthy.Store(true)
@@ -44,7 +44,7 @@ func TestCandidateTransportPeerUsesFreshPinnedConnections(t *testing.T) {
 }
 
 func TestDropUnpinnedPeerTransportsRejectsExistingCandidate(t *testing.T) {
-	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	c := f.candidate(t)

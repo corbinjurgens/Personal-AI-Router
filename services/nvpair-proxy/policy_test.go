@@ -258,8 +258,13 @@ func rpcErr(t *testing.T, p *Proxy, w *recordingWriter, method string, params an
 
 func policyProxy(t *testing.T) (*Proxy, *recordingWriter) {
 	t.Helper()
+	return policyProxyFor(t, anyProfile(t))
+}
+
+func policyProxyFor(t *testing.T, profile engineProfile) (*Proxy, *recordingWriter) {
+	t.Helper()
 	w := &recordingWriter{}
-	return newTestProxy(anyProfile(t), NewCodec(w), NewDiscovery(), 11435), w
+	return newTestProxy(profile, NewCodec(w), NewDiscovery(), 11435), w
 }
 
 func TestPolicyMethods_DefaultsUntilSet(t *testing.T) {
@@ -308,36 +313,36 @@ func TestPolicyMethods_Availability(t *testing.T) {
 
 func TestPolicyMethods_DrainResidencyIntent(t *testing.T) {
 	p, w := policyProxy(t)
-	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "ollama", Drain: true})
+	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "llamacpp", Drain: true})
 	rpcErr(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "v/llm", Drain: true})
-	if !p.admission.drain["ollama"] {
+	if !p.admission.drain["llamacpp"] {
 		t.Fatal("drain not applied")
 	}
 
 	rpcOK(t, p, w, nodepolicy.MethodSetResidency, nodepolicy.SetResidencyParams{
-		LoadedByEngine: map[string][]string{"ollama": {"qwen3"}},
+		LoadedByEngine: map[string][]string{"llamacpp": {"qwen3"}},
 	})
-	if !p.admission.isLoaded("ollama", "qwen3:latest") {
+	if !p.admission.isLoaded("llamacpp", "qwen3") {
 		t.Fatal("residency not applied under the engine's naming")
 	}
 	rpcErr(t, p, w, nodepolicy.MethodSetResidency, nodepolicy.SetResidencyParams{
 		LoadedByEngine: map[string][]string{"v/llm": {"x"}},
 	})
 	rpcErr(t, p, w, nodepolicy.MethodSetResidency, map[string]any{})
-	if !p.admission.isLoaded("ollama", "qwen3") {
+	if !p.admission.isLoaded("llamacpp", "qwen3") {
 		t.Fatal("invalid residency replaced the previous one")
 	}
 
 	rpcOK(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
-		EnabledByEngine: map[string]bool{"ollama": true, "lmstudio": false},
+		EnabledByEngine: map[string]bool{"llamacpp": true, "llamacpp-custom": false},
 	})
-	if on, known := p.admission.engineIntent("lmstudio"); !known || on {
+	if on, known := p.admission.engineIntent("llamacpp-custom"); !known || on {
 		t.Fatal("intent not applied")
 	}
 	rpcErr(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
 		EnabledByEngine: map[string]bool{"v/llm": true},
 	})
-	if on, _ := p.admission.engineIntent("ollama"); !on {
+	if on, _ := p.admission.engineIntent("llamacpp"); !on {
 		t.Fatal("invalid intent replaced the previous one")
 	}
 }
@@ -352,13 +357,13 @@ func TestPolicyMethods_AcceptDescriptorEngineIDs(t *testing.T) {
 		t.Fatal("descriptor engine drain not applied")
 	}
 	rpcOK(t, p, w, nodepolicy.MethodSetResidency, nodepolicy.SetResidencyParams{
-		LoadedByEngine: map[string][]string{"ollama": {"qwen3"}, "llamacpp-custom": {"org/model:Q4_K_M"}},
+		LoadedByEngine: map[string][]string{"llamacpp": {"qwen3"}, "llamacpp-custom": {"org/model:Q4_K_M"}},
 	})
-	if !p.admission.isLoaded("llamacpp-custom", "org/model:Q4_K_M") || !p.admission.isLoaded("ollama", "qwen3:latest") {
+	if !p.admission.isLoaded("llamacpp-custom", "org/model:Q4_K_M") || !p.admission.isLoaded("llamacpp", "qwen3") {
 		t.Fatal("residency with a descriptor engine not applied")
 	}
 	rpcOK(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
-		EnabledByEngine: map[string]bool{"ollama": true, "strata": false},
+		EnabledByEngine: map[string]bool{"llamacpp": true, "strata": false},
 	})
 	if on, known := p.admission.engineIntent("strata"); !known || on {
 		t.Fatal("descriptor engine intent not applied")
@@ -372,7 +377,7 @@ func TestPolicyMethods_AcceptDescriptorEngineIDs(t *testing.T) {
 // one of them.
 func TestPolicyMethods_AreProcessScoped(t *testing.T) {
 	p, w := policyProxy(t)
-	f := rpc(t, p, w, "ollama:"+nodepolicy.MethodSetAvailability, nodepolicy.SetAvailabilityParams{State: nodepolicy.Paused})
+	f := rpc(t, p, w, "llamacpp:"+nodepolicy.MethodSetAvailability, nodepolicy.SetAvailabilityParams{State: nodepolicy.Paused})
 	if f.Error == nil {
 		t.Fatal("an engine-addressed node/set-availability was accepted")
 	}
@@ -511,26 +516,26 @@ func TestStrictReadiness_ReportsTheInstalledCapability(t *testing.T) {
 	a.mu.Lock()
 	a.strict.path = filepath.Join(t.TempDir(), "capacity.json")
 	a.strict.storageErr = nil
-	refOllama := nodepolicy.QualificationRef{ID: "q-ollama", Revision: "1"}
-	refLMStudio := nodepolicy.QualificationRef{ID: "q-lmstudio", Revision: "1"}
+	refLlamaCPP := nodepolicy.QualificationRef{ID: "q-llamacpp", Revision: "1"}
+	refCustom := nodepolicy.QualificationRef{ID: "q-custom", Revision: "1"}
 	a.strict.registry = qualificationRegistry{
-		refOllama:   testQualification(refOllama.ID, "ollama", "m"),
-		refLMStudio: testQualification(refLMStudio.ID, "lmstudio", "Exact Name"),
+		refLlamaCPP: testQualification(refLlamaCPP.ID, "llamacpp", "m"),
+		refCustom:   testQualification(refCustom.ID, "llamacpp-custom", "Exact Name"),
 	}
 	a.mu.Unlock()
 	qualified := func(revision string, limit int) nodepolicy.Policy {
 		pol := policyAt(revision)
 		pol.Admission.MaxConcurrentPerModel = limit
 		pol.Profiles = []nodepolicy.Profile{
-			{Name: "o", Engine: "ollama", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refOllama},
-			{Name: "l", Engine: "lmstudio", Model: "Exact Name", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refLMStudio},
+			{Name: "o", Engine: "llamacpp", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refLlamaCPP},
+			{Name: "l", Engine: "llamacpp-custom", Model: "Exact Name", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refCustom},
 		}
 		return pol
 	}
 	identity := func(engines map[string]nodepolicy.EngineIdentity) nodepolicy.SetModelIdentityParams {
 		return nodepolicy.SetModelIdentityParams{Engines: engines}
 	}
-	both := map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m"), "lmstudio": testIdentity("Exact Name")}
+	both := map[string]nodepolicy.EngineIdentity{"llamacpp": testIdentity("m"), "llamacpp-custom": testIdentity("Exact Name")}
 	last := func(t *testing.T) nodepolicy.StrictAdmissionReadiness {
 		t.Helper()
 		got := strictReports(t, w)
@@ -556,8 +561,8 @@ func TestStrictReadiness_ReportsTheInstalledCapability(t *testing.T) {
 	rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(both))
 	report := last(t)
 	want := []nodepolicy.StrictAdmissionModel{
-		{Engine: "lmstudio", Model: "Exact Name", MaxConcurrent: 1, Identity: strictRequest().Identity},
-		{Engine: "ollama", Model: "m:latest", MaxConcurrent: 1, Identity: strictRequest().Identity},
+		{Engine: "llamacpp", Model: "m", MaxConcurrent: 1, Identity: strictRequest().Identity},
+		{Engine: "llamacpp-custom", Model: "Exact Name", MaxConcurrent: 1, Identity: strictRequest().Identity},
 	}
 	if report.PolicyRevision != "10" || report.ProxyRunID != p.runID || report.Capability == nil ||
 		report.Capability.Version != nodepolicy.StrictAdmissionVersion || !reflect.DeepEqual(report.Capability.Models, want) {
@@ -566,33 +571,33 @@ func TestStrictReadiness_ReportsTheInstalledCapability(t *testing.T) {
 
 	t.Run("a changed limit is reinstalled under the new revision", func(t *testing.T) {
 		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, qualified("11", 2))
-		if report := last(t); report.PolicyRevision != "11" || !slices.Equal(models(report), []string{"lmstudio/Exact Name/2", "ollama/m:latest/2"}) {
+		if report := last(t); report.PolicyRevision != "11" || !slices.Equal(models(report), []string{"llamacpp/m/2", "llamacpp-custom/Exact Name/2"}) {
 			t.Fatalf("report after the limit changed = %+v, want revision 11 with both at 2", report)
 		}
 	})
 	t.Run("an identity without an engine withdraws its model", func(t *testing.T) {
-		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"lmstudio": testIdentity("Exact Name")}))
-		if got := models(last(t)); !slices.Equal(got, []string{"lmstudio/Exact Name/2"}) {
-			t.Fatalf("models after ollama lost its identity = %v", got)
+		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"llamacpp-custom": testIdentity("Exact Name")}))
+		if got := models(last(t)); !slices.Equal(got, []string{"llamacpp-custom/Exact Name/2"}) {
+			t.Fatalf("models after llamacpp lost its identity = %v", got)
 		}
 	})
 	t.Run("a same-name replacement withdraws the model", func(t *testing.T) {
 		replaced := testIdentity()
 		replaced.ModelDigests["Exact Name"] = strings.Repeat("f", 64)
-		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m"), "lmstudio": replaced}))
-		if got := models(last(t)); !slices.Equal(got, []string{"ollama/m:latest/2"}) {
-			t.Fatalf("models after the lmstudio model was replaced = %v", got)
+		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"llamacpp": testIdentity("m"), "llamacpp-custom": replaced}))
+		if got := models(last(t)); !slices.Equal(got, []string{"llamacpp/m/2"}) {
+			t.Fatalf("models after the custom model was replaced = %v", got)
 		}
 	})
 	t.Run("an invalid identity is refused and the previous one kept", func(t *testing.T) {
 		before := len(strictReports(t, w))
 		bad := testIdentity("m")
 		bad.LaunchDigest = "not-a-digest"
-		rpcErr(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"ollama": bad}))
+		rpcErr(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"llamacpp": bad}))
 		if got := strictReports(t, w); len(got) != before {
 			t.Fatalf("a refused identity sent a report: %+v", got[len(got)-1])
 		}
-		if got := models(p.admission.StrictReadiness()); !slices.Equal(got, []string{"ollama/m:latest/2"}) {
+		if got := models(p.admission.StrictReadiness()); !slices.Equal(got, []string{"llamacpp/m/2"}) {
 			t.Fatalf("models after a refused identity = %v", got)
 		}
 	})

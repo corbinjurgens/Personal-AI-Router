@@ -12,7 +12,7 @@ import (
 // CORS follows HTTP responses even for a profile absent from the engine table.
 // No launch-option knowledge is supplied to the proxy.
 func TestCORSPolicyIsIndependentOfEngineIdentity(t *testing.T) {
-	tc := lmstudioCase(t)
+	tc := customCase(t)
 	tc.profile.Name = "future-engine"
 	test := func(name, allowed string) {
 		t.Run(name, func(t *testing.T) {

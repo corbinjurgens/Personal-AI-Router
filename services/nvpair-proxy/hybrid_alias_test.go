@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -29,6 +30,11 @@ func stagedHybridPolicy(t *testing.T) nodepolicy.Policy {
 	pol, err := nodepolicy.Parse([]byte(apiTierPolicy))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
+	}
+	// These fixtures exercise Ollama's native routes as well as OpenAI routes.
+	pol.Tiers["medium"] = []nodepolicy.TierEntry{
+		{Kind: nodepolicy.EntryAPI, Deployment: "cloud-small"},
+		{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b"},
 	}
 	pol.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "big:70b"}}
 	return pol
@@ -80,7 +86,7 @@ func assertRefusedWithoutSideEffects(t *testing.T, tc engineCase, fx *tierFixtur
 	for _, f := range frames(t, fx.w) {
 		methods = append(methods, f.Method)
 	}
-	requestMethod := tc.profile.Name + ":proxy/request"
+	requestMethod := engines.AddressMethod(tc.profile.Name, "proxy/request")
 	if want := []string{requestMethod}; !slices.Equal(methods, want) {
 		t.Fatalf("notifications = %v, want only %v (no workload, wake or admission)", methods, want)
 	}
@@ -124,8 +130,8 @@ func TestAliasRequestsAreRefusedBeforeAnySideEffect(t *testing.T) {
 		}
 	})
 
-	t.Run("lmstudio", func(t *testing.T) {
-		tc := lmstudioCase(t)
+	t.Run("llamacpp-custom", func(t *testing.T) {
+		tc := customCase(t)
 		for _, path := range []string{"/v1/chat/completions", "/v1/messages"} {
 			for _, alias := range suffixAliases {
 				t.Run(path+" "+alias, func(t *testing.T) { test(t, tc, path, alias, aliasReasonNotInferenceReady) })
@@ -164,7 +170,7 @@ func TestAliasLookalikesAreOrdinaryModels(t *testing.T) {
 // A bare tier on a classified inference route keeps the legacy local-only path
 // byte for byte, whether or not disabled hybrid settings are staged.
 func TestBareTierIsUnchangedByStagedHybridSettings(t *testing.T) {
-	legacy := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
+	legacy := tierPolicy(map[string][]nodepolicy.TierEntry{
 		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b"}},
 		"strong": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "big:70b"}},
 	})
@@ -296,11 +302,11 @@ func TestConfiguredAliases(t *testing.T) {
 // routing listener, which has no overlay, lists this node's own roles only.
 func TestModelListOffersDeclaredTiers(t *testing.T) {
 	pol := nodepolicy.Default()
-	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "lmstudio", Model: "qwen3-8b"}}
+	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp-custom", Model: "qwen3-8b"}}
 	fx := listFixture(t, pol, true)
 	f := fx.p.soleFacade()
 	for _, n := range f.discovery.Nodes() {
-		n.Roles = map[string]nodepolicy.AdvertisedRole{"medium": {Engine: "lmstudio", Model: "not-installed"}}
+		n.Roles = map[string]nodepolicy.AdvertisedRole{"medium": {Engine: "llamacpp-custom", Model: "not-installed"}}
 		f.discovery.AddManual(n)
 	}
 	if got, want := modelIDs(t, fx.listModels(t, "/v1/models")), append([]string{"qwen3-8b"}, aliasesOf("medium", "strong")...); !slices.Equal(got, want) {
@@ -369,7 +375,7 @@ func (fx *tierFixture) listModels(t *testing.T, path string) *httptest.ResponseR
 	return rec
 }
 
-// listFixture is an LM Studio facade whose one node answers /v1/models.
+// listFixture is a descriptor-engine facade whose one node answers /v1/models.
 func listFixture(t *testing.T, pol nodepolicy.Policy, up bool) *tierFixture {
 	t.Helper()
 	fx := &tierFixture{w: &recordingWriter{}, eng: map[string]*recordingEngine{}}
@@ -382,7 +388,7 @@ func listFixture(t *testing.T, pol nodepolicy.Policy, up bool) *tierFixture {
 	} else {
 		t.Cleanup(srv.Close)
 	}
-	tc := lmstudioCase(t)
+	tc := customCase(t)
 	disc := NewDiscovery()
 	disc.AddManual(nodeFor(t, "n1", url))
 	fx.p = newTestProxy(tc.profile, NewCodec(fx.w), disc, tc.profile.FacadePort)
@@ -556,8 +562,8 @@ func TestAliasInOtherModelPlacesIsRefused(t *testing.T) {
 		})
 	})
 
-	t.Run("lmstudio", func(t *testing.T) {
-		tc := lmstudioCase(t)
+	t.Run("llamacpp-custom", func(t *testing.T) {
+		tc := customCase(t)
 		t.Run("v1 model path", func(t *testing.T) {
 			test(t, tc, http.MethodGet, "/v1/models/weak-api", ``, "weak-api")
 		})
@@ -584,13 +590,13 @@ func TestBareTierAndLookalikesInOtherModelPlacesAreForwarded(t *testing.T) {
 			}
 		})
 	}
-	ollama, lmstudio := ollamaCase(t), lmstudioCase(t)
+	ollama, custom := ollamaCase(t), customCase(t)
 	test("bare tier as name", ollama, http.MethodPost, "/api/pull", `{"name":"weak"}`)
 	test("bare tier as query model", ollama, http.MethodGet, "/props?model=medium", ``)
-	test("bare tier as model path", lmstudio, http.MethodGet, "/v1/models/strong", ``)
+	test("bare tier as model path", custom, http.MethodGet, "/v1/models/strong", ``)
 	test("tagged alias as name", ollama, http.MethodPost, "/api/pull", `{"name":"weak-api:latest"}`)
 	test("case variant alias as name", ollama, http.MethodPost, "/api/pull", `{"name":"Weak-API"}`)
-	test("organization-qualified model path", lmstudio, http.MethodGet, "/v1/models/org/weak-api", ``)
+	test("organization-qualified model path", custom, http.MethodGet, "/v1/models/org/weak-api", ``)
 	test("alias in an unrelated key", ollama, http.MethodPost, "/api/chat", `{"model":"mid:7b","prompt":"weak-api","title":"weak-local"}`)
 	test("alias as a nested model", ollama, http.MethodPost, "/api/chat", `{"model":"mid:7b","options":{"model":"weak-api"}}`)
 }
@@ -699,7 +705,7 @@ func TestAliasRefusalPrecedesPreflightReservationAndAdmission(t *testing.T) {
 			for _, f := range frames(t, fx.w) {
 				methods = append(methods, f.Method)
 			}
-			if want := []string{tc.profile.Name + ":proxy/request"}; !slices.Equal(methods, want) {
+			if want := []string{engines.AddressMethod(tc.profile.Name, "proxy/request")}; !slices.Equal(methods, want) {
 				t.Errorf("notifications = %v, want only %v (no workload or wake)", methods, want)
 			}
 		})

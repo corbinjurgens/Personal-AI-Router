@@ -83,7 +83,7 @@ func TestModelControlsIngressRawBuffer(t *testing.T) {
 func TestModelControlsIngressFacade(t *testing.T) {
 	test := func(name, method, target, body string, status, hits int) {
 		t.Run(name, func(t *testing.T) {
-			fx := newTierFixture(t, ollamaCase(t), nodepolicy.Default(), map[string][]string{"peer": {"good:tag"}}, nil)
+			fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"peer": {"good:tag"}}, nil)
 			rec := httptest.NewRecorder()
 			fx.p.soleFacade().handleHTTP(rec, httptest.NewRequest(method, target, strings.NewReader(body)))
 			if rec.Code != status || fx.eng["peer"].hits() != hits {
@@ -124,7 +124,7 @@ func TestModelControlsIngressEarlyBodyErrorDoesNotPublishPath(t *testing.T) {
 			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 			t.Cleanup(func() { slog.SetDefault(previous) })
 			slog.Info("model controls log capture active")
-			fx := newTierFixture(t, ollamaCase(t), nodepolicy.Default(), map[string][]string{"peer": {"good:tag"}}, nil)
+			fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"peer": {"good:tag"}}, nil)
 			f := fx.p.soleFacade()
 			rec := httptest.NewRecorder()
 			r := httptest.NewRequest(method, target, strings.NewReader(body))
@@ -185,14 +185,16 @@ func TestModelControlsIngressEarlyBodyErrorDoesNotPublishPath(t *testing.T) {
 }
 
 func TestModelControlsSelectionInventory(t *testing.T) {
-	profile := ollamaCase(t).profile
+	profile := llamacppCase(t).profile
 	bad := []string{"a\n", "a\x7f", "a\u0085", string([]byte{0xff}), strings.Repeat("a", 513), ""}
 	for _, model := range bad {
 		if nodeAdvertisesModel(profile, Node{Models: []string{model}}, "a") {
 			t.Fatal("invalid inventory became a selectable normalized model")
 		}
 	}
-	if nodeAdvertisesModel(profile, Node{Models: []string{strings.Repeat("a", 512)}}, strings.Repeat("a", 512)) {
+	// Engine-specific (Ollama implied :latest): normalization appends the tag,
+	// which would push a 512-byte identifier over the bound.
+	if nodeAdvertisesModel(ollamaCase(t).profile, Node{Models: []string{strings.Repeat("a", 512)}}, strings.Repeat("a", 512)) {
 		t.Fatal("normalization selected an identifier over 512 bytes")
 	}
 	d := NewDiscovery()
@@ -241,15 +243,15 @@ func TestModelControlsSelectionRawDiscoveryAndManual(t *testing.T) {
 
 func TestModelControlsSelectionResidency(t *testing.T) {
 	p, _ := policyProxy(t)
-	raw := json.RawMessage(`{"loadedByEngine":{"ollama":["bad\n","bad` + string([]byte{0xff}) + `","good"],"lmstudio":["bad\u0085"]}}`)
+	raw := json.RawMessage(`{"loadedByEngine":{"llamacpp":["bad\n","bad` + string([]byte{0xff}) + `","good"],"llamacpp-custom":["bad\u0085"]}}`)
 	if err := p.applySetResidency(raw); err != nil {
 		t.Fatalf("mixed successful inventory refused: %v", err)
 	}
-	if !p.admission.isLoaded("ollama", "good") || p.admission.isLoaded("ollama", "bad") || p.admission.isLoaded("ollama", "bad�") {
+	if !p.admission.isLoaded("llamacpp", "good") || p.admission.isLoaded("llamacpp", "bad") || p.admission.isLoaded("llamacpp", "bad�") {
 		t.Fatal("residency lost a valid sibling or retained a repaired model")
 	}
 	p.admission.mu.Lock()
-	known, empty := p.admission.residencyKnown, p.admission.loaded["lmstudio"]
+	known, empty := p.admission.residencyKnown, p.admission.loaded["llamacpp-custom"]
 	p.admission.mu.Unlock()
 	if !known || empty == nil || len(empty) != 0 {
 		t.Fatal("all-bad residency was not known empty")
@@ -258,13 +260,13 @@ func TestModelControlsSelectionResidency(t *testing.T) {
 
 func TestModelControlsSelectionSelfCache(t *testing.T) {
 	w := &recordingWriter{}
-	p := newTestProxy(ollamaCase(t).profile, NewCodec(w), NewDiscovery(), 30001)
+	p := newTestProxy(llamacppCase(t).profile, NewCodec(w), NewDiscovery(), 30001)
 	f := p.soleFacade()
 	test := func(name, models string, want []string) {
 		t.Run(name, func(t *testing.T) {
-			raw := `{"nodes":[{"hostUuid":"self","ip":"127.0.0.1","services":{"ol":{"port":30001}},"models":["legacy"],"modelsByEngine":{"ollama":` + models + `}}]}`
-			p.handleMessage(&Message{Method: engines.AddressMethod("ollama", noderec.NotifyNodes), Params: json.RawMessage(raw)})
-			id, cached := p.selfIdentity("ollama")
+			raw := `{"nodes":[{"hostUuid":"self","ip":"127.0.0.1","services":{"lc":{"port":30001}},"models":["legacy"],"modelsByEngine":{"llamacpp":` + models + `}}]}`
+			p.handleMessage(&Message{Method: engines.AddressMethod("llamacpp", noderec.NotifyNodes), Params: json.RawMessage(raw)})
+			id, cached := p.selfIdentity("llamacpp")
 			if id != "self" || !slices.Equal(cached, want) {
 				t.Fatalf("self cache id/models = %q/%v, want self/%v", id, cached, want)
 			}
@@ -278,23 +280,23 @@ func TestModelControlsSelectionSelfCache(t *testing.T) {
 }
 
 func TestModelControlsSelectionShortAliasConcreteBound(t *testing.T) {
-	test := func(name, model string, role, selectable bool) {
+	test := func(name, model string, role, selectable bool, tc engineCase) {
 		t.Run(name, func(t *testing.T) {
-			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "seed:tag"}}})
-			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"peer": {model}}, nil)
+			pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: tc.profile.Name, Model: "seed:tag"}}})
+			fx := newTierFixture(t, tc, pol, map[string][]string{"peer": {model}}, nil)
 			// Selection still guards metadata supplied through an in-memory
 			// snapshot; strict policy writes are tested separately below.
 			pol.Tiers["weak"][0].Model = model
 			fx.p.admission.setPolicy(pol)
 			if role {
-				fx.declare(t, "peer", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "ollama", Model: model}})
+				fx.declare(t, "peer", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: tc.profile.Name, Model: model}})
 			}
 			got := fx.p.soleFacade().resolveTierCandidates("weak", requestNeeds{}, true)
 			if selectable {
 				if len(got) != 1 || got[0].model != model {
 					t.Fatalf("valid selected model = %+v", got)
 				}
-				rec := fx.do(t, "/api/chat", `{"model":"weak"}`)
+				rec := fx.do(t, tc.inferencePath, `{"model":"weak"}`)
 				if rec.Code != http.StatusOK || fx.eng["peer"].hits() != 1 {
 					t.Fatalf("short alias status/hits = %d/%d", rec.Code, fx.eng["peer"].hits())
 				}
@@ -312,14 +314,16 @@ func TestModelControlsSelectionShortAliasConcreteBound(t *testing.T) {
 			}
 		})
 	}
-	test("local 512 bytes", strings.Repeat("a", 508)+":tag", false, true)
-	test("role 512 bytes", strings.Repeat("a", 508)+":tag", true, true)
-	test("local multibyte 512 bytes", strings.Repeat("界", 169)+"a:tag", false, true)
-	test("local 513 bytes", strings.Repeat("a", 509)+":tag", false, false)
-	test("role 513 bytes", strings.Repeat("a", 509)+":tag", true, false)
-	test("role multibyte 513 bytes", strings.Repeat("界", 169)+"aa:tag", true, false)
-	test("normalization exceeds 512", strings.Repeat("a", 512), false, false)
-	test("role control before trim", "seed:tag\n", true, false)
+	lcpp := llamacppCase(t)
+	test("local 512 bytes", strings.Repeat("a", 508)+":tag", false, true, lcpp)
+	test("role 512 bytes", strings.Repeat("a", 508)+":tag", true, true, lcpp)
+	test("local multibyte 512 bytes", strings.Repeat("界", 169)+"a:tag", false, true, lcpp)
+	test("local 513 bytes", strings.Repeat("a", 509)+":tag", false, false, lcpp)
+	test("role 513 bytes", strings.Repeat("a", 509)+":tag", true, false, lcpp)
+	test("role multibyte 513 bytes", strings.Repeat("界", 169)+"aa:tag", true, false, lcpp)
+	// Engine-specific (Ollama implied :latest): the appended tag exceeds 512.
+	test("normalization exceeds 512", strings.Repeat("a", 512), false, false, ollamaCase(t))
+	test("role control before trim", "seed:tag\n", true, false, lcpp)
 }
 
 func TestModelControlsSelectionPolicyBounds(t *testing.T) {
@@ -333,12 +337,12 @@ func TestModelControlsSelectionPolicyBounds(t *testing.T) {
 			if err := pol.Validate(); (err == nil) != valid {
 				t.Fatalf("deployment validity = %v", err)
 			}
-			pol = ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: model}}})
+			pol = tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: model}}})
 			if err := pol.Validate(); (err == nil) != valid {
 				t.Fatalf("local tier validity = %v", err)
 			}
 			pol = nodepolicy.Default()
-			pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: model}}
+			pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: model}}
 			if err := pol.Validate(); (err == nil) != valid {
 				t.Fatalf("role validity = %v", err)
 			}
@@ -361,12 +365,12 @@ func (rt modelControlsTransport) RoundTrip(*http.Request) (*http.Response, error
 }
 
 func TestModelControlsSelectionModelList(t *testing.T) {
-	test := func(name, body string, role routeRole, want int) {
+	test := func(name, body string, role routeRole, want int, profile engineProfile) {
 		t.Run(name, func(t *testing.T) {
 			previous := modelListClient
 			modelListClient = &http.Client{Transport: modelControlsTransport{body: body}}
 			t.Cleanup(func() { modelListClient = previous })
-			p, _ := policyProxy(t)
+			p, _ := policyProxyFor(t, profile)
 			f := p.soleFacade()
 			rec := httptest.NewRecorder()
 			status, err := f.serveModelList(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil), route{Path: "/v1/models", Role: role}, []candidate{{id: "fixture", url: &url.URL{Scheme: "http", Host: "fixture.invalid"}}})
@@ -402,16 +406,17 @@ func TestModelControlsSelectionModelList(t *testing.T) {
 			}
 		})
 	}
-	test("OpenAI mixed raw entries", `{"data":[{"id":"bad`+string([]byte{0xff})+`"},{"id":"bad\n"},{"id":"good"}]}`, roleModelListOpenAIGET, 1)
-	test("native invalid name cannot hide behind model", `{"models":[{"model":"good","name":"bad\n"},{"model":"bad\n","name":"good"},{"model":"good"}]}`, roleModelListNativeGET, 1)
-	test("native absent model uses valid name", `{"models":[{"name":"good"}]}`, roleModelListNativeGET, 1)
-	test("native null model cannot fall back", `{"models":[{"model":null,"name":"good"},{"model":"good"}]}`, roleModelListNativeGET, 1)
-	test("all bad is successful empty", `{"data":[{"id":"bad\u0085"}]}`, roleModelListOpenAIGET, 0)
-	test("normalized overlong entry", `{"models":[{"model":"`+strings.Repeat("a", 512)+`"},{"model":"good"}]}`, roleModelListNativeGET, 1)
+	test("OpenAI mixed raw entries", `{"data":[{"id":"bad`+string([]byte{0xff})+`"},{"id":"bad\n"},{"id":"good"}]}`, roleModelListOpenAIGET, 1, anyProfile(t))
+	test("native invalid name cannot hide behind model", `{"models":[{"model":"good","name":"bad\n"},{"model":"bad\n","name":"good"},{"model":"good"}]}`, roleModelListNativeGET, 1, ollamaCase(t).profile)
+	test("native absent model uses valid name", `{"models":[{"name":"good"}]}`, roleModelListNativeGET, 1, ollamaCase(t).profile)
+	test("native null model cannot fall back", `{"models":[{"model":null,"name":"good"},{"model":"good"}]}`, roleModelListNativeGET, 1, ollamaCase(t).profile)
+	test("all bad is successful empty", `{"data":[{"id":"bad\u0085"}]}`, roleModelListOpenAIGET, 0, anyProfile(t))
+	// Engine-specific (Ollama implied :latest): the appended tag exceeds 512.
+	test("normalized overlong entry", `{"models":[{"model":"`+strings.Repeat("a", 512)+`"},{"model":"good"}]}`, roleModelListNativeGET, 1, ollamaCase(t).profile)
 }
 
 func TestModelControlsSelectionModelListFailureSemantics(t *testing.T) {
-	dialect := func(name, path, envelope, valid, missing string) {
+	dialect := func(name, path, upstreamPath, envelope, valid, missing string, profile engineProfile) {
 		t.Run(name, func(t *testing.T) {
 			test := func(name, rows string, origin, healthyPeer bool, wantStatus int, wantModels []string) {
 				t.Run(name, func(t *testing.T) {
@@ -425,7 +430,7 @@ func TestModelControlsSelectionModelListFailureSemantics(t *testing.T) {
 						t.Helper()
 						server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 							upstreamHits.Add(1)
-							if r.URL.Path != path || r.Header.Get("Origin") != wantOrigin {
+							if r.URL.Path != upstreamPath || r.Header.Get("Origin") != wantOrigin {
 								t.Error("model-list forwarding changed path or Origin")
 							}
 							w.Header().Set("Access-Control-Allow-Origin", browserOrigin)
@@ -437,7 +442,7 @@ func TestModelControlsSelectionModelListFailureSemantics(t *testing.T) {
 						t.Cleanup(server.Close)
 						return server
 					}
-					p, writer := policyProxy(t)
+					p, writer := policyProxyFor(t, profile)
 					f := p.soleFacade()
 					f.discovery.AddManual(nodeFor(t, "first", upstream(rows).URL))
 					wantHits := int32(1)
@@ -537,8 +542,8 @@ func TestModelControlsSelectionModelListFailureSemantics(t *testing.T) {
 			test("Origin successful empty array", "", true, false, http.StatusOK, nil)
 		})
 	}
-	dialect("OpenAI", "/v1/models", "data", `{"id":"good"}`, `{"name":"bad\n"}`)
-	dialect("native", "/api/tags", "models", `{"model":"good"}`, `{"id":"bad\n"}`)
+	dialect("OpenAI", "/v1/models", "/models", "data", `{"id":"good"}`, `{"name":"bad\n"}`, llamacppCase(t).profile)
+	dialect("native", "/api/tags", "/api/tags", "models", `{"model":"good"}`, `{"id":"bad\n"}`, ollamaCase(t).profile)
 }
 
 func TestModelControlsStrictCapabilityIdentityThroughProjectionAndOverlay(t *testing.T) {
@@ -595,9 +600,9 @@ func TestModelControlsStrictCapabilityIdentityThroughProjectionAndOverlay(t *tes
 }
 
 func TestModelControlsStrictCapabilityRemovalClonesWithoutMutation(t *testing.T) {
-	profile := ollamaCase(t).profile
-	first := nodepolicy.StrictAdmissionModel{Engine: "ollama", Model: "Org/Model:Tag", MaxConcurrent: 2, Identity: strictRequest().Identity}
-	second := nodepolicy.StrictAdmissionModel{Engine: "lmstudio", Model: "Other/Model:Tag", MaxConcurrent: 3, Identity: strictRequest().Identity}
+	profile := llamacppCase(t).profile
+	first := nodepolicy.StrictAdmissionModel{Engine: "llamacpp", Model: "Org/Model:Tag", MaxConcurrent: 2, Identity: strictRequest().Identity}
+	second := nodepolicy.StrictAdmissionModel{Engine: "llamacpp-custom", Model: "Other/Model:Tag", MaxConcurrent: 3, Identity: strictRequest().Identity}
 	bad := first
 	bad.Model = "bad\n"
 	badUTF8 := second
@@ -668,7 +673,7 @@ func TestModelControlsStrictCapabilityNilEmptyAndUnsupportedIdentity(t *testing.
 		{"unsupported model slice is uninterpreted", &nodepolicy.StrictAdmissionCapability{Version: 99, Models: []nodepolicy.StrictAdmissionModel{{Model: "bad\n"}}}, nodepolicy.StrictCapabilityUnsupported},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			profile := ollamaCase(t).profile
+			profile := llamacppCase(t).profile
 			var models []nodepolicy.StrictAdmissionModel
 			if tc.capability != nil {
 				models = tc.capability.Models

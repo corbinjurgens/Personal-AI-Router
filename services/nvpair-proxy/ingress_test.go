@@ -182,7 +182,7 @@ func TestResolveCandidatesUnclusteredDropsRelayPeers(t *testing.T) {
 // peers cannot use the plaintext path at all.
 func TestHandlePlainRejectsNonLoopback(t *testing.T) {
 	p := testProxy(anyProfile(t), NewDiscovery(), 11435)
-	req := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.RemoteAddr = "192.0.2.50:40000"
 	rec := httptest.NewRecorder()
 
@@ -198,7 +198,7 @@ func TestHandlePlainRejectsNonLoopback(t *testing.T) {
 // Preflight is subject to the same ingress gate as ordinary requests.
 func TestHandlePlainRejectsPreflightAtLoopbackGate(t *testing.T) {
 	p := testProxy(anyProfile(t), NewDiscovery(), 11435)
-	req := httptest.NewRequest(http.MethodOptions, "/api/generate", nil)
+	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
 	req.RemoteAddr = "192.0.2.50:40000"
 	rec := httptest.NewRecorder()
 
@@ -218,7 +218,7 @@ func TestHandlePlainRejectsPreflightAtLoopbackGate(t *testing.T) {
 func TestHandlePlainRejectsEngineIdentityProbe(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		p := testProxy(tc.profile, NewDiscovery(), tc.profile.StandalonePort)
-		req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+		req := httptest.NewRequest(http.MethodGet, "/props", nil)
 		req.RemoteAddr = "127.0.0.1:40000"
 		req.Header.Set(engineIdentityProbeHeader, "1")
 		rec := httptest.NewRecorder()
@@ -238,7 +238,7 @@ func TestHandlePlainRejectsEngineIdentityProbe(t *testing.T) {
 // no pins, so every caller is rejected.
 func TestHandleClusterIngressUnclusteredForbids(t *testing.T) {
 	p := testProxy(anyProfile(t), NewDiscovery(), 11435)
-	req := httptest.NewRequest(http.MethodPost, "/api/generate", nil) // no client cert
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil) // no client cert
 	rec := httptest.NewRecorder()
 
 	p.soleFacade().handleClusterIngress(rec, req)

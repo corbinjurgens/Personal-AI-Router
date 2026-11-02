@@ -70,7 +70,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 		budget := bufferTestBudget(t, 192<<20, 0)
 		p := &Proxy{buffers: budget}
 		source := &ownedBodySource{remaining: 17, budget: budget}
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		r.Body, r.ContentLength = source, 17
 		r, owner := p.ownInferenceBuffers(r)
 		defer owner.close()
@@ -86,7 +86,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 		budget := bufferTestBudget(t, 117, time.Hour)
 		p := &Proxy{buffers: budget}
 		source := &ownedBodySource{remaining: 18, budget: budget}
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		r.Body, r.ContentLength = source, 17
 		r, owner := p.ownInferenceBuffers(r)
 		defer owner.close()
@@ -102,7 +102,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 		p := &Proxy{buffers: budget}
 		failure := errors.New("known-length probe failed")
 		source := &ownedBodySource{remaining: 17, budget: budget, failure: failure}
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		r.Body, r.ContentLength = source, 17
 		r, owner := p.ownInferenceBuffers(r)
 		defer owner.close()
@@ -121,7 +121,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				budget := bufferTestBudget(t, 192<<20, 0)
 				p := &Proxy{buffers: budget}
-				r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(tc.raw)))
+				r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.raw)))
 				r.ContentLength = -1 // This case exercises unknown-length decoding storage.
 				defer owner.close()
 				body, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
@@ -145,7 +145,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				budget := bufferTestBudget(t, 192<<20, 0)
 				p := &Proxy{buffers: budget}
-				r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(tc.raw)))
+				r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.raw)))
 				r.ContentLength = -1
 				defer owner.close()
 				body, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
@@ -162,7 +162,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 	t.Run("maximal oversized model is a typed identifier rejection", func(t *testing.T) {
 		budget := bufferTestBudget(t, 192<<20, 0)
 		p := &Proxy{buffers: budget}
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		source := &ownedBodySource{remaining: (64 << 20) - 12, budget: budget}
 		r.Body = io.NopCloser(io.MultiReader(strings.NewReader(`{"model":"`), source, strings.NewReader(`"}`)))
 		r.ContentLength = -1
@@ -181,7 +181,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 			p := &Proxy{buffers: budget}
 			const prefix, suffix = `{"model":"m","input":"`, `"}`
 			source := &ownedBodySource{remaining: (64 << 20) - int64(len(prefix)+len(suffix)), budget: budget}
-			r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 			r.Body = io.NopCloser(io.MultiReader(strings.NewReader(prefix), source, strings.NewReader(suffix)))
 			r.ContentLength = -1
 			if known {
@@ -222,7 +222,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			budget := bufferTestBudget(t, 192<<20, 0)
 			p := &Proxy{buffers: budget}
-			r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 			source := &ownedBodySource{remaining: 64 << 20, budget: budget}
 			r.Body = source
 			r.ContentLength = -1
@@ -246,7 +246,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 	t.Run("chunked growth charges old and replacement concurrently", func(t *testing.T) {
 		budget := bufferTestBudget(t, (96<<20)-1, time.Hour)
 		p := &Proxy{buffers: budget}
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		source := &ownedBodySource{remaining: 64 << 20, budget: budget}
 		r.Body, r.ContentLength = source, -1
 		r, owner := p.ownInferenceBuffers(r)
@@ -261,7 +261,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 	t.Run("custom logical limit charges separate overflow probe", func(t *testing.T) {
 		budget := bufferTestBudget(t, 192<<20, 0)
 		p := &Proxy{buffers: budget}
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		source := &ownedBodySource{remaining: 41, budget: budget}
 		r.Body, r.ContentLength = source, -1
 		r, owner := p.ownInferenceBuffers(r)
@@ -277,7 +277,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 		budget := bufferTestBudget(t, 192<<20, time.Hour)
 		p := &Proxy{buffers: budget}
 		source := &ownedBodySource{remaining: 41, budget: budget}
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		r.Body, r.ContentLength = source, 41
 		r, owner := p.ownInferenceBuffers(r)
 		defer owner.close()
@@ -291,7 +291,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 	t.Run("read failure cannot return a truncated body", func(t *testing.T) {
 		budget := bufferTestBudget(t, 192<<20, 0)
 		p := &Proxy{buffers: budget}
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", nil)
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		failure := errors.New("read failed")
 		r.Body = &ownedBodySource{remaining: 17, budget: budget, failure: failure}
 		r.ContentLength = -1
@@ -322,7 +322,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 			budget := bufferTestBudget(t, 128<<10, time.Hour)
 			hold := bufferMustAcquire(t, budget, 128<<10)
 			p := &Proxy{buffers: budget}
-			r := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"m"}`))
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
 			ctx, cancel := context.WithCancel(r.Context())
 			defer cancel()
 			r, owner := p.ownInferenceBuffers(r.WithContext(ctx))
@@ -343,7 +343,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 			budget := bufferTestBudget(t, 128<<10, time.Hour)
 			hold := bufferMustAcquire(t, budget, 128<<10)
 			p := &Proxy{buffers: budget}
-			r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"m"}`)))
+			r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)))
 			r.ContentLength = -1 // Preserve this contention case's unknown-length growth.
 			defer owner.close()
 			done := make(chan error, 1)
@@ -389,7 +389,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 	t.Run("stream frame storage cannot bypass inference root", func(t *testing.T) {
 		budget := bufferTestBudget(t, 128<<10, 0)
 		p := &Proxy{buffers: budget}
-		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"m"}`)))
+		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)))
 		defer owner.close()
 		if _, _, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20); err != nil {
 			t.Fatal(err)
@@ -422,7 +422,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 	t.Run("stream bootstrap account alone grants no allowance", func(t *testing.T) {
 		budget := bufferTestBudget(t, 16<<10, 0)
 		p := &Proxy{buffers: budget}
-		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", nil))
+		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
 		defer owner.close()
 		hold := bufferMustAcquire(t, budget, 16<<10)
 		defer hold.close()
@@ -437,7 +437,7 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 		p := &Proxy{buffers: budget}
 		newAccount := func(p *Proxy) (*ownedInferenceBuffers, *frameBudget) {
 			t.Helper()
-			r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", nil))
+			r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
 			r.Body = nil
 			if _, _, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20); err != nil {
 				t.Fatal(err)
@@ -487,7 +487,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 	t.Run("admission and alias errors retain canonical charged fields", func(t *testing.T) {
 		budget := bufferTestBudget(t, 512, time.Hour)
 		p := &Proxy{buffers: budget}
-		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", nil))
+		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
 		defer owner.close()
 		recorder := httptest.NewRecorder()
 		w := &inferenceErrorWriter{ResponseWriter: recorder, ctx: r.Context()}
@@ -522,7 +522,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 	t.Run("nonpooled proxy errors preserve canonical strings and needs", func(t *testing.T) {
 		budget := bufferTestBudget(t, 1024, time.Hour)
 		p := &Proxy{buffers: budget}
-		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", nil))
+		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
 		defer owner.close()
 		recorder := httptest.NewRecorder()
 		w := &inferenceErrorWriter{ResponseWriter: recorder, ctx: r.Context()}
@@ -542,7 +542,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 	t.Run("local errors use charged nonpooled serialization", func(t *testing.T) {
 		budget := bufferTestBudget(t, 256, time.Hour)
 		p := &Proxy{buffers: budget}
-		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", nil))
+		r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
 		defer owner.close()
 		recorder := httptest.NewRecorder()
 		w := &inferenceErrorWriter{ResponseWriter: recorder, ctx: r.Context()}
@@ -577,7 +577,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 		p := &Proxy{buffers: budget}
 		input := " { \"model\" : \"weak\", \"n\":1.50e2,\"options\":{\"temperature\":0} }\n"
 		defaults := []byte(`{"options":{"temperature":1,"num_ctx":4096},"keep_alive":"10m"}`)
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(input))
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(input))
 		r.ContentLength = int64(len(input))
 		r, owner := p.ownInferenceBuffers(r)
 		defer owner.close()
@@ -609,7 +609,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 		input := prefix + `{}` + suffix
 		defaults := []byte(prefix + `{"n":1}` + suffix)
 		want := prefix + `{"n":1}` + suffix
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(input))
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(input))
 		r.ContentLength = int64(len(input))
 		r, owner := p.ownInferenceBuffers(r)
 		defer owner.close()
@@ -644,7 +644,7 @@ func TestOwnedInferenceBuffersBodyEdits(t *testing.T) {
 		input.WriteByte('}')
 		budget := bufferTestBudget(t, 1<<20, time.Hour)
 		p := &Proxy{buffers: budget}
-		r := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(input.String()))
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(input.String()))
 		r.ContentLength = int64(input.Len())
 		r, owner := p.ownInferenceBuffers(r)
 		defer owner.close()
@@ -699,7 +699,7 @@ func TestRequestOptionsOwnedBuffers(t *testing.T) {
 			}
 			budget := bufferTestBudget(t, capacity, time.Hour)
 			p := &Proxy{buffers: budget}
-			r := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(tc.input))
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.input))
 			r, owner := p.ownInferenceBuffers(r)
 			defer owner.close()
 			body, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
@@ -826,7 +826,7 @@ func TestOwnedInferenceBuffersIdentifierLimit(t *testing.T) {
 			budget := bufferTestBudget(t, 192<<20, 0)
 			p := &Proxy{buffers: budget}
 			input := `{"model":"` + tc.value + `"}`
-			r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(input)))
+			r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(input)))
 			defer owner.close()
 			body, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
 			if tc.accept {
@@ -850,14 +850,14 @@ func TestOwnedInferenceBuffersIdentifierLimit(t *testing.T) {
 		})
 	}
 	t.Run("handler and ingress refuse before effects", func(t *testing.T) {
-		pol := ollamaTierPolicy(nil)
-		fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"m"}}, nil)
+		pol := tierPolicy(nil)
+		fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"m"}}, nil)
 		backend := newRecordingEngine(t, http.StatusOK)
 		f := fx.p.soleFacade()
 		setBackend(t, f, backend.URL, true)
 		for _, ingress := range []bool{false, true} {
 			rec := httptest.NewRecorder()
-			r := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"`+strings.Repeat(" ", 256)+`m"}`))
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+strings.Repeat(" ", 256)+`m"}`))
 			if ingress {
 				f.serveIngress(rec, r, "peer")
 			} else {
@@ -927,13 +927,13 @@ func TestOwnedInferenceBuffersFinishedModelStorage(t *testing.T) {
 		}
 	})
 	t.Run("terminal ingress unknown names do not grow history", func(t *testing.T) {
-		fx := newTierFixture(t, ollamaCase(t), ollamaTierPolicy(nil), map[string][]string{"a": {"known:latest"}}, nil)
+		fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{"a": {"known"}}, nil)
 		f := fx.p.soleFacade()
 		backend := newRecordingEngine(t, http.StatusNotFound)
 		setBackend(t, f, backend.URL, true)
 		for i := range 4 {
 			rec := httptest.NewRecorder()
-			f.serveIngress(rec, httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(fmt.Sprintf(`{"model":"unknown-%d"}`, i))), "peer")
+			f.serveIngress(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"model":"unknown-%d"}`, i))), "peer")
 			if rec.Code != http.StatusNotFound || backend.hits() != i+1 {
 				t.Fatalf("terminal forwarding: status=%d hits=%d", rec.Code, backend.hits())
 			}
@@ -945,11 +945,11 @@ func TestOwnedInferenceBuffersFinishedModelStorage(t *testing.T) {
 			}
 			ownedAssertHandlerDrained(t, fx.p, nil)
 		}
-		fx.p.admission.setResidency(map[string][]string{"ollama": {"known"}})
+		fx.p.admission.setResidency(map[string][]string{"llamacpp": {"known"}})
 		rec := httptest.NewRecorder()
-		f.serveIngress(rec, httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"known"}`)), "peer")
+		f.serveIngress(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"known"}`)), "peer")
 		fx.p.admission.mu.Lock()
-		_, known := fx.p.admission.finishedAt[admKey{engine: "ollama", model: "known:latest"}]
+		_, known := fx.p.admission.finishedAt[admKey{engine: "llamacpp", model: "known"}]
 		fx.p.admission.mu.Unlock()
 		if rec.Code != http.StatusNotFound || !known {
 			t.Fatalf("resident identity lost timestamp: status=%d known=%v", rec.Code, known)
@@ -963,8 +963,8 @@ func TestOwnedInferenceBuffersFinishedModelStorage(t *testing.T) {
 		}
 	})
 	t.Run("unknown origin resolution creates no timestamp", func(t *testing.T) {
-		fx := newTierFixture(t, ollamaCase(t), ollamaTierPolicy(nil), map[string][]string{"a": {"known:latest"}}, nil)
-		rec := fx.do(t, "/api/generate", `{"model":"unknown"}`)
+		fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{"a": {"known"}}, nil)
+		rec := fx.do(t, "/v1/chat/completions", `{"model":"unknown"}`)
 		fx.p.admission.mu.Lock()
 		timestamps := len(fx.p.admission.finishedAt)
 		fx.p.admission.mu.Unlock()
@@ -977,12 +977,12 @@ func TestOwnedInferenceBuffersFinishedModelStorage(t *testing.T) {
 		w := &recordingWriter{}
 		p, f, _ := twoEngineProxy(t, w)
 		backend := newRecordingEngine(t, http.StatusOK)
-		f.discovery.AddManual(selfNode("self", f.profile.FacadePort, "known:latest"))
+		f.discovery.AddManual(selfNode("self", f.profile.FacadePort, "known"))
 		setBackend(t, f, backend.URL, true)
 		rec := httptest.NewRecorder()
-		f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"known"}`)))
+		f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"known"}`)))
 		p.admission.mu.Lock()
-		_, known := p.admission.finishedAt[admKey{engine: "ollama", model: "known:latest"}]
+		_, known := p.admission.finishedAt[admKey{engine: "llamacpp", model: "known"}]
 		p.admission.mu.Unlock()
 		if rec.Code != http.StatusOK || !known || backend.hits() != 1 {
 			t.Fatalf("resolved cold model: status=%d timestamp=%v hits=%d", rec.Code, known, backend.hits())
@@ -1005,7 +1005,7 @@ func TestOwnedInferenceBuffersStrictIdentifierStorage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			budget := bufferTestBudget(t, 192<<20, 0)
 			p := &Proxy{buffers: budget}
-			input := strings.Repeat(" ", 248) + "m:latest"
+			input := strings.Repeat(" ", 255) + "m"
 			r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"`+input+`"}`)))
 			defer owner.close()
 			_, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
@@ -1016,7 +1016,7 @@ func TestOwnedInferenceBuffersStrictIdentifierStorage(t *testing.T) {
 				t.Fatalf("decoded model bytes=%d, want boundary 256", len(model))
 			}
 			h := newStrictHarness(t)
-			ticket, err := h.a.admitStrictNow(context.Background(), "ollama", model, strictRequest())
+			ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", model, strictRequest())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1024,7 +1024,7 @@ func TestOwnedInferenceBuffersStrictIdentifierStorage(t *testing.T) {
 			bufferAssertTotals(t, budget, 0, 0, 0)
 			assertOwned := func(name, value string) {
 				t.Helper()
-				if value != "m:latest" || unsafe.StringData(value) == unsafe.StringData(strings.TrimSpace(model)) {
+				if value != "m" || unsafe.StringData(value) == unsafe.StringData(strings.TrimSpace(model)) {
 					t.Fatalf("strict %s retains decoded request backing or changed model: %q", name, value)
 				}
 			}
@@ -1085,7 +1085,7 @@ const bufferFixtureResponseBytes int64 = streamFrameMetadataBytes + 1 + streamFr
 
 func bufferFixtureRemotePreparationBytes(t *testing.T, body string) int64 {
 	t.Helper()
-	request, err := parseOriginStreamRequest("/api/generate", []byte(body))
+	request, err := parseOriginStreamRequest("/v1/chat/completions", []byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1100,8 +1100,8 @@ func bufferFixtureRemotePreparationBytes(t *testing.T, body string) int64 {
 func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
 	run := func(name string, later, disconnect bool) {
 		t.Run(name, func(t *testing.T) {
-			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
-			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
+			pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}}})
+			fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
 			capacity := int64(256<<10) + registryNextTestBytes(fx.p)
 			if later {
 				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
@@ -1145,7 +1145,7 @@ func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
 			defer server.Close()
 			ctx, cancelClient := context.WithCancel(context.Background())
 			defer cancelClient()
-			request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/api/generate", strings.NewReader(`{"model":"weak"}`))
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"weak"}`))
 			if err != nil {
 				t.Fatal(err)
 			}

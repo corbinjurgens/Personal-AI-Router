@@ -67,7 +67,7 @@ func TestLocalCredentialIsPairedWithTheBackendPort(t *testing.T) {
 // Local self dispatch: inference and the model list carry the key in place of
 // the caller's; another forwarded path carries what the caller sent.
 func TestLocalCredentialOnSelfRequests(t *testing.T) {
-	tc := lmstudioCase(t)
+	tc := customCase(t)
 	engine := newRecordingEngine(t, http.StatusOK)
 	port := tc.profile.FacadePort
 	disc := NewDiscovery()
@@ -92,7 +92,7 @@ func TestLocalCredentialOnSelfRequests(t *testing.T) {
 // Peer ingress: admitted inference and the model list carry the key; any
 // other path is forwarded with only what the peer sent.
 func TestLocalCredentialOnPeerIngress(t *testing.T) {
-	tc := lmstudioCase(t)
+	tc := customCase(t)
 	engine := newRecordingEngine(t, http.StatusOK)
 	p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
 	f := p.soleFacade()
@@ -162,14 +162,14 @@ func TestUnkeyedBackendKeepsCallerCredentials(t *testing.T) {
 // engine, and there the caller's own credentials pass through unchanged.
 func TestLocalCredentialStaysOffOtherInferencePaths(t *testing.T) {
 	w := &recordingWriter{}
-	p, oll, lm := twoEngineProxy(t, w)
+	p, lcpp, custom := twoEngineProxy(t, w)
 	engine := newRecordingEngine(t, http.StatusOK)
-	lm.discovery.AddManual(selfNode("self", lm.profile.FacadePort, "qwen3-8b"))
-	setKeyedBackend(t, lm, engine.URL, proxyTestKey)
-	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
-	setBackend(t, oll, newRecordingEngine(t, http.StatusOK).URL, true)
+	custom.discovery.AddManual(selfNode("self", custom.profile.FacadePort, "qwen3-8b"))
+	setKeyedBackend(t, custom, engine.URL, proxyTestKey)
+	lcpp.discovery.AddManual(selfNode("self", lcpp.profile.FacadePort, "llama3"))
+	setBackend(t, lcpp, newRecordingEngine(t, http.StatusOK).URL, true)
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}}}
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}}}
 	p.admission.setPolicy(pol)
 
 	send := func(path string) http.Header {
@@ -177,7 +177,7 @@ func TestLocalCredentialStaysOffOtherInferencePaths(t *testing.T) {
 		before := engine.hits()
 		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"weak","messages":[]}`))
 		rec := httptest.NewRecorder()
-		oll.handleHTTP(rec, withCallerCredentials(r))
+		lcpp.handleHTTP(rec, withCallerCredentials(r))
 		if rec.Code != http.StatusOK || engine.hits() != before+1 {
 			t.Fatalf("%s: status %d, hits %d -> %d", path, rec.Code, before, engine.hits())
 		}

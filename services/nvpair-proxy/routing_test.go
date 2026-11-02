@@ -341,7 +341,7 @@ func TestUnifiedDispatchPostcommitAllocationDrains(t *testing.T) {
 	discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
 	discovery.AddManual(nodeForModel(t, "b", other.URL, "m"))
 	writer := &recordingWriter{}
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(writer), discovery, 0)
+	p := newTestProxy(anyProfile(t), NewCodec(writer), discovery, 0)
 	p.SetPriority([]string{"a", "b"})
 	p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 	recorder, done := httptest.NewRecorder(), make(chan struct{})
@@ -392,7 +392,7 @@ func TestUnifiedDispatchUncertainCapacityOutlivesTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.registerWorkload(registered, workloadKey{engine: "ollama", id: "1"}); err != nil {
+	if err := p.registerWorkload(registered, workloadKey{engine: "llamacpp", id: "1"}); err != nil {
 		t.Fatal(err)
 	}
 	p.priorityMu.Lock()
@@ -433,7 +433,7 @@ func TestUnifiedDispatchUncertainCapacityOutlivesTransport(t *testing.T) {
 	p.priorityMu.Lock()
 	placements := len(p.priorityReservations)
 	p.priorityMu.Unlock()
-	if active != 1 || tickets != 0 || markers != 1 || queue != 0 || placements != 0 || len(p.activeRoutingRequests()) != 0 || len(p.workloadControls("ollama", "1")) != 0 {
+	if active != 1 || tickets != 0 || markers != 1 || queue != 0 || placements != 0 || len(p.activeRoutingRequests()) != 0 || len(p.workloadControls("llamacpp", "1")) != 0 {
 		t.Fatalf("liability/transport cleanup conflated: active=%d tickets=%d markers=%d queue=%d placements=%d requests=%d", active, tickets, markers, queue, placements, len(p.activeRoutingRequests()))
 	}
 }
@@ -501,7 +501,7 @@ func TestUnifiedDispatchBodyPreparationDeadline(t *testing.T) {
 			engine := newRecordingEngineForRequest(t, http.StatusOK, http.MethodPost, routeChatCompletions)
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
-			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(writer), discovery, 0)
+			p := newTestProxy(anyProfile(t), NewCodec(writer), discovery, 0)
 			p.buffers = bufferTestBudget(t, 256<<10, time.Hour)
 			var hold *bufferLease
 			defer func() {
@@ -585,8 +585,8 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 			name = "retry consumes original deadline"
 		}
 		t.Run(name, func(t *testing.T) {
-			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
-			fx := newTierFixtureForRequest(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil, http.MethodPost, "/api/generate")
+			pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}}})
+			fx := newTierFixtureForRequest(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil, http.MethodPost, "/v1/chat/completions")
 			capacity := int64(256<<10) + registryNextTestBytes(fx.p)
 			if later {
 				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
@@ -596,7 +596,7 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 			var firstCalls atomic.Int32
 			var firstURL string
 			if later {
-				first := httptest.NewServer(fixtureRequestHandler(http.MethodPost, "/api/generate", func(w http.ResponseWriter, r *http.Request) {
+				first := httptest.NewServer(fixtureRequestHandler(http.MethodPost, "/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 					t.Logf("retry pressure request: %s %s", r.Method, r.URL.Path)
 					firstCalls.Add(1)
 					select {
@@ -628,7 +628,7 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			rec, done := httptest.NewRecorder(), make(chan struct{})
-			r := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"weak"}`)).WithContext(ctx)
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"weak"}`)).WithContext(ctx)
 			go func() { defer close(done); fx.p.soleFacade().handleHTTP(rec, r) }()
 			var hold *bufferLease
 			select {
@@ -900,7 +900,7 @@ func TestUnifiedDispatchSocketBodyInterruption(t *testing.T) {
 			if strings.HasSuffix(scenario, "deadline") {
 				jobDeadline = 150 * time.Millisecond
 			}
-			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), NewDiscovery(), 0)
+			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), NewDiscovery(), 0)
 			p.buffers = bufferTestBudget(t, 1<<20, time.Hour)
 			p.serveCtx, p.cancel = context.WithCancel(context.Background())
 			defer p.cancel()
@@ -1013,7 +1013,7 @@ func TestUnifiedDispatchConcretePreOutputDeadline(t *testing.T) {
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "a", upstream.URL, "m"))
 			discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
-			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
 			p.buffers = bufferTestBudget(t, 2<<20, time.Hour)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -1107,7 +1107,7 @@ func TestUnifiedDispatchClearsBodyReadDeadline(t *testing.T) {
 	engine := newRecordingEngine(t, http.StatusOK)
 	discovery := NewDiscovery()
 	discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+	p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
 	observations := make(chan []time.Time, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wrapped := &routingReadDeadlineWriter{ResponseWriter: w}
@@ -1173,7 +1173,7 @@ func TestUnifiedDispatchJoinsBodyInterrupt(t *testing.T) {
 	original := jobDeadline
 	jobDeadline = 10 * time.Second
 	defer func() { jobDeadline = original }()
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), NewDiscovery(), 0)
+	p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), NewDiscovery(), 0)
 	interrupted, release, cleared, done := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
@@ -1472,7 +1472,7 @@ func TestUnifiedDispatchPostcommitModifyResponseRefusal(t *testing.T) {
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
 			discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
-			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
 			p.SetPriority([]string{"a", "b"})
 			p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 			transport := p.plainHTTPTransport()
@@ -1615,7 +1615,7 @@ func TestUnifiedDispatchCommittedPeekTimer(t *testing.T) {
 				discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
 			}
 			writer := &recordingWriter{}
-			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(writer), discovery, 0)
+			p := newTestProxy(anyProfile(t), NewCodec(writer), discovery, 0)
 			p.SetPriority([]string{"a", "b"})
 			p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 			rec, done := httptest.NewRecorder(), make(chan struct{})
@@ -1949,13 +1949,13 @@ const hybridTestBody = `{"model":"weak","messages":[{"role":"user","content":"hi
 // listed peer answers with its status.
 func hybridPeerFixture(t *testing.T, peers map[string]int) *tierFixture {
 	t.Helper()
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
 	pol.TierPolicy.AllowStronger = false
 	nodes := map[string][]string{}
 	for id := range peers {
 		nodes[id] = []string{"q:1b"}
 	}
-	fx := newTierFixture(t, ollamaCase(t), pol, nodes, nil)
+	fx := newTierFixture(t, llamacppCase(t), pol, nodes, nil)
 	f := fx.p.soleFacade()
 	for id, status := range peers {
 		if status != http.StatusOK {
@@ -1965,7 +1965,7 @@ func hybridPeerFixture(t *testing.T, peers map[string]int) *tierFixture {
 			f.discovery.AddManual(n)
 			fx.eng[id] = e
 		}
-		fx.advertise(t, id, map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+		fx.advertise(t, id, map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 		pinRecordingPairPeer(t, f, id, fx.eng[id])
 	}
 	return fx
@@ -2048,15 +2048,15 @@ func TestUnifiedDispatchHybridSpendsOneAttemptBudget(t *testing.T) {
 }
 
 func TestUnifiedDispatchHybridPreOutputDeadline(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
 	pol.TierPolicy.AllowStronger = false
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"slow": {"q:1b"}}, nil)
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"slow": {"q:1b"}}, nil)
 	stalled := newStallingEngine(t, routeChatCompletions)
 	defer stalled.doRelease()
 	n := nodeFor(t, "slow", stalled.URL)
 	n.Models = []string{"q:1b"}
 	fx.p.soleFacade().discovery.AddManual(n)
-	fx.advertise(t, "slow", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	fx.advertise(t, "slow", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 
 	started := time.Now()
 	recorder, ctl := serveHybridDispatch(t, fx.p.soleFacade(), hybridTestBody, hybridTestPolicy(3, 300*time.Millisecond))
@@ -2074,15 +2074,15 @@ func TestUnifiedDispatchHybridPreOutputDeadline(t *testing.T) {
 func TestUnifiedDispatchHybridPublicRefusalSpendsNothing(t *testing.T) {
 	p, accounts, _, _ := egressFixture(t)
 	egressGrant(t, p, 1, 5*time.Second)
-	profile, ok := profileFor("ollama")
+	profile, ok := profileFor("llamacpp")
 	if !ok {
-		t.Fatal("missing ollama profile")
+		t.Fatal("missing llamacpp profile")
 	}
 	f := newFacade(p, profile, NewDiscovery(), 0)
 	if p.facades == nil {
 		p.facades = map[string]*facade{}
 	}
-	p.facades["ollama"] = f
+	p.facades["llamacpp"] = f
 	var credentialReads atomic.Int32
 	publicChatInputs = func(chatAccountSnapshot) (*chatQualification, *publicClient, func(nodepolicy.CredentialRef) (string, bool), chatByteBudget, bool) {
 		return accounts.profile, accounts.transport, func(ref nodepolicy.CredentialRef) (string, bool) {
@@ -2116,32 +2116,32 @@ func TestUnifiedDispatchHybridPublicUnavailableBeforePreparation(t *testing.T) {
 	}
 }
 
-// hybridSelfProxy is a router whose own Ollama engine serves the weak tier as
+// hybridSelfProxy is a router whose own llama.cpp engine serves the weak tier as
 // a qualified declared role, with its strict storage in a private directory.
 func hybridSelfProxy(t *testing.T, resident bool) (*Proxy, *facade, *recordingEngine) {
 	t.Helper()
-	p, oll, _ := twoEngineProxy(t, &recordingWriter{})
+	p, lcpp, _ := twoEngineProxy(t, &recordingWriter{})
 	e := newRecordingEngine(t, http.StatusOK)
-	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
-	setBackend(t, oll, e.URL, true)
+	lcpp.discovery.AddManual(selfNode("self", lcpp.profile.FacadePort, "llama3"))
+	setBackend(t, lcpp, e.URL, true)
 	p.admission.strict.path = filepath.Join(t.TempDir(), "strict-capacity.json")
 	p.admission.strict.storageErr = nil
-	installQualified(t, p.admission, admKey{engine: "ollama", model: "llama3:latest"})
+	installQualified(t, p.admission, admKey{engine: "llamacpp", model: "llama3"})
 	pol := p.admission.currentPolicy()
-	pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "llama3:latest"}}
+	pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "llama3"}}
 	pol.Admission.MaxConcurrentPerModel = 1
 	p.admission.setPolicy(pol)
 	if resident {
-		p.admission.setResidency(map[string][]string{"ollama": {"llama3:latest"}})
+		p.admission.setResidency(map[string][]string{"llamacpp": {"llama3"}})
 	}
-	return p, oll, e
+	return p, lcpp, e
 }
 
 const hybridSelfBody = `{"model":"weak","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`
 
 func TestUnifiedDispatchHybridSelfAdmitsStrictly(t *testing.T) {
-	p, oll, e := hybridSelfProxy(t, true)
-	recorder, ctl := serveHybridDispatch(t, oll, hybridSelfBody, hybridTestPolicy(1, 5*time.Second))
+	p, lcpp, e := hybridSelfProxy(t, true)
+	recorder, ctl := serveHybridDispatch(t, lcpp, hybridSelfBody, hybridTestPolicy(1, 5*time.Second))
 	if recorder.Code != http.StatusOK || e.hits() != 1 || ctl.ordinal != 1 {
 		t.Fatalf("status = %d, engine hits = %d, attempts = %d; want one strict local attempt", recorder.Code, e.hits(), ctl.ordinal)
 	}
@@ -2159,20 +2159,20 @@ func TestUnifiedDispatchHybridSelfAdmitsStrictly(t *testing.T) {
 }
 
 func TestUnifiedDispatchHybridSelfRefusalFallsBackToPeer(t *testing.T) {
-	p, oll, local := hybridSelfProxy(t, false) // Not resident and no cold-start allowance.
+	p, lcpp, local := hybridSelfProxy(t, false) // Not resident and no cold-start allowance.
 	peer := newRecordingEngine(t, http.StatusOK)
 	n := nodeFor(t, "peer", peer.URL)
-	n.Models = []string{"llama3:latest"}
-	n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("llama3:latest")}
+	n.Models = []string{"llama3"}
+	n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("llama3")}
 	n.PolicyRevision = "1"
-	n.StrictAdmission = strictCapabilityFor("ollama", "llama3:latest")
-	oll.discovery.AddManual(n)
+	n.StrictAdmission = strictCapabilityFor("llamacpp", "llama3")
+	lcpp.discovery.AddManual(n)
 	p.SetPriority([]string{"self", "peer"}) // The tier order leads with this node.
-	pinRecordingPairPeer(t, oll, "peer", peer)
+	pinRecordingPairPeer(t, lcpp, "peer", peer)
 
 	policy := hybridTestPolicy(2, 5*time.Second)
 	policy.coldWait = 0
-	recorder, ctl := serveHybridDispatch(t, oll, hybridSelfBody, policy)
+	recorder, ctl := serveHybridDispatch(t, lcpp, hybridSelfBody, policy)
 	if recorder.Code != http.StatusOK || local.hits() != 0 || peer.hits() != 1 || ctl.ordinal != 2 {
 		t.Fatalf("status = %d, local/peer hits = %d/%d, attempts = %d; want the refused self attempt then the peer",
 			recorder.Code, local.hits(), peer.hits(), ctl.ordinal)

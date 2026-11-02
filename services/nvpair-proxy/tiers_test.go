@@ -38,13 +38,13 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 	}
 	fixture := func(t *testing.T) *tierFixture {
 		t.Helper()
-		pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
-		return newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}}, nil)
+		pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}}})
+		return newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}}, nil)
 	}
 	t.Run("impossible transformation has no claim or published placement", func(t *testing.T) {
 		fx := fixture(t)
 		fx.p.buffers = bufferTestBudget(t, (128<<10)+registryNextTestBytes(fx.p), time.Hour)
-		rec := fx.do(t, "/api/generate", `{"model":"weak"}`)
+		rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`)
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("impossible status=%d body=%s", rec.Code, rec.Body.String())
 		}
@@ -65,7 +65,7 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 		defer cancel()
 		go func() {
 			defer close(done)
-			fx.p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"weak"}`)).WithContext(ctx))
+			fx.p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"weak"}`)).WithContext(ctx))
 		}()
 		waitForCond(t, 2*time.Second, "pre-send storage waiter", func() bool {
 			fx.p.buffers.mu.Lock()
@@ -91,8 +91,8 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 		bufferAssertTotals(t, fx.p.buffers, 0, 0, 0)
 	})
 	t.Run("retry clears prior placement and claim before storage wait", func(t *testing.T) {
-		pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
-		fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
+		pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"}}})
+		fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
 		preparationBytes := bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
 		capacity := (256 << 10) + preparationBytes + registryNextTestBytes(fx.p)
 		// The first attempt needs preparation room in addition to the blocker
@@ -128,7 +128,7 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 		defer cancel()
 		go func() {
 			defer close(done)
-			f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"weak"}`)).WithContext(ctx))
+			f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"weak"}`)).WithContext(ctx))
 		}()
 		var hold *bufferLease
 		select {
@@ -180,7 +180,7 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 func TestOwnedInferenceBuffersReservationRecheck(t *testing.T) {
 	run := func(name string, change func(*Proxy), want []string) {
 		t.Run(name, func(t *testing.T) {
-			fx := newTierFixture(t, ollamaCase(t), nodepolicy.Default(), map[string][]string{"a": {"m"}, "b": {"m"}}, nil)
+			fx := newTierFixture(t, llamacppCase(t), nodepolicy.Default(), map[string][]string{"a": {"m"}, "b": {"m"}}, nil)
 			f := fx.p.soleFacade()
 			cands := f.resolveCandidates("m")
 			entered, resume := make(chan struct{}), make(chan struct{})
@@ -777,18 +777,18 @@ func (fx *tierFixture) servedBy(t *testing.T) string {
 	return ""
 }
 
-func ollamaTierPolicy(tiers map[string][]nodepolicy.TierEntry) nodepolicy.Policy {
+func tierPolicy(tiers map[string][]nodepolicy.TierEntry) nodepolicy.Policy {
 	pol := nodepolicy.Default()
 	pol.Tiers = tiers
 	return pol
 }
 
 func TestTier_CapabilityFilterAndBodyRewrite(t *testing.T) {
-	tc := ollamaCase(t)
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
+	tc := llamacppCase(t)
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
 		"weak": {
-			{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"},
-			{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small-tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
+			{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b"},
+			{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small-tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
 		},
 	})
 	fx := newTierFixture(t, tc, pol, map[string][]string{
@@ -805,7 +805,7 @@ func TestTier_CapabilityFilterAndBodyRewrite(t *testing.T) {
 	}
 	// Headers name what answered.
 	for h, want := range map[string]string{
-		nodepolicy.ModelHeader: "small-tools:1b", nodepolicy.EngineHeader: "ollama",
+		nodepolicy.ModelHeader: "small-tools:1b", nodepolicy.EngineHeader: "llamacpp",
 		nodepolicy.NodeHeader: "b", nodepolicy.TierHeader: "weak",
 	} {
 		if got := rec.Header().Get(h); got != want {
@@ -815,10 +815,10 @@ func TestTier_CapabilityFilterAndBodyRewrite(t *testing.T) {
 }
 
 func TestTier_ContextFilterAndStrongerFallback(t *testing.T) {
-	tc := ollamaCase(t)
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b", ContextTokens: 100}},
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b", ContextTokens: 32000}},
+	tc := llamacppCase(t)
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "small:1b", ContextTokens: 100}},
+		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b", ContextTokens: 32000}},
 	})
 	fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"small:1b"}, "b": {"mid:7b"}}, nil)
 
@@ -855,9 +855,9 @@ func TestTier_ContextFilterAndStrongerFallback(t *testing.T) {
 }
 
 func TestTier_NoEntriesIs404WithEmptyNeeds(t *testing.T) {
-	tc := ollamaCase(t)
+	tc := llamacppCase(t)
 	fx := newTierFixture(t, tc, nodepolicy.Default(), map[string][]string{"a": {"small:1b"}}, nil)
-	rec := fx.do(t, "/api/chat", `{"model":"strong"}`)
+	rec := fx.do(t, "/v1/chat/completions", `{"model":"strong"}`)
 	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), `"needs":[]`) {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body)
 	}
@@ -867,28 +867,28 @@ func TestTier_NoEntriesIs404WithEmptyNeeds(t *testing.T) {
 }
 
 func TestTier_WarmPreference(t *testing.T) {
-	tc := ollamaCase(t)
+	tc := llamacppCase(t)
 	tiers := map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "cold:1b"}, {Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "warm:1b"}},
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b"}},
+		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "cold:1b"}, {Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "warm:1b"}},
+		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b"}},
 	}
 	nodes := map[string][]string{"a": {"cold:1b"}, "b": {"warm:1b"}, "c": {"mid:7b"}}
 
 	// Within the requested tier a loaded model leads, ahead of entry order.
-	fx := newTierFixture(t, tc, ollamaTierPolicy(tiers), nodes, map[string][]string{"b": {"warm:1b"}, "c": {"mid:7b"}})
+	fx := newTierFixture(t, tc, tierPolicy(tiers), nodes, map[string][]string{"b": {"warm:1b"}, "c": {"mid:7b"}})
 	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusOK || fx.servedBy(t) != "b" {
 		t.Fatalf("tier mode: served by %q, want warm b", fx.servedBy(t))
 	}
 
 	// "tier" keeps tier order first: a warm stronger model never beats a cold
 	// model of the requested tier.
-	fx = newTierFixture(t, tc, ollamaTierPolicy(tiers), nodes, map[string][]string{"c": {"mid:7b"}})
+	fx = newTierFixture(t, tc, tierPolicy(tiers), nodes, map[string][]string{"c": {"mid:7b"}})
 	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusOK || fx.servedBy(t) != "a" {
 		t.Fatalf("tier mode, only medium warm: served by %q, want a", fx.servedBy(t))
 	}
 
 	// "any" prefers any loaded eligible model.
-	pol := ollamaTierPolicy(tiers)
+	pol := tierPolicy(tiers)
 	pol.TierPolicy.PreferLoaded = "any"
 	fx = newTierFixture(t, tc, pol, nodes, map[string][]string{"c": {"mid:7b"}})
 	rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`)
@@ -899,10 +899,10 @@ func TestTier_WarmPreference(t *testing.T) {
 
 // Workload events carry the concrete model and the tier asked for.
 func TestTier_WorkloadCarriesRequestedModel(t *testing.T) {
-	tc := ollamaCase(t)
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b"}}})
+	tc := llamacppCase(t)
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b"}}})
 	fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"mid:7b"}}, nil)
-	if rec := fx.do(t, "/api/generate", `{"model":"medium","prompt":"x"}`); rec.Code != http.StatusOK {
+	if rec := fx.do(t, "/v1/chat/completions", `{"model":"medium","prompt":"x"}`); rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
 	}
 	events := notificationsOf(t, fx.w, workloadStartedMethod)
@@ -923,7 +923,7 @@ func TestTier_WorkloadCarriesRequestedModel(t *testing.T) {
 
 	// A request that names its model carries no requestedModel at all.
 	fx2 := newTierFixture(t, tc, pol, map[string][]string{"a": {"mid:7b"}}, nil)
-	fx2.do(t, "/api/generate", `{"model":"mid:7b"}`)
+	fx2.do(t, "/v1/chat/completions", `{"model":"mid:7b"}`)
 	for _, line := range fx2.w.lines() {
 		if strings.Contains(string(line), "requestedModel") {
 			t.Fatalf("requestedModel on a non-tier workload: %s", line)
@@ -949,15 +949,22 @@ func TestHandleHTTP_RoutingHeadersOnPlainRequest(t *testing.T) {
 	})
 }
 
-// twoEngineProxy hosts an Ollama and an LM Studio facade in one process, the
-// way production does, without binding either.
+// twoEngineProxy hosts a llama.cpp and a descriptor-engine facade in one
+// process, the way production does, without binding either.
 func twoEngineProxy(t *testing.T, w *recordingWriter) (*Proxy, *facade, *facade) {
 	t.Helper()
-	oll, lms := ollamaCase(t).profile, lmstudioCase(t).profile
-	p := newTestProxy(oll, NewCodec(w), NewDiscovery(), oll.FacadePort)
-	lm := newFacade(p, lms, NewDiscovery(), lms.FacadePort)
-	p.facades[lms.Name] = lm
-	return p, p.facades[oll.Name], lm
+	return twoEngineProxyFor(t, w, llamacppCase(t).profile)
+}
+
+// twoEngineProxyFor is twoEngineProxy with a chosen first engine, for the tests
+// whose first engine has a native route llama.cpp lacks.
+func twoEngineProxyFor(t *testing.T, w *recordingWriter, lcpp engineProfile) (*Proxy, *facade, *facade) {
+	t.Helper()
+	customProfile := customCase(t).profile
+	p := newTestProxy(lcpp, NewCodec(w), NewDiscovery(), lcpp.FacadePort)
+	custom := newFacade(p, customProfile, NewDiscovery(), customProfile.FacadePort)
+	p.facades[customProfile.Name] = custom
+	return p, p.facades[lcpp.Name], custom
 }
 
 // An OpenAI-compatible tier request entering through one engine's facade may
@@ -965,44 +972,58 @@ func twoEngineProxy(t *testing.T, w *recordingWriter) (*Proxy, *facade, *facade)
 // engine's local backend, and admission is keyed to that engine.
 func TestTier_CrossEngineSelfRouting(t *testing.T) {
 	w := &recordingWriter{}
-	p, oll, lm := twoEngineProxy(t, w)
-	lmEngine := newRecordingEngine(t, http.StatusOK)
-	ollEngine := newRecordingEngine(t, http.StatusOK)
-	lm.discovery.AddManual(selfNode("self", lm.profile.FacadePort, "qwen3-8b"))
-	setBackend(t, lm, lmEngine.URL, true)
-	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
-	setBackend(t, oll, ollEngine.URL, true)
+	p, lcpp, custom := twoEngineProxy(t, w)
+	customEngine := newRecordingEngine(t, http.StatusOK)
+	lcppEngine := newRecordingEngine(t, http.StatusOK)
+	custom.discovery.AddManual(selfNode("self", custom.profile.FacadePort, "qwen3-8b"))
+	setBackend(t, custom, customEngine.URL, true)
+	lcpp.discovery.AddManual(selfNode("self", lcpp.profile.FacadePort, "llama3"))
+	setBackend(t, lcpp, lcppEngine.URL, true)
 
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}}}
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}}}
 	p.admission.setPolicy(pol)
 
 	rec := httptest.NewRecorder()
-	oll.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+	lcpp.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"strong","messages":[]}`)))
-	if rec.Code != http.StatusOK || lmEngine.hits() != 1 || ollEngine.hits() != 0 {
-		t.Fatalf("status %d, lmstudio hits %d, ollama hits %d", rec.Code, lmEngine.hits(), ollEngine.hits())
+	if rec.Code != http.StatusOK || customEngine.hits() != 1 || lcppEngine.hits() != 0 {
+		t.Fatalf("status %d, custom hits %d, llamacpp hits %d", rec.Code, customEngine.hits(), lcppEngine.hits())
 	}
-	if got := lmEngine.lastBody(); got != `{"model":"qwen3-8b","messages":[]}` {
-		t.Fatalf("lmstudio engine got %s", got)
+	if got := customEngine.lastBody(); got != `{"model":"qwen3-8b","messages":[]}` {
+		t.Fatalf("custom engine got %s", got)
 	}
-	if rec.Header().Get(nodepolicy.EngineHeader) != "lmstudio" {
-		t.Fatalf("%s = %q, want lmstudio", nodepolicy.EngineHeader, rec.Header().Get(nodepolicy.EngineHeader))
+	if rec.Header().Get(nodepolicy.EngineHeader) != "llamacpp-custom" {
+		t.Fatalf("%s = %q, want llamacpp-custom", nodepolicy.EngineHeader, rec.Header().Get(nodepolicy.EngineHeader))
 	}
 
-	// Admission is the other engine's: draining LM Studio refuses it.
-	p.admission.setDrain("lmstudio", true)
+	// Admission is the other engine's: draining the custom engine refuses it.
+	p.admission.setDrain("llamacpp-custom", true)
 	rec = httptest.NewRecorder()
-	oll.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+	lcpp.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"strong"}`)))
 	assertAdmissionRejection(t, rec, nodepolicy.RejectDraining)
+}
 
-	// A native route never crosses engines.
-	p.admission.setDrain("lmstudio", false)
-	rec = httptest.NewRecorder()
+// Engine-specific (Ollama native /api route): a native route never crosses
+// engines, so a tier request on /api/chat is not served by the other engine.
+func TestTier_NativeRouteNeverCrossesEngines(t *testing.T) {
+	w := &recordingWriter{}
+	p, oll, custom := twoEngineProxyFor(t, w, ollamaCase(t).profile)
+	customEngine := newRecordingEngine(t, http.StatusOK)
+	custom.discovery.AddManual(selfNode("self", custom.profile.FacadePort, "qwen3-8b"))
+	setBackend(t, custom, customEngine.URL, true)
+	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
+	setBackend(t, oll, newRecordingEngine(t, http.StatusOK).URL, true)
+
+	pol := nodepolicy.Default()
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}}}
+	p.admission.setPolicy(pol)
+
+	rec := httptest.NewRecorder()
 	oll.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"strong"}`)))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("native route crossed engines: status %d", rec.Code)
+	if rec.Code != http.StatusNotFound || customEngine.hits() != 0 {
+		t.Fatalf("native route crossed engines: status %d, custom hits %d", rec.Code, customEngine.hits())
 	}
 }
 
@@ -1010,24 +1031,24 @@ func TestTier_CrossEngineSelfRouting(t *testing.T) {
 // engine: the port the other facade's discovery overlay carries.
 func TestTier_CrossEnginePeerUsesThatEnginesPort(t *testing.T) {
 	w := &recordingWriter{}
-	p, oll, lm := twoEngineProxy(t, w)
-	peerLM := newRecordingEngine(t, http.StatusOK)
-	lm.discovery.AddManual(nodeForModel(t, "peer", peerLM.URL, "qwen3-8b"))
+	p, lcpp, custom := twoEngineProxy(t, w)
+	peerCustom := newRecordingEngine(t, http.StatusOK)
+	custom.discovery.AddManual(nodeForModel(t, "peer", peerCustom.URL, "qwen3-8b"))
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}}}
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}}}
 	p.admission.setPolicy(pol)
 
-	cands := oll.resolveTierCandidates("weak", requestNeeds{}, true)
-	if len(cands) != 1 || cands[0].engine != "lmstudio" || cands[0].url.Host != strings.TrimPrefix(peerLM.URL, "http://") {
+	cands := lcpp.resolveTierCandidates("weak", requestNeeds{}, true)
+	if len(cands) != 1 || cands[0].engine != "llamacpp-custom" || cands[0].url.Host != strings.TrimPrefix(peerCustom.URL, "http://") {
 		t.Fatalf("candidates = %+v", cands)
 	}
-	if cands[0].fac != lm {
+	if cands[0].fac != custom {
 		t.Fatal("a cross-engine candidate must be owned by its engine's facade")
 	}
 }
 
 func TestModelList_OffersTiers(t *testing.T) {
-	tc := lmstudioCase(t)
+	tc := customCase(t)
 	e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"qwen3-8b"}]}`))
 	}))
@@ -1037,8 +1058,8 @@ func TestModelList_OffersTiers(t *testing.T) {
 	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
 	pol := nodepolicy.Default()
 	pol.Tiers = map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}},
-		"strong": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}},
+		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}},
+		"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}},
 	}
 	p.admission.setPolicy(pol)
 	rec := httptest.NewRecorder()
@@ -1091,14 +1112,14 @@ func TestTier_MigratedV1PolicyResolvesTheSameCandidates(t *testing.T) {
 	pol, err := nodepolicy.Parse([]byte(`{
 		"version": 1,
 		"tiers": {
-			"weak":   [{"engine":"ollama","model":"small:1b"}, {"engine":"ollama","model":"small-tools:1b","capabilities":["tools"]}],
-			"medium": [{"engine":"ollama","model":"mid:7b"}]
+			"weak":   [{"engine":"llamacpp","model":"small:1b"}, {"engine":"llamacpp","model":"small-tools:1b","capabilities":["tools"]}],
+			"medium": [{"engine":"llamacpp","model":"mid:7b"}]
 		}
 	}`))
 	if err != nil {
 		t.Fatalf("Parse(v1): %v", err)
 	}
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{
 		"a": {"small:1b"}, "b": {"small-tools:1b"}, "c": {"mid:7b"}, "d": {"unrelated:1b"},
 	}, nil)
 	f := fx.p.soleFacade()
@@ -1130,13 +1151,13 @@ func TestTier_MigratedV1PolicyResolvesTheSameCandidates(t *testing.T) {
 // bounds; each entry made a candidate eligible on its own, and still does.
 func TestTier_MigratedV1NearDuplicateEntriesBothResolve(t *testing.T) {
 	pol, err := nodepolicy.Parse([]byte(`{"version":1,"tiers":{"weak":[
-		{"engine":"ollama","model":"small:1b","contextTokens":100},
-		{"engine":"ollama","model":"small:1b","contextTokens":32000,"capabilities":["tools"]}]}}`))
+		{"engine":"llamacpp","model":"small:1b","contextTokens":100},
+		{"engine":"llamacpp","model":"small:1b","contextTokens":32000,"capabilities":["tools"]}]}}`))
 	if err != nil {
 		t.Fatalf("Parse(v1): %v", err)
 	}
 	pol.TierPolicy.AllowStronger = false
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}}, nil)
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"small:1b"}}, nil)
 	f := fx.p.soleFacade()
 	count := func(needs requestNeeds) int { return len(f.resolveTierCandidates("weak", needs, false)) }
 
@@ -1158,7 +1179,7 @@ const apiTierPolicy = `{
   "version": 2,
   "tiers": {
     "weak":   [{"kind":"api","deployment":"cloud-small"}],
-    "medium": [{"kind":"api","deployment":"cloud-small"}, {"kind":"local","engine":"ollama","model":"mid:7b"}]
+    "medium": [{"kind":"api","deployment":"cloud-small"}, {"kind":"local","engine":"llamacpp","model":"mid:7b"}]
   },
   "routing": {
     "accounts": [{"id":"acct","credential":"NVPAIR_PROVIDER_SECRET_ACCT","billing":"free",
@@ -1174,7 +1195,7 @@ func TestTier_APIEntriesAreSkipped(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	pol.TierPolicy.AllowStronger = false
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{
 		"a": {"mid:7b"}, "b": {"cloud-small", "small-1"},
 	}, nil)
 	f := fx.p.soleFacade()
@@ -1201,7 +1222,7 @@ func TestTier_APIEntriesAreSkipped(t *testing.T) {
 	// such an entry, so it is installed past Validate.
 	odd := nodepolicy.Default()
 	odd.Tiers = map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryAPI, Engine: "ollama", Model: "mid:7b", Deployment: "cloud-small"}},
+		"weak": {{Kind: nodepolicy.EntryAPI, Engine: "llamacpp", Model: "mid:7b", Deployment: "cloud-small"}},
 	}
 	fx.p.admission.setPolicy(odd)
 	if got := resolve("weak"); len(got) != 0 {
@@ -1214,7 +1235,7 @@ func TestModelList_OffersEveryTierWithEntriesAndBothVariants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"mid:7b"}}, nil)
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"mid:7b"}}, nil)
 	var ids []string
 	for _, raw := range fx.p.soleFacade().tierModelEntries(map[string]modelListItem{}) {
 		var item struct {
@@ -1247,8 +1268,8 @@ func (fx *tierFixture) declare(t *testing.T, id string, roles map[string]nodepol
 	t.Fatalf("no fixture node %q", id)
 }
 
-func ollamaRole(model string) nodepolicy.AdvertisedRole {
-	return nodepolicy.AdvertisedRole{Engine: "ollama", Model: model}
+func llamacppRole(model string) nodepolicy.AdvertisedRole {
+	return nodepolicy.AdvertisedRole{Engine: "llamacpp", Model: model}
 }
 
 // tierCand is the part of a candidate that tier resolution decides.
@@ -1271,12 +1292,12 @@ func resolvedTier(f *facade, tier string, needs requestNeeds, crossEngine bool) 
 // even when the router's entry names a model it has, and an undeclared node
 // still receives the router's entries.
 func TestTierRoles_DeclaringNodeIsAuthoritative(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "router-weak:1b"}},
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "router-mid:7b"}},
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "router-weak:1b"}},
+		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "router-mid:7b"}},
 	})
 	pol.TierPolicy.AllowStronger = false
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{
 		"a": {"router-weak:1b", "router-mid:7b", "own-weak:1b"},
 		"b": {"router-weak:1b", "router-mid:7b"},
 	}, nil)
@@ -1289,7 +1310,7 @@ func TestTierRoles_DeclaringNodeIsAuthoritative(t *testing.T) {
 		}
 	})
 
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("own-weak:1b")})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("own-weak:1b")})
 
 	t.Run("declared role replaces router entries on that node", func(t *testing.T) {
 		want := []tierCand{{"a", "own-weak:1b", 0, true}, {"b", "router-weak:1b", 0, false}}
@@ -1317,11 +1338,11 @@ func TestTierRoles_DeclaringNodeIsAuthoritative(t *testing.T) {
 // Two peers may declare different models for the same tier; each offers its
 // own, and a request to either is sent that node's model.
 func TestTierRoles_PeersDeclareDifferentModelsForOneTier(t *testing.T) {
-	fx := newTierFixture(t, ollamaCase(t), ollamaTierPolicy(nil), map[string][]string{
+	fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{
 		"a": {"alpha:1b", "beta:1b"}, "b": {"alpha:1b", "beta:1b"},
 	}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("beta:1b")})
-	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("alpha:1b")})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("beta:1b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("alpha:1b")})
 	want := []tierCand{{"b", "alpha:1b", 0, true}, {"a", "beta:1b", 0, true}}
 	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); !slices.Equal(got, want) {
 		t.Fatalf("candidates = %+v, want %+v", got, want)
@@ -1339,12 +1360,12 @@ func TestTierRoles_PeersDeclareDifferentModelsForOneTier(t *testing.T) {
 // not have is no candidate, and the node does not fall back to the router's
 // entries for that tier either.
 func TestTierRoles_DeclaredModelMissingFromInventory(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "have:1b"}},
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "have:1b"}},
 	})
 	pol.TierPolicy.AllowStronger = false
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"have:1b"}}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("missing:1b")})
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"have:1b"}}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("missing:1b")})
 	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); len(got) != 0 {
 		t.Fatalf("candidates = %+v, want none", got)
 	}
@@ -1356,11 +1377,11 @@ func TestTierRoles_DeclaredModelMissingFromInventory(t *testing.T) {
 // A declared role carries its node's advertised bounds, filtered like an
 // entry's.
 func TestTierRoles_AdvertisedBoundsFilter(t *testing.T) {
-	fx := newTierFixture(t, ollamaCase(t), ollamaTierPolicy(nil), map[string][]string{
+	fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{
 		"a": {"small:1b"}, "b": {"tools:1b"},
 	}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "ollama", Model: "small:1b", ContextTokens: 100}})
-	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "ollama", Model: "tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "llamacpp", Model: "small:1b", ContextTokens: 100}})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "llamacpp", Model: "tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}})
 	f := fx.p.soleFacade()
 	if got, want := resolvedTier(f, "weak", requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}, false), []tierCand{{"b", "tools:1b", 0, true}}; !slices.Equal(got, want) {
 		t.Errorf("tools candidates = %+v, want %+v", got, want)
@@ -1373,10 +1394,10 @@ func TestTierRoles_AdvertisedBoundsFilter(t *testing.T) {
 // allowStronger and allowWeaker are the router's, applied to declared roles
 // as to entries.
 func TestTierRoles_StrongerAndWeakerFallback(t *testing.T) {
-	pol := ollamaTierPolicy(nil)
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"big:70b"}, "b": {"small:1b"}}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"strong": ollamaRole("big:70b")})
-	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("small:1b")})
+	pol := tierPolicy(nil)
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"big:70b"}, "b": {"small:1b"}}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"strong": llamacppRole("big:70b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("small:1b")})
 	f := fx.p.soleFacade()
 	set := func(stronger, weaker bool) {
 		pol.TierPolicy.AllowStronger, pol.TierPolicy.AllowWeaker = stronger, weaker
@@ -1404,14 +1425,14 @@ func TestTierRoles_StrongerAndWeakerFallback(t *testing.T) {
 // rank and warmth a declared candidate leads a router entry.
 func TestTierRoles_WarmOrdering(t *testing.T) {
 	nodes := map[string][]string{"a": {"entry:1b"}, "d": {"declared:1b"}, "m": {"mid:7b"}}
-	tiers := map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "entry:1b"}}}
+	tiers := map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "entry:1b"}}}
 	order := func(t *testing.T, preferLoaded string, loaded map[string][]string) []string {
 		t.Helper()
-		pol := ollamaTierPolicy(tiers)
+		pol := tierPolicy(tiers)
 		pol.TierPolicy.PreferLoaded = preferLoaded
-		fx := newTierFixture(t, ollamaCase(t), pol, nodes, loaded)
-		fx.declare(t, "d", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("declared:1b")})
-		fx.declare(t, "m", map[string]nodepolicy.AdvertisedRole{"medium": ollamaRole("mid:7b")})
+		fx := newTierFixture(t, llamacppCase(t), pol, nodes, loaded)
+		fx.declare(t, "d", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("declared:1b")})
+		fx.declare(t, "m", map[string]nodepolicy.AdvertisedRole{"medium": llamacppRole("mid:7b")})
 		var out []string
 		for _, c := range resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false) {
 			out = append(out, c.node)
@@ -1437,12 +1458,12 @@ func TestTierRoles_WarmOrdering(t *testing.T) {
 // class, so the least-loaded declared node of the requested tier leads and an
 // idle node of a fallback tier is never promoted.
 func TestTierRoles_LoadBalancingKeepsLeadingClass(t *testing.T) {
-	fx := newTierFixture(t, ollamaCase(t), ollamaTierPolicy(nil), map[string][]string{
+	fx := newTierFixture(t, llamacppCase(t), tierPolicy(nil), map[string][]string{
 		"a": {"x:1b"}, "b": {"y:1b"}, "c": {"z:7b"},
 	}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("x:1b")})
-	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("y:1b")})
-	fx.declare(t, "c", map[string]nodepolicy.AdvertisedRole{"medium": ollamaRole("z:7b")})
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("x:1b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("y:1b")})
+	fx.declare(t, "c", map[string]nodepolicy.AdvertisedRole{"medium": llamacppRole("z:7b")})
 	applySnapshot(fx.p, schedulerwire.Priority{
 		Nodes: []string{"c", "a", "b"},
 		Ranks: []schedulerwire.NodeRank{{ID: "c", Pending: 0}, {ID: "a", Pending: 3, Rank: 1}, {ID: "b", Pending: 2, Rank: 2}},
@@ -1460,50 +1481,69 @@ func TestTierRoles_LoadBalancingKeepsLeadingClass(t *testing.T) {
 }
 
 // The router's own node follows the same rule through its policy's roles: a
-// self declaration replaces the router's entries for this node, crosses
-// engines only on an OpenAI-compatible route, and stays on its engine on a
-// native one.
-func TestTierRoles_SelfDeclarationCrossEngineAndNative(t *testing.T) {
+// self declaration replaces the router's entries for this node and crosses
+// engines on an OpenAI-compatible route.
+func TestTierRoles_SelfDeclarationCrossEngine(t *testing.T) {
 	w := &recordingWriter{}
-	p, oll, lm := twoEngineProxy(t, w)
-	lmEngine := newRecordingEngine(t, http.StatusOK)
-	ollEngine := newRecordingEngine(t, http.StatusOK)
-	lm.discovery.AddManual(selfNode("self", lm.profile.FacadePort, "qwen3-8b"))
-	setBackend(t, lm, lmEngine.URL, true)
-	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
-	setBackend(t, oll, ollEngine.URL, true)
+	p, lcpp, custom := twoEngineProxy(t, w)
+	customEngine := newRecordingEngine(t, http.StatusOK)
+	lcppEngine := newRecordingEngine(t, http.StatusOK)
+	custom.discovery.AddManual(selfNode("self", custom.profile.FacadePort, "qwen3-8b"))
+	setBackend(t, custom, customEngine.URL, true)
+	lcpp.discovery.AddManual(selfNode("self", lcpp.profile.FacadePort, "llama3"))
+	setBackend(t, lcpp, lcppEngine.URL, true)
 
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "llama3"}}}
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "llama3"}}}
 	p.admission.setPolicy(pol)
 
 	// Undeclared: the router entry serves this node.
-	if got, want := resolvedTier(oll, "strong", requestNeeds{}, true), []tierCand{{"self", "llama3", 0, false}}; !slices.Equal(got, want) {
+	if got, want := resolvedTier(lcpp, "strong", requestNeeds{}, true), []tierCand{{"self", "llama3", 0, false}}; !slices.Equal(got, want) {
 		t.Fatalf("undeclared self = %+v, want %+v", got, want)
 	}
 
-	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "lmstudio", Model: "qwen3-8b"}}
+	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp-custom", Model: "qwen3-8b"}}
 	if err := pol.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	p.admission.setPolicy(pol)
 
-	cands := oll.resolveTierCandidates("strong", requestNeeds{}, true)
-	if len(cands) != 1 || cands[0].engine != "lmstudio" || cands[0].fac != lm || !cands[0].declared || cands[0].model != "qwen3-8b" {
-		t.Fatalf("declared self candidates = %+v, want only the lmstudio role", cands)
+	cands := lcpp.resolveTierCandidates("strong", requestNeeds{}, true)
+	if len(cands) != 1 || cands[0].engine != "llamacpp-custom" || cands[0].fac != custom || !cands[0].declared || cands[0].model != "qwen3-8b" {
+		t.Fatalf("declared self candidates = %+v, want only the llamacpp-custom role", cands)
 	}
 	rec := httptest.NewRecorder()
-	oll.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"strong"}`)))
-	if rec.Code != http.StatusOK || lmEngine.hits() != 1 || ollEngine.hits() != 0 {
-		t.Fatalf("status %d, lmstudio hits %d, ollama hits %d", rec.Code, lmEngine.hits(), ollEngine.hits())
+	lcpp.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"strong"}`)))
+	if rec.Code != http.StatusOK || customEngine.hits() != 1 || lcppEngine.hits() != 0 {
+		t.Fatalf("status %d, custom hits %d, llamacpp hits %d", rec.Code, customEngine.hits(), lcppEngine.hits())
 	}
+}
 
-	// A native route never crosses engines, and the router's ollama entry no
-	// longer applies to this node.
-	rec = httptest.NewRecorder()
+// Engine-specific (Ollama native /api route): once a self declaration replaces
+// the router's Ollama entry, a native route neither crosses engines nor still
+// applies that entry to this node.
+func TestTierRoles_SelfDeclarationNativeRouteStaysOnItsEngine(t *testing.T) {
+	w := &recordingWriter{}
+	p, oll, custom := twoEngineProxyFor(t, w, ollamaCase(t).profile)
+	customEngine := newRecordingEngine(t, http.StatusOK)
+	ollEngine := newRecordingEngine(t, http.StatusOK)
+	custom.discovery.AddManual(selfNode("self", custom.profile.FacadePort, "qwen3-8b"))
+	setBackend(t, custom, customEngine.URL, true)
+	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
+	setBackend(t, oll, ollEngine.URL, true)
+
+	pol := nodepolicy.Default()
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "llama3"}}}
+	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp-custom", Model: "qwen3-8b"}}
+	if err := pol.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p.admission.setPolicy(pol)
+
+	rec := httptest.NewRecorder()
 	oll.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"strong"}`)))
-	if rec.Code != http.StatusNotFound || ollEngine.hits() != 0 {
-		t.Fatalf("native route: status %d, ollama hits %d, want 404 and none", rec.Code, ollEngine.hits())
+	if rec.Code != http.StatusNotFound || ollEngine.hits() != 0 || customEngine.hits() != 0 {
+		t.Fatalf("native route: status %d, ollama hits %d, custom hits %d, want 404 and none", rec.Code, ollEngine.hits(), customEngine.hits())
 	}
 }
 
@@ -1511,29 +1551,29 @@ func TestTierRoles_SelfDeclarationCrossEngineAndNative(t *testing.T) {
 // facade on an OpenAI-compatible route, and not at all on a native one.
 func TestTierRoles_PeerCrossEngineRole(t *testing.T) {
 	w := &recordingWriter{}
-	p, oll, lm := twoEngineProxy(t, w)
-	peerLM := newRecordingEngine(t, http.StatusOK)
-	n := nodeForModel(t, "peer", peerLM.URL, "qwen3-8b")
-	n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "lmstudio", Model: "qwen3-8b"}}
-	lm.discovery.AddManual(n)
+	p, lcpp, custom := twoEngineProxy(t, w)
+	peerCustom := newRecordingEngine(t, http.StatusOK)
+	n := nodeForModel(t, "peer", peerCustom.URL, "qwen3-8b")
+	n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "llamacpp-custom", Model: "qwen3-8b"}}
+	custom.discovery.AddManual(n)
 	p.admission.setPolicy(nodepolicy.Default())
 
-	cands := oll.resolveTierCandidates("weak", requestNeeds{}, true)
-	if len(cands) != 1 || cands[0].fac != lm || cands[0].engine != "lmstudio" || !cands[0].declared ||
-		cands[0].url.Host != strings.TrimPrefix(peerLM.URL, "http://") {
+	cands := lcpp.resolveTierCandidates("weak", requestNeeds{}, true)
+	if len(cands) != 1 || cands[0].fac != custom || cands[0].engine != "llamacpp-custom" || !cands[0].declared ||
+		cands[0].url.Host != strings.TrimPrefix(peerCustom.URL, "http://") {
 		t.Fatalf("cross-engine candidates = %+v", cands)
 	}
-	if got := oll.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 0 {
+	if got := lcpp.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 0 {
 		t.Fatalf("native candidates = %+v, want none", got)
 	}
-	if got := lm.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 1 || !got[0].declared {
+	if got := custom.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 1 || !got[0].declared {
 		t.Fatalf("own-engine candidates = %+v, want the declared role", got)
 	}
 }
 
-// qualifiedRole is an Ollama role advertising finite qualification.
+// qualifiedRole is a llama.cpp role advertising finite qualification.
 func qualifiedRole(model string) nodepolicy.AdvertisedRole {
-	return nodepolicy.AdvertisedRole{Engine: "ollama", Model: model, ContextTokens: 4096, MaxOutputTokens: 1024,
+	return nodepolicy.AdvertisedRole{Engine: "llamacpp", Model: model, ContextTokens: 4096, MaxOutputTokens: 1024,
 		Qualification: &nodepolicy.QualificationRef{ID: "q", Revision: "1"}}
 }
 
@@ -1563,26 +1603,26 @@ func strictCapabilityFor(engine string, models ...string) *nodepolicy.StrictAdmi
 // qualification on a node that advertises a valid strict entry for it; legacy
 // tier resolution of the same request is unchanged.
 func TestHybridLocalCandidatesRequireQualifiedDeclaredRoles(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
 	pol.TierPolicy.AllowStronger = false
 	nodes := map[string][]string{}
 	for _, id := range []string{"eligible", "unqualified", "no-capability", "unsupported", "other-model", "undeclared", "malformed"} {
 		nodes[id] = []string{"q:1b"}
 	}
-	fx := newTierFixture(t, ollamaCase(t), pol, nodes, nil)
+	fx := newTierFixture(t, llamacppCase(t), pol, nodes, nil)
 	f := fx.p.soleFacade()
 	var unsupported nodepolicy.StrictAdmissionCapability
-	if err := json.Unmarshal([]byte(`{"version":2,"models":[{"engine":"ollama","model":"q:1b"}]}`), &unsupported); err != nil {
+	if err := json.Unmarshal([]byte(`{"version":2,"models":[{"engine":"llamacpp","model":"q:1b"}]}`), &unsupported); err != nil {
 		t.Fatal(err)
 	}
 	malformed := qualifiedRole("q:1b")
 	malformed.MaxOutputTokens = 4096
-	fx.advertise(t, "eligible", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
-	fx.advertise(t, "unqualified", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	fx.advertise(t, "eligible", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "unqualified", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 	fx.advertise(t, "no-capability", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, nil)
 	fx.advertise(t, "unsupported", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, &unsupported)
-	fx.advertise(t, "other-model", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "r:1b"))
-	fx.advertise(t, "malformed", map[string]nodepolicy.AdvertisedRole{"weak": malformed}, strictCapabilityFor("ollama", "q:1b"))
+	fx.advertise(t, "other-model", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "r:1b"))
+	fx.advertise(t, "malformed", map[string]nodepolicy.AdvertisedRole{"weak": malformed}, strictCapabilityFor("llamacpp", "q:1b"))
 
 	got := f.hybridLocalCandidates("weak", requestNeeds{}, true)
 	if len(got) != 1 || got[0].id != "eligible" || got[0].strict.Identity != strictRequest().Identity || !got[0].role.HybridQualified() {
@@ -1597,22 +1637,22 @@ func TestHybridLocalCandidatesRequireQualifiedDeclaredRoles(t *testing.T) {
 // identity removes it at once.
 func TestHybridLocalCandidatesSelfUsesItsOwnCapability(t *testing.T) {
 	w := &recordingWriter{}
-	p, oll, _ := twoEngineProxy(t, w)
+	p, lcpp, _ := twoEngineProxy(t, w)
 	e := newRecordingEngine(t, http.StatusOK)
-	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
-	setBackend(t, oll, e.URL, true)
-	installQualified(t, p.admission, admKey{engine: "ollama", model: "llama3:latest"})
+	lcpp.discovery.AddManual(selfNode("self", lcpp.profile.FacadePort, "llama3"))
+	setBackend(t, lcpp, e.URL, true)
+	installQualified(t, p.admission, admKey{engine: "llamacpp", model: "llama3"})
 	pol := p.admission.currentPolicy()
-	pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "llama3:latest"}}
+	pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "llama3"}}
 	pol.Admission.MaxConcurrentPerModel = 1
 	p.admission.setPolicy(pol)
 
-	got := oll.hybridLocalCandidates("weak", requestNeeds{}, false)
+	got := lcpp.hybridLocalCandidates("weak", requestNeeds{}, false)
 	if len(got) != 1 || !got[0].self || got[0].strict.Identity != strictRequest().Identity {
 		t.Fatalf("hybrid candidates = %+v, want this node with its installed identity", got)
 	}
 	p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{})
-	if got := oll.hybridLocalCandidates("weak", requestNeeds{}, false); len(got) != 0 {
+	if got := lcpp.hybridLocalCandidates("weak", requestNeeds{}, false); len(got) != 0 {
 		t.Fatalf("hybrid candidates after the identity was withdrawn = %+v, want none", got)
 	}
 }
@@ -1620,12 +1660,12 @@ func TestHybridLocalCandidatesSelfUsesItsOwnCapability(t *testing.T) {
 // Hybrid selection is the legacy tier order filtered to eligible candidates,
 // never a reordering of its own.
 func TestHybridLocalCandidatesKeepTierOrder(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "q:1b"}}})
 	pol.TierPolicy.AllowStronger = false
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"q:1b"}, "b": {"q:1b"}, "c": {"q:1b"}}, nil)
-	fx.advertise(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
-	fx.advertise(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
-	fx.advertise(t, "c", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"q:1b"}, "b": {"q:1b"}, "c": {"q:1b"}}, nil)
+	fx.advertise(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
+	fx.advertise(t, "c", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("llamacpp", "q:1b"))
 	f := fx.p.soleFacade()
 
 	var want []string

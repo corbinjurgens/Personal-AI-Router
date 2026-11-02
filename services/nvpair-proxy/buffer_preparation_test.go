@@ -270,9 +270,9 @@ func TestBufferPreparationNativeNDJSONIgnoresChoices(t *testing.T) {
 func TestBufferPreparationEffectiveProfileStreamErrors(t *testing.T) {
 	for _, entry := range []string{"origin", "ingress"} {
 		t.Run(entry, func(t *testing.T) {
-			profile, ok := profileFor("ollama")
+			profile, ok := profileFor("llamacpp")
 			if !ok {
-				t.Fatal("missing ollama profile")
+				t.Fatal("missing llamacpp profile")
 			}
 			root := bufferTestBudget(t, 192<<20, 0)
 			p := testProxy(profile, NewDiscovery(), profile.FacadePort)

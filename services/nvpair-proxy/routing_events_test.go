@@ -120,7 +120,7 @@ func TestRoutingHistoryProjection(t *testing.T) {
 	t.Run("model unknown preserves real local attempt", func(t *testing.T) {
 		p := newBoundProxy(NewCodec(&recordingWriter{}))
 		r := nativeRegistered(t, p, time.UnixMilli(2000))
-		a, err := r.owner.newDispatchAttempt(context.Background(), func() {}, "real-node", destinationDescriptor("", "real-node", "ollama", false))
+		a, err := r.owner.newDispatchAttempt(context.Background(), func() {}, "real-node", destinationDescriptor("", "real-node", "llamacpp", false))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -129,7 +129,7 @@ func TestRoutingHistoryProjection(t *testing.T) {
 		h := p.newRoutingHistory()
 		historyTestScan(t, h)
 		got := historyTestRecord(t, h, 1)
-		if len(got.Attempts) != 1 || got.Attempts[0].Destination.Model != nil || got.Requested.Model != "" || got.Served == nil || got.Served.Model != nil || *got.Served.NodeID != "real-node" || *got.Served.Engine != "ollama" || got.State != "completed" {
+		if len(got.Attempts) != 1 || got.Attempts[0].Destination.Model != nil || got.Requested.Model != "" || got.Served == nil || got.Served.Model != nil || *got.Served.NodeID != "real-node" || *got.Served.Engine != "llamacpp" || got.State != "completed" {
 			t.Fatalf("model-less inference was fabricated/dropped: %+v", got)
 		}
 		if got.Spend.GrantedNanoUSD != nil || got.Spend.HeldNanoUSD != nil || got.Spend.CeilingNanoUSD != nil || got.Spend.ChargedNanoUSD != nil || got.Spend.Accounting != "none" {
@@ -139,13 +139,13 @@ func TestRoutingHistoryProjection(t *testing.T) {
 	t.Run("prefix trim preserves historical workload binding", func(t *testing.T) {
 		p := newBoundProxy(NewCodec(&recordingWriter{}))
 		r := nativeRegistered(t, p, time.UnixMilli(3000))
-		r.owner.observeRequested(requestedDescriptor("m", "", "/api/generate"))
-		if err := p.registerWorkload(r, workloadKey{engine: "ollama", id: "card"}); err != nil {
+		r.owner.observeRequested(requestedDescriptor("m", "", "/v1/chat/completions"))
+		if err := p.registerWorkload(r, workloadKey{engine: "llamacpp", id: "card"}); err != nil {
 			t.Fatal(err)
 		}
 		h := p.newRoutingHistory()
 		for i := 0; i < 35; i++ {
-			a := nativeAttempt(t, r.owner, "ollama")
+			a := nativeAttempt(t, r.owner, "llamacpp")
 			if i == 0 {
 				historyTestScan(t, h)
 				linked := historyTestRecord(t, h, 1)
@@ -159,7 +159,7 @@ func TestRoutingHistoryProjection(t *testing.T) {
 		r.owner.observeIngress(routingIngressResult{factFailed, factAttemptsExhausted, 502})
 		historyTestScan(t, h)
 		got := historyTestRecord(t, h, 1)
-		if got.DroppedAttempts != 3 || len(got.Attempts) != 32 || got.Workload == nil || got.Workload.Attached || got.Workload.AttemptIndex != 0 || got.Workload.Engine != "ollama" || got.Workload.ID != "card" {
+		if got.DroppedAttempts != 3 || len(got.Attempts) != 32 || got.Workload == nil || got.Workload.Attached || got.Workload.AttemptIndex != 0 || got.Workload.Engine != "llamacpp" || got.Workload.ID != "card" {
 			t.Fatalf("trim/binding: %+v", got)
 		}
 		for i, a := range got.Attempts {
@@ -192,7 +192,7 @@ func TestRoutingHistoryProjection(t *testing.T) {
 		if seq != 1 || h.current.cells[0].sequence != seq || h.current.cells[0].facts.revision != revision {
 			t.Fatal("equal native revision advanced sequence")
 		}
-		r.owner.observeRequested(requestedDescriptor("accepted", "medium", "/api/embed"))
+		r.owner.observeRequested(requestedDescriptor("accepted", "medium", "/v1/embeddings"))
 		historyTestScan(t, h)
 		if got := historyTestRecord(t, h, 1); got.Seq != 2 || got.Requested.Mode != "embedding" || got.Requested.Model != "accepted" {
 			t.Fatalf("new native revision not projected once: %+v", got)
@@ -364,7 +364,7 @@ func TestRoutingHistoryProjectionNativeExhaustion(t *testing.T) {
 	p.originNodeID, p.runID = "private-origin-sentinel", "private-run-sentinel"
 	limited := nativeRegistered(t, p, time.UnixMilli(1000))
 	other := nativeRegistered(t, p, time.UnixMilli(1001))
-	limited.owner.observeRequested(requestedDescriptor("stable", "", "/api/chat"))
+	limited.owner.observeRequested(requestedDescriptor("stable", "", "/v1/chat/completions"))
 	h := p.newRoutingHistory()
 	historyTestScan(t, h)
 	historyTestCycle(t, h)
@@ -378,7 +378,7 @@ func TestRoutingHistoryProjectionNativeExhaustion(t *testing.T) {
 	facts.epoch.Store(2 * (factMaxRevision - 1))
 	limited.owner.reason = "private-error-prompt-sentinel"
 	limited.owner.mu.Unlock()
-	limited.owner.observeRequested(requestedDescriptor("private-model-prompt-sentinel", "", "/api/chat"))
+	limited.owner.observeRequested(requestedDescriptor("private-model-prompt-sentinel", "", "/v1/chat/completions"))
 	historyTestScan(t, h)
 	got := historyTestRecord(t, h, 1)
 	if got.Seq != 2 || got.Requested.Model != "stable" || h.current.cells[h.current.find(1)].facts.revision != factMaxRevision || h.failed {
@@ -418,7 +418,7 @@ func TestRoutingHistoryProjectionNativeExhaustion(t *testing.T) {
 	if !h.accepted(nodepolicy.RoutingHistoryAccepted{Schema: 1, Generation: "2"}) {
 		t.Fatal("exhausted record's coherent generation could not be accepted")
 	}
-	other.owner.observeRequested(requestedDescriptor("other-progress", "medium", "/api/embed"))
+	other.owner.observeRequested(requestedDescriptor("other-progress", "medium", "/v1/embeddings"))
 	historyTestScan(t, h)
 	historyTestCycle(t, h)
 	if !bytes.Equal(logs.Bytes(), oneDiagnostic) || h.failed || historyTestRecord(t, h, 1).Seq != 2 || historyTestRecord(t, h, 2).Seq != 2 || h.generation.Low != 3 {
@@ -575,7 +575,7 @@ func TestRoutingHistoryReconciliation(t *testing.T) {
 	if h.active || len(h.writeWake) != 0 || len(w.lines()) != 6 {
 		t.Fatal("clean ack repeated full-window IPC")
 	}
-	r.owner.observeRequested(requestedDescriptor("new", "weak", "/api/chat"))
+	r.owner.observeRequested(requestedDescriptor("new", "weak", "/v1/chat/completions"))
 	historyTestScan(t, h)
 	if h.generation.Low != 2 || h.acknowledged {
 		t.Fatal("changed content did not mint a fresh generation")
@@ -597,7 +597,7 @@ func TestRoutingHistoryReconciliation(t *testing.T) {
 	f.epoch.Add(1)
 	// Verify the real shared uint128 counter is used beyond uint64.
 	h.generation = nodepolicy.RoutingHistoryGeneration{Low: math.MaxUint64}
-	r.owner.observeRequested(requestedDescriptor("beyond", "", "/api/chat"))
+	r.owner.observeRequested(requestedDescriptor("beyond", "", "/v1/chat/completions"))
 	historyTestScan(t, h)
 	if string(h.generationText[:h.generationLength]) != "18446744073709551616" {
 		t.Fatal("generation is not canonical uint128 decimal")

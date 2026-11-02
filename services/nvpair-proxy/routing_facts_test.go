@@ -162,12 +162,12 @@ func TestRoutingNativeFactsEntry(t *testing.T) {
 	}{
 		{"invalid identifier remains empty", `{"model":"bad\nmodel"}`, routeChatCompletions, "", 0, factRequestInvalid},
 		{"valid alias with no owner", `{"model":"m"}`, routeChatCompletions, "m", 1, factNoOwner},
-		{"embedding operation", `{"model":"m"}`, "/api/embed", "m", 3, factNoOwner},
+		{"embedding operation", `{"model":"m"}`, "/v1/embeddings", "m", 3, factNoOwner},
 		{"invalid stream retains validated identifier", `{"model":"m","stream":"yes"}`, routeChatCompletions, "m", 1, factRequestInvalid},
 		{"strict early grammar", `{"model":"m"}`, routeChatCompletions, "m", 1, factRequestInvalid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), NewDiscovery(), 0)
+			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), NewDiscovery(), 0)
 			r := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.name == "strict early grammar" {
 				r.Header.Set(nodepolicy.StrictAdmissionHeader, "not-json")
@@ -193,7 +193,7 @@ func TestRoutingNativeFactsEntry(t *testing.T) {
 func TestRequestOptionsNativeFactsInvalidHygiene(t *testing.T) {
 	p, _, engine := reviewR2TierFixture(t, false)
 	pol := p.admission.currentPolicy()
-	pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(`{"private_configured_key":1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
+	pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"private_configured_key":1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
 	p.admission.setPolicy(pol)
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","private_configured_key":"private-value","PRIVATE_CONFIGURED_KEY":"other-private-value"}`))
@@ -235,7 +235,7 @@ func TestRoutingNativeFactsConcreteDelivery(t *testing.T) {
 			e := newRecordingEngine(t, http.StatusOK)
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "node", e.URL, "m"))
-			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
 			body := `{}`
 			if model != "" {
 				body = `{"model":"m"}`
@@ -247,7 +247,7 @@ func TestRoutingNativeFactsConcreteDelivery(t *testing.T) {
 			if w.Code != http.StatusOK || e.hits() != 1 || out.total != 1 || routingFactState(out.disposition&255) != factCompleted || out.served != 1 || c.flags&factFirstByteKnown == 0 || c.destination.kind != 1 || c.destination.modelKnown != (model != "") {
 				t.Fatalf("delivery status=%d hits=%d state=%d served=%d attempt=%+v", w.Code, e.hits(), out.disposition, out.served, c)
 			}
-			if string(c.destination.first[:c.destination.firstLen]) != "node" || string(c.destination.second[:c.destination.secondLen]) != "ollama" || c.destination.modelLen != uint16(len(model)) || c.admission != 0 || c.continuation != 0 || c.flags&factMoneyApplicable != 0 {
+			if string(c.destination.first[:c.destination.firstLen]) != "node" || string(c.destination.second[:c.destination.secondLen]) != "llamacpp" || c.destination.modelLen != uint16(len(model)) || c.admission != 0 || c.continuation != 0 || c.flags&factMoneyApplicable != 0 {
 				t.Fatalf("destination/waits/account=%+v", c)
 			}
 			if model == "" && out.binding != 0 {
@@ -267,7 +267,7 @@ func TestRoutingNativeRevisionNoopsAndSourceVersions(t *testing.T) {
 	if nativeCopy(t, r).revision != before.revision {
 		t.Fatal("equivalent requested metadata advanced revision")
 	}
-	a := nativeAttempt(t, r, "ollama")
+	a := nativeAttempt(t, r, "llamacpp")
 	if !a.acceptResponse() || !a.commit() {
 		t.Fatal("raw commitment setup failed")
 	}
@@ -310,11 +310,11 @@ func TestRoutingNativeRevisionNoopsAndSourceVersions(t *testing.T) {
 func TestRoutingNativeRevisionRingWrapAndTrimmedAccounting(t *testing.T) {
 	p := newBoundProxy(NewCodec(&recordingWriter{}))
 	r := nativeRegistered(t, p, time.Now()).owner
-	old := nativeAttempt(t, r, "ollama")
+	old := nativeAttempt(t, r, "llamacpp")
 	old.observeAccount(accountAttemptObservation{version: 1, held: 20, flags: factHeldKnown | factChargeKnown, accounting: factAccountingRetained})
 	old.finished(publicAttemptTerminal{})
 	for range 40 {
-		a := nativeAttempt(t, r, "ollama")
+		a := nativeAttempt(t, r, "llamacpp")
 		a.finished(publicAttemptTerminal{})
 	}
 	before := nativeCopy(t, r)
@@ -334,38 +334,38 @@ func TestRoutingNativeAssociationGenerations(t *testing.T) {
 	p := newBoundProxy(NewCodec(&recordingWriter{}))
 	row := nativeRegistered(t, p, time.Now())
 	r := row.owner
-	key := workloadKey{engine: "ollama", id: "job"}
+	key := workloadKey{engine: "llamacpp", id: "job"}
 	if err := p.registerWorkload(row, key); err != nil {
 		t.Fatal(err)
 	}
 	if got := nativeCopy(t, r).binding; got != factAttached {
 		t.Fatalf("pending binding=%d", got)
 	}
-	a := nativeAttempt(t, r, "lmstudio")
+	a := nativeAttempt(t, r, "llamacpp-custom")
 	if nativeCopy(t, r).binding&^factAttached != 0 {
 		t.Fatal("cross-engine attempt bound the card")
 	}
 	a.finished(publicAttemptTerminal{})
-	a = nativeAttempt(t, r, "ollama")
+	a = nativeAttempt(t, r, "llamacpp")
 	if got := nativeCopy(t, r).binding; got != factAttached|2 {
 		t.Fatalf("first matching binding=%d", got)
 	}
 	a.finished(publicAttemptTerminal{})
 	for range 33 {
-		a = nativeAttempt(t, r, "ollama")
+		a = nativeAttempt(t, r, "llamacpp")
 		a.finished(publicAttemptTerminal{})
 	}
 	if got := nativeCopy(t, r).binding; got != 2 {
 		t.Fatalf("trim did not detach presentation binding=%d", got)
 	}
-	if p.workloadCancelControl(nodepolicy.WorkloadCancelParams{OriginatedFrom: row.key.OriginNodeID, RunID: row.key.ProxyRunID, Engine: "ollama", WorkloadID: "job"}) != r {
+	if p.workloadCancelControl(nodepolicy.WorkloadCancelParams{OriginatedFrom: row.key.OriginNodeID, RunID: row.key.ProxyRunID, Engine: "llamacpp", WorkloadID: "job"}) != r {
 		t.Fatal("trim changed cancellation index")
 	}
 	p.unregisterWorkload(row)
-	if err := p.registerWorkload(row, workloadKey{engine: "lmstudio", id: "new-job"}); err != nil {
+	if err := p.registerWorkload(row, workloadKey{engine: "llamacpp-custom", id: "new-job"}); err != nil {
 		t.Fatal(err)
 	}
-	a = nativeAttempt(t, r, "lmstudio")
+	a = nativeAttempt(t, r, "llamacpp-custom")
 	out := nativeCopy(t, r)
 	if out.workload.generation != 2 || out.binding != factAttached|a.ordinal {
 		t.Fatalf("new generation inherited old binding: %+v", out.workload)
@@ -480,7 +480,7 @@ func TestRoutingNativeLifetimeLateCallbacksAndBeforeFreeze(t *testing.T) {
 	p := newBoundProxy(NewCodec(&recordingWriter{}))
 	row := nativeRegistered(t, p, time.Now())
 	r := row.owner
-	a := nativeAttempt(t, r, "ollama")
+	a := nativeAttempt(t, r, "llamacpp")
 	f := r.facts
 	r.finish() // The entry may finish before its final borrower joins.
 	a.observeAccount(accountAttemptObservation{version: 1, held: 15, flags: factHeldKnown | factChargeKnown, accounting: factAccountingRetained})
@@ -736,7 +736,7 @@ func TestRoutingNativeRevisionConcurrentCopy(t *testing.T) {
 		defer close(exited)
 		var completed uint64
 		for range 128 {
-			a, err := r.newDispatchAttempt(context.Background(), func() {}, "node", destinationDescriptor("m", "node", "ollama", false))
+			a, err := r.newDispatchAttempt(context.Background(), func() {}, "node", destinationDescriptor("m", "node", "llamacpp", false))
 			if err != nil {
 				result <- production{completed, err}
 				return
@@ -832,11 +832,11 @@ func TestRoutingNativeRevisionCancellationIsOnePublication(t *testing.T) {
 			p := newBoundProxy(NewCodec(&recordingWriter{}))
 			r := nativeRegistered(t, p, time.Now().Add(time.Hour)).owner
 			if strict {
-				if r.strictFactAttempt(destinationDescriptor("m", "node", "ollama", false)) == nil {
+				if r.strictFactAttempt(destinationDescriptor("m", "node", "llamacpp", false)) == nil {
 					t.Fatal("strict observation absent")
 				}
 			} else {
-				nativeAttempt(t, r, "ollama")
+				nativeAttempt(t, r, "llamacpp")
 			}
 			before := nativeCopy(t, r)
 			f := r.facts
@@ -911,7 +911,7 @@ func TestRoutingNativeFactsTerminalClockBounds(t *testing.T) {
 				created, started = time.Now().Add(time.Hour), time.Now()
 			}
 			r := nativeRegistered(t, p, created).owner
-			d := destinationDescriptor("m", "node", "ollama", false)
+			d := destinationDescriptor("m", "node", "llamacpp", false)
 			r.mu.Lock()
 			a, err := r.newAttemptLocked(started, d)
 			r.mu.Unlock()
@@ -951,7 +951,7 @@ func TestRoutingNativeLifetimeDelayedCancellationBeforeFreeze(t *testing.T) {
 			r.mu.Lock()
 			r.observationContext, r.processContext = ctx, process
 			r.mu.Unlock()
-			a := nativeAttempt(t, r, "ollama")
+			a := nativeAttempt(t, r, "llamacpp")
 			if !a.acceptResponse() || !a.commit() {
 				t.Fatal("raw commitment setup failed")
 			}
@@ -1021,7 +1021,7 @@ func TestRoutingNativeLifetimeDelayedCancellationBeforeFreeze(t *testing.T) {
 // match is evidence for privacy or protocol shape.
 func TestRoutingNativeFactsNoPublicEmitter(t *testing.T) {
 	out := &recordingWriter{}
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(out), NewDiscovery(), 0)
+	p := newTestProxy(anyProfile(t), NewCodec(out), NewDiscovery(), 0)
 	p.soleFacade().handleHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m"}`)))
 	for _, line := range out.lines() {
 		var envelope struct {
@@ -1058,7 +1058,7 @@ func TestRoutingNativeLifetimeLastBorrower(t *testing.T) {
 	discovery := NewDiscovery()
 	discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
 	discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+	p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
 	p.SetPriority([]string{"a", "b"})
 	w, done := httptest.NewRecorder(), make(chan struct{})
 	go func() {

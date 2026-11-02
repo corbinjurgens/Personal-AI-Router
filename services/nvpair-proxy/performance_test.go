@@ -168,9 +168,9 @@ func TestPerformancePeerOriginNeverCounts(t *testing.T) {
 func TestPerformanceStrictDestinations(t *testing.T) {
 	for _, path := range []string{"self", "ingress"} {
 		t.Run(path, func(t *testing.T) {
-			p := testProxy(ollamaOnlyProfile(t), NewDiscovery(), 0)
+			p := testProxy(anyProfile(t), NewDiscovery(), 0)
 			configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
-			p.noteSelf("destination", "ollama", []string{"m"})
+			p.noteSelf("destination", "llamacpp", []string{"m"})
 			u := performanceUpstream(t, "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\"}],\"usage\":{\"completion_tokens\":7}}\n\ndata: [DONE]\n\n")
 			setBackend(t, p.soleFacade(), u.URL, true)
 			w := httptest.NewRecorder()
@@ -1078,10 +1078,10 @@ func TestPerformanceReaderlessHTTPSuccess(t *testing.T) {
 			codec, emittedOne := performanceCapture(t)
 			var p *Proxy
 			if strictIngress {
-				p = newTestProxy(ollamaOnlyProfile(t), codec, NewDiscovery(), 0)
+				p = newTestProxy(anyProfile(t), codec, NewDiscovery(), 0)
 				t.Cleanup(p.closeIdleTransports)
 				configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
-				p.noteSelf("destination", "ollama", []string{"m"})
+				p.noteSelf("destination", "llamacpp", []string{"m"})
 			} else {
 				p = performanceProxyWithCodec(t, "llamacpp", codec)
 			}
@@ -1149,10 +1149,10 @@ func TestPerformanceStrictOriginWithoutSink(t *testing.T) {
 	test := func(name string, flushErr error, want performancewire.Outcome) {
 		t.Run(name, func(t *testing.T) {
 			codec, emittedOne := performanceCapture(t)
-			p := newTestProxy(ollamaOnlyProfile(t), codec, NewDiscovery(), 0)
+			p := newTestProxy(anyProfile(t), codec, NewDiscovery(), 0)
 			t.Cleanup(p.closeIdleTransports)
 			configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
-			p.noteSelf("destination", "ollama", []string{"m"})
+			p.noteSelf("destination", "llamacpp", []string{"m"})
 			const body = `{"choices":[]}`
 			var hits atomic.Int32
 			upstream := paServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

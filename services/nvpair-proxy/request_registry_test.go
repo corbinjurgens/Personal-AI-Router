@@ -207,7 +207,7 @@ func TestRequestRegistryWorkloadBackingPartialDrainAndEmptyRelease(t *testing.T)
 		}
 		rows = append(rows, row)
 		defer p.unregisterRoutingRequest(row)
-		if err := p.registerWorkload(row, workloadKey{engine: "ollama", id: strconv.Itoa(i + 1)}); err != nil {
+		if err := p.registerWorkload(row, workloadKey{engine: "llamacpp", id: strconv.Itoa(i + 1)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -225,7 +225,7 @@ func TestRequestRegistryWorkloadBackingPartialDrainAndEmptyRelease(t *testing.T)
 	bufferAssertTotals(t, p.buffers, metadata, 42, 0)
 	hold := bufferMustAcquire(t, p.buffers, p.buffers.capacity-metadata)
 	defer hold.close()
-	if err := p.registerWorkload(rows[1], workloadKey{engine: "ollama", id: "reused"}); err != nil {
+	if err := p.registerWorkload(rows[1], workloadKey{engine: "llamacpp", id: "reused"}); err != nil {
 		t.Fatalf("funded index backing could not be reused at full root: %v", err)
 	}
 	if p.workloadStorage.lease != backing {
@@ -235,7 +235,7 @@ func TestRequestRegistryWorkloadBackingPartialDrainAndEmptyRelease(t *testing.T)
 	bufferAssertTotals(t, p.buffers, p.buffers.capacity, 43, 0)
 	hold.close()
 	for i := range 256 {
-		if err := p.registerWorkload(rows[1], workloadKey{engine: "ollama", id: strconv.Itoa(i + 100)}); err != nil {
+		if err := p.registerWorkload(rows[1], workloadKey{engine: "llamacpp", id: strconv.Itoa(i + 100)}); err != nil {
 			t.Fatal(err)
 		}
 		p.unregisterWorkload(rows[1])
@@ -289,7 +289,7 @@ func TestRequestRegistryWorkloadBackingAdmissionRollback(t *testing.T) {
 	defer p.unregisterRoutingRequest(row)
 	hold := bufferMustAcquire(t, p.buffers, p.buffers.capacity-registryTestBytes(p))
 	defer hold.close()
-	key := workloadKey{engine: "ollama", id: "7"}
+	key := workloadKey{engine: "llamacpp", id: "7"}
 	if err := p.registerWorkload(row, key); err == nil {
 		t.Fatal("unfunded workload-index backing was allocated")
 	}
@@ -399,7 +399,7 @@ func TestModelControlsRegistryIdentityAndCapacityRefuseBeforeRead(t *testing.T) 
 			f := newFacade(p, anyProfile(t), NewDiscovery(), 0)
 			body := &identityBody{}
 			rec := httptest.NewRecorder()
-			f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat?model=bad%0A", body))
+			f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions?model=bad%0A", body))
 			if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || p.requestSequence != 0 || len(p.activeRoutingRequests()) != 0 || len(writer.lines()) != 0 {
 				t.Fatalf("pre-registration refusal status/reads/counter/rows/notifications = %d/%d/%d/%d/%d", rec.Code, body.reads, p.requestSequence, len(p.activeRoutingRequests()), len(writer.lines()))
 			}
@@ -418,7 +418,7 @@ func TestRequestRegistrySaturationRefusesBeforeEffects(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.unregisterRoutingRequest(request)
-	if err := p.registerWorkload(request, workloadKey{engine: "ollama", id: "7"}); err != nil {
+	if err := p.registerWorkload(request, workloadKey{engine: "llamacpp", id: "7"}); err != nil {
 		t.Fatal(err)
 	}
 	metadata := registryTestBytes(p)
@@ -428,7 +428,7 @@ func TestRequestRegistrySaturationRefusesBeforeEffects(t *testing.T) {
 	f := newFacade(p, anyProfile(t), NewDiscovery(), 0)
 	body := &identityBody{}
 	rec := httptest.NewRecorder()
-	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", body))
+	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
 	if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || len(w.lines()) != 0 || len(p.activeRoutingRequests()) != 1 || p.requestSequence != 1 {
 		t.Fatalf("saturated request status=%d reads=%d notifications=%d entries=%d sequence=%d", rec.Code, body.reads, len(w.lines()), len(p.activeRoutingRequests()), p.requestSequence)
 	}
@@ -438,14 +438,14 @@ func TestRequestRegistrySaturationRefusesBeforeEffects(t *testing.T) {
 	}
 	bufferAssertTotals(t, p.buffers, p.buffers.capacity, 4, 0)
 	p.unregisterRoutingRequest(request)
-	if len(p.workloadControls("ollama", "7")) != 0 {
+	if len(p.workloadControls("llamacpp", "7")) != 0 {
 		t.Fatal("terminal request retained a workload index")
 	}
 	// Free byte capacity after cleanup; metadata refusal must not consume an
 	// identity, so the next admitted request remains counter 2.
 	lease.close()
 	rec = httptest.NewRecorder()
-	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"a","model":"b"}`)))
+	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"a","model":"b"}`)))
 	if rec.Code != http.StatusBadRequest || len(p.activeRoutingRequests()) != 0 || p.requestSequence != 2 {
 		t.Fatalf("released slot was not reused and cleaned: status=%d entries=%d sequence=%d", rec.Code, len(p.activeRoutingRequests()), p.requestSequence)
 	}
@@ -502,12 +502,12 @@ func TestRequestRegistryWorkloadDetachesWithoutEndingRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.unregisterRoutingRequest(first)
-	key := workloadKey{engine: "ollama", id: "7"}
+	key := workloadKey{engine: "llamacpp", id: "7"}
 	if err := p.registerWorkload(first, key); err != nil {
 		t.Fatal(err)
 	}
 	p.unregisterWorkload(first)
-	response := rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", WorkloadID: "7", Engine: "ollama", RunID: p.runID})
+	response := rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", WorkloadID: "7", Engine: "llamacpp", RunID: p.runID})
 	var result nodepolicy.WorkloadCancelResult
 	if response.Error != nil || json.Unmarshal(response.Result, &result) != nil || result.Found {
 		t.Fatal("detached workload still cancelled its request")
@@ -524,7 +524,7 @@ func TestRequestRegistryWorkloadDetachesWithoutEndingRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.unregisterRoutingRequest(first)
-	controls := p.workloadControls("ollama", "7")
+	controls := p.workloadControls("llamacpp", "7")
 	if len(controls) != 1 || controls[0] != second.owner {
 		t.Fatal("old owner cleanup removed a reused workload association")
 	}
@@ -538,7 +538,7 @@ func TestRequestRegistryPublicReplacementDetachesConcreteWorkload(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer p.unregisterRoutingRequest(request)
-	key := workloadKey{engine: "ollama", id: "7"}
+	key := workloadKey{engine: "llamacpp", id: "7"}
 	if err := p.registerWorkload(request, key); err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +625,7 @@ func TestRequestRegistryRegistersBeforeReadingBody(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		f.handleHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/chat", body))
+		f.handleHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
 	}()
 	t.Cleanup(func() {
 		select {
@@ -719,7 +719,7 @@ func TestRequestRegistryRetainedThroughFinalBorrower(t *testing.T) {
 			defer unblock()
 			discovery := NewDiscovery()
 			discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
-			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+			p := newTestProxy(anyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
 			p.buffers = bufferTestBudget(t, (2<<20)+bufferFixtureResponseBytes, 0)
 			transport := p.plainHTTPTransport()
 			dial := transport.DialContext
@@ -801,7 +801,7 @@ func TestRequestRegistryQueuedRegenerateCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.unregisterRoutingRequest(registered)
-	key := workloadKey{engine: "ollama", id: "queued"}
+	key := workloadKey{engine: "llamacpp", id: "queued"}
 	if err := p.registerWorkload(registered, key); err != nil {
 		t.Fatal(err)
 	}

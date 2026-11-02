@@ -23,7 +23,7 @@ import (
 func TestBufferDecreasePreOutputRetryNewAdmission(t *testing.T) {
 	run := func(name string, insufficient bool) {
 		t.Run(name, func(t *testing.T) {
-			policy := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
+			policy := tierPolicy(map[string][]nodepolicy.TierEntry{
 				"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}},
 			})
 			fx := newTierFixture(t, ollamaCase(t), policy, map[string][]string{

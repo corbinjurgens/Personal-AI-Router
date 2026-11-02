@@ -408,8 +408,8 @@ func TestHandleHTTP_404FailoverInferenceOnly(t *testing.T) {
 }
 
 // TestHandleHTTP_AggregatesNativeModelList is Ollama-scoped because the
-// native "models" dialect is Ollama's alone — LM Studio serves no /api/tags.
-// The OpenAI dialect both engines share is covered by the sibling test below.
+// native "models" dialect is Ollama's alone — no other engine serves /api/tags.
+// The OpenAI dialect every other engine shares is covered by the sibling test below.
 func TestHandleHTTP_AggregatesNativeModelList(t *testing.T) {
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -508,10 +508,14 @@ func TestHandleHTTP_AggregatesNativeModelList(t *testing.T) {
 // candidate's metadata on either.
 func TestHandleHTTP_AggregatesOpenAIModelList(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
+		listRoute, ok := tc.profile.routeFor(http.MethodGet, "/v1/models")
+		if !ok {
+			t.Fatalf("%s has no /v1/models route", tc.profile.Name)
+		}
 		serve := func(body string) *httptest.Server {
 			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
-					t.Errorf("upstream request = %s %s, want GET /v1/models", r.Method, r.URL.Path)
+				if r.Method != http.MethodGet || r.URL.Path != listRoute.upstreamPath() {
+					t.Errorf("upstream request = %s %s, want GET %s", r.Method, r.URL.Path, listRoute.upstreamPath())
 				}
 				_, _ = io.WriteString(w, body)
 			}))
@@ -616,7 +620,7 @@ func TestHandleHTTP_ModelListRemapsUpstreamPath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	profile := lmstudioCase(t).profile
+	profile := customCase(t).profile
 	profile.Routes = []route{{
 		Path:         "/v1/models",
 		UpstreamPath: "/models",
@@ -672,10 +676,9 @@ func TestHandleHTTP_ModelListEmptyAndUnavailable(t *testing.T) {
 }
 
 // TestHandleHTTP_StrictModelRouting proves capability is a gate before
-// selection and priority, on both engines. The matching node advertises the
-// model in the engine's own spelling — which for Ollama differs from what the
-// client requests, so this also pins that normalizeModel is applied on the
-// gate rather than only on the model list.
+// selection and priority, on every engine. The matching node advertises the
+// model in the engine's own spelling, as a client requests it. The gate
+// applies normalizeModel, which the model list also applies.
 func TestHandleHTTP_StrictModelRouting(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		missHits, unknownHits, matchHits := 0, 0, 0
@@ -816,15 +819,16 @@ func TestHandleHTTP_InferenceRouting(t *testing.T) {
 	}
 
 	ollama := ollamaCase(t).profile
-	lmstudio := lmstudioCase(t).profile
+	llamacpp := llamacppCase(t).profile
+	custom := customCase(t).profile
 	test("native Ollama generate", "/api/generate", ollama)
 	test("native Ollama chat", "/api/chat", ollama)
 	test("native Ollama embeddings", "/api/embeddings", ollama)
 	test("native Ollama embed", "/api/embed", ollama)
-	test("OpenAI chat completions", "/v1/chat/completions", ollama, lmstudio)
-	test("OpenAI completions", "/v1/completions", ollama, lmstudio)
-	test("OpenAI embeddings", "/v1/embeddings", ollama, lmstudio)
-	test("Anthropic messages", "/v1/messages", ollama, lmstudio)
+	test("OpenAI chat completions", "/v1/chat/completions", llamacpp, custom)
+	test("OpenAI completions", "/v1/completions", llamacpp, custom)
+	test("OpenAI embeddings", "/v1/embeddings", llamacpp, custom)
+	test("Anthropic messages", "/v1/messages", custom)
 }
 
 func TestHandleHTTP_NoAdvertisedModelRejectsLocally(t *testing.T) {

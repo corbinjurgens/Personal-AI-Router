@@ -595,7 +595,8 @@ func TestHandleHTTP_UpstreamDiesMidStream_EmitsTerminal(t *testing.T) {
 		}
 	}()
 
-	tc := anyCase(t)
+	// Engine-specific: the torn upstream event is an Ollama NDJSON line.
+	tc := ollamaCase(t)
 	rec := &recordingWriter{}
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "node-a", "http://"+upLn.Addr().String(), tc.advertisedModel))

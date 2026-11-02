@@ -158,20 +158,20 @@ func TestSetPortPersistenceBoundary(t *testing.T) {
 func TestPersistedPortIsPerEngine(t *testing.T) {
 	redirectConfigDir(t)
 
-	ollama := ollamaCase(t).profile
-	lmstudio := lmstudioCase(t).profile
+	llamacpp := llamacppCase(t).profile
+	custom := customCase(t).profile
 
-	if err := savePersistedPort(ollama, 11500, durablefile.Replacer{}); err != nil {
+	if err := savePersistedPort(llamacpp, 11500, durablefile.Replacer{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := loadPersistedPort(lmstudio); ok {
-		t.Fatal("LM Studio read a port only Ollama saved")
+	if _, ok := loadPersistedPort(custom); ok {
+		t.Fatal("the descriptor engine read a port only llama.cpp saved")
 	}
-	if err := savePersistedPort(lmstudio, 1300, durablefile.Replacer{}); err != nil {
+	if err := savePersistedPort(custom, 1300, durablefile.Replacer{}); err != nil {
 		t.Fatal(err)
 	}
-	if p, ok := loadPersistedPort(ollama); !ok || p != 11500 {
-		t.Errorf("Ollama's port changed when LM Studio saved: got %d ok=%v", p, ok)
+	if p, ok := loadPersistedPort(llamacpp); !ok || p != 11500 {
+		t.Errorf("llama.cpp's port changed when the descriptor engine saved: got %d ok=%v", p, ok)
 	}
 }
 

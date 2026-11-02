@@ -16,11 +16,11 @@ import (
 
 func reviewR2TierFixture(t *testing.T, failover bool) (*Proxy, *recordingEngine, *recordingEngine) {
 	t.Helper()
-	tc := ollamaCase(t)
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "m"}},
+	tc := llamacppCase(t)
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "m"}},
 	})
-	pol.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}
+	pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
 	if err := pol.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func testReviewR2TierKeys(t *testing.T, failover bool) {
 		t.Run(c.name, func(t *testing.T) {
 			p, busy, local := reviewR2TierFixture(t, failover)
 			w := httptest.NewRecorder()
-			p.soleFacade().handleHTTP(w, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(c.body)))
+			p.soleFacade().handleHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(c.body)))
 			if !c.accepted {
 				assertAmbiguousModelRejection(t, w)
 				if busy.hits() != 0 || local.hits() != 0 {
@@ -148,9 +148,9 @@ func TestReviewR2ModelDefaults(t *testing.T) {
 					}
 					pol := p.admission.currentPolicy()
 					pol.Revision = "0"
-					pol.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}
+					pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
 					if !strict {
-						pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "ollama", Model: "m"}}
+						pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "llamacpp", Model: "m"}}
 					}
 					if err := pol.Validate(); err != nil {
 						t.Fatal(err)
@@ -163,9 +163,9 @@ func TestReviewR2ModelDefaults(t *testing.T) {
 						q.RequestOptions = pol.Profiles[0].RequestOptions
 					}
 					p.admission.setPolicy(pol)
-					r := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"m"}`))
+					r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
 					if path == "failover" {
-						r = httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"weak"}`))
+						r = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"weak"}`))
 					} else if strict {
 						r = strictHTTPRequest(t)
 					}
@@ -194,7 +194,7 @@ func TestReviewR2ModelDefaults(t *testing.T) {
 func TestReviewR2QualificationModelDefaults(t *testing.T) {
 	for _, key := range []string{`model`, `Model`, `MODEL`, `mo\u0064el`, `Mo\u0064el`} {
 		t.Run(key, func(t *testing.T) {
-			q := testQualification("q", "ollama", "m")
+			q := testQualification("q", "llamacpp", "m")
 			if err := q.validate(); err != nil {
 				t.Fatal(err)
 			}
@@ -269,7 +269,7 @@ func TestRequestOptionsProductionRoutes(t *testing.T) {
 					}
 					pol := p.admission.currentPolicy()
 					if !strict {
-						pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "ollama", Model: "m"}}
+						pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "llamacpp", Model: "m"}}
 					}
 					pol.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.1,"top_k":4,"min_p":0.02,"repeat_penalty":1.1}`)
 					pol.Profiles[0].RequestOptionsMode = mode
@@ -376,13 +376,13 @@ func TestRequestOptionsAmbiguityHTTP(t *testing.T) {
 func TestRequestOptionsServingOwner(t *testing.T) {
 	destination, _, local := reviewR2TierFixture(t, false)
 	pol := destination.admission.currentPolicy()
-	pol.Profiles = []nodepolicy.Profile{{Name: "destination", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
+	pol.Profiles = []nodepolicy.Profile{{Name: "destination", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.1}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
 	destination.admission.setPolicy(pol)
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { destination.soleFacade().serveIngress(w, r, "origin") }))
 	defer peer.Close()
 	originPolicy := nodepolicy.Default()
-	originPolicy.Profiles = []nodepolicy.Profile{{Name: "origin", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.9,"seed":7}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
-	fx := newTierFixture(t, ollamaCase(t), originPolicy, map[string][]string{"a": {"m"}}, nil)
+	originPolicy.Profiles = []nodepolicy.Profile{{Name: "origin", Engine: "llamacpp", Model: "m", RequestOptions: json.RawMessage(`{"temperature":0.9,"seed":7}`), RequestOptionsMode: nodepolicy.RequestOptionsEnforced}}
+	fx := newTierFixture(t, llamacppCase(t), originPolicy, map[string][]string{"a": {"m"}}, nil)
 	fx.p.soleFacade().discovery.AddManual(nodeForModel(t, "a", peer.URL, "m"))
 	w := fx.do(t, routeChatCompletions, strings.TrimSuffix(strictBody("m"), "}")+`,"temperature":0.8}`)
 	if w.Code != http.StatusOK || local.hits() != 1 || fx.eng["a"].hits() != 0 {
@@ -444,7 +444,7 @@ func TestRequestOptionsHybridSelf(t *testing.T) {
 			if err := json.Unmarshal([]byte(e.lastBody()), &got); err != nil {
 				t.Fatalf("engine body: %v", err)
 			}
-			if got.Model != "llama3:latest" || got.Temperature != tc.want {
+			if got.Model != "llama3" || got.Temperature != tc.want {
 				t.Fatalf("rewritten effective body=%+v", got)
 			}
 		})

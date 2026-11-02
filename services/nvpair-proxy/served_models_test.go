@@ -63,7 +63,7 @@ func TestServedModelsStrict(t *testing.T) {
 			p := h.a.currentPolicy()
 			p.ServedModels = served
 			h.a.setPolicy(p)
-			ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
+			ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest())
 			if !allowed {
 				if ticket != nil || !errors.Is(err, errStrictUnavailable) {
 					t.Fatalf("ticket=%v err=%v", ticket, err)
@@ -81,10 +81,10 @@ func TestServedModelsStrict(t *testing.T) {
 	}
 	test("absent", nil, true)
 	test("empty", nodepolicy.ServedModels{}, false)
-	test("normalized subset", nodepolicy.ServedModels{{Engine: "ollama", Model: "m:latest"}}, true)
-	test("excluded subset", nodepolicy.ServedModels{{Engine: "ollama", Model: "other"}}, false)
-	test("case-variant model", nodepolicy.ServedModels{{Engine: "ollama", Model: "M"}}, false)
-	test("case-variant tag", nodepolicy.ServedModels{{Engine: "ollama", Model: "m:LATEST"}}, false)
+	test("exact subset", nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}, true)
+	test("excluded subset", nodepolicy.ServedModels{{Engine: "llamacpp", Model: "other"}}, false)
+	test("case-variant model", nodepolicy.ServedModels{{Engine: "llamacpp", Model: "M"}}, false)
+	test("case-variant tag", nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m:TAG"}}, false)
 }
 
 // TestServedModelsCaseSensitivity pins the permission comparison itself:
@@ -101,12 +101,13 @@ func TestServedModelsCaseSensitivity(t *testing.T) {
 			}
 		})
 	}
-	test("ollama model case", "ollama", "m", "M", false)
-	test("ollama tag case", "ollama", "m:latest", "m:LATEST", false)
-	test("lmstudio model case", "lmstudio", "qwen3-8b", "QWEN3-8B", false)
-	test("ollama exact", "ollama", "m:latest", "m:latest", true)
+	test("llamacpp model case", "llamacpp", "m", "M", false)
+	test("llamacpp tag case", "llamacpp", "m:tag", "m:TAG", false)
+	test("descriptor engine model case", "llamacpp-custom", "qwen3-8b", "QWEN3-8B", false)
+	test("llamacpp exact", "llamacpp", "m:tag", "m:tag", true)
+	test("llamacpp untagged request", "llamacpp", "m", "m:tag", false)
 	test("ollama untagged request", "ollama", "m", "m:latest", true)
-	test("lmstudio exact", "lmstudio", "qwen3-8b", "qwen3-8b", true)
+	test("descriptor engine exact", "llamacpp-custom", "qwen3-8b", "qwen3-8b", true)
 }
 
 // assertAmbiguousModelRejection checks the structured client error a body
@@ -134,11 +135,11 @@ func assertAmbiguousModelRejection(t *testing.T, rec *httptest.ResponseRecorder)
 // ("weak") could disagree and a model outside the served set could run. The
 // ambiguous body is refused before admission; the ordinary body still works.
 func TestServedModelsTierDuplicateModel(t *testing.T) {
-	tc := ollamaCase(t)
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "m"}},
+	tc := llamacppCase(t)
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "m"}},
 	})
-	pol.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}
+	pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
 	if err := pol.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +152,7 @@ func TestServedModelsTierDuplicateModel(t *testing.T) {
 	f := p.soleFacade()
 	post := func(body string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body)))
+		f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)))
 		return rec
 	}
 
@@ -172,7 +173,7 @@ func TestServedModelsTierDuplicateModel(t *testing.T) {
 		}
 	}
 	ingressRec := httptest.NewRecorder()
-	f.serveIngress(ingressRec, httptest.NewRequest(http.MethodPost, "/api/chat",
+	f.serveIngress(ingressRec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"unused","model":"weak"}`)), "peer")
 	assertAmbiguousModelRejection(t, ingressRec)
 	if e.hits() != 1 {
@@ -198,14 +199,14 @@ func TestServedModelsStrictRoutes(t *testing.T) {
 
 func TestServedModelsRejectBeforeWake(t *testing.T) {
 	h := newAdmHarness(t)
-	h.setHealthy("ollama", false)
-	h.a.setIntent(map[string]bool{"ollama": true})
+	h.setHealthy("llamacpp", false)
+	h.a.setIntent(map[string]bool{"llamacpp": true})
 	pol := h.a.currentPolicy()
 	pol.Idle.StartOnDemand = true
-	pol.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}
+	pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
 	h.a.setPolicy(pol)
 	for _, model := range []string{"other", ""} {
-		d := h.a.admit(context.Background(), admissionRequest{engine: "ollama", model: model})
+		d := h.a.admit(context.Background(), admissionRequest{engine: "llamacpp", model: model})
 		if d.reject != rejectNotServed || d.ticket != nil {
 			t.Fatalf("model=%q decision=%+v", model, d)
 		}
@@ -216,7 +217,7 @@ func TestServedModelsRejectBeforeWake(t *testing.T) {
 }
 
 func TestServedModelsPeerOverlay(t *testing.T) {
-	tc := ollamaCase(t)
+	tc := llamacppCase(t)
 	test := func(name string, served nodepolicy.ServedModels, allowed bool) {
 		t.Run(name, func(t *testing.T) {
 			n, ok := subscribedToNode(tc.profile, noderec.DirectoryNode{
@@ -241,17 +242,17 @@ func TestServedModelsPeerOverlay(t *testing.T) {
 	}
 	test("absent", nil, true)
 	test("empty", nodepolicy.ServedModels{}, false)
-	test("normalized subset", nodepolicy.ServedModels{{Engine: "ollama", Model: "m:latest"}}, true)
-	test("excluded", nodepolicy.ServedModels{{Engine: "ollama", Model: "other"}}, false)
+	test("exact subset", nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}, true)
+	test("excluded", nodepolicy.ServedModels{{Engine: "llamacpp", Model: "other"}}, false)
 }
 
 func TestServedModelsDormantSelf(t *testing.T) {
 	test := func(name string, served nodepolicy.ServedModels, allowed bool) {
 		t.Run(name, func(t *testing.T) {
-			tc := ollamaCase(t)
+			tc := llamacppCase(t)
 			p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
-			p.noteSelf("self", "ollama", []string{"m"})
-			p.admission.setIntent(map[string]bool{"ollama": true})
+			p.noteSelf("self", "llamacpp", []string{"m"})
+			p.admission.setIntent(map[string]bool{"llamacpp": true})
 			pol := p.admission.currentPolicy()
 			pol.Idle.StartOnDemand = true
 			pol.ServedModels = served
@@ -264,18 +265,18 @@ func TestServedModelsDormantSelf(t *testing.T) {
 	}
 	test("absent", nil, true)
 	test("empty", nodepolicy.ServedModels{}, false)
-	test("normalized subset", nodepolicy.ServedModels{{Engine: "ollama", Model: "m:latest"}}, true)
-	test("excluded", nodepolicy.ServedModels{{Engine: "ollama", Model: "other"}}, false)
+	test("exact subset", nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}, true)
+	test("excluded", nodepolicy.ServedModels{{Engine: "llamacpp", Model: "other"}}, false)
 }
 
 func TestServedModelsRolesRetainedButIneligible(t *testing.T) {
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "router"}},
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "router"}},
+	pol := tierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "router"}},
+		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "router"}},
 	})
 	pol.TierPolicy.AllowStronger = false
-	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"own", "router"}}, nil)
-	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("own")})
+	fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"own", "router"}}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": llamacppRole("own")})
 	n, ok := discoveredNode(fx.p.soleFacade(), "a")
 	if !ok {
 		t.Fatal("missing peer")
@@ -283,7 +284,7 @@ func TestServedModelsRolesRetainedButIneligible(t *testing.T) {
 	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); len(got) != 1 {
 		t.Fatalf("unrestricted declared role unavailable: %+v", got)
 	}
-	n.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "router"}}
+	n.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "router"}}
 	fx.p.soleFacade().discovery.AddManual(n)
 	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); len(got) != 0 {
 		t.Fatalf("unserved role fell back: %+v", got)
@@ -303,7 +304,7 @@ func TestServedModelsRolesRetainedButIneligible(t *testing.T) {
 func TestServedModelsActivationBeforeForwarding(t *testing.T) {
 	for _, path := range []string{"self", "ingress"} {
 		t.Run(path, func(t *testing.T) {
-			tc := ollamaCase(t)
+			tc := llamacppCase(t)
 			e := newRecordingEngine(t, http.StatusOK)
 			d := NewDiscovery()
 			d.AddManual(selfNode("self", tc.profile.FacadePort, tc.advertisedModel))
@@ -342,7 +343,7 @@ func TestServedModelsActivationBeforeForwarding(t *testing.T) {
 
 func TestServedModelsStrictActivationAfterAdmission(t *testing.T) {
 	h := newStrictHarness(t)
-	ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
+	ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +357,7 @@ func TestServedModelsStrictActivationAfterAdmission(t *testing.T) {
 	if err := ticket.BeforeStrictDispatch(); err != nil {
 		t.Fatalf("admitted work revoked: %v", err)
 	}
-	if next, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
+	if next, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("new ticket=%v err=%v", next, err)
 	}
 }
@@ -371,7 +372,7 @@ func TestServedModelsStrictReadinessAfterDenyAll(t *testing.T) {
 	if before.Capability == nil || len(before.Capability.Models) != 1 {
 		t.Fatalf("installed capability missing: %+v", before)
 	}
-	ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
+	ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +389,7 @@ func TestServedModelsStrictReadinessAfterDenyAll(t *testing.T) {
 	if err := ticket.BeforeStrictDispatch(); err != nil {
 		t.Fatalf("admitted ticket revoked by serving-only change: %v", err)
 	}
-	if next, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
+	if next, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("new ticket=%v err=%v", next, err)
 	}
 }
@@ -398,11 +399,11 @@ func TestServedModelsStrictReadinessAfterDenyAll(t *testing.T) {
 func TestServedModelsStrictColdTicketCarriesServedSnapshot(t *testing.T) {
 	h := newStrictHarness(t)
 	pol := h.a.currentPolicy()
-	pol.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}
+	pol.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}
 	h.a.setPolicy(pol)
 	// Installed but not resident: admission takes the cold constructor.
 	h.a.setResidency(map[string][]string{})
-	ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
+	ticket, err := h.a.admitStrictNow(context.Background(), "llamacpp", "m", strictRequest())
 	if err != nil {
 		t.Fatalf("cold admission: %v", err)
 	}
@@ -414,7 +415,7 @@ func TestServedModelsStrictColdTicketCarriesServedSnapshot(t *testing.T) {
 	if st.warmOnly {
 		t.Fatal("expected a cold ticket, got a warm one")
 	}
-	if len(st.servedModels) != 1 || st.servedModels[0].Engine != "ollama" || st.servedModels[0].Model != "m" {
+	if len(st.servedModels) != 1 || st.servedModels[0].Engine != "llamacpp" || st.servedModels[0].Model != "m" {
 		t.Fatalf("cold ticket servedModels = %+v, want the admission snapshot", st.servedModels)
 	}
 }

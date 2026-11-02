@@ -132,14 +132,15 @@ func e2eWaitResult(t *testing.T, frames *e2eInbox, id string, timeout time.Durat
 
 // e2eEnableWithRetry enables a facade, trying a fresh port whenever the child
 // reports a lost bind race, and returns the port it actually bound.
-func e2eEnableWithRetry(t *testing.T, stdin io.Writer, frames *e2eInbox, engine string, port int) int {
+func e2eEnableWithRetry(t *testing.T, stdin io.Writer, frames *e2eInbox, engine string, descriptor *engines.Descriptor, port int) int {
 	t.Helper()
 	for attempt := 0; attempt < 8; attempt++ {
 		id := 100 + attempt
-		e2eSend(t, stdin, id, "facade/enable", map[string]any{
-			"engine":              engine,
-			"port":                port,
-			"ignorePersistedPort": true,
+		e2eSend(t, stdin, id, "facade/enable", enableFacadeParams{
+			Engine:              engine,
+			Port:                port,
+			IgnorePersistedPort: true,
+			Descriptor:          descriptor,
 		})
 		bound, bindRace := e2eEnabledPort(t, frames, fmt.Sprint(id), 10*time.Second)
 		if bindRace {
@@ -267,11 +268,8 @@ func e2eSplitHostPort(t *testing.T, serverURL string) (string, int) {
 // to the healthy one, the original body is replayed, and CORS headers are
 // present — the whole shipped path end-to-end, no mocks.
 //
-// Only LM Studio had this. Running it per engine also makes it the one place
-// Ollama's implied-:latest naming is proven end-to-end: the nodes advertise
-// the tagged spelling while the client asks for the untagged one, so a
-// regression in normalizeModel shows up as an unroutable request rather than
-// a unit-test diff.
+// Running it per engine covers a built-in engine and a descriptor engine, the
+// latter enabled with its descriptor over facade/enable.
 func TestE2EFailoverOverRealBinary(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		bin := proxyBinary(t)
@@ -349,7 +347,7 @@ func TestE2EFailoverOverRealBinary(t *testing.T) {
 		// process spawn sits between the probe and the child's bind, so the
 		// port can be taken in between. Treating the probe as authoritative is
 		// what made this flake on "address already in use".
-		port = e2eEnableWithRetry(t, stdin, frames, tc.profile.Name, port)
+		port = e2eEnableWithRetry(t, stdin, frames, tc.profile.Name, tc.descriptor, port)
 
 		// Facade-scoped methods are addressed to their engine, the same way the
 		// broker addresses them: an unaddressed one resolves to no facade
