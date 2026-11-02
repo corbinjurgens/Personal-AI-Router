@@ -28,6 +28,23 @@ func tuiDownloadSnapshot() *modeldownload.Snapshot {
 	}
 }
 
+func tuiLlamaCPPDownloadSnapshot() *modeldownload.Snapshot {
+	return &modeldownload.Snapshot{
+		Version: modeldownload.Version, SourceID: strings.Repeat("a", 32), Revision: "7",
+		Entries: []modeldownload.Entry{{ID: strings.Repeat("b", 32), Engine: engines.NameLlamaCPP, Model: "exact/model",
+			Phase: modeldownload.PhaseInProgress, BlocksReadiness: true}},
+	}
+}
+
+func tuiCustomEngine(t *testing.T) engines.Engine {
+	t.Helper()
+	engine, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+	if !ok {
+		t.Fatal("invalid custom llama.cpp engine")
+	}
+	return engine
+}
+
 func tuiDownloadJSON(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 	data, err := json.Marshal(value)
@@ -38,19 +55,19 @@ func tuiDownloadJSON(t *testing.T, value any) json.RawMessage {
 }
 
 func TestModelDownloadLocalDecodePreservesInventoryWithoutTrustingMalformedSupport(t *testing.T) {
-	valid := string(tuiDownloadJSON(t, tuiDownloadSnapshot()))
+	valid := string(tuiDownloadJSON(t, tuiLlamaCPPDownloadSnapshot()))
 	test := func(name, extension string, supported bool) {
 		t.Run(name, func(t *testing.T) {
 			var got modelsResult
-			data := `{"modelsByEngine":{"ollama":["exact/model"]},"loadedByEngine":{"ollama":["exact/model"]}` + extension + `}`
+			data := `{"modelsByEngine":{"llamacpp":["exact/model"]},"loadedByEngine":{"llamacpp":["exact/model"]}` + extension + `}`
 			if err := json.Unmarshal([]byte(data), &got); err != nil {
 				t.Fatalf("decode inventory: %v", err)
 			}
 			if got.current != supported || (got.DownloadState != nil) != supported {
 				t.Fatalf("support = %v, snapshot = %+v", got.current, got.DownloadState)
 			}
-			if !reflect.DeepEqual(got.ModelsByEngine["ollama"], []string{"exact/model"}) ||
-				!reflect.DeepEqual(got.LoadedByEngine["ollama"], []string{"exact/model"}) {
+			if !reflect.DeepEqual(got.ModelsByEngine["llamacpp"], []string{"exact/model"}) ||
+				!reflect.DeepEqual(got.LoadedByEngine["llamacpp"], []string{"exact/model"}) {
 				t.Fatalf("inventory/residency lost: %+v", got)
 			}
 		})
@@ -67,13 +84,13 @@ func TestModelDownloadLocalDecodePreservesInventoryWithoutTrustingMalformedSuppo
 func TestModelDownloadDiscoveryDecodeRequiresCurrentObservation(t *testing.T) {
 	test := func(name, metadata string, current bool) {
 		t.Run(name, func(t *testing.T) {
-			data := `{"hostUuid":"peer","modelsByEngine":{"ollama":["exact/model"]},"downloadState":` + string(tuiDownloadJSON(t, tuiDownloadSnapshot())) + metadata + `}`
+			data := `{"hostUuid":"peer","modelsByEngine":{"llamacpp":["exact/model"]},"downloadState":` + string(tuiDownloadJSON(t, tuiLlamaCPPDownloadSnapshot())) + metadata + `}`
 			var node availableNode
 			if err := json.Unmarshal([]byte(data), &node); err != nil {
 				t.Fatalf("decode discovery: %v", err)
 			}
 			rows := mergeNodes(nodeFeeds{discovered: []availableNode{node}})
-			if len(rows) != 1 || rows[0].downloadState == nil || !rows[0].downloadState.Equal(*tuiDownloadSnapshot()) {
+			if len(rows) != 1 || rows[0].downloadState == nil || !rows[0].downloadState.Equal(*tuiLlamaCPPDownloadSnapshot()) {
 				t.Fatalf("discovery dropped lifecycle: %+v", rows)
 			}
 			if got := node.modelSnapshot().current; got != current {
@@ -101,14 +118,14 @@ func localRequest(t *testing.T, engine, op, model string) (string, map[string]an
 
 // TestLocalModelOperationsUseTypedMethods checks load, eject and delete reach
 // engine-manager's typed methods with only the engine and the model, for every
-// engine and for a variant the shared table has never heard of. Ollama's
-// run_model, stream:false and keep_alive:0 now live in its manifest's
-// operation bindings, so a second spelling here could only drift from them.
+// engine and for a variant the shared table has never heard of. Engine-specific
+// operation bindings live in manifests, so a second spelling here could only
+// drift from them.
 func TestLocalModelOperationsUseTypedMethods(t *testing.T) {
 	want := map[string]string{
 		"load": "engine:load-model", "unload": "engine:unload-model", "delete": "engine:delete-model",
 	}
-	ids := append(engines.Names(), "llamacpp-custom")
+	ids := []string{engines.NameLlamaCPP, tuiCustomEngine(t).Name}
 	for _, engine := range ids {
 		for op, method := range want {
 			t.Run(engine+"/"+op, func(t *testing.T) {
@@ -155,7 +172,7 @@ func TestPullSendsBothKeys(t *testing.T) {
 // was too, leaving the operator unable to tell a started download from a
 // keystroke that missed.
 func TestPullDeadlineReportsDetachedNotSilence(t *testing.T) {
-	msg := classifyOpResult("download big-model", "ollama", "pull", context.DeadlineExceeded)
+	msg := classifyOpResult("download big-model", "llamacpp", "pull", context.DeadlineExceeded)
 	if msg == nil {
 		t.Fatal("a pull that outran its deadline produced no message at all")
 	}
@@ -175,10 +192,9 @@ func TestPullDeadlineReportsDetachedNotSilence(t *testing.T) {
 // for a slow reply.
 //
 // The set is not "downloads": it is every operation whose duration is set by how
-// much data moves or how slow an engine is to become ready. Ollama's load is
-// run_model with streaming off, which does not answer until the model is
-// resident, so a large model on cold storage exceeds the deadline routinely —
-// and reporting "load failed" at the moment the model finishes loading is worse
+// much data moves or how slow an engine is to become ready. Loading a model
+// waits until it is resident, so a large model on cold storage can exceed the
+// deadline routinely, and reporting "load failed" when the model finishes is worse
 // than saying nothing. Quick operations get no such excuse, because a deadline
 // there is a real fault.
 func TestDeadlineLeniencyTracksOperationLength(t *testing.T) {
@@ -188,7 +204,7 @@ func TestDeadlineLeniencyTracksOperationLength(t *testing.T) {
 	// manifests allow up to ten minutes, so a deadline on either is a slow
 	// reply rather than a failed start.
 	for _, op := range []string{"pull", "load", "install", "uninstall", "start", "restart"} {
-		result, ok := classifyOpResult("x", "ollama", op, context.DeadlineExceeded).(engineOpMsg)
+		result, ok := classifyOpResult("x", "llamacpp", op, context.DeadlineExceeded).(engineOpMsg)
 		if !ok {
 			t.Fatalf("%s: unexpected message type", op)
 		}
@@ -201,7 +217,7 @@ func TestDeadlineLeniencyTracksOperationLength(t *testing.T) {
 	}
 
 	for _, op := range []string{"unload", "delete", "stop"} {
-		result, ok := classifyOpResult("x", "ollama", op, context.DeadlineExceeded).(engineOpMsg)
+		result, ok := classifyOpResult("x", "llamacpp", op, context.DeadlineExceeded).(engineOpMsg)
 		if !ok {
 			t.Fatalf("%s: unexpected message type", op)
 		}
@@ -215,7 +231,7 @@ func TestDeadlineLeniencyTracksOperationLength(t *testing.T) {
 	}
 
 	// A real error is still an error, however long the operation usually takes.
-	result, _ := classifyOpResult("x", "ollama", "pull", errors.New("no such model")).(engineOpMsg)
+	result, _ := classifyOpResult("x", "llamacpp", "pull", errors.New("no such model")).(engineOpMsg)
 	if result.detached || result.err == nil {
 		t.Errorf("a genuine pull error was not reported: %+v", result)
 	}
@@ -242,9 +258,9 @@ func TestPullSpellsByFamily(t *testing.T) {
 }
 
 // TestDownloadPromptUsesTheEnginesSpelling is the regression guard for an
-// Ollama example offered for every engine. "llama3.2" is not a name LM Studio
-// or llama.cpp can download, and llama.cpp's needs a quantization after a colon.
-// Examples are per family, so a fork shows its family's.
+// generic example offered for every engine. llama.cpp's example needs a
+// quantization after a colon. Examples are per family, so a fork shows its
+// family's.
 func TestDownloadPromptUsesTheEnginesSpelling(t *testing.T) {
 	for _, e := range engines.All() {
 		if _, ok := downloadExamples[e.Name]; !ok {
@@ -264,31 +280,32 @@ func TestDownloadPromptUsesTheEnginesSpelling(t *testing.T) {
 // engine with no descriptor here (a peer's variant) keeps the operations the
 // interface already offered.
 func TestDescriptorsGateModelOperations(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	ds := engineDescriptors{
-		"strata": {
-			Version: engines.DescriptorVersion, Engine: "strata", Family: "strata", Label: "Strata",
+		"llamacpp-custom": {
+			Version: engines.DescriptorVersion, Engine: custom.Name, Family: engines.NameLlamaCPP, Label: custom.DisplayName,
 			ModelNaming: engines.ModelNamingExact,
 			Operations: map[string]engines.OperationCapability{
 				engines.OperationLoad: {}, engines.OperationUnload: {},
 			},
 		},
 	}
-	if err := ds.unsupported("strata", modelActions["load"]); err != nil {
+	if err := ds.unsupported("llamacpp-custom", modelActions["load"]); err != nil {
 		t.Errorf("declared load refused: %v", err)
 	}
 	for _, op := range []string{"delete", "pull"} {
-		err := ds.unsupported("strata", modelActions[op])
-		if err == nil || !strings.Contains(err.Error(), "Strata does not support") {
+		err := ds.unsupported("llamacpp-custom", modelActions[op])
+		if err == nil || !strings.Contains(err.Error(), "llama.cpp custom does not support") {
 			t.Errorf("undeclared %s = %v, want refused naming the engine", op, err)
 		}
 	}
 	if err := ds.unsupported("peer-variant", modelActions["delete"]); err != nil {
 		t.Errorf("engine without a descriptor refused: %v", err)
 	}
-	if got := ds.family("strata"); got != "strata" {
+	if got := ds.family("llamacpp-custom"); got != "llamacpp" {
 		t.Errorf("family = %q", got)
 	}
-	if got := ds.family(engines.NameOllama); got != engines.NameOllama {
+	if got := ds.family(engines.NameLlamaCPP); got != engines.NameLlamaCPP {
 		t.Errorf("an engine without a descriptor is its own family, got %q", got)
 	}
 }
@@ -385,12 +402,12 @@ func TestTerminalControlsCanonicalFrames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, broker := nodeInfoRPCFixture(t)
-			request, result := terminalControlsReply(t, broker, modelCmd(client, tc.node, "ollama", "ollama", modelActions[tc.op], "model"), &rpc.Message{Result: []byte(`{}`)})
+			request, result := terminalControlsReply(t, broker, modelCmd(client, tc.node, "llamacpp", "llamacpp", modelActions[tc.op], "model"), &rpc.Message{Result: []byte(`{}`)})
 			var params map[string]string
 			if err := json.Unmarshal(request.Params, &params); err != nil {
 				t.Fatal(err)
 			}
-			want := map[string]string{"engine": "ollama", "model": "model"}
+			want := map[string]string{"engine": "llamacpp", "model": "model"}
 			if tc.node != "" {
 				want["node"] = "peer"
 			}
@@ -412,12 +429,12 @@ func TestTerminalControlsLifecycleFrames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, broker := nodeInfoRPCFixture(t)
-			request, _ := terminalControlsReply(t, broker, engineCmd(client, tc.node, "ollama", tc.method, "start", "start"), &rpc.Message{Result: []byte(`{}`)})
+			request, _ := terminalControlsReply(t, broker, engineCmd(client, tc.node, "llamacpp", tc.method, "start", "start"), &rpc.Message{Result: []byte(`{}`)})
 			var params map[string]string
 			if err := json.Unmarshal(request.Params, &params); err != nil {
 				t.Fatal(err)
 			}
-			want := map[string]string{"engine": "ollama"}
+			want := map[string]string{"engine": "llamacpp"}
 			if tc.node != "" {
 				want["node"] = "peer"
 			}
@@ -444,15 +461,15 @@ func TestTerminalControlsTypedRefusals(t *testing.T) {
 				var cmd tea.Cmd
 				switch family {
 				case "lifecycle":
-					cmd = engineCmd(client, "peer", "ollama", "engine:start", "start", "start")
+					cmd = engineCmd(client, "peer", "llamacpp", "engine:start", "start", "start")
 				case "model":
-					cmd = modelCmd(client, "peer", "ollama", "ollama", modelActions["load"], "model")
+					cmd = modelCmd(client, "peer", "llamacpp", "llamacpp", modelActions["load"], "model")
 				case "settings read":
-					cmd = getEngineSettingsCmd(client, "peer", "ollama")
+					cmd = getEngineSettingsCmd(client, "peer", "llamacpp")
 				case "settings preview":
-					cmd = previewEngineSettingsCmd(client, enginesettings.Request{NodeID: "peer", Engine: "ollama"})
+					cmd = previewEngineSettingsCmd(client, enginesettings.Request{NodeID: "peer", Engine: "llamacpp"})
 				case "settings apply":
-					cmd = applyEngineSettingsCmd(client, enginesettings.Request{NodeID: "peer", Engine: "ollama"})
+					cmd = applyEngineSettingsCmd(client, enginesettings.Request{NodeID: "peer", Engine: "llamacpp"})
 				case "availability":
 					cmd = setAvailabilityCmd(client, availAvailable)
 				}
@@ -519,14 +536,14 @@ func TestEngineStatusLockReadback(t *testing.T) {
 		})
 	}
 	locked, unlocked := true, false
-	test("locked", `{"engine":"ollama","installed":true,"locked":true}`, &locked)
-	test("unlocked", `{"engine":"ollama","installed":true,"locked":false}`, &unlocked)
-	test("absent stays unknown", `{"engine":"ollama","installed":true}`, nil)
+	test("locked", `{"engine":"llamacpp","installed":true,"locked":true}`, &locked)
+	test("unlocked", `{"engine":"llamacpp","installed":true,"locked":false}`, &unlocked)
+	test("absent stays unknown", `{"engine":"llamacpp","installed":true}`, nil)
 
 	t.Run("push without lock clears a stale lock", func(t *testing.T) {
 		d := localDetail()
-		d.engines = []engineStatus{{Engine: "ollama", Installed: true, Locked: &locked}}
-		d.handleNotification(&rpc.Message{Method: "engine:state-changed", Params: json.RawMessage(`{"engine":"ollama","installed":true}`)})
+		d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Locked: &locked}}
+		d.handleNotification(&rpc.Message{Method: "engine:state-changed", Params: json.RawMessage(`{"engine":"llamacpp","installed":true}`)})
 		if len(d.engines) != 1 || d.engines[0].Locked != nil {
 			t.Fatalf("engines after push = %+v, want lock unknown", d.engines)
 		}
@@ -600,17 +617,17 @@ func TestTerminalControlsSavedOff(t *testing.T) {
 		origins               map[string]engineintent.Origin
 		running, remote, want bool
 	}{
-		{"local Off stopped", map[string]bool{"ollama": false}, map[string]engineintent.Origin{"ollama": engineintent.Local}, false, false, true},
-		{"peer Off running", map[string]bool{"ollama": false}, map[string]engineintent.Origin{"ollama": engineintent.Peer}, true, false, true},
-		{"Off without origin", map[string]bool{"ollama": false}, map[string]engineintent.Origin{}, false, false, true},
+		{"local Off stopped", map[string]bool{"llamacpp": false}, map[string]engineintent.Origin{"llamacpp": engineintent.Local}, false, false, true},
+		{"peer Off running", map[string]bool{"llamacpp": false}, map[string]engineintent.Origin{"llamacpp": engineintent.Peer}, true, false, true},
+		{"Off without origin", map[string]bool{"llamacpp": false}, map[string]engineintent.Origin{}, false, false, true},
 		{"missing intent", nil, nil, false, false, false},
 		{"missing entry", map[string]bool{"other": false}, map[string]engineintent.Origin{"other": engineintent.Local}, false, false, false},
-		{"saved On stopped", map[string]bool{"ollama": true}, map[string]engineintent.Origin{}, false, false, false},
-		{"no peer intent", map[string]bool{"ollama": false}, map[string]engineintent.Origin{"ollama": engineintent.Peer}, false, true, false},
+		{"saved On stopped", map[string]bool{"llamacpp": true}, map[string]engineintent.Origin{}, false, false, false},
+		{"no peer intent", map[string]bool{"llamacpp": false}, map[string]engineintent.Origin{"llamacpp": engineintent.Peer}, false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newNodeDetail(nil, nodeRow{self: !tc.remote})
-			d.engines = []engineStatus{{Engine: "ollama", Running: tc.running}}
+			d.engines = []engineStatus{{Engine: "llamacpp", Running: tc.running}}
 			d.intent = engineintent.Snapshot{EnabledByEngine: tc.intent, OffByEngine: tc.origins}
 			d.refreshEngines()
 			rows := d.engineTable.Rows()
@@ -620,7 +637,7 @@ func TestTerminalControlsSavedOff(t *testing.T) {
 			if rows[0][2] != yesNo(tc.running) {
 				t.Fatalf("runtime changed: %v", rows[0])
 			}
-			wantLabel := "ollama"
+			wantLabel := "llamacpp"
 			if tc.want {
 				switch tc.name {
 				case "local Off stopped":
@@ -649,21 +666,21 @@ func TestTerminalControlsOffOrigin(t *testing.T) {
 		remote  bool
 		want    string
 	}{
-		{"local origin", map[string]bool{"ollama": false}, engineintent.Local, false, "ollama (saved Off, local)"},
-		{"peer origin", map[string]bool{"ollama": false}, engineintent.Peer, false, "ollama (saved Off, by peer)"},
-		{"missing origin", map[string]bool{"ollama": false}, "", false, "ollama (saved Off)"},
-		{"invalid origin", map[string]bool{"ollama": false}, "other", false, "ollama (saved Off)"},
-		{"unknown engine", map[string]bool{"other": false}, engineintent.Local, false, "ollama"},
-		{"On with stale origin", map[string]bool{"ollama": true}, engineintent.Local, false, "ollama"},
-		{"remote row", map[string]bool{"ollama": false}, engineintent.Local, true, "ollama"},
+		{"local origin", map[string]bool{"llamacpp": false}, engineintent.Local, false, "llamacpp (saved Off, local)"},
+		{"peer origin", map[string]bool{"llamacpp": false}, engineintent.Peer, false, "llamacpp (saved Off, by peer)"},
+		{"missing origin", map[string]bool{"llamacpp": false}, "", false, "llamacpp (saved Off)"},
+		{"invalid origin", map[string]bool{"llamacpp": false}, "other", false, "llamacpp (saved Off)"},
+		{"unknown engine", map[string]bool{"other": false}, engineintent.Local, false, "llamacpp"},
+		{"On with stale origin", map[string]bool{"llamacpp": true}, engineintent.Local, false, "llamacpp"},
+		{"remote row", map[string]bool{"llamacpp": false}, engineintent.Local, true, "llamacpp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newNodeDetail(nil, nodeRow{self: !tc.remote})
 			d.SetSize(100, 40)
-			d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true, Healthy: true, Port: 11434}}
-			d.intent = engineintent.Snapshot{EnabledByEngine: tc.enabled, OffByEngine: map[string]engineintent.Origin{"ollama": tc.origin}}
+			d.engines = []engineStatus{{Engine: "llamacpp", Installed: true, Running: true, Healthy: true, Port: 8081}}
+			d.intent = engineintent.Snapshot{EnabledByEngine: tc.enabled, OffByEngine: map[string]engineintent.Origin{"llamacpp": tc.origin}}
 			d.refreshEngines()
-			want := []string{tc.want, "yes", "yes", "yes", "11434"}
+			want := []string{tc.want, "yes", "yes", "yes", "8081"}
 			if !tc.remote {
 				want = append(want, "?")
 			}
@@ -680,20 +697,20 @@ func TestTerminalControlsOffOrigin(t *testing.T) {
 		t.Run(event, func(t *testing.T) {
 			d := newNodeDetail(nil, nodeRow{self: true})
 			d.SetSize(100, 40)
-			d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+			d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 			old := detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, intent: engineintent.Snapshot{
-				EnabledByEngine: map[string]bool{"ollama": false},
-				OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local},
+				EnabledByEngine: map[string]bool{"llamacpp": false},
+				OffByEngine:     map[string]engineintent.Origin{"llamacpp": engineintent.Local},
 			}}
 			d.update(old)
-			if !strings.Contains(d.View(), "ollama (saved Off, local)") {
+			if !strings.Contains(d.View(), "llamacpp (saved Off, local)") {
 				t.Fatal("positive control did not render local Off origin")
 			}
-			want := "ollama"
+			want := "llamacpp"
 			switch event {
 			case "On clearing":
 				d.update(detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, intent: engineintent.Snapshot{
-					EnabledByEngine: map[string]bool{"ollama": true}, OffByEngine: map[string]engineintent.Origin{},
+					EnabledByEngine: map[string]bool{"llamacpp": true}, OffByEngine: map[string]engineintent.Origin{},
 				}})
 			case "failed read":
 				d.update(detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, err: errors.New("read failed")})
@@ -709,10 +726,10 @@ func TestTerminalControlsOffOrigin(t *testing.T) {
 			case "late reply after newer generation":
 				d.intentCmd()
 				d.update(detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, intent: engineintent.Snapshot{
-					EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{"ollama": engineintent.Peer},
+					EnabledByEngine: map[string]bool{"llamacpp": false}, OffByEngine: map[string]engineintent.Origin{"llamacpp": engineintent.Peer},
 				}})
 				d.update(old)
-				want = "ollama (saved Off, by peer)"
+				want = "llamacpp (saved Off, by peer)"
 			}
 			if got := d.engineTable.Rows()[0][0]; got != want {
 				t.Fatalf("label = %q, want %q", got, want)
@@ -729,25 +746,25 @@ func TestTerminalControlsOffOrigin(t *testing.T) {
 		width int
 		label string
 	}{
-		{"narrow terminal", 80, "ollama"},
-		{"normal terminal", 100, "ollama"},
-		{"long engine label", 140, "Ollama custom engine with a long display name"},
+		{"narrow terminal", 80, "llamacpp"},
+		{"normal terminal", 100, "llamacpp"},
+		{"long engine label", 140, "llama.cpp custom engine with a long display name"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newNodeDetail(nil, nodeRow{self: true})
 			d.SetSize(tc.width, 40)
-			d.engines = []engineStatus{{Engine: "other"}, {Engine: "ollama", DisplayName: tc.label, Installed: true, Running: true, Port: 11434}}
-			d.intent = engineintent.Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{"ollama": engineintent.Peer}}
+			d.engines = []engineStatus{{Engine: "other"}, {Engine: "llamacpp", DisplayName: tc.label, Installed: true, Running: true, Port: 8081}}
+			d.intent = engineintent.Snapshot{EnabledByEngine: map[string]bool{"llamacpp": false}, OffByEngine: map[string]engineintent.Origin{"llamacpp": engineintent.Peer}}
 			d.refreshEngines()
 			d.engineTable.SetCursor(1)
 			d.refreshEngines()
 			d.SetSize(tc.width, 40)
-			if d.engineTable.Cursor() != 1 || d.selectedEngine().Engine != "ollama" {
+			if d.engineTable.Cursor() != 1 || d.selectedEngine().Engine != "llamacpp" {
 				t.Fatal("refresh lost selected engine")
 			}
 			view := d.engineTable.View()
-			for _, text := range []string{"ENGINE", "INSTALLED", "RUNNING", "HEALTHY", "ENGINE PORT", "ollama", "11434"} {
-				if text == "ollama" {
+			for _, text := range []string{"ENGINE", "INSTALLED", "RUNNING", "HEALTHY", "ENGINE PORT", "llamacpp", "8081"} {
+				if text == "llamacpp" {
 					text = tc.label
 				}
 				if !strings.Contains(view, text) {
@@ -786,7 +803,7 @@ func TestTerminalControlsLocalPauseProvenance(t *testing.T) {
 
 func TestTerminalControlsDescriptorRestrictions(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
-	request, result := terminalControlsReply(t, broker, descriptorsCmd(client), &rpc.Message{Result: []byte(`{"engines":[{"version":1,"engine":"strata","family":"strata","label":"Strata","modelNaming":"exact","operations":{"load":{}}},{"version":999,"engine":"invalid","family":"strata","label":"Invalid","modelNaming":"exact"}]}`)})
+	request, result := terminalControlsReply(t, broker, descriptorsCmd(client), &rpc.Message{Result: []byte(`{"engines":[{"version":1,"engine":"llamacpp-custom","family":"llamacpp","label":"llama.cpp custom","modelNaming":"exact","operations":{"load":{}}},{"version":999,"engine":"invalid","family":"llamacpp","label":"Invalid","modelNaming":"exact"}]}`)})
 	if request.Method != "engine:descriptors" {
 		t.Fatalf("method = %s", request.Method)
 	}
@@ -796,10 +813,10 @@ func TestTerminalControlsDescriptorRestrictions(t *testing.T) {
 	}
 	d := newNodeDetail(nil, nodeRow{self: true})
 	d.descriptors = msg.descriptors
-	if d.refuseModelOp("strata", modelActions["load"]) {
+	if d.refuseModelOp("llamacpp-custom", modelActions["load"]) {
 		t.Fatal("declared operation refused")
 	}
-	if !d.refuseModelOp("strata", modelActions["delete"]) || d.status.kind != toastError {
+	if !d.refuseModelOp("llamacpp-custom", modelActions["delete"]) || d.status.kind != toastError {
 		t.Fatal("undeclared delete offered")
 	}
 	if _, present := d.descriptors["invalid"]; present {
@@ -808,11 +825,11 @@ func TestTerminalControlsDescriptorRestrictions(t *testing.T) {
 }
 
 func TestTerminalControlsTimeoutContracts(t *testing.T) {
-	load := classifyOpResult("load", "ollama", "load", context.DeadlineExceeded).(engineOpMsg)
+	load := classifyOpResult("load", "llamacpp", "load", context.DeadlineExceeded).(engineOpMsg)
 	if !load.detached || load.err != nil {
 		t.Fatalf("load deadline = %+v", load)
 	}
-	stop := classifyOpResult("stop", "ollama", "stop", context.DeadlineExceeded).(engineOpMsg)
+	stop := classifyOpResult("stop", "llamacpp", "stop", context.DeadlineExceeded).(engineOpMsg)
 	if stop.detached || !errors.Is(stop.err, context.DeadlineExceeded) {
 		t.Fatalf("stop deadline = %+v", stop)
 	}
@@ -840,15 +857,15 @@ func TestTerminalControlsRestartRefreshUsesExistingTick(t *testing.T) {
 func TestTerminalControlsLateIntentAfterRestart(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "self", self: true})
-	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`)})
+	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"}}`)})
 	d.handleNotification(&rpc.Message{Method: "service/broker-restarted"})
 	d.update(old)
 	if d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
 		t.Fatal("pre-restart intent restored a saved-Off assertion")
 	}
-	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
+	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"peer"}}`)})
 	d.update(current)
-	if enabled, present := d.intent.EnabledByEngine["ollama"]; !present || enabled || d.intent.OffByEngine["ollama"] != engineintent.Peer {
+	if enabled, present := d.intent.EnabledByEngine["llamacpp"]; !present || enabled || d.intent.OffByEngine["llamacpp"] != engineintent.Peer {
 		t.Fatal("current intent did not replace the retired read")
 	}
 }
@@ -856,9 +873,9 @@ func TestTerminalControlsLateIntentAfterRestart(t *testing.T) {
 func TestTerminalControlsLateIntentAfterManagerReady(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "self", self: true})
-	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`)})
+	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"}}`)})
 	d.update(old)
-	if d.intent.OffByEngine["ollama"] != engineintent.Local {
+	if d.intent.OffByEngine["llamacpp"] != engineintent.Local {
 		t.Fatal("positive control did not retain local origin")
 	}
 	refresh := d.handleNotification(&rpc.Message{Method: "engine:ready"})
@@ -873,12 +890,12 @@ func TestTerminalControlsLateIntentAfterManagerReady(t *testing.T) {
 	if !ok || len(batch) != 2 {
 		t.Fatal("manager readiness did not refresh intent and canonical models")
 	}
-	request, current := terminalControlsReply(t, broker, batch[0], &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
+	request, current := terminalControlsReply(t, broker, batch[0], &rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"peer"}}`)})
 	if request.Method != "engine:intent" {
 		t.Fatalf("method = %q, want engine:intent", request.Method)
 	}
 	d.update(current)
-	want := engineintent.Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{"ollama": engineintent.Peer}}
+	want := engineintent.Snapshot{EnabledByEngine: map[string]bool{"llamacpp": false}, OffByEngine: map[string]engineintent.Origin{"llamacpp": engineintent.Peer}}
 	if !reflect.DeepEqual(d.intent, want) {
 		t.Fatalf("intent = %+v, want %+v", d.intent, want)
 	}
@@ -894,7 +911,7 @@ func TestTerminalControlsLateIntentAfterManagerReady(t *testing.T) {
 		}
 		result := json.RawMessage(`{"subscribed":true}`)
 		if method == "engine:models" {
-			snapshot := tuiDownloadSnapshot()
+			snapshot := tuiLlamaCPPDownloadSnapshot()
 			snapshot.Entries = []modeldownload.Entry{}
 			result = tuiDownloadJSON(t, tuiDownloadInventory(snapshot))
 		}
@@ -908,7 +925,7 @@ func TestTerminalControlsLateIntentAfterManagerReady(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("model hydration did not finish")
 	}
-	if !d.modelReady("ollama", "exact/model") || !reflect.DeepEqual(d.intent, want) {
+	if !d.modelReady("llamacpp", "exact/model") || !reflect.DeepEqual(d.intent, want) {
 		t.Fatal("canonical model hydration lost ready content or refreshed intent")
 	}
 }
@@ -917,16 +934,16 @@ func TestTerminalControlsIntentSnapshotRead(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "self", self: true})
 	request, reply := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{
-		"enabledByEngine":{"ollama":false,"strata":false,"on":true,"unknown":false},
-		"offByEngine":{"ollama":"local","strata":"peer"}
+		"enabledByEngine":{"llamacpp":false,"llamacpp-custom":false,"on":true,"unknown":false},
+		"offByEngine":{"llamacpp":"local","llamacpp-custom":"peer"}
 	}`)})
 	if request.Method != "engine:intent" {
 		t.Fatalf("method = %q, want engine:intent", request.Method)
 	}
 	d.update(reply)
 	want := engineintent.Snapshot{
-		EnabledByEngine: map[string]bool{"ollama": false, "strata": false, "on": true, "unknown": false},
-		OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local, "strata": engineintent.Peer},
+		EnabledByEngine: map[string]bool{"llamacpp": false, "llamacpp-custom": false, "on": true, "unknown": false},
+		OffByEngine:     map[string]engineintent.Origin{"llamacpp": engineintent.Local, "llamacpp-custom": engineintent.Peer},
 	}
 	if !reflect.DeepEqual(d.intent, want) {
 		t.Fatalf("intent = %+v, want %+v", d.intent, want)
@@ -940,21 +957,21 @@ func TestTerminalControlsFailedIntentReadClearsSnapshot(t *testing.T) {
 	}{
 		{"RPC error", rpc.Message{Error: &rpc.RPCError{Code: -32603, Message: "read failed"}}},
 		{"invalid snapshot shape", rpc.Message{Result: []byte(`[]`)}},
-		{"missing origins", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false}}`)}},
-		{"null origins", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":null}`)}},
+		{"missing origins", rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false}}`)}},
+		{"null origins", rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":null}`)}},
 		{"missing enabled map", rpc.Message{Result: []byte(`{"offByEngine":{}}`)}},
-		{"invalid enabled value", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":"false"},"offByEngine":{}}`)}},
-		{"invalid origin", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"other"}}`)}},
-		{"origin for On", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true},"offByEngine":{"ollama":"local"}}`)}},
-		{"unreported origin", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"other":"peer"}}`)}},
+		{"invalid enabled value", rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":"false"},"offByEngine":{}}`)}},
+		{"invalid origin", rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"other"}}`)}},
+		{"origin for On", rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":true},"offByEngine":{"llamacpp":"local"}}`)}},
+		{"unreported origin", rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":{"other":"peer"}}`)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, broker := nodeInfoRPCFixture(t)
 			d := newNodeDetail(client, nodeRow{key: "self", self: true})
-			d.engines = []engineStatus{{Engine: "ollama"}}
-			_, initial := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
+			d.engines = []engineStatus{{Engine: "llamacpp"}}
+			_, initial := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"peer"}}`)})
 			d.update(initial)
-			if d.intent.OffByEngine["ollama"] != engineintent.Peer {
+			if d.intent.OffByEngine["llamacpp"] != engineintent.Peer {
 				t.Fatal("positive control did not retain peer origin")
 			}
 			_, reply := terminalControlsReply(t, broker, d.intentCmd(), &tc.reply)
@@ -982,13 +999,13 @@ func TestTerminalControlsIntentInvalidationRows(t *testing.T) {
 		t.Run(event, func(t *testing.T) {
 			d := newNodeDetail(nil, nodeRow{key: "self", self: true})
 			d.SetSize(100, 40)
-			d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+			d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}}
 			initial := detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, intent: engineintent.Snapshot{
-				EnabledByEngine: map[string]bool{"ollama": false},
-				OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local},
+				EnabledByEngine: map[string]bool{"llamacpp": false},
+				OffByEngine:     map[string]engineintent.Origin{"llamacpp": engineintent.Local},
 			}}
 			d.update(initial)
-			if d.intent.OffByEngine["ollama"] != engineintent.Local {
+			if d.intent.OffByEngine["llamacpp"] != engineintent.Local {
 				t.Fatal("positive control did not retain local origin")
 			}
 			if !strings.Contains(d.View(), "saved Off") {
@@ -1016,15 +1033,15 @@ func TestTerminalControlsIntentInvalidationRows(t *testing.T) {
 func TestTerminalControlsPolicyPushPreservesIntentRead(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "self", self: true})
-	_, reply := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
+	_, reply := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"peer"}}`)})
 	d.handleNotification(&rpc.Message{Method: "policy:changed", Params: []byte(`{"nodeId":"self","policy":{"pausedBy":"local"}}`)})
 	d.update(reply)
-	if enabled, present := d.intent.EnabledByEngine["ollama"]; !present || enabled || d.intent.OffByEngine["ollama"] != engineintent.Peer {
+	if enabled, present := d.intent.EnabledByEngine["llamacpp"]; !present || enabled || d.intent.OffByEngine["llamacpp"] != engineintent.Peer {
 		t.Fatal("unrelated policy push discarded the current intent read")
 	}
-	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true},"offByEngine":{}}`)})
+	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":true},"offByEngine":{}}`)})
 	d.update(current)
-	if enabled, present := d.intent.EnabledByEngine["ollama"]; !present || !enabled || len(d.intent.OffByEngine) != 0 {
+	if enabled, present := d.intent.EnabledByEngine["llamacpp"]; !present || !enabled || len(d.intent.OffByEngine) != 0 {
 		t.Fatal("current On reply was not applied")
 	}
 }
@@ -1035,19 +1052,19 @@ func TestTerminalControlsIntentReadsUseNewestRequest(t *testing.T) {
 		current string
 		want    engineintent.Snapshot
 	}{
-		{"On clears origin", `{"enabledByEngine":{"ollama":true},"offByEngine":{}}`, engineintent.Snapshot{
-			EnabledByEngine: map[string]bool{"ollama": true},
+		{"On clears origin", `{"enabledByEngine":{"llamacpp":true},"offByEngine":{}}`, engineintent.Snapshot{
+			EnabledByEngine: map[string]bool{"llamacpp": true},
 			OffByEngine:     map[string]engineintent.Origin{},
 		}},
-		{"newer origin with unchanged boolean", `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`, engineintent.Snapshot{
-			EnabledByEngine: map[string]bool{"ollama": false},
-			OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Peer},
+		{"newer origin with unchanged boolean", `{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"peer"}}`, engineintent.Snapshot{
+			EnabledByEngine: map[string]bool{"llamacpp": false},
+			OffByEngine:     map[string]engineintent.Origin{"llamacpp": engineintent.Peer},
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, broker := nodeInfoRPCFixture(t)
 			d := newNodeDetail(client, nodeRow{key: "self", self: true})
-			_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`)})
+			_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"}}`)})
 			_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(tc.current)})
 			d.update(current)
 			d.update(old)
@@ -1068,7 +1085,7 @@ func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
 			oldBody := `{"availability":"paused","policy":{"pausedBy":"local"}}`
 			if family == "intent" {
 				oldCmd = oldDetail.intentCmd()
-				oldBody = `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`
+				oldBody = `{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"local"}}`
 			}
 			_, oldReply := terminalControlsReply(t, broker, oldCmd, &rpc.Message{Result: []byte(oldBody)})
 			oldDetail.update(DisconnectedMsg{})
@@ -1077,7 +1094,7 @@ func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
 			currentBody := `{"availability":"available","policy":{}}`
 			if family == "intent" {
 				currentCmd = currentDetail.intentCmd()
-				currentBody = `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`
+				currentBody = `{"enabledByEngine":{"llamacpp":false},"offByEngine":{"llamacpp":"peer"}}`
 			}
 			_, currentReply := terminalControlsReply(t, broker, currentCmd, &rpc.Message{Result: []byte(currentBody)})
 			currentDetail.update(currentReply)
@@ -1086,7 +1103,7 @@ func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
 				if !currentDetail.policyFresh || currentDetail.policy.Availability != "available" || currentDetail.policy.Policy.PausedBy != "" {
 					t.Fatalf("previous visit replaced current policy: %+v", currentDetail.policy)
 				}
-			} else if enabled, present := currentDetail.intent.EnabledByEngine["ollama"]; !present || enabled || currentDetail.intent.OffByEngine["ollama"] != engineintent.Peer {
+			} else if enabled, present := currentDetail.intent.EnabledByEngine["llamacpp"]; !present || enabled || currentDetail.intent.OffByEngine["llamacpp"] != engineintent.Peer {
 				t.Fatal("previous visit replaced current intent")
 			}
 		})
@@ -1094,9 +1111,10 @@ func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
 }
 
 func TestTerminalControlsEngineLock(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	locked, unlocked := true, false
 	lockedEngines := func() []engineStatus {
-		return []engineStatus{{Engine: "ollama", Installed: true, Locked: &locked}, {Engine: "lmstudio", Installed: true, Locked: &unlocked}, {Engine: "llamacpp", Installed: true}}
+		return []engineStatus{{Engine: "llamacpp", Installed: true, Locked: &locked}, {Engine: custom.Name, Installed: true, Locked: &unlocked}}
 	}
 
 	t.Run("lock shown on self and peer", func(t *testing.T) {
@@ -1105,7 +1123,7 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 			d.engines = lockedEngines()
 			d.refreshEngines()
 			rows := d.engineTable.Rows()
-			if rows[0][0] != "ollama (locked on this node)" {
+			if rows[0][0] != "llamacpp (locked on this node)" {
 				t.Fatalf("self=%v locked label = %q", self, rows[0][0])
 			}
 		}
@@ -1113,27 +1131,28 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 	t.Run("absent lock remains unknown", func(t *testing.T) {
 		d := newNodeDetail(nil, nodeRow{self: true})
 		d.engines = lockedEngines()
-		d.refreshEngines()
-		rows := d.engineTable.Rows()
-		for _, i := range []int{1, 2} {
-			if strings.Contains(rows[i][0], "lock") {
-				t.Fatalf("row %d label = %q, want no lock claim", i, rows[i][0])
+		for _, lock := range []*bool{&unlocked, nil} {
+			d.engines[1].Locked = lock
+			d.refreshEngines()
+			rows := d.engineTable.Rows()
+			if strings.Contains(rows[1][0], "lock") {
+				t.Fatalf("row label = %q, want no lock claim", rows[1][0])
 			}
 		}
 	})
 	t.Run("saved Off is not lock", func(t *testing.T) {
 		d := localDetail()
-		d.engines = []engineStatus{{Engine: "ollama"}, {Engine: "lmstudio", Locked: &locked}}
+		d.engines = []engineStatus{{Engine: "llamacpp"}, {Engine: "llamacpp-custom", Locked: &locked}}
 		d.intent = engineintent.Snapshot{
-			EnabledByEngine: map[string]bool{"ollama": false, "lmstudio": false},
-			OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local, "lmstudio": engineintent.Local},
+			EnabledByEngine: map[string]bool{"llamacpp": false, "llamacpp-custom": false},
+			OffByEngine:     map[string]engineintent.Origin{"llamacpp": engineintent.Local, "llamacpp-custom": engineintent.Local},
 		}
 		d.refreshEngines()
 		rows := d.engineTable.Rows()
-		if rows[0][0] != "ollama (saved Off, local)" || rows[1][0] != "lmstudio (locked on this node) (saved Off, local)" {
+		if rows[0][0] != "llamacpp (saved Off, local)" || rows[1][0] != "llamacpp-custom (locked on this node) (saved Off, local)" {
 			t.Fatalf("labels = %q, %q", rows[0][0], rows[1][0])
 		}
-		if d.engineLocked("ollama") {
+		if d.engineLocked("llamacpp") {
 			t.Fatal("saved Off was read as a lock")
 		}
 		// A saved Off engine is still startable; the target decides.
@@ -1154,13 +1173,14 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 			}
 			d.status.info("")
 		}
-		if !d.refuseModelOp("ollama", modelActions["load"]) || !strings.Contains(d.status.text, engineLockedMessage) {
+		if !d.refuseModelOp("llamacpp", modelActions["load"]) || !strings.Contains(d.status.text, engineLockedMessage) {
 			t.Fatalf("locked load was not refused: %+v", d.status)
 		}
-		if d.refuseModelOp("lmstudio", modelActions["load"]) {
+		if d.refuseModelOp("llamacpp-custom", modelActions["load"]) {
 			t.Fatal("unlocked engine load was refused")
 		}
-		if d.refuseModelOp("llamacpp", modelActions["load"]) {
+		d.engines[1].Locked = nil
+		if d.refuseModelOp("llamacpp-custom", modelActions["load"]) {
 			t.Fatal("unreported lock refused a load; the target decides")
 		}
 	})
@@ -1171,7 +1191,7 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 			t.Fatalf("locked stop was refused: %s", d.status.render())
 		}
 		for _, op := range []string{"unload", "delete", "pull"} {
-			if d.refuseModelOp("ollama", modelActions[op]) {
+			if d.refuseModelOp("llamacpp", modelActions[op]) {
 				t.Fatalf("locked %s was refused: %s", op, d.status.render())
 			}
 		}
@@ -1196,13 +1216,13 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 		client, broker := nodeInfoRPCFixture(t)
 		d := newNodeDetail(client, nodeRow{key: "peer", name: "Peer", membership: membershipMember, presence: presenceOnline})
 		d.remotePermission, d.remotePermissionFresh = remotePermission{Version: 1, Allowed: true, State: "allowed"}, true
-		snapshot := tuiDownloadSnapshot()
+		snapshot := tuiLlamaCPPDownloadSnapshot()
 		snapshot.Entries = []modeldownload.Entry{}
-		if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"ollama": {"model"}}, DownloadState: snapshot, current: true}, true) {
+		if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"llamacpp": {"model"}}, DownloadState: snapshot, current: true}, true) {
 			t.Fatal("ready canonical inventory rejected")
 		}
 		const pausedText = "This node is paused. Resume it on this node before managing it remotely."
-		_, result := terminalControlsReply(t, broker, d.modelCmd("ollama", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32011, Message: pausedText}})
+		_, result := terminalControlsReply(t, broker, d.modelCmd("llamacpp", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32011, Message: pausedText}})
 		if cmd, _ := d.update(result); cmd != nil {
 			t.Fatal("pause refusal scheduled a retry")
 		}
@@ -1218,13 +1238,14 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 // A locked engine that is also saved Off must still read as locked when the
 // narrow engine column clips its label at 80 columns.
 func TestLockedEngineRowSurvivesNarrowColumn(t *testing.T) {
+	custom := tuiCustomEngine(t)
 	locked := true
 	d := localDetail()
 	d.SetSize(80, 30)
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Locked: &locked}, {Engine: "lmstudio", Installed: true}}
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}, {Engine: custom.Name, Installed: true, Locked: &locked}}
 	d.intent = engineintent.Snapshot{
-		EnabledByEngine: map[string]bool{"ollama": false, "lmstudio": false},
-		OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local, "lmstudio": engineintent.Local},
+		EnabledByEngine: map[string]bool{"llamacpp": false, "llamacpp-custom": false},
+		OffByEngine:     map[string]engineintent.Origin{"llamacpp": engineintent.Local, "llamacpp-custom": engineintent.Local},
 	}
 	d.refreshEngines()
 	d.engineTable.SetHeight(8)
@@ -1232,10 +1253,10 @@ func TestLockedEngineRowSurvivesNarrowColumn(t *testing.T) {
 	var lockedRow, plainRow string
 	for _, line := range strings.Split(rendered, "\n") {
 		switch {
-		case strings.Contains(line, "ollama"):
-			lockedRow = line
-		case strings.Contains(line, "lmstudio"):
+		case strings.Contains(line, "llamacpp ("):
 			plainRow = line
+		case strings.Contains(line, "llamacpp-custom"):
+			lockedRow = line
 		}
 	}
 	if !strings.Contains(lockedRow, "(locked") {

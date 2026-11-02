@@ -156,7 +156,7 @@ func TestEnterAfterAFailedSearchDownloadsNothing(t *testing.T) {
 // TestUnsearchableCatalogStillFiltersLocally checks a source that cannot search
 // keeps the local filter, which issues no request.
 func TestUnsearchableCatalogStillFiltersLocally(t *testing.T) {
-	b := loadedBrowser()
+	b := loadedLlamaCPPBrowser()
 	if cmd := typeSearch(b, "qwen"); cmd != nil {
 		t.Error("filtering a source that cannot search sent a request")
 	}
@@ -180,6 +180,21 @@ func loadedBrowser() *catalogBrowser {
 	return b
 }
 
+func loadedLlamaCPPBrowser() *catalogBrowser {
+	b := newCatalogBrowser(nil, "llamacpp", "llama.cpp", "this-host", false)
+	b.SetSize(100, 24)
+	b.update(catalogLoadedMsg{
+		engine:    "llamacpp",
+		fetchedAt: "2026-07-21T02:07:47Z",
+		models: []catalogModel{
+			{ID: "llama3.2:8b", Name: "llama3.2:8b", Size: 5 << 30, Family: "llama", ParameterSize: "8B"},
+			{ID: "qwen3:4b", Name: "qwen3:4b", Size: 2 << 30, Family: "qwen", ParameterSize: "4B"},
+			{ID: "phi4", Name: "phi4", Size: 9 << 30, Family: "phi", ParameterSize: "14B"},
+		},
+	})
+	return b
+}
+
 func browserKey(b *catalogBrowser, k string) (string, bool) {
 	var msg tea.KeyMsg
 	switch k {
@@ -196,7 +211,7 @@ func browserKey(b *catalogBrowser, k string) (string, bool) {
 
 // TestCatalogListsModels checks a loaded catalogue reaches the table.
 func TestCatalogListsModels(t *testing.T) {
-	b := loadedBrowser()
+	b := loadedLlamaCPPBrowser()
 	if b.loading {
 		t.Error("still loading after the reply landed")
 	}
@@ -215,7 +230,7 @@ func TestCatalogListsModels(t *testing.T) {
 // TestCatalogFilterNarrowsLocally is the point of the browser: search over the
 // whole list without another request, since there is no server-side search.
 func TestCatalogFilterNarrowsLocally(t *testing.T) {
-	b := loadedBrowser()
+	b := loadedLlamaCPPBrowser()
 
 	b.filter = "qwen"
 	b.refresh()
@@ -249,7 +264,7 @@ func TestCatalogFilterNarrowsLocally(t *testing.T) {
 // TestCatalogSortCyclesAndOrders checks the sort key cycles and that size sorts
 // largest-first.
 func TestCatalogSortCyclesAndOrders(t *testing.T) {
-	b := loadedBrowser()
+	b := loadedLlamaCPPBrowser()
 	if b.sortBy != catalogSortDefault {
 		t.Fatal("did not open on the backend's order")
 	}
@@ -266,7 +281,7 @@ func TestCatalogSortCyclesAndOrders(t *testing.T) {
 	if b.sortBy != catalogSortSize {
 		t.Fatalf("second sort = %v", b.sortBy)
 	}
-	if b.shown[0].Name != "phi4:latest" {
+	if b.shown[0].Name != "phi4" {
 		t.Errorf("size sort leads with %q, want the largest", b.shown[0].Name)
 	}
 
@@ -293,7 +308,7 @@ func TestCatalogEnterReturnsPullReadyName(t *testing.T) {
 
 // TestCatalogEscapeSelectsNothing checks backing out downloads nothing.
 func TestCatalogEscapeSelectsNothing(t *testing.T) {
-	b := loadedBrowser()
+	b := loadedLlamaCPPBrowser()
 	picked, open := browserKey(b, "esc")
 	if open {
 		t.Error("esc left the browser open")
@@ -311,7 +326,7 @@ func TestCatalogEscapeSelectsNothing(t *testing.T) {
 // CapturingInput method on the browser that nothing in production consulted, so
 // it proved a path that never ran.
 func TestCatalogSearchCapturesKeys(t *testing.T) {
-	b := loadedBrowser()
+	b := loadedLlamaCPPBrowser()
 	browserKey(b, "/")
 	if !b.searching {
 		t.Fatal("search did not take the keyboard")
@@ -333,9 +348,9 @@ func TestCatalogSearchCapturesKeys(t *testing.T) {
 // TestCatalogLoadFailureExplainsItself checks a failed load says so instead of
 // showing an empty list that reads as "this engine has nothing".
 func TestCatalogLoadFailureExplainsItself(t *testing.T) {
-	b := newCatalogBrowser(nil, "ollama", "Ollama", "this-host", false)
+	b := newCatalogBrowser(nil, "llamacpp", "llama.cpp", "this-host", false)
 	b.SetSize(100, 24)
-	b.update(catalogLoadedMsg{engine: "ollama", err: errFake{}})
+	b.update(catalogLoadedMsg{engine: "llamacpp", err: errFake{}})
 
 	if b.loading {
 		t.Error("still loading after a failure")
@@ -348,13 +363,13 @@ func TestCatalogLoadFailureExplainsItself(t *testing.T) {
 // TestCatalogLoadFailureCanBeRetried is the regression guard for a failed load
 // with no way forward but closing the browser and opening it again.
 func TestCatalogLoadFailureCanBeRetried(t *testing.T) {
-	b := newCatalogBrowser(nil, "ollama", "Ollama", "this-host", false)
+	b := newCatalogBrowser(nil, "llamacpp", "llama.cpp", "this-host", false)
 	b.SetSize(100, 24)
 	if cmd, _, _ := b.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}); cmd != nil {
 		t.Error("r reloaded a catalog that had not failed")
 	}
 
-	b.update(catalogLoadedMsg{engine: "ollama", err: errFake{}})
+	b.update(catalogLoadedMsg{engine: "llamacpp", err: errFake{}})
 	if !strings.Contains(b.View(), "Press r to try again") {
 		t.Errorf("a failed load did not offer a retry: %q", b.View())
 	}
@@ -366,7 +381,7 @@ func TestCatalogLoadFailureCanBeRetried(t *testing.T) {
 		t.Error("the retry did not show the catalog as loading")
 	}
 
-	loaded := loadedBrowser()
+	loaded := loadedLlamaCPPBrowser()
 	if loaded.failed {
 		t.Error("a successful load was counted as a failure")
 	}
@@ -375,10 +390,11 @@ func TestCatalogLoadFailureCanBeRetried(t *testing.T) {
 // TestCatalogIgnoresOtherEnginesReply checks a late reply for an engine the
 // operator has moved on from does not populate this browser.
 func TestCatalogIgnoresOtherEnginesReply(t *testing.T) {
-	b := newCatalogBrowser(nil, "ollama", "Ollama", "this-host", false)
+	custom := tuiCustomEngine(t)
+	b := newCatalogBrowser(nil, "llamacpp", "llama.cpp", "this-host", false)
 	b.SetSize(100, 24)
 	b.update(catalogLoadedMsg{
-		engine: "lmstudio",
+		engine: custom.Name,
 		models: []catalogModel{{ID: "x", Name: "x"}},
 	})
 	if len(b.all) != 0 {
@@ -400,13 +416,13 @@ func TestCatalogEmptyCatalogIsDistinctFromNoMatch(t *testing.T) {
 
 // TestPeerCatalogNamesTheMachineItWasFilteredFor checks a peer's list states
 // both halves of what it was filtered for. The operating system alone does not
-// decide what installs: an Intel Mac and an Apple Silicon one are offered
-// different LM Studio lists.
+// decide what installs: an Intel Mac and an Apple Silicon one can be offered
+// different model lists.
 func TestPeerCatalogNamesTheMachineItWasFilteredFor(t *testing.T) {
-	b := newCatalogBrowser(nil, "lmstudio", "LM Studio", "peer-host", true)
+	b := newCatalogBrowser(nil, "llamacpp", "llama.cpp", "peer-host", true)
 	b.SetSize(100, 24)
 	b.update(catalogLoadedMsg{
-		engine: "lmstudio",
+		engine: "llamacpp",
 		target: "darwin/amd64",
 		models: []catalogModel{{ID: "x", Name: "x"}},
 	})
@@ -415,7 +431,7 @@ func TestPeerCatalogNamesTheMachineItWasFilteredFor(t *testing.T) {
 	}
 
 	// This machine's own list needs no caveat: it is filtered for itself.
-	local := loadedBrowser()
+	local := loadedLlamaCPPBrowser()
 	local.target = "darwin/arm64"
 	if got := local.summary(); strings.Contains(got, "filtered for") {
 		t.Errorf("local summary %q carries a caveat meant for peers", got)

@@ -21,10 +21,11 @@ func switchDetail(t *testing.T, remote bool) (*nodeDetail, *reconnectUIFixture) 
 	f := newReconnectUIFixture(t)
 	d := newNodeDetail(f.client, nodeRow{key: "node", name: "fixture", self: !remote,
 		presence: presenceOnline, membership: membershipMember})
-	d.engines = []engineStatus{{Engine: "ollama", Installed: true}, {Engine: "lmstudio", Installed: true}}
+	custom := tuiCustomEngine(t)
+	d.engines = []engineStatus{{Engine: "llamacpp", Installed: true}, {Engine: custom.Name, Installed: true}}
 	d.refreshEngines()
 	d.SetSize(100, 40)
-	d.engineSwitch.source, d.engineSwitch.target = "ollama", "lmstudio"
+	d.engineSwitch.source, d.engineSwitch.target = "llamacpp", "llamacpp-custom"
 	d.engineSwitch.revision, d.engineSwitch.fresh = "e3v1:"+strings.Repeat("a", 64), true
 	d.remotePermissionFresh = true
 	d.remotePermission = remotePermission{Version: 1, Allowed: true, State: "allowed"}
@@ -575,7 +576,7 @@ func TestSwitchCanonicalFramesAndDuplicateSubmit(t *testing.T) {
 			if err := json.Unmarshal(req.Params, &write); err != nil {
 				t.Fatal(err)
 			}
-			if req.Method != enginesettings.SwitchMethod || write.NodeID != d.nodeArg() || write.ExpectedRevision != "fresh-revision" || write.RequestID == "" || write.SourceEngine != "ollama" || write.TargetEngine != "lmstudio" {
+			if req.Method != enginesettings.SwitchMethod || write.NodeID != d.nodeArg() || write.ExpectedRevision != "fresh-revision" || write.RequestID == "" || write.SourceEngine != "llamacpp" || write.TargetEngine != "llamacpp-custom" {
 				t.Fatalf("switch frame: %s %+v", req.Method, write)
 			}
 			wait, _ := d.update(reply)
@@ -749,7 +750,7 @@ func TestSwitchFollowNewActiveAfterDefiniteRefusal(t *testing.T) {
 			d.engineSwitch.requestID, d.engineSwitch.active, readback != nil)
 	}
 	r := switchReceipt(d, 3, enginesettings.SwitchCompleted)
-	r.Request.SourceEngine, r.Request.TargetEngine = "lmstudio", "ollama"
+	r.Request.SourceEngine, r.Request.TargetEngine = "llamacpp-custom", "llamacpp"
 	req, reply := terminalControlsReply(t, f.broker, readback,
 		switchResponse(t, enginesettings.SwitchStatus{Receipt: &r}))
 	var params enginesettings.SwitchStatusRequest
@@ -761,10 +762,10 @@ func TestSwitchFollowNewActiveAfterDefiniteRefusal(t *testing.T) {
 	}
 	d.update(reply)
 	s := &d.engineSwitch
-	if s.source != "ollama" || s.target != "lmstudio" || s.refusal == nil {
+	if s.source != "llamacpp" || s.target != "llamacpp-custom" || s.refusal == nil {
 		t.Fatal("adopting active request lost draft or refusal")
 	}
-	for _, want := range []string{"remote management denied", "permission revoked before acceptance", "Request: new-active", "From lmstudio To ollama", "phase completed"} {
+	for _, want := range []string{"remote management denied", "permission revoked before acceptance", "Request: new-active", "From llamacpp-custom To llamacpp", "phase completed"} {
 		if !strings.Contains(d.switchView(), want) {
 			t.Fatalf("missing %q in switch view: %s", want, d.switchView())
 		}
@@ -862,7 +863,7 @@ func TestSwitchPermissionAndBlockedDraft(t *testing.T) {
 			t.Fatal("permission confused with engine capability")
 		}
 	}
-	if d.engineSwitch.source != "ollama" || d.engineSwitch.target != "lmstudio" {
+	if d.engineSwitch.source != "llamacpp" || d.engineSwitch.target != "llamacpp-custom" {
 		t.Fatal("denial lost draft")
 	}
 }
@@ -883,7 +884,7 @@ func TestSwitchTypedRefusalsSurviveReadback(t *testing.T) {
 			baseline.requestID = ""
 			baseline.status.ConfigurationRevision = "new"
 			d.applySwitch(baseline)
-			if !strings.Contains(d.switchView(), tc.text) || d.engineSwitch.source != "ollama" {
+			if !strings.Contains(d.switchView(), tc.text) || d.engineSwitch.source != "llamacpp" {
 				t.Fatalf("refusal/draft lost: %s", d.switchView())
 			}
 			if tc.code == -32012 && d.remotePermissionFresh {
@@ -919,14 +920,14 @@ func TestSwitchDraftIdentitySurvivesReorder(t *testing.T) {
 	d.engineSwitch.open = true
 	d.engines[0], d.engines[1] = d.engines[1], d.engines[0]
 	d.refreshEngines()
-	if d.engineSwitch.source != "ollama" || d.engineSwitch.target != "lmstudio" {
+	if d.engineSwitch.source != "llamacpp" || d.engineSwitch.target != "llamacpp-custom" {
 		t.Fatal("reorder changed captured identity")
 	}
 	if !d.CapturingInput() {
 		t.Fatal("switch editor does not own keyboard")
 	}
 	view := d.View()
-	for _, text := range []string{"Reported service build:", "From ollama", "To lmstudio"} {
+	for _, text := range []string{"Reported service build:", "From llamacpp", "To llamacpp-custom"} {
 		if !strings.Contains(view, text) {
 			t.Fatalf("missing %q", text)
 		}
@@ -1314,7 +1315,7 @@ func TestSwitchDefiniteRefusalAfterRestartWithNoActive(t *testing.T) {
 		t.Fatalf("definitely refused identity stranded: %q", reason)
 	}
 	if d.engineSwitch.state != switchRefused || d.engineSwitch.refusal == nil ||
-		!strings.Contains(d.switchView(), "refused before acceptance") || d.engineSwitch.source != "ollama" {
+		!strings.Contains(d.switchView(), "refused before acceptance") || d.engineSwitch.source != "llamacpp" {
 		t.Fatal("retirement lost refusal or draft evidence")
 	}
 }
