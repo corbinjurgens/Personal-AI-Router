@@ -156,9 +156,16 @@ func TestModelDownloadJournalEncodedByteBound(t *testing.T) {
 }
 
 func TestModelDownloadJournalSerializesCrossEnginePublication(t *testing.T) {
-	d := testModelDownloads(t)
+	other, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+	if !ok {
+		t.Fatal("invalid descriptor engine")
+	}
+	d := newModelDownloads(newOpID(), t.TempDir(), map[string]string{
+		engines.NameLlamaCPP: engines.ModelNamingExact,
+		other.Name:           engines.ModelNamingExact,
+	})
 	a := reserveModelDownload(t, d, "llamacpp", "one", engines.ModelNamingExact)
-	b := reserveModelDownload(t, d, "ollama", "two", engines.ModelNamingImpliedLatestTag)
+	b := reserveModelDownload(t, d, other.Name, "two", engines.ModelNamingExact)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var firstSync sync.Once
 	d.store.replace.SyncDir = func(string) error { firstSync.Do(func() { close(entered); <-release }); return nil }

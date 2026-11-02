@@ -89,7 +89,7 @@ func TestBundledLoadBudgets(t *testing.T) {
 
 func TestModelOperationErrors(t *testing.T) {
 	ex := bundledTestExecutor(t)
-	if _, _, err := ex.modelOperationCall("ollama", "load", ""); err == nil || !strings.Contains(err.Error(), "model is required") {
+	if _, _, err := ex.modelOperationCall("llamacpp", "load", ""); err == nil || !strings.Contains(err.Error(), "model is required") {
 		t.Errorf("empty model error = %v", err)
 	}
 	if _, _, err := ex.modelOperationCall("nope", "load", "m"); err == nil || !strings.Contains(err.Error(), "unknown engine") {
