@@ -142,16 +142,16 @@ func TestErrorContextIsShownForTheSelectedRow(t *testing.T) {
 		Message:    "install failed",
 		Timestamp:  time.Now().UnixMilli(),
 		Severity:   "error",
-		EngineType: "ollama",
+		EngineType: "llamacpp",
 		Operation:  "install",
 		ModelName:  "llama3.2",
 		Action:     "retry",
 	}})
 
 	got := v.View()
-	// The display name, not the wire id: the operator sees "Ollama" everywhere
+	// The display name, not the wire id: the operator sees "llama.cpp" everywhere
 	// else, and an error is a poor place to introduce a second name for it.
-	for _, want := range []string{"Ollama", "install", "llama3.2", "retry"} {
+	for _, want := range []string{"llama.cpp", "install", "llama3.2", "retry"} {
 		if !contains(got, want) {
 			t.Errorf("context %q is missing from the view:\n%s", want, got)
 		}
@@ -215,7 +215,7 @@ func TestErrorActionNoneIsNotAdvice(t *testing.T) {
 		ID:         "e1",
 		Message:    "informational",
 		Timestamp:  time.Now().UnixMilli(),
-		EngineType: "lmstudio",
+		EngineType: "llamacpp",
 		Action:     "none",
 	}})
 
@@ -223,7 +223,7 @@ func TestErrorActionNoneIsNotAdvice(t *testing.T) {
 	if contains(got, "suggested") {
 		t.Errorf("action=none was rendered as advice: %q", got)
 	}
-	if !contains(got, "LM Studio") {
+	if !contains(got, "llama.cpp") {
 		t.Errorf("the engine was dropped along with it: %q", got)
 	}
 }
