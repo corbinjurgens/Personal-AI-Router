@@ -87,10 +87,7 @@ func writePrivateBrokerEngineSettings(t *testing.T, configDir, clusterDir string
 		if _, exists := journal[name]; exists {
 			continue
 		}
-		engine, ok := engines.ByName(name)
-		if !ok {
-			t.Fatalf("unknown fixture engine %q", name)
-		}
+		engine := privateFixtureEngine(t, name)
 		portPath := filepath.Join(jointAppDir(configDir), engine.PortFile)
 		portData, portErr := os.ReadFile(portPath)
 		if portErr == nil {
@@ -133,10 +130,25 @@ func writePrivateBrokerEngineSettings(t *testing.T, configDir, clusterDir string
 	}
 }
 
+func privateFixtureEngine(t *testing.T, name string) engines.Engine {
+	t.Helper()
+	if engine, ok := engines.ByName(name); ok {
+		return engine
+	}
+	if name == "llamacpp-custom" {
+		engine, ok := engines.DynamicEngine(name, "llama.cpp custom")
+		if ok {
+			return engine
+		}
+	}
+	t.Fatalf("unknown fixture engine %q", name)
+	return engines.Engine{}
+}
+
 func TestPrivateBrokerEngineSettings(t *testing.T) {
 	t.Run("selected facades use an owned unavailable backend", func(t *testing.T) {
 		configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
-		facades := map[string]int{"ollama": freePort(t), "llamacpp": freePort(t)}
+		facades := map[string]int{"llamacpp-custom": freePort(t), "llamacpp": freePort(t)}
 		writePrivateBrokerEngineSettings(t, configDir, clusterDir, facades)
 		data, err := os.ReadFile(filepath.Join(filepath.Dir(clusterDir), "engine-settings-operations.json"))
 		if err != nil {
@@ -163,10 +175,7 @@ func TestPrivateBrokerEngineSettings(t *testing.T) {
 			if err := validateFixturePort(snapshot.Settings.ServerPort); err != nil {
 				t.Fatal(err)
 			}
-			engine, ok := engines.ByName(name)
-			if !ok {
-				t.Fatalf("unknown fixture engine %q", name)
-			}
+			engine := privateFixtureEngine(t, name)
 			data, err := os.ReadFile(filepath.Join(jointAppDir(configDir), engine.PortFile))
 			if err != nil {
 				t.Fatal(err)
@@ -240,7 +249,7 @@ func TestPrivateBrokerEngineSettings(t *testing.T) {
 		if err := os.WriteFile(portPath, portData, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		facades := map[string]int{"llamacpp": freePort(t), "ollama": freePort(t)}
+		facades := map[string]int{"llamacpp": freePort(t), "llamacpp-custom": freePort(t)}
 		writePrivateBrokerEngineSettings(t, configDir, clusterDir, facades)
 		before, err := os.ReadFile(path)
 		if err != nil {
@@ -250,7 +259,7 @@ func TestPrivateBrokerEngineSettings(t *testing.T) {
 		if err := json.Unmarshal(before, &journal); err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(journal["llamacpp"], intentional) || len(journal["ollama"]) == 0 {
+		if !bytes.Equal(journal["llamacpp"], intentional) || len(journal["llamacpp-custom"]) == 0 {
 			t.Fatalf("private journal changed or missing new engine: %s", before)
 		}
 		actual, err := os.ReadFile(portPath)
@@ -272,8 +281,8 @@ func TestDisabledBuiltinOverridesPreservePrivateEngine(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	private := []byte(`{"engine":"ollama","runtime":{"port":12345,"ready":{"http":"http://127.0.0.1:{port}/api/version"}}}`)
-	path := filepath.Join(dir, "ollama.json")
+	private := []byte(`{"engine":"llamacpp","runtime":{"port":12345,"ready":{"http":"http://127.0.0.1:{port}/health"}}}`)
+	path := filepath.Join(dir, "llamacpp.json")
 	if err := os.WriteFile(path, private, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +292,7 @@ func TestDisabledBuiltinOverridesPreservePrivateEngine(t *testing.T) {
 		t.Fatalf("private engine changed: %q, %v", actual, err)
 	}
 	for _, engine := range engines.All() {
-		if engine.Name == "ollama" {
+		if engine.Name == engines.NameLlamaCPP {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(dir, engine.Name+".json"))

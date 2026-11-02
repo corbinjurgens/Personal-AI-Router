@@ -248,9 +248,9 @@ func assertPlaintextRefused(t *testing.T, hostPath, body string) {
 // dataPlaneWorkloadFrame is what a non-member tries to inject; dataPlanePeerFrame
 // is what the legitimate pinned peer sends. They are deliberately distinguishable
 // so an accepted event can never be confused with a refused one.
-const dataPlaneWorkloadFrame = `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"intruder-wl","model":"m","engine":"ollama","state":"running","originatedFrom":"intruder-node","createdAt":1716998400000}}}`
+const dataPlaneWorkloadFrame = `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"intruder-wl","model":"m","engine":"llamacpp","state":"running","originatedFrom":"intruder-node","createdAt":1716998400000}}}`
 
-const dataPlanePeerFrame = `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"pinned-peer-wl","model":"m","engine":"ollama","state":"running","originatedFrom":"data-plane-peer","createdAt":1716998400000}}}`
+const dataPlanePeerFrame = `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"pinned-peer-wl","model":"m","engine":"llamacpp","state":"running","originatedFrom":"data-plane-peer","createdAt":1716998400000}}}`
 
 const dataPlaneErrorsEnvelope = `{"nodeId":"intruder-node","errors":[{"id":"intruder:err","nodeId":"intruder-node","severity":"error","message":"injected"}]}`
 

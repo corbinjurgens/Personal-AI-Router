@@ -28,7 +28,7 @@ import (
 
 // secure_inference_test.go is the cross-process proof that inference is gated on
 // cluster membership end to end. It pairs two real cluster-managers (A and B) so
-// each holds the other's pin on disk, runs each node's real ollama-proxy against
+// each holds the other's pin on disk, runs each node's real llamacpp-proxy against
 // that cluster dir, and then drives actual traffic:
 //
 //   - A client on A's loopback facade routes an inference request to B; A dials
@@ -42,10 +42,10 @@ import (
 //     access immediately without any restart.
 //
 // The engines here are httptest servers bound to loopback, standing in for
-// Ollama; the mTLS identities and pins are the real ones the cluster-manager
+// llama.cpp; the mTLS identities and pins are the real ones the cluster-manager
 // mints and exchanges during pairing, so the crypto path is genuine.
 
-// proxyProc is a running ollama-proxy subprocess driven over stdio.
+// proxyProc is a running llamacpp-proxy subprocess driven over stdio.
 type proxyProc struct {
 	t      *testing.T
 	cmd    *exec.Cmd
@@ -56,7 +56,7 @@ type proxyProc struct {
 	port   int // the listen port the proxy reported via its ready notification
 }
 
-// startProxyProc launches ollama-proxy with the given cluster dir on a fresh
+// startProxyProc launches llamacpp-proxy with the given cluster dir on a fresh
 // port and blocks until it reports ready. Its persisted-port store is isolated
 // into a temp config dir so the test never reads or writes the developer's real
 // config.
@@ -91,11 +91,11 @@ func startProxyProc(t *testing.T, clusterDir, originNodeID string, listenPort in
 	p.msgs = startMsgReader(stdout)
 	bindProxyFixtureIdentity(t, originNodeID, p.call)
 
-	// The mTLS ingress under test is engine-agnostic; Ollama is an arbitrary
+	// The mTLS ingress under test is engine-agnostic; llama.cpp is an arbitrary
 	// pick. The bound port comes from the enable response rather than the ready
 	// notification, which is where the broker reads it too.
 	resp := p.call("facade/enable", map[string]any{
-		"engine":              "ollama",
+		"engine":              engines.NameLlamaCPP,
 		"port":                listenPort,
 		"ignorePersistedPort": true,
 	})
@@ -217,19 +217,19 @@ func (p *proxyProc) setLocalBackend(engine, host string, port int, healthy bool)
 	})
 }
 
-// pushOllamaPeer feeds the proxy a discovery:nodes snapshot advertising a single
-// remote peer that runs ollama at proxyPort, tagged as a trusted cluster member
+// pushLlamaCPPPeer feeds the proxy a discovery:nodes snapshot advertising a single
+// remote peer that runs llama.cpp at proxyPort, tagged as a trusted cluster member
 // keyed by clusterUUID (the peer's cluster cert principal).
-func (p *proxyProc) pushOllamaPeer(name, ip, clusterUUID string, proxyPort int, models []string) {
-	p.notify(engines.AddressMethod("ollama", "discovery:nodes"), map[string]any{
+func (p *proxyProc) pushLlamaCPPPeer(name, ip, clusterUUID string, proxyPort int, models []string) {
+	p.notify(engines.AddressMethod(engines.NameLlamaCPP, "discovery:nodes"), map[string]any{
 		"nodes": []map[string]any{{
 			"hostUuid":       name,
 			"name":           name,
 			"ip":             ip,
 			"clusterUuid":    clusterUUID,
 			"trusted":        true,
-			"services":       map[string]any{"ol": map[string]any{"port": proxyPort}},
-			"modelsByEngine": map[string]any{"ollama": models},
+			"services":       map[string]any{"lc": map[string]any{"port": proxyPort}},
+			"modelsByEngine": map[string]any{engines.NameLlamaCPP: models},
 			"lastSeen":       time.Now().Unix(),
 		}},
 	})
@@ -242,7 +242,7 @@ func (p *proxyProc) waitForRoutableNode(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		resp := p.call(engines.AddressMethod("ollama", "nodes/list"), nil)
+		resp := p.call(engines.AddressMethod(engines.NameLlamaCPP, "nodes/list"), nil)
 		var r struct {
 			Nodes []json.RawMessage `json:"nodes"`
 		}
@@ -254,21 +254,21 @@ func (p *proxyProc) waitForRoutableNode(t *testing.T) {
 	t.Fatal("proxy never registered the pushed discovery node")
 }
 
-// startFakeOllama runs a loopback httptest server that answers the model-list
-// and generate routes an ollama-proxy forwards, counting generate calls so the
+// startFakeLlamaCPP runs a loopback httptest server that answers the model-list
+// and completion routes a llamacpp-proxy forwards, counting completion calls so the
 // test can prove whether a request actually reached the backend engine.
-func startFakeOllama(t *testing.T) (host string, port int, generates *int32) {
+func startFakeLlamaCPP(t *testing.T) (host string, port int, generates *int32) {
 	t.Helper()
 	var n int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/tags":
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"models":[{"name":"m:latest","model":"m:latest"}]}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/generate":
+			io.WriteString(w, `{"data":[{"id":"m"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 			atomic.AddInt32(&n, 1)
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"model":"m:latest","response":"hello from the backend","done":true}`)
+			io.WriteString(w, `{"model":"m","choices":[{"message":{"role":"assistant","content":"hello from the backend"},"finish_reason":"stop"}]}`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -310,24 +310,24 @@ func TestSecureInferenceClusterMTLS(t *testing.T) {
 
 	// Each node's engine is a loopback httptest server. Only B needs a working
 	// backend for the A->B path; A routes out to B rather than serving locally.
-	bEngineHost, bEnginePort, bGenerates := startFakeOllama(t)
+	bEngineHost, bEnginePort, bGenerates := startFakeLlamaCPP(t)
 
 	proxyB := startProxyProc(t, clusterB, bInfo.NodeUUID, freePort(t))
 	defer proxyB.stop()
-	proxyB.setLocalBackend("ollama", bEngineHost, bEnginePort, true)
+	proxyB.setLocalBackend(engines.NameLlamaCPP, bEngineHost, bEnginePort, true)
 
 	proxyA := startProxyProc(t, clusterA, aInfo.NodeUUID, freePort(t))
 	defer proxyA.stop()
-	// Tell A that B runs ollama at B's promoted proxy port, as a trusted member.
-	proxyA.pushOllamaPeer("node-b", "127.0.0.1", bInfo.NodeUUID, proxyB.port, []string{"m:latest"})
+	// Tell A that B runs llama.cpp at B's promoted proxy port, as a trusted member.
+	proxyA.pushLlamaCPPPeer("node-b", "127.0.0.1", bInfo.NodeUUID, proxyB.port, []string{"m"})
 	proxyA.waitForRoutableNode(t)
 
-	genBody := []byte(`{"model":"m:latest","prompt":"hi","stream":false}`)
+	genBody := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":false}`)
 
 	// 1. Paired A->B inference succeeds over cluster mTLS, reaching B's engine.
 	t.Run("paired A to B over mTLS", func(t *testing.T) {
 		before := atomic.LoadInt32(bGenerates)
-		resp := postInference(t, fmt.Sprintf("http://127.0.0.1:%d/api/generate", proxyA.port), genBody)
+		resp := postInference(t, fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", proxyA.port), genBody)
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
@@ -345,7 +345,7 @@ func TestSecureInferenceClusterMTLS(t *testing.T) {
 	//    requires any client cert) but its cert is not pinned, so it gets 403.
 	t.Run("foreign C rejected by mTLS ingress", func(t *testing.T) {
 		client := mtlsClientWithIdentity(t, clusterC)
-		resp, err := client.Post(fmt.Sprintf("https://127.0.0.1:%d/api/generate", proxyB.port),
+		resp, err := client.Post(fmt.Sprintf("https://127.0.0.1:%d/v1/chat/completions", proxyB.port),
 			"application/json", bytes.NewReader(genBody))
 		if err != nil {
 			t.Fatalf("foreign C dial B ingress: %v", err)
@@ -366,7 +366,7 @@ func TestSecureInferenceClusterMTLS(t *testing.T) {
 		}
 		removeAuthorityFile(t, pin)
 		before := atomic.LoadInt32(bGenerates)
-		resp := postInference(t, fmt.Sprintf("http://127.0.0.1:%d/api/generate", proxyA.port), genBody)
+		resp := postInference(t, fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", proxyA.port), genBody)
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
 			t.Fatalf("A->B still succeeded (status %d) after B dropped A's pin", resp.StatusCode)

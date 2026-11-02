@@ -169,7 +169,7 @@ func newPairedBootstrapFixture(t *testing.T, blocked bool) *pairedBootstrapFixtu
 	}
 	f.wantPolicy = nodepolicy.Default()
 	f.wantPolicy.Admission.MaxConcurrentPerModel = 17
-	f.wantSettings = settings.Snapshot{NodeID: f.b.uuid, Engine: "ollama", Revision: 43, AppliedRevision: 43, Sequence: 9, Epoch: "bootstrap-settings", Settings: settings.Config{ServerPort: 45679}, Editable: true, Phase: "applied"}
+	f.wantSettings = settings.Snapshot{NodeID: f.b.uuid, Engine: "llamacpp", Revision: 43, AppliedRevision: 43, Sequence: 9, Epoch: "bootstrap-settings", Settings: settings.Config{ServerPort: 45679}, Editable: true, Phase: "applied"}
 	f.serve(t, noderec.ServiceNodeInfo, blocked, false)
 	f.serve(t, noderec.ServiceEngineControl, blocked, true)
 	blockedClusterPort := 0
@@ -300,12 +300,12 @@ func (f *pairedBootstrapFixture) serve(t *testing.T, service noderec.ServiceKey,
 			principal := f.b.uuid
 			value = phase04NodeInfoSample{HostUUID: f.b.uuid, ClusterUUID: &principal, TelemetryValid: true, MSSince: 100, CPU: &noderec.CPUInfo{Name: "bootstrap CPU", Cores: 7}, GPUs: []noderec.GPUInfo{{Name: "bootstrap GPU", UtilizationPercent: f.sample}}}
 		case "GET /v1/engines":
-			value = map[string]any{"engines": []map[string]any{{"engine": "ollama", "installed": true, "running": true, "port": 45679}}}
+			value = map[string]any{"engines": []map[string]any{{"engine": "llamacpp", "installed": true, "running": true, "port": 45679}}}
 		case "POST /v1/node-policy/get":
 			value = map[string]any{"policy": f.wantPolicy, "availability": nodepolicy.Available}
 		case "POST /v1/engine-settings/get":
 			var request settings.Request
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Engine != "ollama" || request.NodeID != "" {
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Engine != "llamacpp" || request.NodeID != "" {
 				t.Errorf("settings target request: %+v err=%v", request, err)
 				http.Error(w, "invalid settings target", http.StatusBadRequest)
 				return
@@ -490,7 +490,7 @@ func (f *pairedBootstrapFixture) assertReads(t *testing.T) {
 			} `json:"engines"`
 		}
 		task2Decode(t, raw, &got)
-		if len(got.Engines) != 1 || got.Engines[0].Engine != "ollama" || !got.Engines[0].Installed || !got.Engines[0].Running || got.Engines[0].Port != 45679 {
+		if len(got.Engines) != 1 || got.Engines[0].Engine != "llamacpp" || !got.Engines[0].Installed || !got.Engines[0].Running || got.Engines[0].Port != 45679 {
 			t.Fatalf("fresh intended engine inventory differs: %+v", got)
 		}
 	})
@@ -504,7 +504,7 @@ func (f *pairedBootstrapFixture) assertReads(t *testing.T) {
 			t.Fatalf("fresh intended policy differs: %+v", got)
 		}
 	})
-	test("engine settings", "engine:get-settings", "POST /v1/engine-settings/get", map[string]string{"nodeId": f.b.uuid, "engine": "ollama"}, func(t *testing.T, raw json.RawMessage) {
+	test("engine settings", "engine:get-settings", "POST /v1/engine-settings/get", map[string]string{"nodeId": f.b.uuid, "engine": "llamacpp"}, func(t *testing.T, raw json.RawMessage) {
 		var got settings.Snapshot
 		task2Decode(t, raw, &got)
 		if !reflect.DeepEqual(got, f.wantSettings) {
@@ -632,7 +632,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 				}{
 					{"engine:remote-get-installed", "GET /v1/engines", map[string]string{"node": f.b.uuid}},
 					{"policy:get", "POST /v1/node-policy/get", map[string]string{"nodeId": f.b.uuid}},
-					{"engine:get-settings", "POST /v1/engine-settings/get", map[string]string{"nodeId": f.b.uuid, "engine": "ollama"}},
+					{"engine:get-settings", "POST /v1/engine-settings/get", map[string]string{"nodeId": f.b.uuid, "engine": "llamacpp"}},
 				} {
 					before := f.count(call.path)
 					response := f.call(t, call.method, call.params)

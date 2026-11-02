@@ -53,7 +53,7 @@ func TestErrorsBrokerPipeline_EndToEnd(t *testing.T) {
 
 	// 1. errors:report (REQUEST form, id=1). Expect a null response,
 	//    then an errors:update notification with the new entry.
-	const upstreamID = "ollama-proxy:upstream-unreachable:peer-A"
+	const upstreamID = "llamacpp-proxy:upstream-unreachable:peer-A"
 	first := errors.ServiceError{
 		ID:        upstreamID,
 		Message:   "first emit",

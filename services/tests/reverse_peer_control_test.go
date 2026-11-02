@@ -584,7 +584,7 @@ func task1Directory(node *task1Node, blockedPort int) noderec.DirectoryNode {
 }
 
 func task1Workload(origin, id, state string, seq int) map[string]any {
-	return map[string]any{"workloadInfo": map[string]any{"id": id, "model": "task1-model", "engine": "ollama", "runId": "task1-run", "originatedFrom": origin, "state": state, "seq": seq, "createdAt": 1000}}
+	return map[string]any{"workloadInfo": map[string]any{"id": id, "model": "task1-model", "engine": "llamacpp", "runId": "task1-run", "originatedFrom": origin, "state": state, "seq": seq, "createdAt": 1000}}
 }
 
 func task1Upserts(t *testing.T, process *task1Process, origin, id, state string) int {
@@ -613,8 +613,8 @@ func task1Upserts(t *testing.T, process *task1Process, origin, id, state string)
 				wantSeq = 2
 			}
 			w := params.WorkloadInfo
-			if w.Model != "task1-model" || w.Engine != "ollama" || w.RunID != "task1-run" || w.Seq != wantSeq || w.CreatedAt != 1000 {
-				t.Fatalf("delivered workload metadata=%+v want model=task1-model engine=ollama run=task1-run seq=%d createdAt=1000", w, wantSeq)
+			if w.Model != "task1-model" || w.Engine != "llamacpp" || w.RunID != "task1-run" || w.Seq != wantSeq || w.CreatedAt != 1000 {
+				t.Fatalf("delivered workload metadata=%+v want model=task1-model engine=llamacpp run=task1-run seq=%d createdAt=1000", w, wantSeq)
 			}
 			count++
 		}
