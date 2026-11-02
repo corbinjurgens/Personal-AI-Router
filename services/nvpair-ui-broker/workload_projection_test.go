@@ -17,7 +17,7 @@ import (
 	"nvpair-ui-broker/workloadstore"
 )
 
-const privacyInfo = `{"id":"7","model":"model","engine":"ollama","runId":"run-1","state":"running","originatedFrom":"host","scheduledOn":"peer","createdAt":1,"startedAt":null,"completedAt":null,"error":null,"requesterId":null,"requestedModel":"weak","seq":2}`
+const privacyInfo = `{"id":"7","model":"model","engine":"llamacpp","runId":"run-1","state":"running","originatedFrom":"host","scheduledOn":"peer","createdAt":1,"startedAt":null,"completedAt":null,"error":null,"requesterId":null,"requestedModel":"weak","seq":2}`
 
 func privacyEnvelope(info string) json.RawMessage {
 	return json.RawMessage(`{"workloadInfo":` + info + `}`)
@@ -84,7 +84,7 @@ func TestWorkloadPrivacyProjection(t *testing.T) {
 		})
 	}
 	t.Run("optional absence", func(t *testing.T) {
-		info := `{"id":"7","model":"model","engine":"ollama","state":"queued","originatedFrom":"host"}`
+		info := `{"id":"7","model":"model","engine":"llamacpp","state":"queued","originatedFrom":"host"}`
 		out, category, _ := projectWorkloadFrame("workload:started", privacyEnvelope(info))
 		if category != "accepted" {
 			t.Fatal(category)
@@ -146,7 +146,7 @@ func TestWorkloadPrivacyProjectionRejectsBeforeEffects(t *testing.T) {
 		}
 	}
 	for _, key := range []string{"id", "engine", "runId"} {
-		cases["empty "+key] = privacyEnvelope(strings.Replace(privacyInfo, `"`+key+`":"`+map[string]string{"id": "7", "engine": "ollama", "runId": "run-1"}[key]+`"`, `"`+key+`":""`, 1))
+		cases["empty "+key] = privacyEnvelope(strings.Replace(privacyInfo, `"`+key+`":"`+map[string]string{"id": "7", "engine": "llamacpp", "runId": "run-1"}[key]+`"`, `"`+key+`":""`, 1))
 	}
 	for _, key := range []string{"id", "model", "engine", "state", "originatedFrom"} {
 		obj := privacyObject(t, json.RawMessage(privacyInfo))

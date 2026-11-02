@@ -32,11 +32,11 @@ func storeIncoming(id, origin, engine, runID, state, scheduledOn string) workloa
 func TestActiveLocalReplayFrames(t *testing.T) {
 	b := &Broker{workloads: workloadstore.New(), nodeID: "host"}
 
-	b.workloads.Apply(storeIncoming("1", "host", "ollama", "r1", "running", "peer"))   // local-origin active → replay
-	b.workloads.Apply(storeIncoming("2", "host", "ollama", "r1", "failed", "peer"))    // local-origin recent terminal → replay
-	b.workloads.Apply(storeIncoming("3", "peer", "ollama", "r2", "running", "host"))   // peer-origin (scheduled here) → skip
-	b.workloads.Apply(storeIncoming("4", "host", "lmstudio", "r3", "queued", "host"))  // local-origin active (other engine) → replay
-	b.workloads.Apply(storeIncoming("5", "host", "ollama", "r4", "completed", "host")) // local-origin recent terminal → replay
+	b.workloads.Apply(storeIncoming("1", "host", "llamacpp", "r1", "running", "peer"))       // local-origin active → replay
+	b.workloads.Apply(storeIncoming("2", "host", "llamacpp", "r1", "failed", "peer"))        // local-origin recent terminal → replay
+	b.workloads.Apply(storeIncoming("3", "peer", "llamacpp", "r2", "running", "host"))       // peer-origin (scheduled here) → skip
+	b.workloads.Apply(storeIncoming("4", "host", "llamacpp-custom", "r3", "queued", "host")) // local-origin active (other engine) → replay
+	b.workloads.Apply(storeIncoming("5", "host", "llamacpp", "r4", "completed", "host"))     // local-origin recent terminal → replay
 
 	frames := b.activeLocalReplayFrames()
 	if len(frames) != 4 {
@@ -86,7 +86,7 @@ func TestWorkloadHistoryFlusherFlushesOnShutdown(t *testing.T) {
 
 	// A terminal completes. With the default 5 s periodic flush and an immediate
 	// shutdown, only the flusher's shutdown (join) flush can have persisted it.
-	if !b.workloads.Apply(storeIncoming("1", "host", "ollama", "r1", "completed", "host")) {
+	if !b.workloads.Apply(storeIncoming("1", "host", "llamacpp", "r1", "completed", "host")) {
 		t.Fatal("terminal apply should be accepted")
 	}
 	stop() // cancels + joins the flusher; its final flush must have completed
@@ -121,7 +121,7 @@ func TestWorkloadHistoryFlusherOutlivesParentCancel(t *testing.T) {
 	time.Sleep(150 * time.Millisecond) // give a (hypothetically coupled) flusher time to exit
 
 	// A producer emits a terminal during teardown — after parent cancel, before stop().
-	if !b.workloads.Apply(storeIncoming("1", "host", "ollama", "r1", "failed", "host")) {
+	if !b.workloads.Apply(storeIncoming("1", "host", "llamacpp", "r1", "failed", "host")) {
 		t.Fatal("terminal apply should be accepted")
 	}
 	stop() // now cancel + join the flusher; its final flush must include the terminal
@@ -142,7 +142,7 @@ func TestWorkloadHistoryFlusherOutlivesParentCancel(t *testing.T) {
 func TestFailWorkloadsForNodeMatchesByHostUUID(t *testing.T) {
 	b := &Broker{workloads: workloadstore.New(), nodeID: "self"}
 	// A peer-origin running workload stamped with the peer's HostUUID.
-	if !b.workloads.Apply(storeIncoming("7", "peer-uuid", "ollama", "r1", "running", "peer-uuid")) {
+	if !b.workloads.Apply(storeIncoming("7", "peer-uuid", "llamacpp", "r1", "running", "peer-uuid")) {
 		t.Fatal("running apply should be accepted")
 	}
 

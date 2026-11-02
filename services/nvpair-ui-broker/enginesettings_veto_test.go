@@ -34,7 +34,7 @@ func (h *settingsHarness) pendingResume(t *testing.T) {
 	}
 	h.b.engineConfigMu.Lock()
 	defer h.b.engineConfigMu.Unlock()
-	if record := h.b.engineSettings["ollama"]; !record.Resume || record.Snapshot.Running {
+	if record := h.b.engineSettings[h.engine]; !record.Resume || record.Snapshot.Running {
 		t.Fatalf("failed apply left resume %t running %t, want a stopped engine with a pending resume", record.Resume, record.Snapshot.Running)
 	}
 }
@@ -59,7 +59,7 @@ func (h *settingsHarness) changedRequest(t *testing.T, option string) settings.R
 func (h *settingsHarness) snapshot() settings.Snapshot {
 	h.b.engineConfigMu.Lock()
 	defer h.b.engineConfigMu.Unlock()
-	return h.b.engineSettings["ollama"].Snapshot
+	return h.b.engineSettings[h.engine].Snapshot
 }
 
 // A paused node stays paused: an apply saves the settings and never starts the
@@ -76,7 +76,7 @@ func TestSettingsApplyWhilePausedNeverResumesAStoppedEngine(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			h := newSettingsHarness(t)
+			h := newLlamaCPPSettingsHarness(t)
 			clustertrusttest.Join(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer)
 			grantRemoteManagement(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer, true)
 			h.pendingResume(t)
@@ -100,7 +100,7 @@ func TestSettingsApplyWhilePausedNeverResumesAStoppedEngine(t *testing.T) {
 // A paired node's apply while paused is refused before anything is accepted,
 // and the relay reply carries -32011.
 func TestSettingsPairedApplyIsVetoedWhilePausedLocally(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer)
 	grantRemoteManagement(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer, true)
 	h.pendingResume(t)
@@ -119,7 +119,7 @@ func TestSettingsPairedApplyIsVetoedWhilePausedLocally(t *testing.T) {
 		t.Fatalf("vetoed apply changed the node: applies %d -> %d, snapshot %+v -> %+v", applies, h.applies.Load(), before, after)
 	}
 	h.b.engineConfigMu.Lock()
-	_, accepted := h.b.engineSettings["ollama"].Receipts[p.RequestID]
+	_, accepted := h.b.engineSettings[h.engine].Receipts[p.RequestID]
 	h.b.engineConfigMu.Unlock()
 	if accepted {
 		t.Fatal("vetoed apply left a receipt")
@@ -157,7 +157,7 @@ func TestSettingsPairedApplyIsVetoedWhilePausedLocally(t *testing.T) {
 }
 
 func TestSettingsPairedApplyWithoutAResumeIsRefusedWhilePaused(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer)
 	grantRemoteManagement(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer, true)
 	h.pause(nodepolicy.PausedLocally)
@@ -184,8 +184,8 @@ func TestPausedSettingsRefuseNoOpAndDuplicateReceipts(t *testing.T) {
 			h.pause(origin)
 			before, journal := h.snapshot(), rmSettingsJournal(t, h)
 			h.b.engineConfigMu.Lock()
-			receipts := make(map[string]settingsReceipt, len(h.b.engineSettings["ollama"].Receipts))
-			for id, receipt := range h.b.engineSettings["ollama"].Receipts {
+			receipts := make(map[string]settingsReceipt, len(h.b.engineSettings[h.engine].Receipts))
+			for id, receipt := range h.b.engineSettings[h.engine].Receipts {
 				receipts[id] = receipt
 			}
 			h.b.engineConfigMu.Unlock()
@@ -200,7 +200,7 @@ func TestPausedSettingsRefuseNoOpAndDuplicateReceipts(t *testing.T) {
 				t.Fatal("receipt refusal changed the persisted journal")
 			}
 			h.b.engineConfigMu.Lock()
-			gotReceipts := h.b.engineSettings["ollama"].Receipts
+			gotReceipts := h.b.engineSettings[h.engine].Receipts
 			unchanged := reflect.DeepEqual(gotReceipts, receipts)
 			h.b.engineConfigMu.Unlock()
 			if !unchanged || h.applies.Load() != 0 || h.proxyRebinds.Load() != 0 {
@@ -248,7 +248,7 @@ func TestPendingPauseRefusesSettingsAfterDelayedPreview(t *testing.T) {
 		switch method {
 		case "engine:get-launch":
 			return settings.LaunchState{
-				Engine: "ollama", ServerPort: before.Settings.ServerPort,
+				Engine: "llamacpp", ServerPort: before.Settings.ServerPort,
 				EffectivePort: before.EffectiveServerPort, LaunchText: before.Settings.LaunchText,
 				Running: before.Running, Editable: true, Format: "pair-arguments-v1",
 			}, ""
@@ -323,7 +323,7 @@ func TestPendingPauseDiscardsSettingsPreparation(t *testing.T) {
 				h.b.engineConfigMu.Unlock()
 				t.Fatalf("save preparation fixture: %v", err)
 			}
-			before := h.b.engineSettings["ollama"].clone()
+			before := h.b.engineSettings[h.engine].clone()
 			h.b.engineConfigMu.Unlock()
 			journal := rmSettingsJournal(t, h)
 			engine := attachFakeEngine(t, h.b)
@@ -335,7 +335,7 @@ func TestPendingPauseDiscardsSettingsPreparation(t *testing.T) {
 						text += " --component-drift"
 					}
 					return settings.LaunchState{
-						Engine: "ollama", ServerPort: launch.Settings.ServerPort,
+						Engine: "llamacpp", ServerPort: launch.Settings.ServerPort,
 						EffectivePort: launch.EffectiveServerPort, LaunchText: text,
 						Running: launch.Running, Editable: true, Format: "pair-arguments-v1",
 					}, holdSuccessReply
@@ -382,7 +382,7 @@ func TestPendingPauseDiscardsSettingsPreparation(t *testing.T) {
 				t.Fatal("refused preparation changed the persisted journal")
 			}
 			h.b.engineConfigMu.Lock()
-			after := h.b.engineSettings["ollama"].clone()
+			after := h.b.engineSettings[h.engine].clone()
 			h.b.engineConfigMu.Unlock()
 			if !reflect.DeepEqual(after, before) {
 				t.Fatalf("refused preparation changed record: got %+v, want %+v", after, before)
@@ -393,14 +393,14 @@ func TestPendingPauseDiscardsSettingsPreparation(t *testing.T) {
 		})
 	}
 	test("initialization", func(h *settingsHarness, p *settings.Request) {
-		delete(h.b.engineSettings, "ollama")
+		delete(h.b.engineSettings, "llamacpp")
 		p.ExpectedRevision = 1
 	}, false)
 	test("component drift", func(h *settingsHarness, p *settings.Request) {
 		p.ExpectedRevision++
 	}, true)
 	test("legacy argument migration", func(h *settingsHarness, p *settings.Request) {
-		record := h.b.engineSettings["ollama"]
+		record := h.b.engineSettings[h.engine]
 		record.Snapshot.Format = "pair-launch-v1"
 		record.Snapshot.Settings.LaunchText = "managed serve " + record.Snapshot.Settings.LaunchText
 		p.ExpectedRevision++
@@ -445,10 +445,10 @@ func TestPausedBrokerReadsAndLocalConfigurationRemainAvailable(t *testing.T) {
 // Recovery replays an interrupted apply without resuming its engine while the
 // node is paused.
 func TestSettingsRecoveryWhilePausedDoesNotResume(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	h.pendingResume(t)
 	h.b.engineConfigMu.Lock()
-	h.b.engineSettings["ollama"].Snapshot.Phase = "applying"
+	h.b.engineSettings[h.engine].Snapshot.Phase = "applying"
 	if err := h.b.saveEngineSettingsLocked(); err != nil {
 		h.b.engineConfigMu.Unlock()
 		t.Fatal(err)

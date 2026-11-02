@@ -40,8 +40,8 @@ func waitDrainPushes(t *testing.T, h *settingsHarness, n int) []nodepolicy.SetEn
 }
 
 func TestSettingsRestartDrainsEngineFirst(t *testing.T) {
-	h := newSettingsHarness(t)
-	h.b.observeAdmission(nodepolicy.AdmissionState{Active: 1, ActiveByEngine: map[string]int{"ollama": 1}})
+	h := newLlamaCPPSettingsHarness(t)
+	h.b.observeAdmission(nodepolicy.AdmissionState{Active: 1, ActiveByEngine: map[string]int{"llamacpp": 1}})
 	p := h.request(t)
 	p.Settings.LaunchText += " --parallel 4"
 
@@ -50,7 +50,7 @@ func TestSettingsRestartDrainsEngineFirst(t *testing.T) {
 		_, err := h.b.applyEngineSettings(context.Background(), p, "")
 		done <- err
 	}()
-	if got := waitDrainPushes(t, h, 1); got[0] != (nodepolicy.SetEngineDrainParams{Engine: "ollama", Drain: true}) {
+	if got := waitDrainPushes(t, h, 1); got[0] != (nodepolicy.SetEngineDrainParams{Engine: "llamacpp", Drain: true}) {
 		t.Fatalf("first drain push = %+v", got[0])
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -60,7 +60,7 @@ func TestSettingsRestartDrainsEngineFirst(t *testing.T) {
 	// Other settings readers are not frozen while the drain waits.
 	readDone := make(chan error, 1)
 	go func() {
-		_, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "ollama"}, "")
+		_, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
 		readDone <- err
 	}()
 	select {
@@ -82,7 +82,7 @@ func TestSettingsRestartDrainsEngineFirst(t *testing.T) {
 		t.Fatalf("applies = %d", n)
 	}
 	got := waitDrainPushes(t, h, 2)
-	if got[1] != (nodepolicy.SetEngineDrainParams{Engine: "ollama", Drain: false}) {
+	if got[1] != (nodepolicy.SetEngineDrainParams{Engine: "llamacpp", Drain: false}) {
 		t.Fatalf("drain was not cleared: %+v", got)
 	}
 }
@@ -91,8 +91,8 @@ func TestSettingsDrainTimesOutAndApplies(t *testing.T) {
 	prev := settingsDrainTimeout
 	settingsDrainTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { settingsDrainTimeout = prev })
-	h := newSettingsHarness(t)
-	h.b.observeAdmission(nodepolicy.AdmissionState{Active: 1, ActiveByEngine: map[string]int{"ollama": 1}})
+	h := newLlamaCPPSettingsHarness(t)
+	h.b.observeAdmission(nodepolicy.AdmissionState{Active: 1, ActiveByEngine: map[string]int{"llamacpp": 1}})
 	p := h.request(t)
 	p.Settings.LaunchText += " --parallel 8"
 	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err != nil {
@@ -105,8 +105,8 @@ func TestSettingsDrainTimesOutAndApplies(t *testing.T) {
 }
 
 func TestSettingsWithoutRestartDoNotDrain(t *testing.T) {
-	h := newSettingsHarness(t)
-	h.b.observeAdmission(nodepolicy.AdmissionState{Active: 1, ActiveByEngine: map[string]int{"ollama": 1}})
+	h := newLlamaCPPSettingsHarness(t)
+	h.b.observeAdmission(nodepolicy.AdmissionState{Active: 1, ActiveByEngine: map[string]int{"llamacpp": 1}})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

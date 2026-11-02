@@ -145,8 +145,8 @@ func TestSurvivingProcessReleasesTheAliasForAFailedFacade(t *testing.T) {
 // this test a later edit can either strand a live listener the broker reports
 // as unavailable, or publish a dead port the broker will never retry.
 func TestFacadeCameUpAnywayOnlyTrustsAnUnansweredEnable(t *testing.T) {
-	engine := ollamaProxyProfile.Name
-	ready := &proxyProcess{facadeState: readyFacade(engine, 11434)}
+	engine := engines.NameLlamaCPP
+	ready := &proxyProcess{facadeState: readyFacade(engine, 8080)}
 	notReady := &proxyProcess{}
 
 	for _, tc := range []struct {
@@ -198,24 +198,35 @@ func readyFacade(engine string, port int) map[string]proxyFacadeState {
 // different ports. A single port for the process would be whichever facade
 // readied last, so get-status would hand a client the other engine's port —
 // and its inference traffic with it.
-func TestReadinessIsTrackedPerEngine(t *testing.T) {
-	all := engines.All()
-	if len(all) < 2 {
-		t.Skip("needs at least two engines")
+func addressingEngines(t *testing.T) (engines.Engine, engines.Engine) {
+	t.Helper()
+	first, ok := engines.ByName(engines.NameLlamaCPP)
+	if !ok {
+		t.Fatal("llama.cpp engine missing")
 	}
-	first, second := all[0], all[1]
+	second, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+	if !ok {
+		t.Fatal("custom engine identity invalid")
+	}
+	b := &Broker{}
+	b.setDynamicEngines([]engines.Descriptor{customEngineDescriptor()}, func(int) bool { return true })
+	return first, second
+}
+
+func TestReadinessIsTrackedPerEngine(t *testing.T) {
+	first, second := addressingEngines(t)
 
 	p := &proxyProcess{}
 	p.handleNotify(
 		engines.AddressMethod(first.Name, "ready"),
-		json.RawMessage(`{"version":"test","port":11434}`),
+		json.RawMessage(`{"version":"test","port":8080}`),
 	)
 	p.handleNotify(
 		engines.AddressMethod(second.Name, "ready"),
-		json.RawMessage(`{"version":"test","port":1234}`),
+		json.RawMessage(`{"version":"test","port":18180}`),
 	)
 
-	for engine, wantPort := range map[string]int{first.Name: 11434, second.Name: 1234} {
+	for engine, wantPort := range map[string]int{first.Name: 8080, second.Name: 18180} {
 		ready, port := p.Status(engine)
 		if !ready {
 			t.Errorf("%s facade is not ready", engine)
@@ -394,11 +405,7 @@ func TestResubscribeReplacesOnlyThatEnginesSubscription(t *testing.T) {
 	dir := relay.NewDirectory()
 	p := &proxyProcess{peer: NewPeer(NewCodec(client)), relayDir: dir}
 
-	all := engines.All()
-	if len(all) < 2 {
-		t.Skip("needs at least two engines to tell the subscriptions apart")
-	}
-	first, second := all[0], all[1]
+	first, second := addressingEngines(t)
 
 	params := func(e engines.Engine) json.RawMessage {
 		raw, err := json.Marshal(noderec.SubscribeParams{
@@ -435,6 +442,9 @@ func TestResubscribeReplacesOnlyThatEnginesSubscription(t *testing.T) {
 // names, so it has to see through the address. An unaddressed notification is
 // process-scoped and passes through untouched.
 func TestFacadeMethodForStripsOnlyItsOwnEngine(t *testing.T) {
+	first, second := addressingEngines(t)
+	primary := engineProxyProfile{Engine: first}
+	custom := engineProxyProfile{Engine: second}
 	for _, tc := range []struct {
 		name    string
 		profile engineProxyProfile
@@ -444,8 +454,8 @@ func TestFacadeMethodForStripsOnlyItsOwnEngine(t *testing.T) {
 	}{
 		{
 			name:    "own address is stripped",
-			profile: ollamaProxyProfile,
-			method:  ollamaProxyProfile.addressed("ready"),
+			profile: primary,
+			method:  primary.addressed("ready"),
 			want:    "ready",
 			ok:      true,
 		},
@@ -455,29 +465,29 @@ func TestFacadeMethodForStripsOnlyItsOwnEngine(t *testing.T) {
 			// address means addressing broke. Forwarding it would file one
 			// engine's event under another.
 			name:    "another engine's address is dropped",
-			profile: ollamaProxyProfile,
-			method:  lmstudioProxyProfile.addressed("ready"),
+			profile: primary,
+			method:  custom.addressed("ready"),
 			ok:      false,
 		},
 		{
 			name:    "process-scoped method passes through",
-			profile: ollamaProxyProfile,
+			profile: primary,
 			method:  "workload:started",
 			want:    "workload:started",
 			ok:      true,
 		},
 		{
 			// The errors relay matches bare names, so an addressed error has to
-			// come out as errors:report and not as ollama:errors:report.
+			// come out as errors:report and not as llamacpp:errors:report.
 			name:    "addressed error becomes a bare errors method",
-			profile: ollamaProxyProfile,
-			method:  ollamaProxyProfile.addressed(methodErrorsReport),
+			profile: primary,
+			method:  primary.addressed(methodErrorsReport),
 			want:    methodErrorsReport,
 			ok:      true,
 		},
 		{
 			name:    "unaddressed error is untouched",
-			profile: lmstudioProxyProfile,
+			profile: custom,
 			method:  methodErrorsReport,
 			want:    methodErrorsReport,
 			ok:      true,

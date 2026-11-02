@@ -15,7 +15,7 @@ func TestActiveLocalOutsideRun(t *testing.T) {
 	seed := func(id, origin, runID, state, destination string) {
 		t.Helper()
 		raw, err := json.Marshal(map[string]any{
-			"id": id, "originatedFrom": origin, "engine": "ollama",
+			"id": id, "originatedFrom": origin, "engine": "llamacpp",
 			"runId": runID, "seq": 7, "state": state, "scheduledOn": destination,
 			"createdAt": 1,
 		})
@@ -70,7 +70,7 @@ func TestActiveLocalOutsideRunInferred(t *testing.T) {
 	input := func(id, origin, runID, state string) Incoming {
 		t.Helper()
 		raw, err := json.Marshal(map[string]any{
-			"id": id, "originatedFrom": origin, "engine": "ollama", "runId": runID,
+			"id": id, "originatedFrom": origin, "engine": "llamacpp", "runId": runID,
 			"state": state, "scheduledOn": "host", "createdAt": 1, "seq": 7,
 		})
 		if err != nil {
@@ -127,7 +127,7 @@ func mkIn(id, origin, state, scheduledOn string, createdAt int64) Incoming {
 		"scheduledOn":    scheduledOn,
 		"createdAt":      createdAt,
 		"model":          "granite-embedding:latest",
-		"engine":         "ollama",
+		"engine":         "llamacpp",
 	}
 	b, _ := json.Marshal(m)
 	return Incoming{
@@ -562,15 +562,15 @@ func mkTermFull(id, origin, engine, runID string, createdAt, completedAt int64) 
 }
 
 // TestCrossEngineConcurrentDistinct: two concurrent jobs from one host that
-// reuse id "1" (Ollama + LM Studio, separate counters) are distinct workloads
+// reuse id "1" (llama.cpp + custom, separate counters) are distinct workloads
 // and must not collide in the store.
 func TestCrossEngineConcurrentDistinct(t *testing.T) {
 	s := New()
-	if !s.Apply(mkInFull("1", "host", "ollama", "ro", "running", "host", 100)) {
-		t.Fatal("ollama/1 should be accepted")
+	if !s.Apply(mkInFull("1", "host", "llamacpp", "ro", "running", "host", 100)) {
+		t.Fatal("llamacpp/1 should be accepted")
 	}
-	if !s.Apply(mkInFull("1", "host", "lmstudio", "rl", "running", "host", 200)) {
-		t.Fatal("lmstudio/1 shares the numeric id but a different engine; must be distinct")
+	if !s.Apply(mkInFull("1", "host", "llamacpp-custom", "rl", "running", "host", 200)) {
+		t.Fatal("llamacpp-custom/1 shares the numeric id but a different engine; must be distinct")
 	}
 	if s.Len() != 2 {
 		t.Fatalf("Len = %d, want 2 (engine distinguishes concurrent same-id jobs)", s.Len())
@@ -581,10 +581,10 @@ func TestCrossEngineConcurrentDistinct(t *testing.T) {
 // the prior generation's terminal history must be preserved, not overwritten.
 func TestRestartReuseKeepsHistory(t *testing.T) {
 	s := New()
-	if !s.Apply(mkTermFull("1", "host", "ollama", "run1", 100, 150)) {
+	if !s.Apply(mkTermFull("1", "host", "llamacpp", "run1", 100, 150)) {
 		t.Fatal("gen-1 terminal should be accepted")
 	}
-	if !s.Apply(mkInFull("1", "host", "ollama", "run2", "running", "host", 200)) {
+	if !s.Apply(mkInFull("1", "host", "llamacpp", "run2", "running", "host", 200)) {
 		t.Fatal("gen-2 reused id (new run) should be a distinct workload")
 	}
 	if s.Len() != 2 {
@@ -598,9 +598,9 @@ func TestRestartReuseKeepsHistory(t *testing.T) {
 func TestGenerationBeforeProvenance(t *testing.T) {
 	// (a) A stale authoritative event must not replace a newer inferred record.
 	s := New()
-	s.Apply(mkInFull("1", "a", "ollama", "r", "running", "a", 200))
-	s.ApplyInferred(mkInFull("1", "a", "ollama", "r", "failed", "a", 200)) // inferred at gen 200
-	if s.Apply(mkInFull("1", "a", "ollama", "r", "running", "a", 100)) {
+	s.Apply(mkInFull("1", "a", "llamacpp", "r", "running", "a", 200))
+	s.ApplyInferred(mkInFull("1", "a", "llamacpp", "r", "failed", "a", 200)) // inferred at gen 200
+	if s.Apply(mkInFull("1", "a", "llamacpp", "r", "running", "a", 100)) {
 		t.Fatal("stale authoritative gen-100 must not replace the gen-200 record")
 	}
 	if r, _ := s.Get("a", "1"); r.CreatedAt != 200 {
@@ -608,8 +608,8 @@ func TestGenerationBeforeProvenance(t *testing.T) {
 	}
 
 	// (b) A stale inferred failure must not replace a newer authoritative running.
-	s.Apply(mkInFull("2", "a", "ollama", "r", "running", "a", 200))
-	if s.ApplyInferred(mkInFull("2", "a", "ollama", "r", "failed", "a", 100)) {
+	s.Apply(mkInFull("2", "a", "llamacpp", "r", "running", "a", 200))
+	if s.ApplyInferred(mkInFull("2", "a", "llamacpp", "r", "failed", "a", 100)) {
 		t.Fatal("stale inferred gen-100 must not fail a gen-200 running")
 	}
 	if r, _ := s.Get("a", "2"); r.State != "running" || r.CreatedAt != 200 {
