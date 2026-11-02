@@ -345,7 +345,7 @@ func TestReverseCarriesDynamicEngineServiceKeys(t *testing.T) {
 		})
 	}
 	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
-	for _, key := range []noderec.ServiceKey{"e-ollama", "e-", "e-a/b", noderec.ServiceKey("e-" + strings.Repeat("a", engines.MaxDynamicIDLen+1))} {
+	for _, key := range []noderec.ServiceKey{"e-llamacpp", "e-", "e-a/b", noderec.ServiceKey("e-" + strings.Repeat("a", engines.MaxDynamicIDLen+1))} {
 		if conn, err := a.Open(context.Background(), ReversePeer{"b", "v1"}, key); err == nil {
 			conn.Close()
 			t.Errorf("Open(%q) admitted a malformed dynamic key", key)
@@ -603,7 +603,7 @@ func TestReverseRejectsMalformedServiceHeaders(t *testing.T) {
 		{"third peer", "PAIR-REVERSE/1 ni/a\n"},
 		{"missing prefix", "ni\n"},
 		{"oversized", strings.Repeat("a", 64)},
-		{"built-in name as dynamic key", "PAIR-REVERSE/1 e-ollama\n"},
+		{"built-in name as dynamic key", "PAIR-REVERSE/1 e-llamacpp\n"},
 		{"dynamic key with separator", "PAIR-REVERSE/1 e-a/b\n"},
 		{"empty dynamic key", "PAIR-REVERSE/1 e-\n"},
 	} {

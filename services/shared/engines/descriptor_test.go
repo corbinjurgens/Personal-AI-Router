@@ -25,7 +25,7 @@ func TestDescriptorOpenAIChatProtocol(t *testing.T) {
 }
 
 func TestValidID(t *testing.T) {
-	for _, id := range []string{"ollama", "llamacpp-custom", "llama.cpp_2", "A1"} {
+	for _, id := range []string{"llamacpp", "llamacpp-custom", "llama.cpp_2", "A1"} {
 		if !ValidID(id) {
 			t.Errorf("ValidID(%q) = false, want true", id)
 		}

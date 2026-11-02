@@ -58,7 +58,7 @@ func TestPeerServicesDescriptorCarriesDynamicEngineKeys(t *testing.T) {
 	if err := ValidatePeerServicesDescriptor(d, "peer-a"); err != nil {
 		t.Fatalf("dynamic engine keys rejected: %v", err)
 	}
-	for _, key := range []ServiceKey{"e-", "e-ollama", "e-a/b", "e-a:b", ServiceKey("e-" + strings.Repeat("a", engines.MaxDynamicIDLen+1))} {
+	for _, key := range []ServiceKey{"e-", "e-llamacpp", "e-a/b", "e-a:b", ServiceKey("e-" + strings.Repeat("a", engines.MaxDynamicIDLen+1))} {
 		t.Run(string(key), func(t *testing.T) {
 			d := validPeerServices()
 			d.Services = append(d.Services, PeerService{Service: key, Port: 18180})

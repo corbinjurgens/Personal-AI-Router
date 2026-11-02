@@ -102,8 +102,8 @@ func TestMemoryTelemetryEnvelopeStrictDecode(t *testing.T) {
 }
 
 func TestEngineBindingOffersDirectoryWire(t *testing.T) {
-	node := DirectoryNode{HostUUID: "fixture", Models: []string{}, ModelsByEngine: map[string][]string{"lmstudio": {}},
-		Policy: &nodepolicy.Advertisement{Revision: "1", EngineBindingOffers: &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role{{Engine: "lmstudio", Model: "cold-model"}}}}}
+	node := DirectoryNode{HostUUID: "fixture", Models: []string{}, ModelsByEngine: map[string][]string{"llamacpp": {}},
+		Policy: &nodepolicy.Advertisement{Revision: "1", EngineBindingOffers: &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role{{Engine: "llamacpp", Model: "cold-model"}}}}}
 	raw, err := json.Marshal(node)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestEngineBindingOffersDirectoryWire(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got.Policy, node.Policy) || len(got.Models) != 0 || len(got.EngineModels("lmstudio")) != 0 || len(got.LoadedByEngine) != 0 {
+	if !reflect.DeepEqual(got.Policy, node.Policy) || len(got.Models) != 0 || len(got.EngineModels("llamacpp")) != 0 || len(got.LoadedByEngine) != 0 {
 		t.Fatalf("offers became installed inventory: %+v", got)
 	}
 }
@@ -162,12 +162,12 @@ func TestModelControlsDirectoryAttributionWire(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw   string
 		attribution map[string][]string
-		ollama      []string
+		llamacpp    []string
 	}{
 		{"nil retains flat fallback", `{"hostUuid":"owner","models":["good"]}`, nil, []string{"good"}},
 		{"outer empty suppresses flat fallback", `{"hostUuid":"owner","models":["good"],"modelsByEngine":{}}`, map[string][]string{}, nil},
-		{"per engine known empty", `{"hostUuid":"owner","models":["good"],"modelsByEngine":{"ollama":[]}}`, map[string][]string{"ollama": {}}, []string{}},
-		{"populated siblings retain attribution", `{"hostUuid":"owner","models":["good"],"modelsByEngine":{"ollama":["first","last"],"lmstudio":["other"]}}`, map[string][]string{"ollama": {"first", "last"}, "lmstudio": {"other"}}, []string{"first", "last"}},
+		{"per engine known empty", `{"hostUuid":"owner","models":["good"],"modelsByEngine":{"llamacpp":[]}}`, map[string][]string{"llamacpp": {}}, []string{}},
+		{"populated siblings retain attribution", `{"hostUuid":"owner","models":["good"],"modelsByEngine":{"llamacpp":["first","last"],"llamacpp-custom":["other"]}}`, map[string][]string{"llamacpp": {"first", "last"}, "llamacpp-custom": {"other"}}, []string{"first", "last"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var node DirectoryNode
@@ -175,10 +175,10 @@ func TestModelControlsDirectoryAttributionWire(t *testing.T) {
 				t.Fatalf("decode raw inventory specimen: %v", err)
 			}
 			node.Name, node.IP, node.Trusted, node.LastSeen = "name", "127.0.0.1", true, 304
-			node.Services = map[ServiceKey]ServiceStatus{ServiceOllama: {Port: 24001}}
+			node.Services = map[ServiceKey]ServiceStatus{ServiceLlamaCPP: {Port: 24001}}
 			assertNode := func(t *testing.T, got DirectoryNode) {
 				t.Helper()
-				if !reflect.DeepEqual(got.ModelsByEngine, tc.attribution) || !reflect.DeepEqual(got.EngineModels("ollama"), tc.ollama) || !reflect.DeepEqual(got.Models, []string{"good"}) {
+				if !reflect.DeepEqual(got.ModelsByEngine, tc.attribution) || !reflect.DeepEqual(got.EngineModels("llamacpp"), tc.llamacpp) || !reflect.DeepEqual(got.Models, []string{"good"}) {
 					t.Fatal("wire round-trip changed attribution, fallback, order or valid flat inventory")
 				}
 				if got.HostUUID != "owner" || got.Name != "name" || got.IP != "127.0.0.1" || !got.Trusted || got.LastSeen != 304 || !reflect.DeepEqual(got.Services, node.Services) {
@@ -320,7 +320,7 @@ func TestServedResidentDirectoryRoundTrip(t *testing.T) {
 		served nodepolicy.ServedModels
 	}{
 		{name: "absent"}, {name: "empty", served: nodepolicy.ServedModels{}},
-		{name: "restricted", served: nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}},
+		{name: "restricted", served: nodepolicy.ServedModels{{Engine: "llamacpp", Model: "m"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := nodepolicy.Default()
@@ -350,27 +350,27 @@ func TestEngineModels(t *testing.T) {
 	attributed := DirectoryNode{
 		Models: []string{"a", "b", "c"},
 		ModelsByEngine: map[string][]string{
-			"ollama":   {"a", "b"},
-			"lmstudio": {"c"},
+			"llamacpp":        {"a", "b"},
+			"llamacpp-custom": {"c"},
 		},
 	}
-	if got := attributed.EngineModels("ollama"); !reflect.DeepEqual(got, []string{"a", "b"}) {
-		t.Errorf("EngineModels(ollama) = %v, want [a b]", got)
+	if got := attributed.EngineModels("llamacpp"); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Errorf("EngineModels(llamacpp) = %v, want [a b]", got)
 	}
-	if got := attributed.EngineModels("lmstudio"); !reflect.DeepEqual(got, []string{"c"}) {
-		t.Errorf("EngineModels(lmstudio) = %v, want [c]", got)
+	if got := attributed.EngineModels("llamacpp-custom"); !reflect.DeepEqual(got, []string{"c"}) {
+		t.Errorf("EngineModels(llamacpp-custom) = %v, want [c]", got)
 	}
 
 	// Attribution present but this engine has no entry: authoritatively empty —
 	// NOT the cross-engine union (the whole point of per-engine attribution).
-	if got := attributed.EngineModels("llamacpp"); len(got) != 0 {
+	if got := attributed.EngineModels("llamacpp-other"); len(got) != 0 {
 		t.Errorf("EngineModels(missing engine, attribution present) = %v, want empty", got)
 	}
 
 	// No attribution at all (pre-attribution / mixed-version peer): fall back to
 	// the flat union so a single-engine consumer doesn't regress to no inventory.
 	legacy := DirectoryNode{Models: []string{"a", "b", "c"}}
-	if got := legacy.EngineModels("ollama"); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+	if got := legacy.EngineModels("llamacpp"); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
 		t.Errorf("EngineModels with nil ModelsByEngine = %v, want union [a b c]", got)
 	}
 }
@@ -435,7 +435,7 @@ func TestTXTRoundTrip(t *testing.T) {
 		HostUUID:      "host-abc",
 		ClusterUUID:   "clu-xyz",
 		IP:            "10.0.0.5",
-		Services:      map[ServiceKey]int{ServiceOllama: 11434, ServiceErrors: 14319, ServiceNodeInfo: 14318, ServiceEngineManager: 14322},
+		Services:      map[ServiceKey]int{ServiceLlamaCPP: 8081, ServiceErrors: 14319, ServiceNodeInfo: 14318, ServiceEngineManager: 14322},
 	}
 	txt := orig.TXT()
 	// Schema must be first.
@@ -451,7 +451,7 @@ func TestTXTRoundTrip(t *testing.T) {
 func TestTXTDeterministicOrder(t *testing.T) {
 	r := NodeRecord{
 		HostUUID: "h",
-		Services: map[ServiceKey]int{ServiceCluster: 14321, ServiceNodeInfo: 14318, ServiceOllama: 11434},
+		Services: map[ServiceKey]int{ServiceCluster: 14321, ServiceNodeInfo: 14318, ServiceLlamaCPP: 8081},
 	}
 	// Built twice, identical order (map iteration is randomized, so this guards
 	// the deterministic emit).
@@ -459,7 +459,7 @@ func TestTXTDeterministicOrder(t *testing.T) {
 		t.Fatal("TXT() is not deterministic")
 	}
 	got := r.TXT()
-	want := []string{"v=1", "uuid=h", "ni=14318", "ol=11434", "cl=14321"}
+	want := []string{"v=1", "uuid=h", "ni=14318", "lc=8081", "cl=14321"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("TXT order = %v, want %v", got, want)
 	}
@@ -511,7 +511,7 @@ func TestNodeInfoAlwaysPlainEvenClustered(t *testing.T) {
 
 func TestSubscribeMatches(t *testing.T) {
 	n := DirectoryNode{Services: map[ServiceKey]ServiceStatus{
-		ServiceOllama:   {Port: 11434},
+		ServiceLlamaCPP: {Port: 8081},
 		ServiceNodeInfo: {Port: 14318},
 	}}
 	// Empty filter matches everything.
@@ -519,8 +519,8 @@ func TestSubscribeMatches(t *testing.T) {
 		t.Error("empty subscribe filter should match all nodes")
 	}
 	// A service the node has.
-	if !(SubscribeParams{Services: []ServiceKey{ServiceOllama}}).Matches(n) {
-		t.Error("filter for ol should match a node advertising ol")
+	if !(SubscribeParams{Services: []ServiceKey{ServiceLlamaCPP}}).Matches(n) {
+		t.Error("filter for llamacpp should match a node advertising llamacpp")
 	}
 	// A service the node lacks.
 	if (SubscribeParams{Services: []ServiceKey{ServiceErrors}}).Matches(n) {
@@ -537,7 +537,7 @@ func TestDirectoryNodeHelpers(t *testing.T) {
 	if !n.Clustered() {
 		t.Error("Clustered() should be true with a cluster-uuid")
 	}
-	if !n.HasService(ServiceCluster) || n.HasService(ServiceOllama) {
+	if !n.HasService(ServiceCluster) || n.HasService(ServiceLlamaCPP) {
 		t.Error("HasService wrong")
 	}
 	if (DirectoryNode{}).Clustered() {
@@ -550,7 +550,7 @@ func TestDirectoryNodeJSONRoundTrip(t *testing.T) {
 		HostUUID: "host-1", Name: "host", IP: "192.168.1.10", ClusterUUID: "clu",
 		Trusted: true,
 		Services: map[ServiceKey]ServiceStatus{
-			ServiceOllama:   {Port: 11434, Probe: ProbeReachable},
+			ServiceLlamaCPP: {Port: 8081, Probe: ProbeReachable},
 			ServiceErrors:   {Port: 14319, Probe: ProbeInaccessible},
 			ServiceNodeInfo: {Port: 14318},
 		},
@@ -586,7 +586,7 @@ func TestDirectoryNodePolicy(t *testing.T) {
 		orig := DirectoryNode{HostUUID: "host-1", Policy: &nodepolicy.Advertisement{
 			Revision: "42",
 			Roles: map[string]nodepolicy.AdvertisedRole{
-				nodepolicy.TierStrong: {Engine: "ollama", Model: "qwen3:32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
+				nodepolicy.TierStrong: {Engine: "llamacpp", Model: "qwen3-32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
 			},
 			PausedBy: nodepolicy.PausedLocally,
 		}}

@@ -1207,7 +1207,7 @@ func TestPeerReadRetirementOwnedRequestsUseOnlyOrdinaryHandler(t *testing.T) {
 	t.Cleanup(finish)
 	var pumps []chan struct{}
 	for generation := 0; generation < 3; generation++ {
-		frame := `{"jsonrpc":"2.0","id":"first","ID":"second","method":"ollama:routing/request","params":{}}` + "\n"
+		frame := `{"jsonrpc":"2.0","id":"first","ID":"second","method":"llamacpp:routing/request","params":{}}` + "\n"
 		codec := newReadRetirementCodec(t, rw{strings.NewReader(frame + frame), io.Discard}, backing, &HistoryCorrelation{}, func() { t.Error("owned request callback pinned reader") })
 		peer := NewPeer(codec)
 		if err := peer.SetHistoryReadHandlers(func(*Message) { t.Error("owned request captured J handler") }, func(HistoryFailure) { t.Error("owned request captured J failure handler") }); err != nil {

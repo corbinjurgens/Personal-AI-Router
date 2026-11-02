@@ -135,7 +135,7 @@ func newServiceClientFixture(t *testing.T, handler http.Handler) *serviceClientF
 	}
 	f.url = "https://peer.example:" + port
 	f.routes[noderec.ServiceCluster] = PeerServiceRoute{Incarnation: "v1", Address: "peer.example:" + port, Protocol: ReverseTLS, Generation: 1}
-	f.routes[noderec.ServiceOllama] = PeerServiceRoute{Incarnation: "v1", Address: "proxy.example:12345", Protocol: ReverseTLS, Generation: 1}
+	f.routes[noderec.ServiceLlamaCPP] = PeerServiceRoute{Incarnation: "v1", Address: "proxy.example:12345", Protocol: ReverseTLS, Generation: 1}
 	dial := func(ctx context.Context, _ noderec.ServiceKey) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", f.server.Listener.Addr().String())
 	}
@@ -319,21 +319,21 @@ func TestPeerServiceClientTLSHandshakeBudgetLeavesReverseTime(t *testing.T) {
 
 func TestPeerServiceClientIndependentServiceHealth(t *testing.T) {
 	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { writeServiceResponse(t, w, "ok") }))
-	f.routes[noderec.ServiceOllama] = PeerServiceRoute{Incarnation: "v1", Address: "proxy.example:12345", Protocol: ReverseTLS, Generation: 1}
+	f.routes[noderec.ServiceLlamaCPP] = PeerServiceRoute{Incarnation: "v1", Address: "proxy.example:12345", Protocol: ReverseTLS, Generation: 1}
 	reachable := f.direct
 	f.direct = func(ctx context.Context, service noderec.ServiceKey) (net.Conn, error) {
-		if service == noderec.ServiceOllama {
+		if service == noderec.ServiceLlamaCPP {
 			return nil, errors.New("proxy blocked")
 		}
 		return reachable(ctx, service)
 	}
 	proxyURL := "https://proxy.example:12345"
-	serviceClientGet(t, f.adapter.Client("peer", noderec.ServiceOllama), proxyURL)
+	serviceClientGet(t, f.adapter.Client("peer", noderec.ServiceLlamaCPP), proxyURL)
 	serviceClientGet(t, f.adapter.Client("peer", noderec.ServiceCluster), f.url)
-	serviceClientGet(t, f.adapter.Client("peer", noderec.ServiceOllama), proxyURL)
+	serviceClientGet(t, f.adapter.Client("peer", noderec.ServiceLlamaCPP), proxyURL)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.directCalls[noderec.ServiceCluster] != 1 || f.directCalls[noderec.ServiceOllama] != 1 || f.reverseCalls[noderec.ServiceOllama] != 2 || f.reverseCalls[noderec.ServiceCluster] != 0 {
+	if f.directCalls[noderec.ServiceCluster] != 1 || f.directCalls[noderec.ServiceLlamaCPP] != 1 || f.reverseCalls[noderec.ServiceLlamaCPP] != 2 || f.reverseCalls[noderec.ServiceCluster] != 0 {
 		t.Fatalf("route attempts direct=%v reverse=%v", f.directCalls, f.reverseCalls)
 	}
 }

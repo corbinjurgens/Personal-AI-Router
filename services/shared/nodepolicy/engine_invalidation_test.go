@@ -33,19 +33,19 @@ func TestInvalidateEngineParams(t *testing.T) {
 			}
 		})
 	}
-	test("built in", "ollama", "switch-1", nodepolicy.InvalidationReasonEngineSwitch, true)
+	test("built in", "llamacpp", "switch-1", nodepolicy.InvalidationReasonEngineSwitch, true)
 	test("variant and request punctuation", "llamacpp-custom", "A._:-09", nodepolicy.InvalidationReasonEngineSwitch, true)
-	test("maximum request id", "ollama", strings.Repeat("a", enginesettings.MaxSwitchRequestIDBytes), nodepolicy.InvalidationReasonEngineSwitch, true)
+	test("maximum request id", "llamacpp", strings.Repeat("a", enginesettings.MaxSwitchRequestIDBytes), nodepolicy.InvalidationReasonEngineSwitch, true)
 	test("empty engine", "", "switch-1", nodepolicy.InvalidationReasonEngineSwitch, false)
-	test("invalid engine syntax", "../ollama", "switch-1", nodepolicy.InvalidationReasonEngineSwitch, false)
-	test("empty operation", "ollama", "", nodepolicy.InvalidationReasonEngineSwitch, false)
-	test("oversized operation", "ollama", strings.Repeat("a", enginesettings.MaxSwitchRequestIDBytes+1), nodepolicy.InvalidationReasonEngineSwitch, false)
-	test("invalid first character", "ollama", "-switch", nodepolicy.InvalidationReasonEngineSwitch, false)
-	test("non ASCII operation", "ollama", "switch-é", nodepolicy.InvalidationReasonEngineSwitch, false)
-	test("operation whitespace", "ollama", "switch 1", nodepolicy.InvalidationReasonEngineSwitch, false)
-	test("operation newline", "ollama", "switch\n", nodepolicy.InvalidationReasonEngineSwitch, false)
-	test("empty reason", "ollama", "switch-1", "", false)
-	test("unknown reason", "ollama", "switch-1", "restart", false)
+	test("invalid engine syntax", "../llamacpp", "switch-1", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("empty operation", "llamacpp", "", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("oversized operation", "llamacpp", strings.Repeat("a", enginesettings.MaxSwitchRequestIDBytes+1), nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("invalid first character", "llamacpp", "-switch", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("non ASCII operation", "llamacpp", "switch-é", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("operation whitespace", "llamacpp", "switch 1", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("operation newline", "llamacpp", "switch\n", nodepolicy.InvalidationReasonEngineSwitch, false)
+	test("empty reason", "llamacpp", "switch-1", "", false)
+	test("unknown reason", "llamacpp", "switch-1", "restart", false)
 }
 
 func TestInvalidateEngineStrictJSON(t *testing.T) {
@@ -53,13 +53,13 @@ func TestInvalidateEngineStrictJSON(t *testing.T) {
 		"null":              `null`,
 		"array":             `[]`,
 		"missing engine":    `{"operationId":"switch-1","reason":"engine-switch"}`,
-		"missing operation": `{"engine":"ollama","reason":"engine-switch"}`,
-		"missing reason":    `{"engine":"ollama","operationId":"switch-1"}`,
+		"missing operation": `{"engine":"llamacpp","reason":"engine-switch"}`,
+		"missing reason":    `{"engine":"llamacpp","operationId":"switch-1"}`,
 		"null field":        `{"engine":null,"operationId":"switch-1","reason":"engine-switch"}`,
-		"wrong type":        `{"engine":"ollama","operationId":1,"reason":"engine-switch"}`,
-		"unknown field":     `{"engine":"ollama","operationId":"switch-1","reason":"engine-switch","force":true}`,
-		"wrong casing":      `{"Engine":"ollama","operationId":"switch-1","reason":"engine-switch"}`,
-		"trailing object":   `{"engine":"ollama","operationId":"switch-1","reason":"engine-switch"}{}`,
+		"wrong type":        `{"engine":"llamacpp","operationId":1,"reason":"engine-switch"}`,
+		"unknown field":     `{"engine":"llamacpp","operationId":"switch-1","reason":"engine-switch","force":true}`,
+		"wrong casing":      `{"Engine":"llamacpp","operationId":"switch-1","reason":"engine-switch"}`,
+		"trailing object":   `{"engine":"llamacpp","operationId":"switch-1","reason":"engine-switch"}{}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			var got nodepolicy.InvalidateEngineParams
@@ -74,7 +74,7 @@ func TestAdmissionSnapshotParams(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{}`), &nodepolicy.AdmissionSnapshotParams{}); err != nil {
 		t.Fatal(err)
 	}
-	for name, input := range map[string]string{"null": `null`, "array": `[]`, "unknown field": `{"engine":"ollama"}`, "trailing object": `{}{}`} {
+	for name, input := range map[string]string{"null": `null`, "array": `[]`, "unknown field": `{"engine":"llamacpp"}`, "trailing object": `{}{}`} {
 		t.Run(name, func(t *testing.T) {
 			if err := json.Unmarshal([]byte(input), &nodepolicy.AdmissionSnapshotParams{}); err == nil {
 				t.Fatal("accepted invalid snapshot params")

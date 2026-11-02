@@ -17,7 +17,7 @@ func TestServedResidentReferenceSize(t *testing.T) {
 	for _, field := range []string{"servedModels", "residentModels"} {
 		for _, fill := range []string{"m", "\u2028", "<", "界"} {
 			t.Run(fmt.Sprintf("%s/%q", field, fill), func(t *testing.T) {
-				empty, err := json.Marshal(Role{Engine: "ollama"})
+				empty, err := json.Marshal(Role{Engine: "llamacpp"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -26,7 +26,7 @@ func TestServedResidentReferenceSize(t *testing.T) {
 					t.Fatal(err)
 				}
 				n := (maxModelReferenceBytes - len(empty)) / (len(unit) - 2)
-				ref := Role{Engine: "ollama", Model: strings.Repeat(fill, n)}
+				ref := Role{Engine: "llamacpp", Model: strings.Repeat(fill, n)}
 				check := func(wantError bool) {
 					t.Helper()
 					encoded, err := json.Marshal(map[string][]Role{field: {ref}})
@@ -54,7 +54,7 @@ func TestServedResidentReferenceSize(t *testing.T) {
 func TestModelIdentifierReferenceSizeRejectsNUL(t *testing.T) {
 	for _, field := range []string{"servedModels", "residentModels"} {
 		t.Run(field, func(t *testing.T) {
-			ref := Role{Engine: "ollama", Model: "old\x00model"}
+			ref := Role{Engine: "llamacpp", Model: "old\x00model"}
 			raw, err := json.Marshal(map[string][]Role{field: {ref}})
 			if err != nil {
 				t.Fatal(err)

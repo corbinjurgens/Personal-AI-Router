@@ -33,7 +33,7 @@ func TestPriorityAcceptsLegacyNodesOnlyPayload(t *testing.T) {
 
 func TestEnginePriorityRoundTripsGPUAwareRanks(t *testing.T) {
 	want := EnginePriority{
-		Engine: "ollama",
+		Engine: "llamacpp",
 		Nodes:  []string{"b", "a"},
 		Ranks: []NodeRank{
 			{ID: "b", Pending: 1, GPUPressure: 0, Rank: 0},
@@ -59,7 +59,7 @@ func TestEnginePriorityRoundTripsGPUAwareRanks(t *testing.T) {
 
 func TestPriorityCopiesOwnTheirSlices(t *testing.T) {
 	source := EnginePriority{
-		Engine: "ollama",
+		Engine: "llamacpp",
 		Nodes:  []string{"a"},
 		Ranks:  []NodeRank{{ID: "a", Pending: 2}},
 	}

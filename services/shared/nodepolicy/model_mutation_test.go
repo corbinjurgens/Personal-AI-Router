@@ -11,7 +11,7 @@ import (
 const testMutationRequestID = "mutation-1"
 
 func TestModelMutationRequestRoundTrips(t *testing.T) {
-	raw, err := json.Marshal(ModelMutationRequest{RequestID: testMutationRequestID, Engine: "ollama"})
+	raw, err := json.Marshal(ModelMutationRequest{RequestID: testMutationRequestID, Engine: "llamacpp"})
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
@@ -19,7 +19,7 @@ func TestModelMutationRequestRoundTrips(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode request %s: %v", raw, err)
 	}
-	if got.RequestID != testMutationRequestID || got.Engine != "ollama" {
+	if got.RequestID != testMutationRequestID || got.Engine != "llamacpp" {
 		t.Fatalf("request = %+v", got)
 	}
 	if MethodModelMutationRequest != "engine:model-mutation-request" || MethodModelMutationReply != "engine:model-mutation-reply" {
@@ -37,12 +37,12 @@ func TestModelMutationRequestRejectsInvalidParams(t *testing.T) {
 			}
 		})
 	}
-	test("empty request id", `{"requestId":"","engine":"ollama"}`)
-	test("request id with a space", `{"requestId":"mutation 1","engine":"ollama"}`)
+	test("empty request id", `{"requestId":"","engine":"llamacpp"}`)
+	test("request id with a space", `{"requestId":"mutation 1","engine":"llamacpp"}`)
 	test("missing engine", `{"requestId":"mutation-1"}`)
-	test("engine with a path separator", `{"requestId":"mutation-1","engine":"../ollama"}`)
-	test("unknown field", `{"requestId":"mutation-1","engine":"ollama","model":"m:latest"}`)
-	test("null request id", `{"requestId":null,"engine":"ollama"}`)
+	test("engine with a path separator", `{"requestId":"mutation-1","engine":"../llamacpp"}`)
+	test("unknown field", `{"requestId":"mutation-1","engine":"llamacpp","model":"m"}`)
+	test("null request id", `{"requestId":null,"engine":"llamacpp"}`)
 }
 
 func TestModelMutationReplyRoundTrips(t *testing.T) {
@@ -50,8 +50,8 @@ func TestModelMutationReplyRoundTrips(t *testing.T) {
 		name  string
 		reply ModelMutationReply
 	}{
-		{name: "accepted", reply: ModelMutationReply{RequestID: testMutationRequestID, Engine: "ollama", OK: true}},
-		{name: "unavailable", reply: ModelMutationReply{RequestID: testMutationRequestID, Engine: "ollama", Error: "the worker retired", Code: ModelMutationUnavailable}},
+		{name: "accepted", reply: ModelMutationReply{RequestID: testMutationRequestID, Engine: "llamacpp", OK: true}},
+		{name: "unavailable", reply: ModelMutationReply{RequestID: testMutationRequestID, Engine: "llamacpp", Error: "the worker retired", Code: ModelMutationUnavailable}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw, err := json.Marshal(tc.reply)
@@ -79,13 +79,13 @@ func TestModelMutationReplyRejectsInvalidResults(t *testing.T) {
 			}
 		})
 	}
-	test("missing ok", `{"requestId":"mutation-1","engine":"ollama","error":"","code":0}`)
-	test("null ok", `{"requestId":"mutation-1","engine":"ollama","ok":null,"error":"","code":0}`)
-	test("missing error", `{"requestId":"mutation-1","engine":"ollama","ok":false,"code":1}`)
-	test("missing code", `{"requestId":"mutation-1","engine":"ollama","ok":true,"error":""}`)
-	test("success with an error", `{"requestId":"mutation-1","engine":"ollama","ok":true,"error":"refused","code":0}`)
-	test("success with a code", `{"requestId":"mutation-1","engine":"ollama","ok":true,"error":"","code":1}`)
-	test("failure without an error", `{"requestId":"mutation-1","engine":"ollama","ok":false,"error":"","code":1}`)
-	test("blank failure error", `{"requestId":"mutation-1","engine":"ollama","ok":false,"error":"  ","code":1}`)
-	test("unknown field", `{"requestId":"mutation-1","engine":"ollama","ok":true,"error":"","code":0,"result":"ok"}`)
+	test("missing ok", `{"requestId":"mutation-1","engine":"llamacpp","error":"","code":0}`)
+	test("null ok", `{"requestId":"mutation-1","engine":"llamacpp","ok":null,"error":"","code":0}`)
+	test("missing error", `{"requestId":"mutation-1","engine":"llamacpp","ok":false,"code":1}`)
+	test("missing code", `{"requestId":"mutation-1","engine":"llamacpp","ok":true,"error":""}`)
+	test("success with an error", `{"requestId":"mutation-1","engine":"llamacpp","ok":true,"error":"refused","code":0}`)
+	test("success with a code", `{"requestId":"mutation-1","engine":"llamacpp","ok":true,"error":"","code":1}`)
+	test("failure without an error", `{"requestId":"mutation-1","engine":"llamacpp","ok":false,"error":"","code":1}`)
+	test("blank failure error", `{"requestId":"mutation-1","engine":"llamacpp","ok":false,"error":"  ","code":1}`)
+	test("unknown field", `{"requestId":"mutation-1","engine":"llamacpp","ok":true,"error":"","code":0,"result":"ok"}`)
 }

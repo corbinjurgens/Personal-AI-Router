@@ -70,8 +70,8 @@ func TestServedResidentAdvertisementRawKeys(t *testing.T) {
 	for _, raw := range []string{
 		`{"servedModels":null}`, `{"servedModels":[],"servedModels":[]}`,
 		`{"servedModels":[],"ServedModels":[]}`, `{"ServedModels":[]}`,
-		`{"servedModels":[{"engine":"ollama","model":"m","model":"m"}]}`,
-		`{"servedModels":[{"engine":"ollama","Model":"m"}]}`,
+		`{"servedModels":[{"engine":"llamacpp","model":"m","model":"m"}]}`,
+		`{"servedModels":[{"engine":"llamacpp","Model":"m"}]}`,
 	} {
 		var adv Advertisement
 		if err := json.Unmarshal([]byte(raw), &adv); err == nil {
@@ -83,14 +83,14 @@ func TestServedResidentAdvertisementRawKeys(t *testing.T) {
 func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 	p := stagedPolicy(t)
 	p.Profiles = []Profile{{
-		Name: "qwen", Engine: "ollama", Model: "qwen3:8b", ContextTokens: 16384,
+		Name: "qwen", Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 16384,
 		Capabilities: []Capability{CapTools, CapVision}, MemoryBytes: 5000000000, MaxConcurrent: 2,
 		RequestOptions: json.RawMessage(`{"keep_alive":"10m"}`),
 	}}
 	p.Roles = map[string]Role{
-		TierWeak:   {Engine: "ollama", Model: "qwen3:8b"},
-		TierMedium: {Engine: "ollama", Model: "qwen3:8b"},
-		TierStrong: {Engine: "lmstudio", Model: "qwen3:8b"},
+		TierWeak:   {Engine: "llamacpp", Model: "qwen3-8b"},
+		TierMedium: {Engine: "llamacpp", Model: "qwen3-8b"},
+		TierStrong: {Engine: "llamacpp-custom", Model: "qwen3-8b"},
 	}
 	p.Availability = Paused
 	p.PausedBy = PausedByPeer
@@ -99,14 +99,14 @@ func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 	}
 
 	got := p.Advertisement()
-	bounded := AdvertisedRole{Engine: "ollama", Model: "qwen3:8b", ContextTokens: 16384, Capabilities: []Capability{CapTools, CapVision}}
+	bounded := AdvertisedRole{Engine: "llamacpp", Model: "qwen3-8b", ContextTokens: 16384, Capabilities: []Capability{CapTools, CapVision}}
 	want := Advertisement{
 		Revision: "12",
 		Roles: map[string]AdvertisedRole{
 			TierWeak:   bounded,
 			TierMedium: bounded,
 			// The only profile covers the same model on another engine.
-			TierStrong: {Engine: "lmstudio", Model: "qwen3:8b"},
+			TierStrong: {Engine: "llamacpp-custom", Model: "qwen3-8b"},
 		},
 		PausedBy: PausedByPeer,
 	}
@@ -135,10 +135,10 @@ func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 
 func TestAdvertisementWithoutProfileHasNoBounds(t *testing.T) {
 	p := Default()
-	p.Roles = map[string]Role{TierWeak: {Engine: "ollama", Model: "m"}}
+	p.Roles = map[string]Role{TierWeak: {Engine: "llamacpp", Model: "m"}}
 
 	got := p.Advertisement()
-	want := Advertisement{Revision: "0", Roles: map[string]AdvertisedRole{TierWeak: {Engine: "ollama", Model: "m"}}}
+	want := Advertisement{Revision: "0", Roles: map[string]AdvertisedRole{TierWeak: {Engine: "llamacpp", Model: "m"}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Advertisement() = %+v, want %+v", got, want)
 	}
@@ -146,7 +146,7 @@ func TestAdvertisementWithoutProfileHasNoBounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal advertisement: %v", err)
 	}
-	if want := `{"revision":"0","roles":{"weak":{"engine":"ollama","model":"m"}}}`; string(data) != want {
+	if want := `{"revision":"0","roles":{"weak":{"engine":"llamacpp","model":"m"}}}`; string(data) != want {
 		t.Errorf("advertisement JSON = %s, want %s", data, want)
 	}
 }
@@ -164,7 +164,7 @@ func TestAdvertisementWithoutRoles(t *testing.T) {
 func TestAdvertisementStrictCapabilityCompatibility(t *testing.T) {
 	for _, original := range []string{
 		`{"revision":"0","roles":{}}`,
-		`{"revision":"12","roles":{"weak":{"engine":"ollama","model":"m","contextTokens":1024,"capabilities":["tools"]}},"pausedBy":"peer"}`,
+		`{"revision":"12","roles":{"weak":{"engine":"llamacpp","model":"m","contextTokens":1024,"capabilities":["tools"]}},"pausedBy":"peer"}`,
 		`{"revision":"0","roles":{},"strictAdmission":{"version":2,"future":{"newField":true}}}`,
 	} {
 		t.Run(original, func(t *testing.T) {
@@ -247,11 +247,11 @@ func TestAdvertisementStrictRawParityCorpus(t *testing.T) {
 
 func TestAdvertisementLegacyCaseFolding(t *testing.T) {
 	var got Advertisement
-	input := `{"revision":"1","Revision":"2","ROLES":{"weak":{"ENGINE":"ollama","MODEL":"m"}},"PAUSEDBY":"peer"}`
+	input := `{"revision":"1","Revision":"2","ROLES":{"weak":{"ENGINE":"llamacpp","MODEL":"m"}},"PAUSEDBY":"peer"}`
 	if err := json.Unmarshal([]byte(input), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := Advertisement{Revision: "2", Roles: map[string]AdvertisedRole{"weak": {Engine: "ollama", Model: "m"}}, PausedBy: PausedByPeer}
+	want := Advertisement{Revision: "2", Roles: map[string]AdvertisedRole{"weak": {Engine: "llamacpp", Model: "m"}}, PausedBy: PausedByPeer}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("decoded = %+v, want %+v", got, want)
 	}
@@ -260,17 +260,17 @@ func TestAdvertisementLegacyCaseFolding(t *testing.T) {
 func TestAdvertisementCarriesProfileQualification(t *testing.T) {
 	p := Default()
 	p.Profiles = []Profile{{
-		Name: "q", Engine: "ollama", Model: "q:latest", ContextTokens: 8192, MaxOutputTokens: 2048,
+		Name: "q", Engine: "llamacpp", Model: "q", ContextTokens: 8192, MaxOutputTokens: 2048,
 		Qualification: &QualificationRef{ID: "msi-qwen3-8b", Revision: "3"},
 	}}
-	p.Roles = map[string]Role{TierWeak: {Engine: "ollama", Model: "q:latest"}, TierStrong: {Engine: "ollama", Model: "unprofiled"}}
+	p.Roles = map[string]Role{TierWeak: {Engine: "llamacpp", Model: "q"}, TierStrong: {Engine: "llamacpp", Model: "unprofiled"}}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("fixture policy is invalid: %v", err)
 	}
 
 	got := p.Advertisement()
 	weak := got.Roles[TierWeak]
-	want := AdvertisedRole{Engine: "ollama", Model: "q:latest", ContextTokens: 8192, MaxOutputTokens: 2048,
+	want := AdvertisedRole{Engine: "llamacpp", Model: "q", ContextTokens: 8192, MaxOutputTokens: 2048,
 		Qualification: &QualificationRef{ID: "msi-qwen3-8b", Revision: "3"}}
 	if !reflect.DeepEqual(weak, want) {
 		t.Fatalf("weak role = %+v, want %+v", weak, want)
@@ -291,7 +291,7 @@ func TestAdvertisementCarriesProfileQualification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"engine":"ollama","model":"q:latest","contextTokens":8192,"maxOutputTokens":2048,"qualification":{"id":"msi-qwen3-8b","revision":"3"}}`; string(data) != want {
+	if want := `{"engine":"llamacpp","model":"q","contextTokens":8192,"maxOutputTokens":2048,"qualification":{"id":"msi-qwen3-8b","revision":"3"}}`; string(data) != want {
 		t.Errorf("role JSON = %s, want %s", data, want)
 	}
 }
@@ -333,12 +333,12 @@ func TestAdvertisementDecodesMalformedQualificationLeniently(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var adv Advertisement
-			doc := `{"revision":"1","roles":{"weak":{"engine":"ollama","model":"m","contextTokens":4096,` + tc.role + `}}}`
+			doc := `{"revision":"1","roles":{"weak":{"engine":"llamacpp","model":"m","contextTokens":4096,` + tc.role + `}}}`
 			if err := json.Unmarshal([]byte(doc), &adv); err != nil {
 				t.Fatalf("decode: %v", err)
 			}
 			role := adv.Roles[TierWeak]
-			if role.Engine != "ollama" || role.Model != "m" || role.ContextTokens != 4096 {
+			if role.Engine != "llamacpp" || role.Model != "m" || role.ContextTokens != 4096 {
 				t.Fatalf("role = %+v, want its engine, model and context kept", role)
 			}
 			if role.HybridQualified() {
@@ -350,10 +350,10 @@ func TestAdvertisementDecodesMalformedQualificationLeniently(t *testing.T) {
 
 func TestAdvertisedRoleKeepsLegacyCaseFolding(t *testing.T) {
 	var role AdvertisedRole
-	if err := json.Unmarshal([]byte(`{"ENGINE":"ollama","Model":"m","CONTEXTTOKENS":4096,"maxoutputtokens":1024,"Qualification":{"ID":"q","REVISION":"1"}}`), &role); err != nil {
+	if err := json.Unmarshal([]byte(`{"ENGINE":"llamacpp","Model":"m","CONTEXTTOKENS":4096,"maxoutputtokens":1024,"Qualification":{"ID":"q","REVISION":"1"}}`), &role); err != nil {
 		t.Fatal(err)
 	}
-	want := AdvertisedRole{Engine: "ollama", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &QualificationRef{ID: "q", Revision: "1"}}
+	want := AdvertisedRole{Engine: "llamacpp", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &QualificationRef{ID: "q", Revision: "1"}}
 	if !reflect.DeepEqual(role, want) {
 		t.Fatalf("decoded = %+v, want %+v", role, want)
 	}

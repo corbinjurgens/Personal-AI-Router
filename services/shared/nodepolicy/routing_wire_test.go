@@ -233,7 +233,7 @@ func TestStrictContractDuplicateObjectKeys(t *testing.T) {
 	identity := `{"engineRunId":"engine-1","settingsFingerprint":"` + strings.Repeat("a", 64) + `","modelDigest":"` + strings.Repeat("b", 64) + `"}`
 	duplicateIdentity := `{"engineRunId":"rogue-run","engineRunId":"engine-1","settingsFingerprint":"` + strings.Repeat("a", 64) + `","modelDigest":"` + strings.Repeat("b", 64) + `"}`
 	prepareResident := func(inner string) string {
-		return `{"policyRevision":"1","proxyRunId":"proxy-1","engine":"ollama","model":"m:latest","identity":` + inner + `,"operationId":"resident:1","timeoutMs":60000}`
+		return `{"policyRevision":"1","proxyRunId":"proxy-1","engine":"llamacpp","model":"m","identity":` + inner + `,"operationId":"resident:1","timeoutMs":60000}`
 	}
 	reject := func(t *testing.T, err error) {
 		t.Helper()
@@ -775,7 +775,7 @@ func TestRoutingHistoryContract(t *testing.T) {
 		bad("trimmed reference cannot target absent future", 2, "attempts.0.continuationOf", 3)
 		bad("workload origin must match", 0, "workload.originNodeId", "synthetic-other")
 		bad("workload run must match", 0, "workload.proxyRunId", "synthetic-other")
-		bad("workload engine must match local", 0, "workload.engine", "ollama")
+		bad("workload engine must match local", 0, "workload.engine", "llamacpp-custom")
 		bad("workload attempt must exist", 0, "workload.attemptIndex", 2)
 		bad("trimmed workload cannot be attached", 2, "workload.attached", true)
 		good("retained local workload attached", 0, "workload.attached", true)
@@ -839,7 +839,7 @@ func TestRoutingHistoryContract(t *testing.T) {
 		}
 		other := decode(t, fixtures[0].Record)
 		other.Attempts[1].Outcome = "failed"
-		*other.Attempts[1].Destination.Engine = "ollama"
+		*other.Attempts[1].Destination.Engine = "llamacpp-custom"
 		other.Workload.ID = "synthetic-other"
 		if !reflect.DeepEqual(got, want) {
 			t.Fatal("decodes share mutable payload storage")

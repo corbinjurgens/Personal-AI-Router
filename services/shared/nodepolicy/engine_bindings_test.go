@@ -59,21 +59,21 @@ func TestEngineBindingsRejectMalformedInput(t *testing.T) {
 	test("case variant", `{"EngineBindings":[]}`)
 	test("unicode case variant", `{"engineBindingſ":[]}`)
 	test("repeated list", `{"engineBindings":[],"engineBindings":[]}`)
-	test("repeated member", `{"engineBindings":[{"engine":"ollama","model":"a","model":"b"}]}`)
-	test("repeated engine", `{"engineBindings":[{"engine":"ollama","engine":"llamacpp","model":"a"}]}`)
-	test("case variant member", `{"engineBindings":[{"engine":"ollama","Model":"a"}]}`)
-	test("unexpected member", `{"engineBindings":[{"engine":"ollama","model":"a","extra":true}]}`)
+	test("repeated member", `{"engineBindings":[{"engine":"llamacpp","model":"a","model":"b"}]}`)
+	test("repeated engine", `{"engineBindings":[{"engine":"llamacpp-custom","engine":"llamacpp","model":"a"}]}`)
+	test("case variant member", `{"engineBindings":[{"engine":"llamacpp","Model":"a"}]}`)
+	test("unexpected member", `{"engineBindings":[{"engine":"llamacpp","model":"a","extra":true}]}`)
 	test("invalid engine", `{"engineBindings":[{"engine":"../bad","model":"a"}]}`)
-	test("empty model", `{"engineBindings":[{"engine":"ollama","model":""}]}`)
-	test("non-string model", `{"engineBindings":[{"engine":"ollama","model":42}]}`)
-	test("tier alias", `{"engineBindings":[{"engine":"ollama","model":"weak-local"}]}`)
-	test("control token", `{"engineBindings":[{"engine":"ollama","model":"a\u0000"}]}`)
-	test("invalid UTF8", "{\"engineBindings\":[{\"engine\":\"ollama\",\"model\":\"\xff\"}]}")
-	test("duplicate model across engines", `{"engineBindings":[{"engine":"ollama","model":"a"},{"engine":"llamacpp","model":"a"}]}`)
-	test("encoded reference bound", `{"engineBindings":[{"engine":"ollama","model":"`+strings.Repeat("x", 230)+`"}]}`)
+	test("empty model", `{"engineBindings":[{"engine":"llamacpp","model":""}]}`)
+	test("non-string model", `{"engineBindings":[{"engine":"llamacpp","model":42}]}`)
+	test("tier alias", `{"engineBindings":[{"engine":"llamacpp","model":"weak-local"}]}`)
+	test("control token", `{"engineBindings":[{"engine":"llamacpp","model":"a\u0000"}]}`)
+	test("invalid UTF8", "{\"engineBindings\":[{\"engine\":\"llamacpp\",\"model\":\"\xff\"}]}")
+	test("duplicate model across engines", `{"engineBindings":[{"engine":"llamacpp-custom","model":"a"},{"engine":"llamacpp","model":"a"}]}`)
+	test("encoded reference bound", `{"engineBindings":[{"engine":"llamacpp","model":"`+strings.Repeat("x", 230)+`"}]}`)
 	entries := make([]string, 257)
 	for i := range entries {
-		entries[i] = fmt.Sprintf(`{"engine":"ollama","model":"m%d"}`, i)
+		entries[i] = fmt.Sprintf(`{"engine":"llamacpp","model":"m%d"}`, i)
 	}
 	test("entry bound", `{"engineBindings":[`+strings.Join(entries, ",")+`]}`)
 }
@@ -113,7 +113,7 @@ func TestEngineBindingsTargetNaming(t *testing.T) {
 
 func TestEngineBindingsPeerOwnership(t *testing.T) {
 	p := Default()
-	p.EngineBindings = EngineBindings{{"ollama", "Native/Model"}}
+	p.EngineBindings = EngineBindings{{"llamacpp", "Native/Model"}}
 	projection := p.PeerProjection()
 	projection.EngineBindings[0].Model = "changed"
 	if p.EngineBindings[0].Model != "Native/Model" {
@@ -138,11 +138,11 @@ func TestEngineBindingsPeerOwnership(t *testing.T) {
 }
 
 func TestEngineBindingsStoredSanitationKeepsBindings(t *testing.T) {
-	p, counts, err := ParseStored([]byte(`{"engineBindings":[{"engine":"ollama","model":"Native/Model"}],"profiles":[{"name":"bad","engine":"ollama","model":"bad\u0000"}]}`))
+	p, counts, err := ParseStored([]byte(`{"engineBindings":[{"engine":"llamacpp","model":"Native/Model"}],"profiles":[{"name":"bad","engine":"llamacpp","model":"bad\u0000"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts["profiles"] != 1 || !reflect.DeepEqual(p.EngineBindings, EngineBindings{{"ollama", "Native/Model"}}) {
+	if counts["profiles"] != 1 || !reflect.DeepEqual(p.EngineBindings, EngineBindings{{"llamacpp", "Native/Model"}}) {
 		t.Fatalf("bindings=%+v counts=%v", p.EngineBindings, counts)
 	}
 }

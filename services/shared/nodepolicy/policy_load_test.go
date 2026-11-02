@@ -18,7 +18,7 @@ func TestModelControlStoredPolicyPreservesValidSiblings(t *testing.T) {
 			if version == "1" {
 				kind = ""
 			}
-			raw := []byte(`{"version":` + version + `,"revision":"42","availability":"available","admission":{"memoryBudgetBytes":12345},"profiles":[{"name":"good","engine":"ollama","model":"good"},{"name":"bad","engine":"ollama","model":"RAW"}],"roles":{"weak":{"engine":"ollama","model":"good"},"strong":{"engine":"ollama","model":"bad\nname"}},"tiers":{"weak":[{` + kind + `"engine":"ollama","model":"good"},{` + kind + `"engine":"ollama","model":"bad\u0085name"}]},"servedModels":[{"engine":"ollama","model":"bad\nname"}],"residentModels":[{"engine":"ollama","model":"bad\nname"}]}`)
+			raw := []byte(`{"version":` + version + `,"revision":"42","availability":"available","admission":{"memoryBudgetBytes":12345},"profiles":[{"name":"good","engine":"llamacpp","model":"good"},{"name":"bad","engine":"llamacpp","model":"RAW"}],"roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"bad\nname"}},"tiers":{"weak":[{` + kind + `"engine":"llamacpp","model":"good"},{` + kind + `"engine":"llamacpp","model":"bad\u0085name"}]},"servedModels":[{"engine":"llamacpp","model":"bad\nname"}],"residentModels":[{"engine":"llamacpp","model":"bad\nname"}]}`)
 			raw = bytes.ReplaceAll(raw, []byte("RAW"), []byte{0xff})
 			original := bytes.Clone(raw)
 			p, counts, err := ParseStored(raw)
@@ -89,15 +89,15 @@ func TestModelControlStoredPolicyRepairsDeploymentFamilies(t *testing.T) {
 
 func TestModelControlStoredPolicyConservativeRecovery(t *testing.T) {
 	for _, raw := range []string{
-		`{"availability":"bad-secret","roles":{"weak":{"engine":"ollama","model":"bad\nname"}}}`,
-		`{"roles":{"weak":{"engine":"ollama","model":"good","Model":"bad\nname"}}}`,
-		`{"roles":{"weak":{"engine":"ollama","model":"bad\nname"}},"Roles":{}}`,
-		`{"servedModels":[{"engine":"ollama","model":null}]}`,
-		`{"servedModels":[{"engine":"ollama","model":"bad\nname","extra":true}]}`,
-		`{"profiles":[{"name":"same","engine":"ollama","model":"good"},{"name":"same","engine":"ollama","model":"bad\nname"}]}`,
-		`{"profiles":[{"name":"test","engine":"ollama","model":"bad\nname","memoryBytes":-1}]}`,
-		`{"roles":{"unknown":{"engine":"ollama","model":"bad\nname"}}}`,
-		`{"profiles":[{"name":"test","engine":"ollama","model":"bad\nname"}],"residentModels":[{"engine":"ollama","model":"unrelated"}]}`,
+		`{"availability":"bad-secret","roles":{"weak":{"engine":"llamacpp","model":"bad\nname"}}}`,
+		`{"roles":{"weak":{"engine":"llamacpp","model":"good","Model":"bad\nname"}}}`,
+		`{"roles":{"weak":{"engine":"llamacpp","model":"bad\nname"}},"Roles":{}}`,
+		`{"servedModels":[{"engine":"llamacpp","model":null}]}`,
+		`{"servedModels":[{"engine":"llamacpp","model":"bad\nname","extra":true}]}`,
+		`{"profiles":[{"name":"same","engine":"llamacpp","model":"good"},{"name":"same","engine":"llamacpp","model":"bad\nname"}]}`,
+		`{"profiles":[{"name":"test","engine":"llamacpp","model":"bad\nname","memoryBytes":-1}]}`,
+		`{"roles":{"unknown":{"engine":"llamacpp","model":"bad\nname"}}}`,
+		`{"profiles":[{"name":"test","engine":"llamacpp","model":"bad\nname"}],"residentModels":[{"engine":"llamacpp","model":"unrelated"}]}`,
 	} {
 		if _, _, err := ParseStored([]byte(raw)); err == nil {
 			t.Fatal("unrelated malformed policy repaired")
@@ -117,7 +117,7 @@ func TestModelControlStoredPolicyLengthAndDecodedControls(t *testing.T) {
 		if model == string([]byte{0xff}) {
 			token = []byte{'"', 0xff, '"'}
 		}
-		raw := append([]byte(`{"roles":{"weak":{"engine":"ollama","model":`), token...)
+		raw := append([]byte(`{"roles":{"weak":{"engine":"llamacpp","model":`), token...)
 		raw = append(raw, []byte(`}}}`)...)
 		p, counts, err := ParseStored(raw)
 		if err != nil {
@@ -130,7 +130,7 @@ func TestModelControlStoredPolicyLengthAndDecodedControls(t *testing.T) {
 }
 
 func TestModelControlStoredPolicyPreservesPausedState(t *testing.T) {
-	p, counts, err := ParseStored([]byte(`{"version":2,"revision":"88","availability":"paused","pausedBy":"peer","pause":{"onActive":"cancel","drainTimeoutSeconds":19},"roles":{"weak":{"engine":"ollama","model":"bad\nname"}}}`))
+	p, counts, err := ParseStored([]byte(`{"version":2,"revision":"88","availability":"paused","pausedBy":"peer","pause":{"onActive":"cancel","drainTimeoutSeconds":19},"roles":{"weak":{"engine":"llamacpp","model":"bad\nname"}}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestModelControlStoredPolicyPreservesLegacyMemberOrder(t *testing.T) {
 		{"same spelling", `"revision":"11","revision":"22"`, "22"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := []byte(`{` + tc.revisions + `,"availability":"paused","Availability":"available","idle":{"unloadAfterMinutes":7},"IDLE":{"wakeTimeoutSeconds":23},"routing":{"limits":{"queueSeconds":5},"Limits":{"maxAttempts":3}},"roles":{"weak":{"engine":"ollama","model":"good"},"strong":{"engine":"ollama","model":"bad\nmodel"}}}`)
+			raw := []byte(`{` + tc.revisions + `,"availability":"paused","Availability":"available","idle":{"unloadAfterMinutes":7},"IDLE":{"wakeTimeoutSeconds":23},"routing":{"limits":{"queueSeconds":5},"Limits":{"maxAttempts":3}},"roles":{"weak":{"engine":"llamacpp","model":"good"},"strong":{"engine":"llamacpp","model":"bad\nmodel"}}}`)
 			before := bytes.Clone(raw)
 			p, counts, err := ParseStored(raw)
 			if err != nil {
