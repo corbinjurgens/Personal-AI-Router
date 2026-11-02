@@ -68,12 +68,12 @@ const FORK_WIRE = wireDescriptor('llamacpp-custom', 'llamacpp', 'llama.cpp (cust
 })
 /** An engine of a family this build has no adapters for. */
 const STRATA_WIRE = wireDescriptor('strata', 'strata', 'Strata', { load: {}, unload: {} })
-const OLLAMA_WIRE = wireDescriptor(
-    'ollama',
-    'ollama',
-    'Ollama',
+const LLAMACPP_WIRE = wireDescriptor(
+    'llamacpp',
+    'llamacpp',
+    'llama.cpp',
     { load: { responseTimeoutS: 600 }, unload: {}, pull: {}, delete: {} },
-    { modelStore: 'ollama', catalog: 'ollama' }
+    { modelStore: 'llamacpp', catalog: 'llamacpp' }
 )
 
 function engineId(name: string): EngineType {
@@ -183,12 +183,12 @@ describe('engine descriptor parsing', () => {
     })
 
     it('maps built-in engines to their desktop spelling and refuses a second identity for them', () => {
-        expect(parseEngineDescriptors({ engines: [OLLAMA_WIRE] })[0].engineType).toBe('ollama')
-        expect(engineTypeFromManagerName('lmstudio')).toBe('lm-studio')
+        expect(parseEngineDescriptors({ engines: [LLAMACPP_WIRE] })[0].engineType).toBe('llama-cpp')
+        expect(engineTypeFromManagerName('llamacpp')).toBe('llama-cpp')
         expect(engineTypeFromManagerName('llamacpp-custom')).toBe('llamacpp-custom')
         expect(engineManagerName(engineId('llamacpp-custom'))).toBe('llamacpp-custom')
         // The desktop spelling of a built-in engine is not a variant of it.
-        expect(engineTypeFromManagerName('lm-studio')).toBeNull()
+        expect(engineTypeFromManagerName('llama-cpp')).toBeNull()
         expect(engineTypeFromManagerName('..')).toBeNull()
         expect(isEngineType('a/b')).toBe(false)
     })
@@ -338,7 +338,7 @@ describe('local engine variants reach the UI', () => {
         const selfId = 'descriptor-local'
         const peerId = 'descriptor-peer'
         state.setSelfId(selfId)
-        state.setEngineDescriptors(parseEngineDescriptors({ engines: [FORK_WIRE, OLLAMA_WIRE] }))
+        state.setEngineDescriptors(parseEngineDescriptors({ engines: [FORK_WIRE, LLAMACPP_WIRE] }))
         state.applyEngineManagerStatus({
             engine: 'llamacpp-custom',
             installed: true,
@@ -368,8 +368,8 @@ describe('local engine variants reach the UI', () => {
 
         const initial = state.getEngineInitialState()
         expect(initial.descriptors.map(d => d.engineType).sort()).toEqual([
-            'llamacpp-custom',
-            'ollama'
+            'llama-cpp',
+            'llamacpp-custom'
         ])
         expect(
             initial.statuses.find(s => s.nodeId === selfId && s.engineType === 'llamacpp-custom')

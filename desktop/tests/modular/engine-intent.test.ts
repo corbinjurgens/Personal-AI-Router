@@ -39,12 +39,12 @@ vi.mock('@/shared/utils/log', () => ({
 }))
 
 const local: EngineIntentSnapshot = {
-    enabledByEngine: { ollama: false, lmstudio: true, custom: false },
-    offByEngine: { ollama: 'local' }
+    enabledByEngine: { llamacpp: false, 'llamacpp-custom': true, custom: false },
+    offByEngine: { llamacpp: 'local' }
 }
 const peer: EngineIntentSnapshot = {
-    enabledByEngine: { ollama: false, lmstudio: false },
-    offByEngine: { ollama: 'peer', lmstudio: 'local' }
+    enabledByEngine: { llamacpp: false, 'llamacpp-custom': false },
+    offByEngine: { llamacpp: 'peer', 'llamacpp-custom': 'local' }
 }
 const initial: EngineInitialState = {
     descriptors: [],
@@ -108,17 +108,17 @@ describe('strict engine intent parser', () => {
         ['null origin map', { enabledByEngine: {}, offByEngine: null }],
         ['array origin map', { enabledByEngine: {}, offByEngine: [] }],
         ['scalar origin map', { enabledByEngine: {}, offByEngine: 'local' }],
-        ['nonboolean enabled', { enabledByEngine: { ollama: 0 }, offByEngine: {} }],
+        ['nonboolean enabled', { enabledByEngine: { llamacpp: 0 }, offByEngine: {} }],
         [
             'invalid origin',
-            { enabledByEngine: { ollama: false }, offByEngine: { ollama: 'remote' } }
+            { enabledByEngine: { llamacpp: false }, offByEngine: { llamacpp: 'remote' } }
         ],
         [
             'nonstring origin',
-            { enabledByEngine: { ollama: false }, offByEngine: { ollama: false } }
+            { enabledByEngine: { llamacpp: false }, offByEngine: { llamacpp: false } }
         ],
-        ['origin for On', { enabledByEngine: { ollama: true }, offByEngine: { ollama: 'local' } }],
-        ['origin for unreported engine', { enabledByEngine: {}, offByEngine: { ollama: 'peer' } }],
+        ['origin for On', { enabledByEngine: { llamacpp: true }, offByEngine: { llamacpp: 'local' } }],
+        ['origin for unreported engine', { enabledByEngine: {}, offByEngine: { llamacpp: 'peer' } }],
         ['origin for inherited key', { enabledByEngine: {}, offByEngine: { constructor: 'local' } }]
     ]
     it.each(invalid)('rejects %s', (_name, value) => {
@@ -201,7 +201,7 @@ describe('local intent bridge', () => {
     it('rejects malformed push and clears both maps to null', async () => {
         notify('app:ready')
         await flush()
-        notify('engine:intent-changed', { enabledByEngine: { ollama: false } })
+        notify('engine:intent-changed', { enabledByEngine: { llamacpp: false } })
         expect(state.getEngineIntent()).toBeNull()
         expect(emitBridgePush).toHaveBeenCalledWith('engines:intent-changed', null)
     })
@@ -421,7 +421,7 @@ describe('intent typed API and renderer store', () => {
         fixture.pending.resolve(local)
         await initializing
         expect(useEngineStatusStore.getState().intent).toEqual(local)
-        expect(useEngineStatusStore.getState().getStatus('self', 'ollama').processStatus).toBe(
+        expect(useEngineStatusStore.getState().getStatus('self', 'llama-cpp').processStatus).toBe(
             'initializing'
         )
     })

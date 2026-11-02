@@ -27,10 +27,10 @@ let container: HTMLDivElement
 
 function status(nodeId: string, changes: Partial<EngineStatusData> = {}): EngineStatusData {
     return {
-        engineType: 'ollama',
+        engineType: 'llama-cpp',
         nodeId,
         processStatus: 'stopped',
-        enginePort: 11434,
+        enginePort: 8081,
         proxyPort: 54301,
         ...changes
     }
@@ -147,9 +147,9 @@ describe('engine lock on this device', () => {
     it('locks an unlocked engine through the typed setLock command', async () => {
         report(status(SELF, { locked: false }))
         await mount(SELF)
-        await act(async () => button('Lock Ollama').click())
+        await act(async () => button('Lock llama.cpp').click())
         expect(commands()).toEqual([
-            { command: 'setLock', engineType: 'ollama', nodeId: SELF, locked: true }
+            { command: 'setLock', engineType: 'llama-cpp', nodeId: SELF, locked: true }
         ])
     })
 
@@ -157,17 +157,17 @@ describe('engine lock on this device', () => {
         report(status(SELF, { locked: true }))
         await mount(SELF)
         expect(container.textContent).toContain('Locked')
-        await act(async () => button('Unlock Ollama').click())
+        await act(async () => button('Unlock llama.cpp').click())
         expect(commands()).toEqual([
-            { command: 'setLock', engineType: 'ollama', nodeId: SELF, locked: false }
+            { command: 'setLock', engineType: 'llama-cpp', nodeId: SELF, locked: false }
         ])
     })
 
     it('does not claim success before the backend reports the lock', async () => {
         report(status(SELF, { locked: false }))
         await mount(SELF)
-        await act(async () => button('Lock Ollama').click())
-        expect(usePendingActionsStore.getState().getLifecyclePending(SELF, 'ollama')).toBe(
+        await act(async () => button('Lock llama.cpp').click())
+        expect(usePendingActionsStore.getState().getLifecyclePending(SELF, 'llama-cpp')).toBe(
             'setLock'
         )
         expect(container.textContent).not.toContain('Locked')
@@ -176,76 +176,76 @@ describe('engine lock on this device', () => {
         act(() =>
             errorsCb?.([
                 {
-                    id: 'engine-cmd:setLock:node-self:ollama',
-                    message: 'Failed to lock ollama: stop failed',
+                    id: 'engine-cmd:setLock:node-self:llamacpp',
+                    message: 'Failed to lock llamacpp: stop failed',
                     timestamp: Date.now(),
                     severity: 'error',
                     nodeId: SELF,
-                    engineType: 'ollama'
+                    engineType: 'llama-cpp'
                 }
             ])
         )
-        expect(usePendingActionsStore.getState().getLifecyclePending(SELF, 'ollama')).toBe(
+        expect(usePendingActionsStore.getState().getLifecyclePending(SELF, 'llama-cpp')).toBe(
             undefined
         )
-        expect(button('Lock Ollama').disabled).toBe(false)
+        expect(button('Lock llama.cpp').disabled).toBe(false)
         expect(container.textContent).not.toContain('Locked')
     })
 
     it('covers the row while the command is pending and blocks conflicting commands', async () => {
         report(status(SELF, { locked: false }))
         await mount(SELF)
-        await act(async () => button('Lock Ollama').click())
+        await act(async () => button('Lock llama.cpp').click())
         expect(container.querySelector('[role="switch"]')).toBeNull()
         expect(container.querySelector('[role="status"]')).not.toBeNull()
-        expect(button('Lock Ollama').disabled).toBe(true)
-        await act(async () => button('Lock Ollama').click())
+        expect(button('Lock llama.cpp').disabled).toBe(true)
+        await act(async () => button('Lock llama.cpp').click())
         expect(commands()).toHaveLength(1)
     })
 
     it('clears the pending cover on a lock-only push that leaves the process status alone', async () => {
         report(status(SELF, { locked: false }))
         await mount(SELF)
-        await act(async () => button('Lock Ollama').click())
+        await act(async () => button('Lock llama.cpp').click())
         push(status(SELF, { locked: true }))
-        expect(usePendingActionsStore.getState().getLifecyclePending(SELF, 'ollama')).toBe(
+        expect(usePendingActionsStore.getState().getLifecyclePending(SELF, 'llama-cpp')).toBe(
             undefined
         )
         await mount(SELF)
-        expect(button('Unlock Ollama').disabled).toBe(false)
+        expect(button('Unlock llama.cpp').disabled).toBe(false)
     })
 
     it('reports a failed lock-stop as locked and still running', async () => {
         report(status(SELF, { locked: false, processStatus: 'running' }))
         await mount(SELF)
-        await act(async () => button('Lock Ollama').click())
+        await act(async () => button('Lock llama.cpp').click())
         push(status(SELF, { locked: true, processStatus: 'running' }))
         await mount(SELF)
         expect(container.textContent).toContain('Locked')
         expect(toggleSwitch().checked).toBe(true)
-        expect(button('Unlock Ollama')).toBeDefined()
+        expect(button('Unlock llama.cpp')).toBeDefined()
     })
 
     it('drops the pending cover and the lock when a reconnect invalidates the readback', async () => {
         report(status(SELF, { locked: false }))
         await mount(SELF)
-        await act(async () => button('Lock Ollama').click())
+        await act(async () => button('Lock llama.cpp').click())
         const { locked: _, ...unknown } = status(SELF)
         void _
         push(unknown)
-        expect(usePendingActionsStore.getState().getLifecyclePending(SELF, 'ollama')).toBe(
+        expect(usePendingActionsStore.getState().getLifecyclePending(SELF, 'llama-cpp')).toBe(
             undefined
         )
         await mount(SELF)
         expect(container.textContent).toContain('Lock status unavailable')
-        expect(button('Lock Ollama').disabled).toBe(true)
+        expect(button('Lock llama.cpp').disabled).toBe(true)
     })
 
     it('disables the lock button and says so when the readback is absent', async () => {
         report(status(SELF))
         await mount(SELF)
         expect(container.textContent).toContain('Lock status unavailable')
-        expect(button('Lock Ollama').disabled).toBe(true)
+        expect(button('Lock llama.cpp').disabled).toBe(true)
         expect(toggleSwitch().disabled).toBe(false)
     })
 })
@@ -256,10 +256,10 @@ describe('locked engine activation', () => {
         await mount(SELF)
         const toggle = toggleSwitch()
         expect(toggle.disabled).toBe(true)
-        expect(toggle.getAttribute('aria-label')).toBe('Ollama is locked')
+        expect(toggle.getAttribute('aria-label')).toBe('llama.cpp is locked')
         await act(async () => toggle.click())
         const name = [...container.querySelectorAll('p, span, div')].find(
-            e => e.children.length === 0 && e.textContent === 'Ollama'
+            e => e.children.length === 0 && e.textContent === 'llama.cpp'
         )
         if (!name) throw new Error('Missing engine name')
         await act(async () => (name instanceof HTMLElement ? name.click() : undefined))
@@ -270,9 +270,9 @@ describe('locked engine activation', () => {
         report(status(SELF, { locked: true, processStatus: 'running' }))
         await mount(SELF)
         expect(toggleSwitch().disabled).toBe(false)
-        expect(toggleSwitch().getAttribute('aria-label')).toBe('Stop Ollama')
+        expect(toggleSwitch().getAttribute('aria-label')).toBe('Stop llama.cpp')
         await act(async () => toggleSwitch().click())
-        expect(commands()).toEqual([{ command: 'toggle', engineType: 'ollama', nodeId: SELF }])
+        expect(commands()).toEqual([{ command: 'toggle', engineType: 'llama-cpp', nodeId: SELF }])
     })
 })
 

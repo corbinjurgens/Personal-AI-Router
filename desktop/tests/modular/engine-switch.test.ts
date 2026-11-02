@@ -170,8 +170,8 @@ function fixture(): JsonObject {
         request: {
             nodeId: 'node-a',
             requestId: 'switch-1',
-            sourceEngine: 'ollama',
-            targetEngine: 'llama-cpp',
+            sourceEngine: 'llamacpp',
+            targetEngine: 'llamacpp-custom',
             expectedRevision: revision
         },
         expectedRevision: revision,
@@ -267,7 +267,7 @@ describe('engine switch receipt parser', () => {
         const request = {
             nodeId: 'node-a',
             requestId: 'switch-1',
-            sourceEngine: 'Ollama_1.0',
+            sourceEngine: 'LlamaCPP_1.0',
             targetEngine: 'custom.engine-2',
             expectedRevision: revision
         }

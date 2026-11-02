@@ -73,14 +73,14 @@ describe('engine identity', () => {
 
 describe('routing engine IDs match Go engines.ValidRoutingID', () => {
     it.each([
-        'ollama',
-        'lmstudio',
+        'llamacpp-main',
+        'llamacpp-dev',
         'llamacpp',
         'llamacpp-custom',
         'strata',
         'errors',
         'e-x',
-        'lm-studio',
+        'llamacpp-custom-main',
         'llama-cpp',
         'A_1.-',
         '-engine',

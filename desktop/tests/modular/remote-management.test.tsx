@@ -706,14 +706,14 @@ describe('permission controls', () => {
     }
     const settings: EngineSettingsSnapshot = {
         nodeId: 'peer-1',
-        engine: 'ollama',
+        engine: 'llamacpp',
         revision: 1,
         appliedRevision: 1,
         sequence: 1,
         epoch: 'one',
-        settings: { serverPort: 1235, proxyPort: 11434, launchText: 'serve' },
-        effectiveServerPort: 1235,
-        effectiveProxyPort: 11434,
+        settings: { serverPort: 8081, proxyPort: 8080, launchText: 'serve' },
+        effectiveServerPort: 8081,
+        effectiveProxyPort: 8080,
         running: true,
         adopted: false,
         editable: true,
@@ -783,7 +783,7 @@ describe('permission controls', () => {
     async function renderSettings() {
         await act(async () =>
             root.render(
-                <EngineSettingsSection nodeId="peer-1" engineType="ollama" disabled={false} />
+                <EngineSettingsSection nodeId="peer-1" engineType="llama-cpp" disabled={false} />
             )
         )
     }
@@ -1077,7 +1077,7 @@ describe('permission controls', () => {
             useNodeConfigurationStore.getState().adopt('peer-1', policy)
             useNodeConfigurationStore
                 .getState()
-                .setRole('peer-1', 'weak', { engine: 'ollama', model: 'draft-model' })
+                .setRole('peer-1', 'weak', { engine: 'llamacpp', model: 'draft-model' })
             await act(async () =>
                 root.render(
                     <>
@@ -1088,7 +1088,7 @@ describe('permission controls', () => {
                         />
                         <EngineSettingsSection
                             nodeId="peer-1"
-                            engineType="ollama"
+                            engineType="llama-cpp"
                             disabled={false}
                         />
                     </>
@@ -1106,7 +1106,7 @@ describe('permission controls', () => {
             ).toBe(true)
             expect(
                 document.querySelector<HTMLInputElement>('input[aria-label="Server port"]')?.value
-            ).toBe('1235')
+            ).toBe('8081')
             expect(applySettings).not.toHaveBeenCalled()
             expect(setPolicy).not.toHaveBeenCalled()
             expect(capability).toHaveBeenCalledTimes(1)
@@ -1123,7 +1123,7 @@ describe('permission controls', () => {
         useNodeConfigurationStore.getState().adopt('invalid-target', policy)
         useNodeConfigurationStore
             .getState()
-            .setRole('invalid-target', 'weak', { engine: 'ollama', model: 'draft-model' })
+            .setRole('invalid-target', 'weak', { engine: 'llamacpp', model: 'draft-model' })
         await act(async () =>
             root.render(
                 <RoleEditor
@@ -1153,7 +1153,7 @@ describe('permission controls', () => {
             document.querySelector<HTMLInputElement>('input[aria-label="Server port"]')?.value
         ).toBe('2345')
         expect(applySettings).toHaveBeenCalledTimes(1)
-        expect(usePendingActionsStore.getState().isSettingsPending('peer-1', 'ollama')).toBe(false)
+        expect(usePendingActionsStore.getState().isSettingsPending('peer-1', 'llama-cpp')).toBe(false)
     })
 
     it.each([
@@ -1233,7 +1233,7 @@ describe('permission controls', () => {
                 [
                     'peer-1',
                     new Map([
-                        ['ollama', { ...emptyEngineStatus('peer-1', 'ollama'), locked: true }]
+                        ['llama-cpp', { ...emptyEngineStatus('peer-1', 'llama-cpp'), locked: true }]
                     ])
                 ]
             ])
@@ -1249,7 +1249,7 @@ describe('permission controls', () => {
         expect(applySettings).toHaveBeenCalledWith(
             expect.objectContaining({
                 nodeId: 'peer-1',
-                engine: 'ollama',
+                engine: 'llamacpp',
                 settings: expect.objectContaining({ serverPort: 2345 })
             })
         )
@@ -1297,7 +1297,7 @@ describe('permission controls', () => {
         await renderSettings()
         await act(async () =>
             root.render(
-                <EngineSettingsSection nodeId="peer-2" engineType="ollama" disabled={false} />
+                <EngineSettingsSection nodeId="peer-2" engineType="llama-cpp" disabled={false} />
             )
         )
         if (!finish) throw new Error('Missing first target capability request')

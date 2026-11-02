@@ -311,7 +311,7 @@ describe('opaque policy JSON through renderer, preload, bridge and socket client
         ['model preferences', '{"servedModels":[],"ServedModels":[]}'],
         [
             'resident permission',
-            '{"servedModels":[],"residentModels":[{"engine":"ollama","model":"m"}]}'
+            '{"servedModels":[],"residentModels":[{"engine":"llamacpp","model":"m"}]}'
         ]
     ])('rejects invalid %s before writing a policy request', async (_name, policy) => {
         await expect(

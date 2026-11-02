@@ -19,8 +19,8 @@ let fixtureId = 0
 function inventory(names: string[], revision = '1'): JsonObject {
     return {
         models: names,
-        modelsByEngine: { lmstudio: names },
-        loadedByEngine: { lmstudio: [] },
+        modelsByEngine: { llamacpp: names },
+        loadedByEngine: { llamacpp: [] },
         downloadState: {
             version: 1,
             sourceId: fixtureId.toString(16).padStart(32, '0'),
@@ -34,14 +34,14 @@ function inventory(names: string[], revision = '1'): JsonObject {
 function setup(names: string[]) {
     const state = getModularBridgeState()
     const supervisor = getModularSupervisor()
-    const nodeId = `lmstudio-current-inventory-${fixtureId}`
+    const nodeId = `llamacpp-current-inventory-${fixtureId}`
     state.setSelfId(nodeId)
     state.applyEngineManagerStatus({
-        engine: 'lmstudio',
+        engine: 'llamacpp',
         installed: true,
         running: true,
         healthy: true,
-        port: 1235
+        port: 8081
     })
     const discoveryNode = (models: string[]) => ({
         hostUuid: nodeId,
@@ -49,7 +49,7 @@ function setup(names: string[]) {
         ipAddress: '127.0.0.1',
         port: 14318,
         models,
-        modelsByEngine: { lmstudio: models }
+        modelsByEngine: { llamacpp: models }
     })
     state.handleNotification({
         source: 'broker',
@@ -62,7 +62,7 @@ function setup(names: string[]) {
     const rows = () =>
         state
             .getEngineInitialState()
-            .models.find(models => models.nodeId === nodeId && models.engineType === 'lm-studio')
+            .models.find(models => models.nodeId === nodeId && models.engineType === 'llama-cpp')
             ?.models ?? []
     return { state, supervisor, discoveryNode, hasProcess, call, rows }
 }
@@ -81,7 +81,7 @@ beforeEach(() => {
 afterEach(() => {
     const supervisor = getModularSupervisor()
     vi.spyOn(supervisor, 'hasProcess').mockReturnValue(false)
-    supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
+    supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: false })
     getModularBridgeState().setLocalDiscoveryModelRefresher(() => {})
     vi.restoreAllMocks()
     vi.useRealTimers()
@@ -102,10 +102,10 @@ describe('canonical engine model wire formats', () => {
     })
 
     it('distinguishes a successfully queried empty engine from an unqueryable one', () => {
-        expect(parseModelsResult(inventory([])).modelsByEngine).toEqual({ lmstudio: [] })
+        expect(parseModelsResult(inventory([])).modelsByEngine).toEqual({ llamacpp: [] })
         expect(parseModelsResult({ models: [] }).modelsByEngine).toBeUndefined()
         expect(() =>
-            parseModelsResult({ models: [], modelsByEngine: { lmstudio: [null] } })
+            parseModelsResult({ models: [], modelsByEngine: { llamacpp: [null] } })
         ).toThrow('malformed inventory')
     })
 
@@ -116,14 +116,14 @@ describe('canonical engine model wire formats', () => {
     })
 })
 
-describe('LM Studio canonical inventory reconciliation', () => {
+describe('llama.cpp canonical inventory reconciliation', () => {
     it('retains successful empty inventory after a failure instead of resurrecting discovery names', async () => {
         const { supervisor, call, rows } = setup(['stale-discovery-model'])
         call.mockResolvedValueOnce(inventory([])).mockRejectedValueOnce(new Error('offline'))
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: true })
         await flush()
         expect(rows()).toEqual([])
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: true })
         await flush()
         expect(rows()).toEqual([])
         expect(call).toHaveBeenNthCalledWith(1, 'broker', 'engine:models')
@@ -134,7 +134,7 @@ describe('LM Studio canonical inventory reconciliation', () => {
         const { supervisor, call, rows } = setup(['last-good'])
         expect(rows()[0]?.downloaded).toBe(true)
         call.mockRejectedValueOnce(new Error('offline'))
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: true })
         await flush()
         expect(rows()).toMatchObject([
             { name: 'last-good', downloaded: false, downloadStateCurrent: false }
@@ -145,10 +145,10 @@ describe('LM Studio canonical inventory reconciliation', () => {
         const { supervisor, call, rows } = setup(['last-good'])
         const stopped = { ...inventory([]), modelsByEngine: {} }
         call.mockResolvedValueOnce(stopped).mockResolvedValueOnce({ models: null })
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: false })
         expect(rows()).toMatchObject([{ name: 'last-good', downloaded: false }])
         await flush()
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: true })
         await flush()
         expect(rows()).toMatchObject([
             { name: 'last-good', downloaded: false, downloadStateCurrent: false }
@@ -160,9 +160,9 @@ describe('LM Studio canonical inventory reconciliation', () => {
         const { supervisor, hasProcess, call, rows } = setup(['last-good'])
         const delayed = Promise.withResolvers<JsonObject>()
         call.mockReturnValueOnce(delayed.promise)
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: true })
         hasProcess.mockReturnValue(false)
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: false })
         delayed.resolve(inventory(['late-model']))
         await flush()
         expect(rows()).toMatchObject([{ name: 'last-good', downloaded: false }])
@@ -175,7 +175,7 @@ describe('LM Studio canonical inventory reconciliation', () => {
             supervisor.refreshDiscoveryEngineModels(engine)
         )
         call.mockResolvedValueOnce(inventory(['deleted-model']))
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: true })
         await flush()
         call.mockResolvedValueOnce(inventory([]))
         state.handleNotification({
@@ -191,7 +191,7 @@ describe('LM Studio canonical inventory reconciliation', () => {
     it('refreshes only the engine whose attribution changed when the union did not', () => {
         const { state, discoveryNode } = setup(['shared-model'])
         state.applyEngineManagerStatus({
-            engine: 'ollama',
+            engine: 'llamacpp-custom',
             installed: true,
             running: true,
             healthy: true
@@ -199,8 +199,8 @@ describe('LM Studio canonical inventory reconciliation', () => {
         const node = {
             ...discoveryNode(['shared-model']),
             modelsByEngine: {
-                ollama: ['shared-model'],
-                lmstudio: ['shared-model']
+                'llamacpp-custom': ['shared-model'],
+                llamacpp: ['shared-model']
             }
         }
         state.handleNotification({
@@ -213,19 +213,19 @@ describe('LM Studio canonical inventory reconciliation', () => {
         state.handleNotification({
             source: 'broker',
             method: 'discovery:nodes-changed',
-            params: [{ ...node, modelsByEngine: { ollama: ['shared-model'], lmstudio: [] } }]
+            params: [{ ...node, modelsByEngine: { 'llamacpp-custom': ['shared-model'], llamacpp: [] } }]
         })
-        expect(refresh).toHaveBeenCalledExactlyOnceWith('lm-studio')
+        expect(refresh).toHaveBeenCalledExactlyOnceWith('llama-cpp')
     })
 
     it('retries a failed discovery refresh without another discovery event', async () => {
         const { supervisor, call, rows } = setup(['deleted-model'])
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: true })
         await flush()
         call.mockRejectedValueOnce(new Error('temporary failure')).mockResolvedValueOnce(
             inventory([])
         )
-        supervisor.refreshDiscoveryEngineModels('lm-studio')
+        supervisor.refreshDiscoveryEngineModels('llama-cpp')
         await flush()
         expect(call).toHaveBeenCalledTimes(2)
         await vi.advanceTimersByTimeAsync(1_000)
@@ -235,12 +235,12 @@ describe('LM Studio canonical inventory reconciliation', () => {
 
     it('cancels a pending discovery retry when the engine stops', async () => {
         const { supervisor, call } = setup(['ready'])
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: true })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: true })
         await flush()
         call.mockRejectedValueOnce(new Error('schedule retry'))
-        supervisor.refreshDiscoveryEngineModels('lm-studio')
+        supervisor.refreshDiscoveryEngineModels('llama-cpp')
         await flush()
-        supervisor.refreshManagedEngineModels({ engine: 'lmstudio', running: false })
+        supervisor.refreshManagedEngineModels({ engine: 'llamacpp', running: false })
         await flush()
         expect(call).toHaveBeenCalledTimes(3)
         await vi.advanceTimersByTimeAsync(2_000)

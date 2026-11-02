@@ -162,9 +162,9 @@ it('preserves observation age through broker and proxy discovery merges', () => 
     state.mergeNodeInfoResponse(id, response({ msSince: 5000 }))
     vi.setSystemTime(22000)
     state.handleNotification({
-        source: 'ollama-proxy',
+        source: 'llamacpp-proxy',
         method: 'node/discovered',
-        params: { id, host: 'Host', port: 11434, ip: '192.0.2.1' }
+        params: { id, host: 'Host', port: 8080, ip: '192.0.2.1' }
     })
     expect(current().gpuUtilization[0].timestamp).toBe(15000)
     discover('Updated host')

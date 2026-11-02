@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { customEngine } from './engine-fixtures'
 import type { ServiceError } from '@/shared/types/errors'
 import type { EngineStatePatch } from '@/shared/types/engine-api'
 import type { EngineProgress, ModelItem } from '@/shared/types/engines'
@@ -24,7 +25,7 @@ import { engineProgressKey } from '@/shared/utils/engine-progress'
  *    it has bounced the server and passed its readiness probe (`ready.timeout_s`
  *    is 60s on its own), which the 60s net could expire underneath.
  *
- * Slow Ollama loads have the same guarantee: a safety net must not re-enable
+ * Slow llama.cpp loads have the same guarantee: a safety net must not re-enable
  * conflicting controls while the backend request is still valid.
  */
 
@@ -106,22 +107,22 @@ describe('pending-actions store: model actions', () => {
         const store = usePendingActionsStore.getState()
         store.begin({
             command: 'deleteModel',
-            engineType: 'lm-studio',
+            engineType: 'llama-cpp',
             nodeId: 'node-1',
             model: 'publisher/demo'
         })
-        expect(store.getModelPending('node-1', 'lm-studio', 'publisher/demo')).toBe('deleteModel')
+        expect(store.getModelPending('node-1', 'llama-cpp', 'publisher/demo')).toBe('deleteModel')
 
         // What `ModularSupervisor.deleteModel` now emits on failure. The
         // nodeId/engineType/modelName triple is what makes it attributable.
         errorsCb?.([
             {
-                id: 'pair-ui:engine-delete:lmstudio:publisher/demo',
-                message: 'Failed to delete publisher/demo: engine "lmstudio" is not running',
+                id: 'pair-ui:engine-delete:llamacpp:publisher/demo',
+                message: 'Failed to delete publisher/demo: engine "llamacpp" is not running',
                 timestamp: Date.now(),
                 severity: 'error',
                 nodeId: 'node-1',
-                engineType: 'lm-studio',
+                engineType: 'llama-cpp',
                 operation: 'delete',
                 modelName: 'publisher/demo'
             }
@@ -130,7 +131,7 @@ describe('pending-actions store: model actions', () => {
         expect(
             usePendingActionsStore
                 .getState()
-                .getModelPending('node-1', 'lm-studio', 'publisher/demo')
+                .getModelPending('node-1', 'llama-cpp', 'publisher/demo')
         ).toBeUndefined()
     })
 
@@ -138,7 +139,7 @@ describe('pending-actions store: model actions', () => {
         const store = usePendingActionsStore.getState()
         store.begin({
             command: 'deleteModel',
-            engineType: 'lm-studio',
+            engineType: 'llama-cpp',
             nodeId: 'node-1',
             model: 'publisher/demo'
         })
@@ -156,7 +157,7 @@ describe('pending-actions store: model actions', () => {
         expect(
             usePendingActionsStore
                 .getState()
-                .getModelPending('node-1', 'lm-studio', 'publisher/demo')
+                .getModelPending('node-1', 'llama-cpp', 'publisher/demo')
         ).toBe('deleteModel')
     })
 
@@ -184,35 +185,35 @@ describe('pending-actions store: model actions', () => {
         ).toBeUndefined()
     })
 
-    it('leaves the default net in place for an Ollama delete, which never bounces', () => {
+    it('leaves the default net in place for a llama.cpp delete, which never bounces', () => {
         usePendingActionsStore.getState().begin({
             command: 'deleteModel',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             nodeId: 'node-1',
             model: 'llama3.2'
         })
 
         vi.advanceTimersByTime(61_000)
         expect(
-            usePendingActionsStore.getState().getModelPending('node-1', 'ollama', 'llama3.2')
+            usePendingActionsStore.getState().getModelPending('node-1', 'llama-cpp', 'llama3.2')
         ).toBeUndefined()
     })
 
-    it('keeps Ollama loads pending through the backend budget and clears on real outcomes', () => {
-        // The budget is the one Ollama's descriptor declares for its load.
+    it('keeps llama.cpp loads pending through the backend budget and clears on real outcomes', () => {
+        // The fixture descriptor declares the budget for its load.
         useEngineStatusStore.setState({
             descriptors: new Map([
                 [
-                    'ollama',
+                    customEngine,
                     {
-                        engineType: 'ollama',
-                        family: 'ollama',
-                        label: 'Ollama',
+                        engineType: customEngine,
+                        family: 'llamacpp',
+                        label: 'llama.cpp custom',
                         available: true,
-                        protocols: ['ollama-api', 'openai-v1'],
-                        modelNaming: 'implied-latest-tag',
-                        modelStore: 'ollama',
-                        catalog: 'ollama',
+                        protocols: ['openai-v1', 'llamacpp-router'],
+                        modelNaming: 'exact',
+                        modelStore: 'llamacpp',
+                        catalog: 'llamacpp',
                         operations: { load: { responseTimeoutS: 600 } }
                     }
                 ]
@@ -222,7 +223,7 @@ describe('pending-actions store: model actions', () => {
         for (const nodeId of ['local-node', 'remote-node']) {
             store.begin({
                 command: 'loadModel',
-                engineType: 'ollama',
+                engineType: customEngine,
                 nodeId,
                 model: 'llama3.2'
             })
@@ -231,54 +232,54 @@ describe('pending-actions store: model actions', () => {
         // The remote path can withhold headers for 11 minutes. Both rows must
         // remain locked until backend truth arrives, not expire at the old 60s net.
         vi.advanceTimersByTime(11 * 60_000 + 1_000)
-        expect(store.getModelPending('local-node', 'ollama', 'llama3.2')).toBe('loadModel')
-        expect(store.getModelPending('remote-node', 'ollama', 'llama3.2')).toBe('loadModel')
+        expect(store.getModelPending('local-node', customEngine, 'llama3.2')).toBe('loadModel')
+        expect(store.getModelPending('remote-node', customEngine, 'llama3.2')).toBe('loadModel')
 
         stateCb?.({
             nodeId: 'local-node',
-            engineType: 'ollama',
+            engineType: customEngine,
             models: {
                 nodeId: 'local-node',
-                engineType: 'ollama',
+                engineType: customEngine,
                 models: [loadedModel('llama3.2')]
             }
         })
         errorsCb?.([
             {
-                id: 'pair-ui:engine-load:remote-node:ollama:llama3.2',
+                id: 'pair-ui:engine-load:remote-node:llamacpp-custom:llama3.2',
                 message: 'Failed to load llama3.2',
                 timestamp: Date.now(),
                 severity: 'error',
                 nodeId: 'remote-node',
-                engineType: 'ollama',
+                engineType: customEngine,
                 operation: 'load',
                 modelName: 'llama3.2'
             }
         ])
 
         expect(
-            usePendingActionsStore.getState().getModelPending('local-node', 'ollama', 'llama3.2')
+            usePendingActionsStore.getState().getModelPending('local-node', customEngine, 'llama3.2')
         ).toBeUndefined()
         expect(
-            usePendingActionsStore.getState().getModelPending('remote-node', 'ollama', 'llama3.2')
+            usePendingActionsStore.getState().getModelPending('remote-node', customEngine, 'llama3.2')
         ).toBeUndefined()
 
         store.begin({
             command: 'loadModel',
-            engineType: 'ollama',
+            engineType: customEngine,
             nodeId: 'remote-node',
             model: 'llama3.2'
         })
         vi.advanceTimersByTime(12 * 60_000 + 1_000)
         expect(
-            usePendingActionsStore.getState().getModelPending('remote-node', 'ollama', 'llama3.2')
+            usePendingActionsStore.getState().getModelPending('remote-node', customEngine, 'llama3.2')
         ).toBeUndefined()
     })
 
-    it('leaves the default net in place for LM Studio loads', () => {
+    it('leaves the default net in place for loads without a declared budget', () => {
         usePendingActionsStore.getState().begin({
             command: 'loadModel',
-            engineType: 'lm-studio',
+            engineType: 'llama-cpp',
             nodeId: 'local-node',
             model: 'publisher/demo'
         })
@@ -287,30 +288,30 @@ describe('pending-actions store: model actions', () => {
         expect(
             usePendingActionsStore
                 .getState()
-                .getModelPending('local-node', 'lm-studio', 'publisher/demo')
+                .getModelPending('local-node', 'llama-cpp', 'publisher/demo')
         ).toBeUndefined()
     })
 
     it('does not settle a pull because inventory contains the name', () => {
         const store = usePendingActionsStore.getState()
-        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'ollama', model: 'demo' })
+        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'llama-cpp', model: 'demo' })
         stateCb?.({
             nodeId: 'node-1',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             models: {
                 nodeId: 'node-1',
-                engineType: 'ollama',
+                engineType: 'llama-cpp',
                 models: [loadedModel('demo')]
             }
         })
-        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+        expect(store.getModelPending('node-1', 'llama-cpp', 'demo')).toBe('pullModel')
     })
 
     it('hands off only the matching new active download and keeps a newer pending request safe from an old ID', () => {
         const old: EngineProgress = {
             nodeId: 'node-1',
             nodeName: '',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             operation: 'pull',
             model: 'demo',
             status: 'failed',
@@ -319,7 +320,7 @@ describe('pending-actions store: model actions', () => {
             downloadStateCurrent: true,
             downloadState: {
                 id: '1'.repeat(32),
-                engine: 'ollama',
+                engine: 'llamacpp',
                 model: 'demo',
                 phase: 'failed',
                 blocksReadiness: true
@@ -327,11 +328,11 @@ describe('pending-actions store: model actions', () => {
         }
         useEngineProgressStore.setState({ progress: new Map([[engineProgressKey(old), old]]) })
         const store = usePendingActionsStore.getState()
-        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'ollama', model: 'demo' })
+        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'llama-cpp', model: 'demo' })
         store.begin({
             command: 'pullModel',
             nodeId: 'node-1',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             model: 'other'
         })
         progressCb?.({
@@ -339,20 +340,20 @@ describe('pending-actions store: model actions', () => {
             status: 'complete',
             downloadState: {
                 id: '1'.repeat(32),
-                engine: 'ollama',
+                engine: 'llamacpp',
                 model: 'demo',
                 phase: 'complete',
                 blocksReadiness: false
             }
         })
-        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+        expect(store.getModelPending('node-1', 'llama-cpp', 'demo')).toBe('pullModel')
         const queued: EngineProgress = {
             ...old,
             status: 'queued',
             downloadRevision: '3',
             downloadState: {
                 id: '2'.repeat(32),
-                engine: 'ollama',
+                engine: 'llamacpp',
                 model: 'demo',
                 phase: 'queued',
                 blocksReadiness: true
@@ -361,10 +362,10 @@ describe('pending-actions store: model actions', () => {
         progressCb?.({ ...queued, nodeId: 'another-target' })
         progressCb?.({ ...queued, operation: 'copy' })
         progressCb?.({ ...queued, downloadStateCurrent: false })
-        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+        expect(store.getModelPending('node-1', 'llama-cpp', 'demo')).toBe('pullModel')
         progressCb?.(queued)
-        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBeUndefined()
-        expect(store.getModelPending('node-1', 'ollama', 'other')).toBe('pullModel')
+        expect(store.getModelPending('node-1', 'llama-cpp', 'demo')).toBeUndefined()
+        expect(store.getModelPending('node-1', 'llama-cpp', 'other')).toBe('pullModel')
     })
 
     const terminalPhases: ModelDownloadEntry['phase'][] = ['failed', 'complete', 'unknown']
@@ -374,7 +375,7 @@ describe('pending-actions store: model actions', () => {
             const old: EngineProgress = {
                 nodeId: 'node-1',
                 nodeName: '',
-                engineType: 'ollama',
+                engineType: 'llama-cpp',
                 operation: 'pull',
                 model: 'demo',
                 status: 'failed',
@@ -383,7 +384,7 @@ describe('pending-actions store: model actions', () => {
                 downloadStateCurrent: true,
                 downloadState: {
                     id: '1'.repeat(32),
-                    engine: 'ollama',
+                    engine: 'llamacpp',
                     model: 'demo',
                     phase: 'failed',
                     blocksReadiness: true
@@ -394,7 +395,7 @@ describe('pending-actions store: model actions', () => {
             store.begin({
                 command: 'pullModel',
                 nodeId: 'node-1',
-                engineType: 'ollama',
+                engineType: 'llama-cpp',
                 model: 'demo'
             })
             const terminal: EngineProgress = {
@@ -403,7 +404,7 @@ describe('pending-actions store: model actions', () => {
                 downloadRevision: '3',
                 downloadState: {
                     id: '2'.repeat(32),
-                    engine: 'ollama',
+                    engine: 'llamacpp',
                     model: 'demo',
                     phase,
                     blocksReadiness: phase !== 'complete'
@@ -414,9 +415,9 @@ describe('pending-actions store: model actions', () => {
             progressCb?.({ ...terminal, downloadStateCurrent: false })
             progressCb?.({ ...terminal, downloadSourceId: undefined })
             progressCb?.({ ...terminal, nodeId: 'other-node' })
-            expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+            expect(store.getModelPending('node-1', 'llama-cpp', 'demo')).toBe('pullModel')
             progressCb?.(terminal)
-            expect(store.getModelPending('node-1', 'ollama', 'demo')).toBeUndefined()
+            expect(store.getModelPending('node-1', 'llama-cpp', 'demo')).toBeUndefined()
 
             useEngineProgressStore.setState({
                 progress: new Map([[engineProgressKey(terminal), terminal]])
@@ -424,11 +425,11 @@ describe('pending-actions store: model actions', () => {
             store.begin({
                 command: 'pullModel',
                 nodeId: 'node-1',
-                engineType: 'ollama',
+                engineType: 'llama-cpp',
                 model: 'demo'
             })
             progressCb?.({ ...terminal, downloadRevision: '4' })
-            expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+            expect(store.getModelPending('node-1', 'llama-cpp', 'demo')).toBe('pullModel')
         }
     )
 
@@ -436,7 +437,7 @@ describe('pending-actions store: model actions', () => {
         const terminal: EngineProgress = {
             nodeId: 'node-1',
             nodeName: '',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             operation: 'pull',
             model: 'demo',
             status: 'failed',
@@ -445,7 +446,7 @@ describe('pending-actions store: model actions', () => {
             downloadStateCurrent: true,
             downloadState: {
                 id: '2'.repeat(32),
-                engine: 'ollama',
+                engine: 'llamacpp',
                 model: 'demo',
                 phase: 'failed',
                 blocksReadiness: true
@@ -457,10 +458,10 @@ describe('pending-actions store: model actions', () => {
         useEngineModelsStore.setState({
             models: new Map([
                 [
-                    'node-1:ollama',
+                    'node-1:llama-cpp',
                     {
                         nodeId: 'node-1',
-                        engineType: 'ollama',
+                        engineType: 'llama-cpp',
                         models: [loadedModel('demo')],
                         downloadStateCurrent: false,
                         downloadState: {
@@ -475,27 +476,27 @@ describe('pending-actions store: model actions', () => {
             ])
         })
         const store = usePendingActionsStore.getState()
-        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'ollama', model: 'demo' })
+        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'llama-cpp', model: 'demo' })
         progressCb?.({ ...terminal, downloadRevision: '3' })
-        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBe('pullModel')
+        expect(store.getModelPending('node-1', 'llama-cpp', 'demo')).toBe('pullModel')
     })
 
     it('settles a terminal pull from a model snapshot without receiving progress', () => {
         const store = usePendingActionsStore.getState()
-        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'ollama', model: 'demo' })
+        store.begin({ command: 'pullModel', nodeId: 'node-1', engineType: 'llama-cpp', model: 'demo' })
         const failed: ModelDownloadEntry = {
             id: '2'.repeat(32),
-            engine: 'ollama',
+            engine: 'llamacpp',
             model: 'demo',
             phase: 'failed',
             blocksReadiness: true
         }
         stateCb?.({
             nodeId: 'node-1',
-            engineType: 'ollama',
+            engineType: 'llama-cpp',
             models: {
                 nodeId: 'node-1',
-                engineType: 'ollama',
+                engineType: 'llama-cpp',
                 models: [{ ...loadedModel('demo'), downloaded: false, downloadState: failed }],
                 downloadStateCurrent: true,
                 downloadState: {
@@ -507,6 +508,6 @@ describe('pending-actions store: model actions', () => {
                 }
             }
         })
-        expect(store.getModelPending('node-1', 'ollama', 'demo')).toBeUndefined()
+        expect(store.getModelPending('node-1', 'llama-cpp', 'demo')).toBeUndefined()
     })
 })

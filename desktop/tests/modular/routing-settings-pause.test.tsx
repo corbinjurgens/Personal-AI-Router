@@ -292,7 +292,7 @@ describe('routing settings pause recovery', () => {
         )
         if (!option) throw new Error('Missing peer menu item')
         await act(async () => option.click())
-        const draft = { weak: { engine: 'ollama', model: 'unsent-role' } }
+        const draft = { weak: { engine: 'llamacpp', model: 'unsent-role' } }
         useNodeConfigurationStore.getState().setDraft('peer', draft)
         const baselinePolicy = useNodeConfigurationStore.getState().editors.get('peer')
             ?.baseline?.policy

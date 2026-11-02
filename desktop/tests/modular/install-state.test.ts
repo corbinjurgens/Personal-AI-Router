@@ -15,18 +15,18 @@ let unsubscribe = (): void => {}
 afterEach(() => {
     unsubscribe()
     unsubscribe = () => {}
-    getModularBridgeState().clearPendingEngineOp('lm-studio')
+    getModularBridgeState().clearPendingEngineOp('llama-cpp')
     vi.useRealTimers()
 })
 
-describe('LM Studio install state', () => {
-    it.each(['lmstudio', 'lm-studio'])('clears failed operations for %s', engineId => {
+describe('llama.cpp install state', () => {
+    it.each(['llamacpp', 'llama-cpp'])('clears failed operations for %s', engineId => {
         const state = getModularBridgeState()
         const statuses: EngineProcessStatus[] = []
         unsubscribe = subscribePush(event => {
             if (
                 event.channel === 'engines:state-changed' &&
-                event.payload.engineType === 'lm-studio' &&
+                event.payload.engineType === 'llama-cpp' &&
                 event.payload.status
             ) {
                 statuses.push(event.payload.status.processStatus)
@@ -34,12 +34,12 @@ describe('LM Studio install state', () => {
         })
         state.setSelfId('local-node')
         state.applyEngineManagerStatus({
-            engine: 'lmstudio',
+            engine: 'llamacpp',
             installed: false,
             running: false,
-            port: 1234
+            port: 8081
         })
-        state.beginLocalEngineOp('lm-studio', 'installing')
+        state.beginLocalEngineOp('llama-cpp', 'installing')
         expect(statuses.at(-1)).toBe('installing')
         state.failLocalEngineOp(engineId, 'install')
         expect(statuses.at(-1)).toBe('not-installed')
@@ -52,7 +52,7 @@ describe('LM Studio install state', () => {
         unsubscribe = subscribePush(event => {
             if (
                 event.channel === 'engines:state-changed' &&
-                event.payload.engineType === 'lm-studio' &&
+                event.payload.engineType === 'llama-cpp' &&
                 event.payload.status
             ) {
                 statuses.push(event.payload.status.processStatus)
@@ -61,23 +61,23 @@ describe('LM Studio install state', () => {
 
         state.setSelfId('local-node')
         state.applyEngineManagerStatus({
-            engine: 'lmstudio',
+            engine: 'llamacpp',
             installed: false,
             running: false,
-            port: 1234
+            port: 8081
         })
-        state.beginLocalEngineOp('lm-studio', 'installing')
+        state.beginLocalEngineOp('llama-cpp', 'installing')
 
         vi.advanceTimersByTime(120_000)
         expect(statuses.at(-1)).toBe('installing')
 
-        state.applyEngineManagerProgress({ engine: 'lmstudio', stage: 'installing' })
+        state.applyEngineManagerProgress({ engine: 'llamacpp', stage: 'installing' })
         vi.advanceTimersByTime(30 * 60_000 - 1)
         expect(statuses.at(-1)).toBe('installing')
         vi.advanceTimersByTime(1)
         expect(statuses.at(-1)).toBe('not-installed')
 
-        state.beginLocalEngineOp('lm-studio', 'starting')
+        state.beginLocalEngineOp('llama-cpp', 'starting')
         vi.advanceTimersByTime(90_000)
         expect(statuses.at(-1)).toBe('not-installed')
     })
@@ -102,11 +102,11 @@ describe('install progress percent', () => {
         const frames = captureInstallProgress()
         state.setSelfId('local-node')
 
-        state.applyEngineManagerProgress({ engine: 'lmstudio', stage: 'downloading', percent: 42 })
+        state.applyEngineManagerProgress({ engine: 'llamacpp', stage: 'downloading', percent: 42 })
         expect(frames.at(-1)?.percent).toBe(42)
 
-        state.applyEngineManagerProgress({ engine: 'lmstudio', stage: 'downloading', percent: 100 })
-        state.applyEngineManagerProgress({ engine: 'lmstudio', stage: 'installing' })
+        state.applyEngineManagerProgress({ engine: 'llamacpp', stage: 'downloading', percent: 100 })
+        state.applyEngineManagerProgress({ engine: 'llamacpp', stage: 'installing' })
         expect(frames.at(-1)?.status).toBe('installing')
         expect(frames.at(-1)?.percent).toBeUndefined()
     })
@@ -114,7 +114,7 @@ describe('install progress percent', () => {
     it('drops a remote install to indeterminate after a measured download', () => {
         const state = getModularBridgeState()
         const frames = captureInstallProgress()
-        const frame = { node: 'remote-node', engine: 'ollama', op: 'install' }
+        const frame = { node: 'remote-node', engine: 'llamacpp', op: 'install' }
 
         state.applyRemoteEngineProgress({ ...frame, stage: 'downloading', percent: 100 })
         expect(frames.at(-1)?.percent).toBe(100)

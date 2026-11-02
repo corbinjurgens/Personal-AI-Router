@@ -47,11 +47,7 @@ const POISONED_ENV: Record<string, string> = {
 }
 
 /** Proxy ports the fake broker reports. Mutable so a test can withhold one. */
-const proxyPorts: Record<BuiltinEngineType, number | null> = {
-    ollama: 11434,
-    'lm-studio': 1234,
-    'llama-cpp': 8080
-}
+const proxyPorts = new Map<BuiltinEngineType, number | null>([['llama-cpp', 8080]])
 
 /** Model inventory each probe returns. Mutable so a test can return none. */
 let inventory: unknown = [{ name: 'demo-model', type: 'llm' }]
@@ -120,7 +116,7 @@ vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
 
 vi.mock('@/electron/service-bridge/modular-state', () => ({
     getModularBridgeState: () => ({
-        getProxyPort: (engine: BuiltinEngineType) => proxyPorts[engine]
+        getProxyPort: (engine: BuiltinEngineType) => proxyPorts.get(engine) ?? null
     })
 }))
 
@@ -132,7 +128,7 @@ import {
 } from '@/electron/inference-demo'
 
 /** Ports the demo is allowed to target: proxy facades only. */
-const PROXY_FACADE_PORTS = [11434, 1234, 8080]
+const PROXY_FACADE_PORTS = [8080]
 
 function portOf(record: SpawnRecord): number {
     return Number(record.args[record.args.indexOf('--port') + 1])
@@ -147,9 +143,8 @@ beforeEach(() => {
     probeOptions.length = 0
     probeArgs.length = 0
     inventory = [{ name: 'demo-model', type: 'llm' }]
-    proxyPorts.ollama = 11434
-    proxyPorts['lm-studio'] = 1234
-    proxyPorts['llama-cpp'] = 8080
+    proxyPorts.clear()
+    proxyPorts.set('llama-cpp', 8080)
     Object.assign(process.env, POISONED_ENV)
     vi.useFakeTimers()
 })
@@ -258,7 +253,8 @@ describe('inference demo lifecycle', () => {
     })
 
     it('skips an engine whose proxy has not reported a port', async () => {
-        proxyPorts['llama-cpp'] = null
+        proxyPorts.set('llama-cpp', null)
+        proxyPorts.set('lm-studio', 1234)
         await startInferenceDemo()
         await vi.advanceTimersByTimeAsync(70_000)
 

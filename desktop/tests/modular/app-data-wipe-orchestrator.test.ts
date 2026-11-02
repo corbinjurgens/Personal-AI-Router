@@ -48,8 +48,8 @@ describe('resetting app data', () => {
 
     it('wipes once every engine PAIR installed is gone', async () => {
         mocks.supervisor.uninstallManagedEngines.mockResolvedValue([
-            { engine: 'ollama', removed: true, error: '' },
-            { engine: 'lmstudio', removed: false, error: '' }
+            { engine: 'llamacpp-custom', removed: true, error: '' },
+            { engine: 'llamacpp', removed: false, error: '' }
         ])
 
         await wipeAppDataAndRelaunch()
@@ -63,12 +63,12 @@ describe('resetting app data', () => {
     // removal left the engine's files on disk with nothing allowed to remove them.
     it('stops before deleting anything when an engine PAIR installed is not removed', async () => {
         mocks.supervisor.uninstallManagedEngines.mockResolvedValue([
-            { engine: 'ollama', removed: true, error: '' },
-            { engine: 'lmstudio', removed: false, error: 'locked' }
+            { engine: 'llamacpp-custom', removed: true, error: '' },
+            { engine: 'llamacpp', removed: false, error: 'locked' }
         ])
 
         await expect(wipeAppDataAndRelaunch()).rejects.toThrow(
-            'Could not remove LM Studio, which NVIDIA PAIR installed. Your data was not deleted. ' +
+            'Could not remove llama.cpp, which NVIDIA PAIR installed. Your data was not deleted. ' +
                 'Try again, or uninstall it yourself first.'
         )
         expectNothingDeleted()

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // @vitest-environment jsdom
 
+import { customEngine } from './engine-fixtures'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -527,7 +528,7 @@ describe('capability and authority checks', () => {
     )
     const unrelatedLifecycle: [string, Partial<EngineProgress>][] = [
         ['another model', { model: 'another-model' }],
-        ['another engine', { engineType: 'ollama' }],
+        ['another engine', { engineType: customEngine }],
         ['another device', { nodeId: 'joes-id' }],
         ['an older lifecycle revision', { downloadRevision: '1' }]
     ]

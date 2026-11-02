@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import { customEngine } from './engine-fixtures'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { EngineInitialState } from '@/shared/types/engine-api'
@@ -31,18 +32,18 @@ const node: NodeItem = {
 }
 const initial: EngineInitialState = {
     descriptors: [],
-    statuses: [emptyEngineStatus('peer', 'ollama')],
+    statuses: [emptyEngineStatus('peer', 'llama-cpp')],
     models: [],
     activeProgress: [],
     updateAvailable: []
 }
 const newer: EngineStatusData = { ...initial.statuses[0], processStatus: 'running' }
 const descriptor: EngineDescriptor = {
-    engineType: 'ollama',
-    family: 'ollama',
+    engineType: 'llama-cpp',
+    family: 'llamacpp',
     label: 'New descriptor',
     available: true,
-    protocols: ['ollama-api'],
+    protocols: ['openai-v1'],
     modelNaming: 'exact',
     modelStore: '',
     catalog: '',
@@ -197,7 +198,7 @@ describe('snapshot ordering', () => {
         push({ status: newer })
         pending.resolve(initial)
         await loading
-        expect(useEngineStatusStore.getState().getStatus('peer', 'ollama').processStatus).toBe(
+        expect(useEngineStatusStore.getState().getStatus('peer', 'llama-cpp').processStatus).toBe(
             'running'
         )
     })
@@ -233,16 +234,16 @@ describe('snapshot ordering', () => {
             ...initial,
             statuses: [
                 ...initial.statuses,
-                emptyEngineStatus('peer', 'lm-studio'),
-                emptyEngineStatus('other', 'ollama')
+                emptyEngineStatus('peer', customEngine),
+                emptyEngineStatus('other', 'llama-cpp')
             ]
         })
         await loading
-        expect(useEngineStatusStore.getState().getStatus('peer', 'ollama').processStatus).toBe(
+        expect(useEngineStatusStore.getState().getStatus('peer', 'llama-cpp').processStatus).toBe(
             'running'
         )
         expect(useEngineStatusStore.getState().statusByNode.has('other')).toBe(true)
-        expect(useEngineStatusStore.getState().statusByNode.get('peer')?.has('lm-studio')).toBe(
+        expect(useEngineStatusStore.getState().statusByNode.get('peer')?.has(customEngine)).toBe(
             false
         )
     })
@@ -269,7 +270,7 @@ describe('snapshot ordering', () => {
         push([descriptor])
         pending.resolve({ ...initial, descriptors: [{ ...descriptor, label: 'Old descriptor' }] })
         await loading
-        expect(useEngineStatusStore.getState().descriptors.get('ollama')).toEqual(descriptor)
+        expect(useEngineStatusStore.getState().descriptors.get('llama-cpp')).toEqual(descriptor)
     })
 
     it('ignores an obsolete engine snapshot after cleanup and reinitialization', async () => {
@@ -302,7 +303,7 @@ describe('snapshot ordering', () => {
         })
         pending.resolve({ ...initial, descriptors: [{ ...descriptor, label: 'Old descriptor' }] })
         await obsolete
-        expect(useEngineStatusStore.getState().getStatus('peer', 'ollama')).toEqual(newer)
-        expect(useEngineStatusStore.getState().descriptors.get('ollama')).toEqual(descriptor)
+        expect(useEngineStatusStore.getState().getStatus('peer', 'llama-cpp')).toEqual(newer)
+        expect(useEngineStatusStore.getState().descriptors.get('llama-cpp')).toEqual(descriptor)
     })
 })

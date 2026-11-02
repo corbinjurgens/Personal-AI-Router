@@ -38,7 +38,7 @@ describe('truthful local stop', () => {
 
         await handleServiceBridgeInvoke('engine:command', {
             command: 'toggle',
-            engineType: 'lm-studio',
+            engineType: 'llama-cpp',
             nodeId: 'local-node'
         })
 
@@ -48,17 +48,17 @@ describe('truthful local stop', () => {
         expect([name, method, params, observeResponse]).toEqual([
             'broker',
             'engine:stop',
-            { engine: 'lmstudio' },
+            { engine: 'llamacpp' },
             true
         ])
 
         onFailure('cannot stop an externally managed process', true)
 
-        expect(mocks.state.clearPendingEngineOp).toHaveBeenCalledWith('lm-studio')
+        expect(mocks.state.clearPendingEngineOp).toHaveBeenCalledWith('llama-cpp')
         expect(mocks.supervisor.reportError).toHaveBeenCalledWith(
-            'Failed to stop lmstudio: cannot stop an externally managed process',
+            'Failed to stop llamacpp: cannot stop an externally managed process',
             'error',
-            'engine-cmd:toggle:lmstudio'
+            'engine-cmd:toggle:llamacpp'
         )
     })
 })

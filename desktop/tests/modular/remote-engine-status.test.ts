@@ -15,42 +15,42 @@ describe('remote engine status', () => {
 
         state.setSelfId('remote-engine-status-local')
         state.handleNotification({
-            source: 'lmstudio-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/discovered',
             params: {
                 id: remoteNodeId,
                 host: remoteNodeId,
-                port: 1234,
+                port: 8080,
                 addresses: ['192.0.2.190'],
                 ip: '192.0.2.190'
             }
         })
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'lm-studio')).toBe(true)
+        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(true)
 
         state.applyRemoteEngineFacts(remoteNodeId, {
             engines: [
                 {
-                    engine: 'lmstudio',
+                    engine: 'llamacpp',
                     installed: true,
                     running: false,
                     healthy: false,
-                    port: 1235
+                    port: 8081
                 }
             ]
         })
 
-        expect(state.isRemoteEngineRunning(remoteNodeId, 'lm-studio')).toBe(false)
+        expect(state.isRemoteEngineRunning(remoteNodeId, 'llama-cpp')).toBe(false)
         expect(
             state
                 .getEngineInitialState()
                 .statuses.find(
-                    status => status.nodeId === remoteNodeId && status.engineType === 'lm-studio'
+                    status => status.nodeId === remoteNodeId && status.engineType === 'llama-cpp'
                 )
         ).toMatchObject({
             processStatus: 'stopped',
-            enginePort: 1235,
+            enginePort: 8081,
             // The proxy remains discoverable even though the engine behind it is stopped.
-            proxyPort: 1234
+            proxyPort: 8080
         })
     })
 })

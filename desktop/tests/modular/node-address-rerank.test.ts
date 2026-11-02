@@ -33,12 +33,12 @@ describe('broker address re-rank', () => {
             }
         })
         state.handleNotification({
-            source: 'ollama-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/discovered',
             params: {
                 id: 'uuid-rerank',
                 host: 'rerank-host',
-                port: 11434,
+                port: 8080,
                 addresses: ['198.51.100.9'],
                 ip: '192.0.2.101'
             }
@@ -94,12 +94,12 @@ describe('broker address re-rank', () => {
             }
         })
         state.handleNotification({
-            source: 'lmstudio-proxy',
+            source: 'llamacpp-proxy',
             method: 'node/updated',
             params: {
                 id: 'uuid-proxy-refresh',
                 host: 'proxy-refresh-host',
-                port: 1234,
+                port: 8080,
                 addresses: ['203.0.113.7'],
                 ip: '192.0.2.201'
             }

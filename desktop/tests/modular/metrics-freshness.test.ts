@@ -67,7 +67,7 @@ it('keeps a real zero visible', () => {
 })
 
 it('preserves missing node-info dynamic fields as unknown through projection', () => {
-    const node = parseProxyNode({ id: 'node', name: 'Node' }, 'ollama')
+    const node = parseProxyNode({ id: 'node', name: 'Node' }, 'llama-cpp')
     if (!node) throw new Error('fixture node was not parsed')
     node.gpus = gpuArrayValue([{ name: 'GPU', vram_bytes: 1024 }])
     node.telemetryValid = true

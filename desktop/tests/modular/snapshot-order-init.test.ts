@@ -63,7 +63,7 @@ it('subscribes to engine status during shared startup and resync snapshots', asy
     let refresh = () => {}
     let reads = 0
     let push: (patch: { status: EngineStatusData }) => void = () => {}
-    const old = emptyEngineStatus('peer', 'ollama')
+    const old = emptyEngineStatus('peer', 'llama-cpp')
     vi.stubGlobal('window', {
         pairApi: {
             app: { getInitial: async () => undefined },
@@ -106,7 +106,7 @@ it('subscribes to engine status during shared startup and resync snapshots', asy
         updateAvailable: []
     })
     await loading
-    expect(useEngineStatusStore.getState().getStatus('peer', 'ollama').processStatus).toBe(
+    expect(useEngineStatusStore.getState().getStatus('peer', 'llama-cpp').processStatus).toBe(
         'running'
     )
     refresh()
@@ -114,7 +114,7 @@ it('subscribes to engine status during shared startup and resync snapshots', asy
     push({ status: { ...old, processStatus: 'stopped' } })
     refreshSnapshot.resolve({
         descriptors: [],
-        statuses: [old, emptyEngineStatus('other', 'ollama')],
+        statuses: [old, emptyEngineStatus('other', 'llama-cpp')],
         models: [],
         activeProgress: [],
         updateAvailable: []
@@ -122,7 +122,7 @@ it('subscribes to engine status during shared startup and resync snapshots', asy
     await vi.waitFor(() =>
         expect(useEngineStatusStore.getState().statusByNode.has('other')).toBe(true)
     )
-    expect(useEngineStatusStore.getState().getStatus('peer', 'ollama').processStatus).toBe(
+    expect(useEngineStatusStore.getState().getStatus('peer', 'llama-cpp').processStatus).toBe(
         'stopped'
     )
     expect(reads).toBe(2)

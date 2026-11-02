@@ -22,15 +22,15 @@ describe('model catalog relay', () => {
         mocks.supervisor.callProcess.mockResolvedValue({ models: [] })
     })
 
-    // The renderer spells the engine `lm-studio`; the engine manager keys on
+    // The renderer spells the engine `llama-cpp`; the engine manager keys on
     // its manifest name. No target machine is named, because the hub only
     // installs to this machine and naming the OS alone would lose the CPU.
     it('asks the backend in its own vocabulary, for this machine', async () => {
-        await getEngineHubModels('lm-studio')
+        await getEngineHubModels('llama-cpp')
         expect(mocks.supervisor.callProcess).toHaveBeenCalledWith(
             'broker',
             'engine:catalog',
-            { engine: 'lmstudio' },
+            { engine: 'llamacpp' },
             MODULAR_CATALOG_CALL_TIMEOUT_MS
         )
     })
@@ -38,18 +38,18 @@ describe('model catalog relay', () => {
     // The backend decides whether a source can search; the relay only carries
     // the query, and a blank one is no query at all.
     it('passes a search query through, trimmed, and leaves a blank one out', async () => {
-        await getEngineHubModels('lm-studio', '  gemma  ')
+        await getEngineHubModels('llama-cpp', '  gemma  ')
         expect(mocks.supervisor.callProcess).toHaveBeenLastCalledWith(
             'broker',
             'engine:catalog',
-            { engine: 'lmstudio', query: 'gemma' },
+            { engine: 'llamacpp', query: 'gemma' },
             MODULAR_CATALOG_CALL_TIMEOUT_MS
         )
-        await getEngineHubModels('lm-studio', '   ')
+        await getEngineHubModels('llama-cpp', '   ')
         expect(mocks.supervisor.callProcess).toHaveBeenLastCalledWith(
             'broker',
             'engine:catalog',
-            { engine: 'lmstudio' },
+            { engine: 'llamacpp' },
             MODULAR_CATALOG_CALL_TIMEOUT_MS
         )
     })
@@ -60,8 +60,8 @@ describe('model catalog relay', () => {
                 {
                     id: 'qwen3:8b',
                     name: 'qwen3:8b',
-                    author: 'ollama',
-                    url: 'https://ollama.com/library/qwen3',
+                    author: 'ggml-org',
+                    url: 'https://huggingface.co/ggml-org/qwen3-GGUF',
                     size: 5000,
                     downloads: 3,
                     likes: 1,
@@ -71,7 +71,7 @@ describe('model catalog relay', () => {
                     parameterSize: '8B'
                 },
                 // A name alone is still pull-ready.
-                { name: 'phi4:latest', size: 0, family: '', parameterSize: '' },
+                { name: 'phi4', size: 0, family: '', parameterSize: '' },
                 // No id and no name: nothing to hand to a pull.
                 { author: 'nobody' },
                 'not an object',
@@ -79,14 +79,14 @@ describe('model catalog relay', () => {
             ]
         })
 
-        const { models } = await getEngineHubModels('ollama')
+        const { models } = await getEngineHubModels('llama-cpp')
 
         expect(models).toEqual([
             {
                 id: 'qwen3:8b',
                 name: 'qwen3:8b',
-                author: 'ollama',
-                url: 'https://ollama.com/library/qwen3',
+                author: 'ggml-org',
+                url: 'https://huggingface.co/ggml-org/qwen3-GGUF',
                 size: 5000,
                 downloads: 3,
                 likes: 1,
@@ -96,8 +96,8 @@ describe('model catalog relay', () => {
                 parameterSize: '8B'
             },
             {
-                id: 'phi4:latest',
-                name: 'phi4:latest',
+                id: 'phi4',
+                name: 'phi4',
                 author: '',
                 url: '',
                 size: undefined,
@@ -113,14 +113,14 @@ describe('model catalog relay', () => {
 
     it('reads a reply without a model list as an empty hub', async () => {
         mocks.supervisor.callProcess.mockResolvedValue({ source: 'nowhere' })
-        await expect(getEngineHubModels('ollama')).resolves.toEqual({ models: [] })
+        await expect(getEngineHubModels('llama-cpp')).resolves.toEqual({ models: [] })
     })
 
     // The modal renders its empty state for this; a rejection would surface as
     // a failure the user can do nothing about.
     it('turns a failed call into an empty hub rather than an error', async () => {
-        mocks.supervisor.callProcess.mockRejectedValue(new Error('lm studio catalog unavailable'))
-        await expect(getEngineHubModels('lm-studio')).resolves.toEqual({ models: [] })
+        mocks.supervisor.callProcess.mockRejectedValue(new Error('llama.cpp catalog unavailable'))
+        await expect(getEngineHubModels('llama-cpp')).resolves.toEqual({ models: [] })
     })
 
     // Ollama's list is compiled into the engine manager, so warming it would

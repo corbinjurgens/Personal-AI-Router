@@ -849,7 +849,7 @@ describe('reviewed model operations', () => {
 
 describe('selected policy and portable load patches', () => {
     const identity = { engine: 'llamacpp', model: 'model' }
-    it.each(['ollama', 'custom-engine'])(
+    it.each(['llamacpp-custom', 'custom-engine'])(
         'selects the raw profile after a preceding %s profile',
         engine => {
             const baseline = policy.policy.replace(

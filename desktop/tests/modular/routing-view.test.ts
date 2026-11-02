@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // @vitest-environment jsdom
 
+import { customEngine } from './engine-fixtures'
 import fs from 'fs'
 import path from 'path'
 import { EventEmitter } from 'events'
@@ -117,7 +118,7 @@ describe('routing presentation labels', () => {
             { ...workload, id: 'reused' },
             { ...workload, originatedFrom: 'other' },
             { ...workload, runId: 'other' },
-            { ...workload, engine: 'ollama' },
+            { ...workload, engine: customEngine },
             { ...workload, runId: undefined }
         ]
         for (const different of differentWorkloads) {

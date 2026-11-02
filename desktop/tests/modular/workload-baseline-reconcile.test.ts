@@ -23,7 +23,7 @@ import { parseWorkloadsInitial } from '@/electron/service-bridge/workload-projec
 const ORIGIN = 'uuid-reconcile'
 
 function info(id: string, state: WorkloadState, model = 'm') {
-    return { id, engine: 'ollama', state, model, originatedFrom: ORIGIN, createdAt: 1 }
+    return { id, engine: 'llamacpp', state, model, originatedFrom: ORIGIN, createdAt: 1 }
 }
 
 function upsert(id: string, state: WorkloadState, model = 'm'): void {
