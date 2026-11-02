@@ -59,7 +59,7 @@ func nextModelDownloadUpdate(t *testing.T, updates <-chan modelsChangedParams) m
 	t.Helper()
 	select {
 	case update := <-updates:
-		if update.Engine != "ollama" || update.Models.DownloadState == nil {
+		if update.Engine != "llamacpp" || update.Models.DownloadState == nil {
 			t.Fatalf("notification lost engine or target snapshot: %+v", update)
 		}
 		if err := update.Models.DownloadState.Validate(); err != nil {
@@ -74,14 +74,14 @@ func nextModelDownloadUpdate(t *testing.T, updates <-chan modelsChangedParams) m
 
 func TestModelDownloadWatcherPublishesLifecycleWithoutLoadedChanges(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
-	ex.engines["ollama"].running = false
+	ex.engines["llamacpp"].running = false
 	updates := modelDownloadWatch(t, ex)
 	ex.pokeLoaded()
 	baseline := nextModelDownloadUpdate(t, updates)
 	if len(baseline.Models.DownloadState.Entries) != 0 {
 		t.Fatalf("initial lifecycle is not explicitly empty: %+v", baseline)
 	}
-	attempt := reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+	attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 	ex.pokeLoaded()
 	queued := nextModelDownloadUpdate(t, updates)
 	entry := queued.Models.DownloadState.Entries[0]
@@ -111,21 +111,21 @@ func TestModelDownloadWatcherPublishesInventoryWithoutLoadedChanges(t *testing.T
 	var removed atomic.Bool
 	original := ex.client.Transport
 	ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path == "/api/tags" && removed.Load() {
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":[]}`))}, nil
+		if request.URL.Path == "/models" && removed.Load() {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[]}`))}, nil
 		}
 		return original.RoundTrip(request)
 	})
 	updates := modelDownloadWatch(t, ex)
 	ex.pokeLoaded()
 	baseline := nextModelDownloadUpdate(t, updates)
-	if !reflect.DeepEqual(baseline.Models.Models, []string{"demo:latest", "ready:latest"}) {
+	if !reflect.DeepEqual(baseline.Models.Models, []string{"demo", "ready"}) {
 		t.Fatalf("missing ready inventory baseline: %+v", baseline)
 	}
 	removed.Store(true)
 	ex.pokeLoaded()
 	changed := nextModelDownloadUpdate(t, updates)
-	if len(changed.Models.Models) != 0 || !reflect.DeepEqual(changed.Models.ByEngine["ollama"], []string{}) ||
+	if len(changed.Models.Models) != 0 || !reflect.DeepEqual(changed.Models.ByEngine["llamacpp"], []string{}) ||
 		!reflect.DeepEqual(changed.Models.LoadedByEngine, baseline.Models.LoadedByEngine) ||
 		!changed.Models.DownloadState.Equal(*baseline.Models.DownloadState) {
 		t.Fatalf("inventory-only change lost independent loaded/lifecycle facts: %+v", changed)

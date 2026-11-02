@@ -1052,7 +1052,7 @@ func TestMemoryEvidencePublicationBoundsAndOrdering(t *testing.T) {
 	entries := make([]performancewire.MemoryEvidenceEntry, 0, 140)
 	for i := 139; i >= 0; i-- {
 		entry := performancewire.MemoryEvidenceEntry{
-			Engine: "ollama", Model: fmt.Sprintf("model-%03d", i), State: performancewire.MemoryStateUnknown,
+			Engine: "llamacpp", Model: fmt.Sprintf("model-%03d", i), State: performancewire.MemoryStateUnknown,
 			Uncertainty: []performancewire.MemoryUncertainty{},
 			Freshness:   performancewire.MemoryFreshness{ReadingValidForMs: performancewire.MemoryReadingValidForMs},
 		}

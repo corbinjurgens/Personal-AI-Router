@@ -310,19 +310,22 @@ func TestModelCopyReverseInvalidPinNeverReachesFileHandlers(t *testing.T) {
 	test := func(name string, invalidate func(*testing.T, *remoteReverseFixture)) {
 		t.Run(name, func(t *testing.T) {
 			var calls atomic.Int32
-			f := newReverseCopyFixture(t, func(next http.Handler) http.Handler {
-				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			source := namedCustomCopyFixture(t, "tiny", 500_000, 5)
+			list := sourceFromExecutor(t, source.source, "llamacpp", "tiny").list
+			f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
+				control := &controlServer{exec: source.source, mesh: mesh}
+				return control.requirePin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					calls.Add(1)
-					next.ServeHTTP(w, r)
-				})
+					control.mux().ServeHTTP(w, r)
+				}))
 			})
 			ctx := remoteFixtureContext(t)
-			client := f.peer.client(t, ctx)
-			invalidate(t, f.peer)
-			if _, err := client.modelFiles(ctx, "ollama", "tiny", nil); err == nil {
+			client := f.client(t, ctx)
+			invalidate(t, f)
+			if _, err := client.modelFiles(ctx, "llamacpp", "tiny", nil); err == nil {
 				t.Fatal("invalid pin allowed file listing")
 			}
-			body, _, err := client.modelFile(ctx, "ollama", "tiny", f.weights, f.listing.ExportID, 0)
+			body, _, err := client.modelFile(ctx, "llamacpp", "tiny", "model/model.gguf", list.ExportID, 0)
 			if body != nil {
 				if closeErr := body.Close(); closeErr != nil {
 					t.Error(closeErr)
@@ -370,11 +373,11 @@ func TestModelCopyReverseDispatchedDirectGETDoesNotReplay(t *testing.T) {
 		})
 	}
 	test("file listing", func(ctx context.Context, client *remoteClient) error {
-		_, err := client.modelFiles(ctx, "ollama", "tiny", nil)
+		_, err := client.modelFiles(ctx, "llamacpp", "tiny", nil)
 		return err
 	})
 	test("file download", func(ctx context.Context, client *remoteClient) error {
-		body, _, err := client.modelFile(ctx, "ollama", "tiny", "blobs/fixture", "", 0)
+		body, _, err := client.modelFile(ctx, "llamacpp", "tiny", "model/fixture.gguf", "", 0)
 		if body != nil {
 			err = errors.Join(err, body.Close())
 		}
@@ -401,7 +404,7 @@ func TestModelCopyReverseListingProgressAndFileBytesStreamBeforeCompletion(t *te
 				case <-r.Context().Done():
 					return
 				}
-				list, err := json.Marshal(modelFileList{Engine: "lmstudio", Model: "fixture", Files: []modelFile{{Path: "fixture.gguf", Size: int64(len(data)), SHA256: sha256Hex(data)}}})
+				list, err := json.Marshal(modelFileList{Engine: "llamacpp", Model: "fixture", Files: []modelFile{{Path: "fixture.gguf", Size: int64(len(data)), SHA256: sha256Hex(data)}}})
 				if err != nil {
 					t.Error(err)
 					return
@@ -438,7 +441,7 @@ func TestModelCopyReverseListingProgressAndFileBytesStreamBeforeCompletion(t *te
 	progress := make(chan streamFrame, 1)
 	listingDone := make(chan error, 1)
 	go func() {
-		list, err := client.modelFiles(ctx, "lmstudio", "fixture", func(frame streamFrame) { progress <- frame })
+		list, err := client.modelFiles(ctx, "llamacpp", "fixture", func(frame streamFrame) { progress <- frame })
 		if err == nil && (len(list.Files) != 1 || list.Files[0].SHA256 != sha256Hex(data)) {
 			err = errors.New("listing differs from source")
 		}
@@ -470,7 +473,7 @@ func TestModelCopyReverseListingProgressAndFileBytesStreamBeforeCompletion(t *te
 	case <-ctx.Done():
 		t.Fatal("listing did not complete after release")
 	}
-	body, offset, err := client.modelFile(ctx, "lmstudio", "fixture", "fixture.gguf", "", 0)
+	body, offset, err := client.modelFile(ctx, "llamacpp", "fixture", "fixture.gguf", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

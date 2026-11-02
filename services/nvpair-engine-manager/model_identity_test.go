@@ -31,7 +31,7 @@ import (
 func TestModelDownloadIdentityRetainsUnsafeMaskAfterMutation(t *testing.T) {
 	test := func(name, requestModel, listedModel string) {
 		t.Run(name, func(t *testing.T) {
-			ex := modelDownloadInventoryExecutor(t)
+			ex := ollamaDownloadInventoryExecutor(t)
 			original := ex.client.Transport
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 				if request.URL.Path == "/api/tags" {
@@ -75,13 +75,13 @@ func TestModelDownloadRecoveryWithdrawsNamesAndDigestsOnly(t *testing.T) {
 	ex.downloads.recoveryRequired = true
 	ex.downloads.mu.Unlock()
 	result := ex.ModelsResult(context.Background())
-	if len(result.Models) != 0 || len(result.ByEngine["ollama"]) != 0 || result.DownloadState == nil || !result.DownloadState.RecoveryRequired {
+	if len(result.Models) != 0 || len(result.ByEngine["llamacpp"]) != 0 || result.DownloadState == nil || !result.DownloadState.RecoveryRequired {
 		t.Fatalf("recovery published ready content or hid its state: %+v", result)
 	}
-	if len(ex.modelIdentity().Engines["ollama"].ModelDigests) != 0 {
+	if len(ex.modelIdentity().Engines["llamacpp"].ModelDigests) != 0 {
 		t.Fatal("recovery published strict content digests")
 	}
-	if !reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"demo:latest"}) {
+	if !reflect.DeepEqual(result.LoadedByEngine["llamacpp"], []string{"demo"}) {
 		t.Fatalf("recovery synthesized an unload: %+v", result.LoadedByEngine)
 	}
 }
@@ -171,8 +171,8 @@ func TestModelIdentityReportsSameNameReplacement(t *testing.T) {
 
 func TestModelIdentityExcludesAdoptedRuns(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/tags" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"models": []map[string]string{{"name": "m:latest", "digest": nameDigest("m")}}})
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "m:latest", "digest": nameDigest("m")}}})
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -192,8 +192,8 @@ func TestModelIdentityExcludesAdoptedRuns(t *testing.T) {
 			},
 		}},
 		Actions: map[string]Action{"list_models": {
-			HTTP:   &ActionHTTP{Method: "GET", Path: "/api/tags"},
-			Result: &ActionResult{Array: "models", Field: "name", Digest: "digest"},
+			HTTP:   &ActionHTTP{Method: "GET", Path: "/v1/models"},
+			Result: &ActionResult{Array: "data", Field: "id", Digest: "digest"},
 		}},
 	}
 	ex := newTestExecutor(t, m)
@@ -271,7 +271,7 @@ func TestModelIdentityIgnoresAListingAcrossARunChange(t *testing.T) {
 }
 
 func TestExtractDigests(t *testing.T) {
-	spec := &ActionResult{Array: "models", Field: "name", Digest: "digest"}
+	spec := &ActionResult{Array: "data", Field: "id", Digest: "digest"}
 	good := strings.Repeat("a", 64)
 	for _, tc := range []struct {
 		name string
@@ -279,13 +279,13 @@ func TestExtractDigests(t *testing.T) {
 		spec *ActionResult
 		want map[string]string
 	}{
-		{"valid", `{"models":[{"name":"m","digest":"` + good + `"}]}`, spec, map[string]string{"m": good}},
-		{"no digest field declared", `{"models":[{"name":"m","digest":"` + good + `"}]}`, &ActionResult{Array: "models", Field: "name"}, nil},
-		{"uppercase digest", `{"models":[{"name":"m","digest":"` + strings.ToUpper(good) + `"}]}`, spec, map[string]string{}},
-		{"prefixed digest", `{"models":[{"name":"m","digest":"sha256:` + good + `"}]}`, spec, map[string]string{}},
-		{"missing digest", `{"models":[{"name":"m"}]}`, spec, map[string]string{}},
-		{"conflicting duplicate", `{"models":[{"name":"m","digest":"` + good + `"},{"name":"m","digest":"` + strings.Repeat("b", 64) + `"}]}`, spec, map[string]string{}},
-		{"not a listing", `{"models":"x"}`, spec, nil},
+		{"valid", `{"data":[{"id":"m","digest":"` + good + `"}]}`, spec, map[string]string{"m": good}},
+		{"no digest field declared", `{"data":[{"id":"m","digest":"` + good + `"}]}`, &ActionResult{Array: "data", Field: "id"}, nil},
+		{"uppercase digest", `{"data":[{"id":"m","digest":"` + strings.ToUpper(good) + `"}]}`, spec, map[string]string{}},
+		{"prefixed digest", `{"data":[{"id":"m","digest":"sha256:` + good + `"}]}`, spec, map[string]string{}},
+		{"missing digest", `{"data":[{"id":"m"}]}`, spec, map[string]string{}},
+		{"conflicting duplicate", `{"data":[{"id":"m","digest":"` + good + `"},{"id":"m","digest":"` + strings.Repeat("b", 64) + `"}]}`, spec, map[string]string{}},
+		{"not a listing", `{"data":"x"}`, spec, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := extractDigests(json.RawMessage(tc.raw), tc.spec); !reflect.DeepEqual(got, tc.want) {
@@ -442,15 +442,15 @@ func TestModelIdentityIsNeverSentAfterTheStopItPrecedes(t *testing.T) {
 }
 
 func TestResultDigestIsListModelsOnly(t *testing.T) {
-	list := Action{HTTP: &ActionHTTP{Method: "GET", Path: "/api/tags"}, Result: &ActionResult{Array: "models", Field: "name", Digest: "digest"}}
+	list := Action{HTTP: &ActionHTTP{Method: "GET", Path: "/models"}, Result: &ActionResult{Array: "data", Field: "id", Digest: "digest"}}
 	if err := list.validate("list_models"); err != nil {
 		t.Fatalf("list_models with a digest field rejected: %v", err)
 	}
-	loaded := Action{HTTP: &ActionHTTP{Method: "GET", Path: "/api/ps"}, Result: &ActionResult{Array: "models", Field: "name", Digest: "digest"}}
+	loaded := Action{HTTP: &ActionHTTP{Method: "GET", Path: "/v1/models"}, Result: &ActionResult{Array: "data", Field: "id", Digest: "digest"}}
 	if err := loaded.validate("loaded_models"); err == nil || !strings.Contains(err.Error(), "result.digest") {
 		t.Fatalf("loaded_models with a digest field = %v, want rejected", err)
 	}
-	padded := Action{HTTP: &ActionHTTP{Method: "GET", Path: "/api/tags"}, Result: &ActionResult{Array: "models", Field: "name", Digest: " digest"}}
+	padded := Action{HTTP: &ActionHTTP{Method: "GET", Path: "/models"}, Result: &ActionResult{Array: "data", Field: "id", Digest: " digest"}}
 	if err := padded.validate("list_models"); err == nil {
 		t.Fatal("a padded digest field name was accepted")
 	}

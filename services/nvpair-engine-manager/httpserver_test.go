@@ -20,7 +20,7 @@ func TestModelDownloadHTTPAndRPCCarryCanonicalSnapshot(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ex := modelDownloadInventoryExecutor(t)
 			if reserve {
-				reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+				reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 			}
 			request := httptest.NewRequest(http.MethodGet, modelsPath, nil)
 			recorder := httptest.NewRecorder()
@@ -58,6 +58,6 @@ func TestModelDownloadHTTPAndRPCCarryCanonicalSnapshot(t *testing.T) {
 			}
 		})
 	}
-	test("explicit empty lifecycle", false, []string{"demo:latest", "ready:latest"})
-	test("queued model remains loaded but unavailable", true, []string{"ready:latest"})
+	test("explicit empty lifecycle", false, []string{"demo", "ready"})
+	test("queued model remains loaded but unavailable", true, []string{"ready"})
 }

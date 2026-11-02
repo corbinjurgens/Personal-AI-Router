@@ -284,21 +284,18 @@ func itoa(n int64) string {
 
 func TestCopyModelHashMismatchRejectsAndDeletesPartial(t *testing.T) {
 	plentyOfDisk(t)
-	srcDir, dstDir := t.TempDir(), t.TempDir()
-	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
-	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 50_000, 6)
-	copyTestNativeModels(t, srcExec, "ollama", "tiny")
-	src := sourceFromExecutor(t, srcExec, "ollama", "tiny")
-	// The source serves different bytes than it listed for the manifest.
-	src.data[fx.manifestRel] = append([]byte(nil), src.data[fx.manifestRel]...)
-	src.data[fx.manifestRel][0] ^= 0xff
-	dst := copyTestExecutor(t, "ollama", dstDir, true)
+	fixture := namedCustomCopyFixture(t, "tiny", 50_000, 6)
+	src := sourceFromExecutor(t, fixture.source, "llamacpp", "tiny")
+	path := src.list.Files[0].Path
+	src.data[path] = append([]byte(nil), src.data[path]...)
+	src.data[path][0] ^= 0xff
+	dst, store := customDestination(t)
 
-	_, err := dst.CopyModelFrom(context.Background(), src, "ollama", "tiny", nil)
+	_, err := dst.CopyModelFrom(context.Background(), src, "llamacpp", "tiny", nil)
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("err = %v, want a sha256 mismatch", err)
 	}
-	dest := filepath.Join(dstDir, "models", filepath.FromSlash(fx.manifestRel))
+	dest := filepath.Join(copyAliasDir(store.root, "tiny"), src.list.ExportID, filepath.FromSlash(path))
 	if _, err := os.Stat(dest + ".part"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("mismatched partial kept: %v", err)
 	}
@@ -309,20 +306,12 @@ func TestCopyModelHashMismatchRejectsAndDeletesPartial(t *testing.T) {
 
 func TestCopyModelSkipsFilesAlreadyPresent(t *testing.T) {
 	plentyOfDisk(t)
-	srcDir, dstDir := t.TempDir(), t.TempDir()
-	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
-	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 80_000, 7)
-	copyTestNativeModels(t, srcExec, "ollama", "tiny")
-	src := sourceFromExecutor(t, srcExec, "ollama", "tiny")
-	dst := copyTestExecutor(t, "ollama", dstDir, true)
-	var present string
-	for rel, b := range fx.blobs {
-		if len(b) == 80_000 {
-			present = rel
-			writeTestFile(t, filepath.Join(dstDir, "models", filepath.FromSlash(rel)), b)
-		}
-	}
-	res, err := dst.CopyModelFrom(context.Background(), src, "ollama", "tiny", nil)
+	fixture := namedCustomCopyFixture(t, "tiny", 80_000, 7)
+	src := sourceFromExecutor(t, fixture.source, "llamacpp", "tiny")
+	dst, store := customDestination(t)
+	present := src.list.Files[0].Path
+	writeTestFile(t, filepath.Join(copyAliasDir(store.root, "tiny"), src.list.ExportID, filepath.FromSlash(present)), src.data[present])
+	res, err := dst.CopyModelFrom(context.Background(), src, "llamacpp", "tiny", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,18 +373,16 @@ func TestCopyModelOllamaWritesManifestLast(t *testing.T) {
 }
 
 func TestCopyModelRefusesWhenDiskSpaceIsShort(t *testing.T) {
-	srcDir, dstDir := t.TempDir(), t.TempDir()
-	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
-	writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 100_000, 9)
-	copyTestNativeModels(t, srcExec, "ollama", "tiny")
-	src := sourceFromExecutor(t, srcExec, "ollama", "tiny")
-	dst := copyTestExecutor(t, "ollama", dstDir, true)
+	fixture := namedCustomCopyFixture(t, "tiny", 100_000, 9)
+	src := sourceFromExecutor(t, fixture.source, "llamacpp", "tiny")
+	dstDir := t.TempDir()
+	dst := copyTestExecutor(t, "llamacpp", filepath.Join(dstDir, "models"), true)
 	prev := diskFreeBytes
 	var asked string
 	diskFreeBytes = func(path string) (uint64, error) { asked = path; return 1 << 20, nil }
 	t.Cleanup(func() { diskFreeBytes = prev })
 
-	_, err := dst.CopyModelFrom(context.Background(), src, "ollama", "tiny", nil)
+	_, err := dst.CopyModelFrom(context.Background(), src, "llamacpp", "tiny", nil)
 	if err == nil || !strings.Contains(err.Error(), "not enough free disk space") {
 		t.Fatalf("err = %v, want a disk-space refusal", err)
 	}
@@ -411,8 +398,8 @@ func TestCopyModelRefusesWhenDiskSpaceIsShort(t *testing.T) {
 
 func TestCopyModelRefusesUninstalledEngine(t *testing.T) {
 	src := &fakeModelSource{}
-	dst := copyTestExecutor(t, "ollama", t.TempDir(), false)
-	_, err := dst.CopyModelFrom(context.Background(), src, "ollama", "tiny", nil)
+	dst := copyTestExecutor(t, "llamacpp", t.TempDir(), false)
+	_, err := dst.CopyModelFrom(context.Background(), src, "llamacpp", "tiny", nil)
 	if err == nil || !strings.Contains(err.Error(), "not installed") {
 		t.Fatalf("err = %v, want not installed", err)
 	}
@@ -431,16 +418,20 @@ func TestCopyModelRefusesUnsupportedEngine(t *testing.T) {
 
 func TestCopyModelRejectsUnsafeListing(t *testing.T) {
 	plentyOfDisk(t)
-	dst := copyTestExecutor(t, "ollama", t.TempDir(), true)
+	dst := copyTestExecutor(t, "llamacpp", t.TempDir(), true)
 	sum := sha256Hex([]byte("x"))
-	for _, list := range []modelFileList{
-		{Files: []modelFile{{Path: "../../evil", Size: 1, SHA256: sum}}},
-		{Files: []modelFile{{Path: "blobs/sha256-" + sum, Size: 1, SHA256: sum}, {Path: "manifests/x/y/z/w", Size: 1, SHA256: sum}}},
-		{Files: []modelFile{{Path: "blobs/sha256-" + sum, Size: 1, SHA256: "nothex"}}},
+	for _, test := range []struct {
+		files []modelFile
+		want  string
+	}{
+		{[]modelFile{{Path: "../../evil", Size: 1, SHA256: sum}}, "unsafe path"},
+		{[]modelFile{{Path: "model-Q4_K_M.gguf", Size: 1, SHA256: sum}, {Path: "README.md", Size: 1, SHA256: sum}}, "unexpected file"},
+		{[]modelFile{{Path: "model-Q4_K_M.gguf", Size: 1, SHA256: "nothex"}}, "without a valid sha256"},
 	} {
+		list := modelFileList{Engine: "llamacpp", Model: "owner/tiny:Q4_K_M", Revision: strings.Repeat("a", 40), Files: test.files}
 		src := &fakeModelSource{list: list}
-		if _, err := dst.CopyModelFrom(context.Background(), src, "ollama", "tiny", nil); err == nil {
-			t.Errorf("listing %+v accepted", list.Files)
+		if _, err := dst.CopyModelFrom(context.Background(), src, "llamacpp", "owner/tiny:Q4_K_M", nil); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("listing %+v: error = %v, want %s", list.Files, err, test.want)
 		}
 		if len(src.fetchedPaths()) != 0 {
 			t.Errorf("listing %+v led to downloads", list.Files)
@@ -663,10 +654,10 @@ func (b *lockedBuffer) String() string {
 
 func TestRunRemoteCopyValidatesParams(t *testing.T) {
 	for params, want := range map[string]string{
-		`{"engine":"ollama","model":"x"}`:                "node is required",
-		`{"node":"n","model":"x"}`:                       "engine is required",
-		`{"node":"n","engine":"ollama"}`:                 "model is required",
-		`{"node":"ghost","engine":"ollama","model":"x"}`: "this node is not clustered",
+		`{"engine":"llamacpp","model":"x"}`:                "node is required",
+		`{"node":"n","model":"x"}`:                         "engine is required",
+		`{"node":"n","engine":"llamacpp"}`:                 "model is required",
+		`{"node":"ghost","engine":"llamacpp","model":"x"}`: "this node is not clustered",
 	} {
 		out := &lockedBuffer{}
 		m := NewManager(NewCodec(out), &Executor{progress: newProgressHub()}, nil, "")

@@ -161,7 +161,7 @@ func TestModelPublisherMappingRefusesUnprovenSelectors(t *testing.T) {
 			}
 		})
 	}
-	test("unsupported adapter", "lmstudio", func(*modelFileList) {})
+	test("unsupported adapter", "unsupported", func(*modelFileList) {})
 	test("custom layout", "llamacpp", func(list *modelFileList) { list.Layout = llamaArtifactsLayout })
 	test("custom alias", "llamacpp", func(list *modelFileList) { list.Model = "my-model" })
 	test("mutable revision", "llamacpp", func(list *modelFileList) { list.Revision = "main" })

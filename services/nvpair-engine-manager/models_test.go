@@ -83,7 +83,7 @@ func modelsMemoryEntry(t *testing.T, result ModelsResult) performancewire.Memory
 
 // This fixture has no process, listener or installed engine. Its transport
 // accepts inventory reads only and its profile is private to the test.
-func modelDownloadInventoryExecutor(t *testing.T) *Executor {
+func ollamaDownloadInventoryExecutor(t *testing.T) *Executor {
 	t.Helper()
 	manifest := &Manifest{Engine: "ollama", DisplayName: "Fixture", ModelNaming: engines.ModelNamingImpliedLatestTag,
 		Actions: map[string]Action{
@@ -118,6 +118,44 @@ func modelDownloadInventoryExecutor(t *testing.T) *Executor {
 	return ex
 }
 
+func modelDownloadInventoryExecutor(t *testing.T) *Executor {
+	t.Helper()
+	manifest := &Manifest{Engine: engines.NameLlamaCPP, DisplayName: "llama.cpp fixture", ModelNaming: engines.ModelNamingExact,
+		Actions: map[string]Action{
+			"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/models"},
+				Result: &ActionResult{Array: "data", Field: "id", Digest: "digest"}},
+			"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/v1/models"},
+				Result: &ActionResult{Array: "data", Field: "id"}},
+		}}
+	reg := NewRegistry()
+	reg.engines[manifest.Engine] = manifest
+	ex := NewExecutor(reg, NewReporter(nil), nil, t.TempDir())
+	ex.engines[manifest.Engine] = &engineState{manifest: manifest, plat: &Platform{}, running: true,
+		runID: "fixture-run", launchDigest: memoryTestLaunch, proc: &managedProc{}, contentMu: make(chan struct{}, 1)}
+	ex.inventoryDigests = map[string]observedDigests{
+		manifest.Engine: {runID: "fixture-run", models: map[string]string{memoryTestModel: memoryTestDigest}, epoch: 9},
+	}
+	ex.client = &http.Client{Transport: memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+		if request.Method != http.MethodGet {
+			t.Errorf("unexpected engine effect: %s %s", request.Method, request.URL.Path)
+			return nil, fmt.Errorf("fixture refuses engine effects")
+		}
+		var body string
+		switch request.URL.Path {
+		case "/models":
+			body = fmt.Sprintf(`{"data":[{"id":"demo","digest":%q},{"id":"ready","digest":%q}]}`, memoryTestDigest, memoryTestDigest)
+		case "/v1/models":
+			body = `{"data":[{"id":"demo"}]}`
+		default:
+			t.Errorf("unexpected engine endpoint: %s", request.URL.Path)
+			return nil, fmt.Errorf("fixture refuses unexpected endpoint")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+	ex.modelMutationParent = func(context.Context, string) error { return nil }
+	return ex
+}
+
 func modelInventoryObservation(t *testing.T, ex *Executor, engine string) observedDigests {
 	t.Helper()
 	state, err := ex.state(engine)
@@ -132,13 +170,18 @@ func modelInventoryObservation(t *testing.T, ex *Executor, engine string) observ
 }
 
 func TestLinkedModelInventory(t *testing.T) {
-	test := func(name, body, model string, want inventoryMembership) {
+	test := func(name, body, model string, want inventoryMembership, impliedLatest bool) {
 		t.Run(name, func(t *testing.T) {
 			ex := modelDownloadInventoryExecutor(t)
+			engine, path := "llamacpp", "/models"
+			if impliedLatest {
+				ex = ollamaDownloadInventoryExecutor(t)
+				engine, path = "ollama", "/api/tags"
+			}
 			calls := 0
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 				calls++
-				if request.Method != http.MethodGet || request.URL.Path != "/api/tags" {
+				if request.Method != http.MethodGet || request.URL.Path != path {
 					t.Fatalf("unexpected request: %s %s", request.Method, request.URL.Path)
 				}
 				if body == "failure" {
@@ -146,28 +189,35 @@ func TestLinkedModelInventory(t *testing.T) {
 				}
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 			})
-			result := ex.readEngineInventory(context.Background(), "ollama")
+			result := ex.readEngineInventory(context.Background(), engine)
 			if got := result.membership(model); got != want {
 				t.Fatalf("membership = %v, want %v", got, want)
 			}
-			if calls != 1 || result.engine != "ollama" || result.runID != "fixture-run" {
+			if calls != 1 || result.engine != engine || result.runID != "fixture-run" {
 				t.Fatalf("unexpected request or binding: calls=%d result=%+v", calls, result)
 			}
 		})
 	}
-	test("descriptor naming", `{"models":[{"name":"demo:latest"}]}`, "demo", inventoryPresent)
-	test("empty", `{"models":[]}`, "demo", inventoryAbsent)
-	test("duplicate aliases", `{"models":[{"name":"demo"},{"name":"demo:latest"}]}`, "demo", inventoryAmbiguous)
-	test("failed", "failure", "demo", inventoryFailed)
-	test("invalid response", `{"models":null}`, "demo", inventoryFailed)
+	test("descriptor naming", `{"models":[{"name":"demo:latest"}]}`, "demo", inventoryPresent, true)
+	test("empty", `{"data":[]}`, "demo", inventoryAbsent, false)
+	test("duplicate aliases", `{"models":[{"name":"demo"},{"name":"demo:latest"}]}`, "demo", inventoryAmbiguous, true)
+	test("failed", "failure", "demo", inventoryFailed, false)
+	test("invalid response", `{"data":null}`, "demo", inventoryFailed, false)
 
 	t.Run("exact naming and unrelated engine", func(t *testing.T) {
 		ex := modelDownloadInventoryExecutor(t)
-		ex.engines["ollama"].manifest.ModelNaming = ""
-		other := &Manifest{Engine: "other", Actions: map[string]Action{"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/other"}, Result: &ActionResult{Array: "models", Field: "name"}}}}
-		ex.reg.engines["other"] = other
-		ex.engines["other"] = &engineState{manifest: other, running: true}
-		got := ex.readEngineInventory(context.Background(), "ollama")
+		ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"demo:latest"}]}`))}, nil
+		})
+		descriptor, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+		if !ok {
+			t.Fatal("invalid descriptor engine")
+		}
+		other := &Manifest{Engine: descriptor.Name, DisplayName: descriptor.DisplayName, Family: engines.NameLlamaCPP, ModelNaming: engines.ModelNamingExact,
+			Actions: map[string]Action{"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/other/models"}, Result: &ActionResult{Array: "data", Field: "id"}}}}
+		ex.reg.engines[other.Engine] = other
+		ex.engines[other.Engine] = &engineState{manifest: other, running: true}
+		got := ex.readEngineInventory(context.Background(), "llamacpp")
 		if got.membership("demo") != inventoryAbsent || got.membership("demo:latest") != inventoryPresent {
 			t.Fatalf("exact naming: %+v", got)
 		}
@@ -175,12 +225,12 @@ func TestLinkedModelInventory(t *testing.T) {
 
 	t.Run("native and download readiness", func(t *testing.T) {
 		ex := modelDownloadInventoryExecutor(t)
-		ex.engines["ollama"].manifest.Actions["pull_model"] = Action{ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE}
+		ex.engines["llamacpp"].manifest.Actions["pull_model"] = Action{ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE}
 		ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":[{"name":"demo:latest","status":{"value":"downloading"}},{"name":"ready:latest","status":{"value":"loaded"}}]}`))}, nil
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"demo","status":{"value":"downloading"}},{"id":"ready","status":{"value":"loaded"}}]}`))}, nil
 		})
-		reserveModelDownload(t, ex.downloads, "ollama", "ready", engines.ModelNamingImpliedLatestTag)
-		got := ex.readEngineInventory(context.Background(), "ollama")
+		reserveModelDownload(t, ex.downloads, "llamacpp", "ready", engines.ModelNamingExact)
+		got := ex.readEngineInventory(context.Background(), "llamacpp")
 		if got.membership("demo") != inventoryUnready || got.membership("ready") != inventoryUnready {
 			t.Fatalf("readiness: %+v", got)
 		}
@@ -195,33 +245,33 @@ func TestLinkedModelInventory(t *testing.T) {
 				response, err := original.RoundTrip(req)
 				switch change {
 				case "run":
-					ex.engines["ollama"].mu.Lock()
-					ex.engines["ollama"].runID = "new-run"
-					ex.engines["ollama"].mu.Unlock()
+					ex.engines["llamacpp"].mu.Lock()
+					ex.engines["llamacpp"].runID = "new-run"
+					ex.engines["llamacpp"].mu.Unlock()
 				case "configuration":
-					ex.engines["ollama"].mu.Lock()
-					ex.engines["ollama"].modelsDir = "changed"
-					ex.engines["ollama"].mu.Unlock()
+					ex.engines["llamacpp"].mu.Lock()
+					ex.engines["llamacpp"].modelsDir = "changed"
+					ex.engines["llamacpp"].mu.Unlock()
 				case "epoch":
 					ex.inventoryMu.Lock()
-					observation := ex.inventoryDigests["ollama"]
+					observation := ex.inventoryDigests["llamacpp"]
 					observation.epoch++
-					ex.inventoryDigests["ollama"] = observation
+					ex.inventoryDigests["llamacpp"] = observation
 					ex.inventoryMu.Unlock()
 				}
 				return response, err
 			})
-			if got := ex.readEngineInventory(context.Background(), "ollama"); got.membership("demo") != inventoryFailed {
+			if got := ex.readEngineInventory(context.Background(), "llamacpp"); got.membership("demo") != inventoryFailed {
 				t.Fatalf("accepted changed evidence: %+v", got)
 			}
 		})
 	}
 	t.Run("caller holds operation lock", func(t *testing.T) {
 		ex := modelDownloadInventoryExecutor(t)
-		st := ex.engines["ollama"]
+		st := ex.engines["llamacpp"]
 		st.opMu.Lock()
 		defer st.opMu.Unlock()
-		if got := ex.readEngineInventory(context.Background(), "ollama"); got.membership("demo") != inventoryPresent {
+		if got := ex.readEngineInventory(context.Background(), "llamacpp"); got.membership("demo") != inventoryPresent {
 			t.Fatalf("recognition failed: %+v", got)
 		}
 	})
@@ -230,7 +280,7 @@ func TestLinkedModelInventory(t *testing.T) {
 func TestModelDownloadInventoryMasksEquivalentKeys(t *testing.T) {
 	test := func(name, requestModel, listedModel, terminalPhase, reason string) {
 		t.Run(name, func(t *testing.T) {
-			ex := modelDownloadInventoryExecutor(t)
+			ex := ollamaDownloadInventoryExecutor(t)
 			original := ex.client.Transport
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 				response, err := original.RoundTrip(request)
@@ -280,12 +330,12 @@ func TestModelDownloadInventoryMasksEquivalentKeys(t *testing.T) {
 
 func TestModelDownloadPreEffectFailurePreservesReadyContent(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
-	attempt := reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+	attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 	if err := ex.downloads.finish(attempt, modeldownload.PhaseFailed, modeldownload.ReasonInterrupted, ""); err != nil {
 		t.Fatalf("finish pre-effect cancellation: %v", err)
 	}
 	result := ex.ModelsResult(context.Background())
-	if !reflect.DeepEqual(result.Models, []string{"demo:latest", "ready:latest"}) || result.DownloadState == nil {
+	if !reflect.DeepEqual(result.Models, []string{"demo", "ready"}) || result.DownloadState == nil {
 		t.Fatalf("pre-effect failure invalidated existing content: %+v", result)
 	}
 	entry := result.DownloadState.Entries[0]
@@ -296,13 +346,13 @@ func TestModelDownloadPreEffectFailurePreservesReadyContent(t *testing.T) {
 
 func TestModelDownloadCompleteDoesNotReplaceInventoryObservation(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
-	attempt := reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+	attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 	if err := ex.downloads.finish(attempt, modeldownload.PhaseComplete, "", ""); err != nil {
 		t.Fatalf("finish successful attempt: %v", err)
 	}
 	original := ex.client.Transport
 	ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path == "/api/tags" {
+		if request.URL.Path == "/models" {
 			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 		}
 		return original.RoundTrip(request)
@@ -312,11 +362,11 @@ func TestModelDownloadCompleteDoesNotReplaceInventoryObservation(t *testing.T) {
 		result.DownloadState.Entries[0].Phase != modeldownload.PhaseComplete {
 		t.Fatalf("completion manufactured ready content after failed query: %+v", result)
 	}
-	if !reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"demo:latest"}) {
+	if !reflect.DeepEqual(result.LoadedByEngine["llamacpp"], []string{"demo"}) {
 		t.Fatalf("failed inventory query changed observed residency: %+v", result.LoadedByEngine)
 	}
 	ex.client.Transport = original
-	if result := ex.ModelsResult(context.Background()); !reflect.DeepEqual(result.Models, []string{"demo:latest", "ready:latest"}) {
+	if result := ex.ModelsResult(context.Background()); !reflect.DeepEqual(result.Models, []string{"demo", "ready"}) {
 		t.Fatalf("fresh successful inventory did not restore ready content: %+v", result)
 	}
 }
@@ -325,14 +375,14 @@ func TestModelDownloadInventoryReadFences(t *testing.T) {
 	test := func(name string, change func(*testing.T, *Executor, *modelDownloadAttempt), wantReady bool) {
 		t.Run(name, func(t *testing.T) {
 			ex := modelDownloadInventoryExecutor(t)
-			attempt := reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+			attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 			started, release := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			releaseRead := func() { once.Do(func() { close(release) }) }
 			defer releaseRead()
 			original := ex.client.Transport
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-				if request.URL.Path == "/api/tags" {
+				if request.URL.Path == "/models" {
 					close(started)
 					select {
 					case <-release:
@@ -354,7 +404,7 @@ func TestModelDownloadInventoryReadFences(t *testing.T) {
 			select {
 			case result := <-done:
 				if wantReady {
-					if !reflect.DeepEqual(result.Models, []string{"ready:latest"}) {
+					if !reflect.DeepEqual(result.Models, []string{"ready"}) {
 						t.Fatalf("percent update invalidated unrelated ready inventory: %+v", result)
 					}
 				} else if len(result.Models) != 0 || len(result.ByEngine) != 0 || len(ex.cachedInventory()) != 0 {
@@ -366,13 +416,13 @@ func TestModelDownloadInventoryReadFences(t *testing.T) {
 		})
 	}
 	test("retired mutation epoch", func(t *testing.T, ex *Executor, attempt *modelDownloadAttempt) {
-		if err := ex.beginModelMutation(context.Background(), "ollama"); err != nil {
+		if err := ex.beginModelMutation(context.Background(), "llamacpp"); err != nil {
 			t.Fatalf("begin synthetic mutation: %v", err)
 		}
-		ex.endModelMutation("ollama", nil)
+		ex.endModelMutation("llamacpp", nil)
 	}, false)
 	test("retired engine run", func(t *testing.T, ex *Executor, attempt *modelDownloadAttempt) {
-		state := ex.engines["ollama"]
+		state := ex.engines["llamacpp"]
 		state.mu.Lock()
 		state.runID = "replacement-run"
 		state.mu.Unlock()
@@ -388,9 +438,9 @@ func TestModelDownloadInventoryReadFences(t *testing.T) {
 func TestModelDownloadInventoryRemasksAtPublication(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
 	result := ex.modelsSweep(context.Background(), true)
-	attempt := reserveModelDownload(t, ex.downloads, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+	attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
 	result = ex.currentModelsResult(result)
-	if !reflect.DeepEqual(result.Models, []string{"ready:latest"}) || result.DownloadState == nil ||
+	if !reflect.DeepEqual(result.Models, []string{"ready"}) || result.DownloadState == nil ||
 		len(result.DownloadState.Entries) != 1 || result.DownloadState.Entries[0].ID != attempt.entry.ID {
 		t.Fatalf("publication retained a pre-reservation mask/snapshot: %+v", result)
 	}
@@ -399,15 +449,15 @@ func TestModelDownloadInventoryRemasksAtPublication(t *testing.T) {
 func TestModelDownloadInventoryRejectsRetiredPublication(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
 	result := ex.modelsSweep(context.Background(), true)
-	if err := ex.beginModelMutation(context.Background(), "ollama"); err != nil {
+	if err := ex.beginModelMutation(context.Background(), "llamacpp"); err != nil {
 		t.Fatalf("begin synthetic mutation: %v", err)
 	}
-	ex.endModelMutation("ollama", nil)
+	ex.endModelMutation("llamacpp", nil)
 	result = ex.currentModelsResult(result)
 	if len(result.Models) != 0 || len(result.ByEngine) != 0 {
 		t.Fatalf("publication restored names from a retired mutation epoch: %+v", result)
 	}
-	if !reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"demo:latest"}) {
+	if !reflect.DeepEqual(result.LoadedByEngine["llamacpp"], []string{"demo"}) {
 		t.Fatalf("epoch fencing changed actual loaded observation: %+v", result.LoadedByEngine)
 	}
 }
@@ -421,11 +471,11 @@ func TestModelDownloadOlderSweepUsesCurrentInventory(t *testing.T) {
 	var reads atomic.Int32
 	original := ex.client.Transport
 	ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path != "/api/tags" {
+		if request.URL.Path != "/models" {
 			return original.RoundTrip(request)
 		}
 		if reads.Add(1) != 1 {
-			body := fmt.Sprintf(`{"models":[{"name":"ready:latest","digest":%q}]}`, memoryTestDigest)
+			body := fmt.Sprintf(`{"data":[{"id":"ready","digest":%q}]}`, memoryTestDigest)
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 		}
 		response, err := original.RoundTrip(request)
@@ -451,7 +501,7 @@ func TestModelDownloadOlderSweepUsesCurrentInventory(t *testing.T) {
 		t.Fatal("old inventory query did not reach barrier")
 	}
 	newer := ex.ModelsResult(context.Background())
-	if !reflect.DeepEqual(newer.Models, []string{"ready:latest"}) {
+	if !reflect.DeepEqual(newer.Models, []string{"ready"}) {
 		t.Fatalf("new inventory baseline = %+v", newer)
 	}
 	releaseRead()
@@ -468,7 +518,7 @@ func TestModelDownloadOlderSweepUsesCurrentInventory(t *testing.T) {
 
 func TestModelDownloadLlamaStableInventory(t *testing.T) {
 	ex := modelDownloadInventoryExecutor(t)
-	manifest := ex.reg.engines["ollama"]
+	manifest := ex.reg.engines["llamacpp"]
 	manifest.Actions["pull_model"] = Action{ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE}
 	manifest.Actions["list_models"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/models"}, Result: &ActionResult{Array: "data", Field: "id", Digest: "digest"}}
 	manifest.Actions["loaded_models"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/models"}, Result: &ActionResult{Array: "data", Field: "id", Match: &ResultMatch{Field: "status.value", In: []string{"loaded"}}}}
@@ -492,8 +542,8 @@ func TestModelDownloadLlamaStableInventory(t *testing.T) {
 	})
 	result := ex.ModelsResult(context.Background())
 	if !reflect.DeepEqual(result.Models, []string{"cold", "loading", "resident", "sleeping"}) ||
-		!reflect.DeepEqual(result.ByEngine["ollama"], result.Models) ||
-		!reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"resident"}) {
+		!reflect.DeepEqual(result.ByEngine["llamacpp"], result.Models) ||
+		!reflect.DeepEqual(result.LoadedByEngine["llamacpp"], []string{"resident"}) {
 		t.Fatalf("router transient/unknown rows became ready: %+v", result)
 	}
 	// Adapter selection follows the named protocol, never the family label.
@@ -506,13 +556,13 @@ func TestModelDownloadLlamaStableInventory(t *testing.T) {
 }
 
 func TestModelDownloadMalformedSnapshotCannotCertifyInventory(t *testing.T) {
-	payload := []byte(`{"models":["partial"],"modelsByEngine":{"ollama":["partial"]},"loadedByEngine":{"ollama":["partial"]},"downloadState":{"version":1,"entries":[]}}`)
+	payload := []byte(`{"models":["partial"],"modelsByEngine":{"llamacpp":["partial"]},"loadedByEngine":{"llamacpp":["partial"]},"downloadState":{"version":1,"entries":[]}}`)
 	var result ModelsResult
 	if err := json.Unmarshal(payload, &result); err != nil {
 		t.Fatalf("decode additive malformed lifecycle: %v", err)
 	}
 	if len(result.Models) != 0 || len(result.ByEngine) != 0 || result.DownloadState != nil ||
-		!reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"partial"}) {
+		!reflect.DeepEqual(result.LoadedByEngine["llamacpp"], []string{"partial"}) {
 		t.Fatalf("malformed snapshot promoted content or changed residency: %+v", result)
 	}
 }
@@ -745,15 +795,15 @@ func TestModelsMemoryEvidenceWithdrawalCannotRevive(t *testing.T) {
 func TestModelsResultDecodeDiscardsInvalidMemoryEvidence(t *testing.T) {
 	test := func(name, evidence string) {
 		t.Run(name, func(t *testing.T) {
-			payload := `{"models":["m"],"modelsByEngine":{"ollama":["m"]},"loadedByEngine":{"ollama":["m"]},"policy":{"revision":"21","roles":{}},"memoryEvidence":` + evidence + `}`
+			payload := `{"models":["m"],"modelsByEngine":{"llamacpp":["m"]},"loadedByEngine":{"llamacpp":["m"]},"policy":{"revision":"21","roles":{}},"memoryEvidence":` + evidence + `}`
 			result := ModelsResult{MemoryEvidence: &performancewire.MemoryEvidence{Version: 2}}
 			if err := json.Unmarshal([]byte(payload), &result); err != nil {
 				t.Fatalf("decode inventory with invalid optional evidence: %v", err)
 			}
 			want := ModelsResult{
 				Models:         []string{"m"},
-				ByEngine:       map[string][]string{"ollama": {"m"}},
-				LoadedByEngine: map[string][]string{"ollama": {"m"}},
+				ByEngine:       map[string][]string{"llamacpp": {"m"}},
+				LoadedByEngine: map[string][]string{"llamacpp": {"m"}},
 				Policy:         &nodepolicy.Advertisement{Revision: "21", Roles: map[string]nodepolicy.AdvertisedRole{}},
 			}
 			if !reflect.DeepEqual(result, want) {
@@ -802,8 +852,8 @@ func TestModelsResultDecodeRejectsMalformedInventory(t *testing.T) {
 	test("invalid JSON", `{"models":["m"],"memoryEvidence":`)
 	test("wrong result type", `[]`)
 	test("wrong models type", `{"models":{},"memoryEvidence":{"version":2}}`)
-	test("wrong attribution type", `{"models":["m"],"modelsByEngine":{"ollama":1}}`)
-	test("wrong residency type", `{"models":["m"],"loadedByEngine":{"ollama":1}}`)
+	test("wrong attribution type", `{"models":["m"],"modelsByEngine":{"llamacpp":1}}`)
+	test("wrong residency type", `{"models":["m"],"loadedByEngine":{"llamacpp":1}}`)
 	test("wrong policy type", `{"models":["m"],"policy":[]}`)
 }
 
@@ -1642,7 +1692,7 @@ func TestModelsResultCarriesAndWithdrawsTheStrictCapability(t *testing.T) {
 		Revision: "21",
 		Roles:    map[string]nodepolicy.AdvertisedRole{},
 		StrictAdmission: &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion, Models: []nodepolicy.StrictAdmissionModel{{
-			Engine: "ollama", Model: "m:latest", MaxConcurrent: 2,
+			Engine: "llamacpp", Model: "m", MaxConcurrent: 2,
 			Identity: nodepolicy.StrictModelIdentity{EngineRunID: "engine-run-1", SettingsFingerprint: strings.Repeat("a", 64), ModelDigest: strings.Repeat("b", 64)},
 		}}},
 	}

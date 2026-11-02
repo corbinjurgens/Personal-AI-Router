@@ -78,20 +78,18 @@ func (w *modelDownloadBodyWriter) Write(body []byte) (int, error) {
 }
 
 func TestModelDownloadExportReaderHoldsThroughBody(t *testing.T) {
-	root := t.TempDir()
-	fixture := writeOllamaModel(t, filepath.Join(root, "models"), "demo", 64, 1)
-	ex := copyTestExecutor(t, "ollama", root, true)
-	copyTestNativeModels(t, ex, "ollama", "demo")
+	fixture := namedCustomCopyFixture(t, "demo", 64, 1)
+	ex := fixture.source
 	server := &controlServer{exec: ex}
 	_, client := modelFileServer(t, ex, nil)
-	list, err := client.modelFiles(context.Background(), "ollama", "demo", nil)
+	list, err := client.modelFiles(context.Background(), "llamacpp", "demo", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	writer := &modelDownloadBodyWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
 	var release sync.Once
 	done := make(chan struct{})
-	request := httptest.NewRequest(http.MethodGet, controlModelFilePath+"?engine=ollama&model=demo&path="+url.QueryEscape(fixture.manifestRel)+"&exportId="+url.QueryEscape(list.ExportID), nil)
+	request := httptest.NewRequest(http.MethodGet, controlModelFilePath+"?engine=llamacpp&model=demo&path="+url.QueryEscape("model/model.gguf")+"&exportId="+url.QueryEscape(list.ExportID), nil)
 	go func() {
 		defer close(done)
 		server.handleModelFile(writer, request)
@@ -99,16 +97,16 @@ func TestModelDownloadExportReaderHoldsThroughBody(t *testing.T) {
 	t.Cleanup(func() { release.Do(func() { close(writer.release) }); <-done })
 	<-writer.entered
 	var effects int
-	err = ex.withModelMutation(context.Background(), "ollama", func() error { effects++; return nil })
+	err = ex.withModelMutation(context.Background(), "llamacpp", func() error { effects++; return nil })
 	if !errors.Is(err, errDownloadBusy) || effects != 0 {
 		t.Fatalf("mutation during body: effects=%d error=%v", effects, err)
 	}
 	release.Do(func() { close(writer.release) })
 	<-done
-	if writer.Code != http.StatusOK || !bytes.Equal(writer.Body.Bytes(), fixture.manifest) {
+	if writer.Code != http.StatusOK || !bytes.Equal(writer.Body.Bytes(), testBytes(64, 1)) {
 		t.Fatalf("export response: status=%d bytes=%d", writer.Code, writer.Body.Len())
 	}
-	releaseWriter, err := ex.downloads.acquireWrite("ollama")
+	releaseWriter, err := ex.downloads.acquireWrite("llamacpp")
 	if err != nil {
 		t.Fatalf("reader leaked after body: %v", err)
 	}
@@ -116,11 +114,9 @@ func TestModelDownloadExportReaderHoldsThroughBody(t *testing.T) {
 }
 
 func TestModelDownloadExportReaderHoldsThroughHashing(t *testing.T) {
-	root := t.TempDir()
-	fixture := writeOllamaModel(t, filepath.Join(root, "models"), "demo", 64, 1)
-	ex := copyTestExecutor(t, "ollama", root, true)
-	copyTestNativeModels(t, ex, "ollama", "demo")
-	abs, err := filepath.EvalSymlinks(filepath.Join(root, "models", filepath.FromSlash(fixture.manifestRel)))
+	fixture := namedCustomCopyFixture(t, "demo", 64, 1)
+	ex := fixture.source
+	abs, err := filepath.EvalSymlinks(fixture.artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +125,7 @@ func TestModelDownloadExportReaderHoldsThroughHashing(t *testing.T) {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{})
-	call := &hashCall{done: make(chan struct{}), info: info, sum: sha256Hex(fixture.manifest), onWait: func() { close(entered) }}
+	call := &hashCall{done: make(chan struct{}), info: info, sum: sha256Hex(testBytes(64, 1)), onWait: func() { close(entered) }}
 	key := hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano()}
 	fileHashes.mu.Lock()
 	fileHashes.inflight[key] = call
@@ -139,7 +135,7 @@ func TestModelDownloadExportReaderHoldsThroughHashing(t *testing.T) {
 	writer := httptest.NewRecorder()
 	go func() {
 		defer close(done)
-		(&controlServer{exec: ex}).handleModelFiles(writer, httptest.NewRequest(http.MethodGet, controlModelFilesPath+"?engine=ollama&model=demo", nil))
+		(&controlServer{exec: ex}).handleModelFiles(writer, httptest.NewRequest(http.MethodGet, controlModelFilesPath+"?engine=llamacpp&model=demo", nil))
 	}()
 	t.Cleanup(func() {
 		release.Do(func() { close(call.done) })
@@ -149,7 +145,7 @@ func TestModelDownloadExportReaderHoldsThroughHashing(t *testing.T) {
 		fileHashes.mu.Unlock()
 	})
 	<-entered
-	err = ex.withModelMutation(context.Background(), "ollama", func() error { t.Error("mutation dispatched during hashing"); return nil })
+	err = ex.withModelMutation(context.Background(), "llamacpp", func() error { t.Error("mutation dispatched during hashing"); return nil })
 	if !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("mutation during hashing = %v", err)
 	}
@@ -336,7 +332,7 @@ func modelFileServer(t *testing.T, exec *Executor, wrap func(http.Handler) http.
 }
 
 func TestValidModelRelPath(t *testing.T) {
-	good := []string{"blobs/sha256-abc", "manifests/registry.ollama.ai/library/x/latest", "a.gguf", "sub/dir/model-Q4_K_M.gguf"}
+	good := []string{"blobs/sha256-abc", "models--owner--repo/snapshots/revision/model.gguf", "a.gguf", "sub/dir/model-Q4_K_M.gguf"}
 	bad := []string{"", "/etc/passwd", "../x", "a/../b", "a/./b", "a//b", `a\b`, "C:/x", "a/b.", "a/b ", "a\x00b", "a/"}
 	for _, p := range good {
 		if !validModelRelPath(p) {
@@ -439,10 +435,10 @@ func TestModelFilesListsOllamaModelWithHashes(t *testing.T) {
 
 func TestModelFilesUnknownModelIs404(t *testing.T) {
 	dir := t.TempDir()
-	exec := copyTestExecutor(t, "ollama", dir, true)
-	copyTestNativeModels(t, exec, "ollama")
+	exec := copyTestExecutor(t, "llamacpp", dir, true)
+	copyTestNativeModels(t, exec, "llamacpp")
 	srv, _ := modelFileServer(t, exec, nil)
-	resp, err := srv.Client().Get(srv.URL + controlModelFilesPath + "?engine=ollama&model=missing")
+	resp, err := srv.Client().Get(srv.URL + controlModelFilesPath + "?engine=llamacpp&model=owner/missing:Q4_K_M")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,21 +449,18 @@ func TestModelFilesUnknownModelIs404(t *testing.T) {
 }
 
 func TestModelFileRejectsTraversalAndUnlistedFiles(t *testing.T) {
-	dir := t.TempDir()
-	exec := copyTestExecutor(t, "ollama", dir, true)
-	root := filepath.Join(dir, "models")
-	fx := writeOllamaModel(t, root, "tiny", 1024, 1)
-	other := writeOllamaModel(t, root, "other", 1024, 2)
-	copyTestNativeModels(t, exec, "ollama", "tiny", "other")
-	writeTestFile(t, filepath.Join(dir, "secret"), []byte("secret"))
+	fixture := namedCustomCopyFixture(t, "tiny", 1024, 1)
+	exec := fixture.source
+	writeTestFile(t, filepath.Join(filepath.Dir(fixture.artifact), "other.gguf"), testBytes(1024, 2))
+	writeTestFile(t, filepath.Join(fixture.store, "secret"), []byte("secret"))
 	srv, client := modelFileServer(t, exec, nil)
-	list, err := client.modelFiles(context.Background(), "ollama", "tiny", nil)
+	list, err := client.modelFiles(context.Background(), "llamacpp", "tiny", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	get := func(path string) int {
-		q := url.Values{"engine": {"ollama"}, "model": {"tiny"}, "path": {path}, "exportId": {list.ExportID}}
+		q := url.Values{"engine": {"llamacpp"}, "model": {"tiny"}, "path": {path}, "exportId": {list.ExportID}}
 		resp, err := srv.Client().Get(srv.URL + controlModelFilePath + "?" + q.Encode())
 		if err != nil {
 			t.Fatal(err)
@@ -481,48 +474,33 @@ func TestModelFileRejectsTraversalAndUnlistedFiles(t *testing.T) {
 		}
 	}
 	// A real file in the store that belongs to another model is not served.
-	for p := range other.blobs {
-		if _, mine := fx.blobs[p]; mine {
-			continue
-		}
-		if code := get(p); code != http.StatusNotFound {
-			t.Errorf("other model's %q: status %d, want 404", p, code)
-		}
+	if code := get("model/other.gguf"); code != http.StatusNotFound {
+		t.Errorf("other model's file: status %d, want 404", code)
 	}
-	if code := get(other.manifestRel); code != http.StatusNotFound {
-		t.Errorf("other model's manifest: status %d, want 404", code)
-	}
-	if code := get(fx.manifestRel); code != http.StatusOK {
-		t.Errorf("listed manifest: status %d, want 200", code)
+	if code := get("model/model.gguf"); code != http.StatusOK {
+		t.Errorf("listed model: status %d, want 200", code)
 	}
 }
 
 func TestModelFileServesRanges(t *testing.T) {
-	dir := t.TempDir()
-	exec := copyTestExecutor(t, "ollama", dir, true)
-	fx := writeOllamaModel(t, filepath.Join(dir, "models"), "tiny", 10000, 3)
-	copyTestNativeModels(t, exec, "ollama", "tiny")
+	fixture := namedCustomCopyFixture(t, "tiny", 10000, 3)
+	exec := fixture.source
 	_, client := modelFileServer(t, exec, nil)
-	list, err := client.modelFiles(context.Background(), "ollama", "tiny", nil)
+	list, err := client.modelFiles(context.Background(), "llamacpp", "tiny", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rel string
-	for p, b := range fx.blobs {
-		if len(b) == 10000 {
-			rel = p
-		}
-	}
-	body, start, err := client.modelFile(context.Background(), "ollama", "tiny", rel, list.ExportID, 4000)
+	rel := "model/model.gguf"
+	body, start, err := client.modelFile(context.Background(), "llamacpp", "tiny", rel, list.ExportID, 4000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer body.Close()
 	got, _ := io.ReadAll(body)
-	if start != 4000 || string(got) != string(fx.blobs[rel][4000:]) {
+	if start != 4000 || string(got) != string(testBytes(10000, 3)[4000:]) {
 		t.Fatalf("ranged read started at %d with %d bytes, want the tail from 4000", start, len(got))
 	}
-	if _, _, err := client.modelFile(context.Background(), "ollama", "tiny", rel, list.ExportID, 20000); err != errRangeNotSatisfiable {
+	if _, _, err := client.modelFile(context.Background(), "llamacpp", "tiny", rel, list.ExportID, 20000); err != errRangeNotSatisfiable {
 		t.Fatalf("range past the end: err = %v, want errRangeNotSatisfiable", err)
 	}
 }

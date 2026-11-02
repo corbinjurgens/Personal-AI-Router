@@ -346,7 +346,7 @@ func TestModelDownloadDeleteResolutionReservesRevisionBeforePersistence(t *testi
 	})
 	t.Run("progress preserves deletion and active terminal capacity", func(t *testing.T) {
 		d, a := prepare(t)
-		other := reserveModelDownload(t, d, "ollama", "other", engines.ModelNamingImpliedLatestTag)
+		other := reserveModelDownload(t, d, "llamacpp-custom", "other", engines.ModelNamingExact)
 		if err := d.update(other, "in_progress", nil); err != nil {
 			t.Fatal(err)
 		}
@@ -457,7 +457,11 @@ func TestModelDownloadBlockedLoadAndExportDispatch(t *testing.T) {
 
 func testModelDownloads(t *testing.T) *modelDownloads {
 	t.Helper()
-	return newModelDownloads(newOpID(), t.TempDir(), map[string]string{"ollama": engines.ModelNamingImpliedLatestTag, "llamacpp": engines.ModelNamingExact})
+	other, ok := engines.DynamicEngine("llamacpp-custom", "llama.cpp custom")
+	if !ok {
+		t.Fatal("invalid descriptor engine")
+	}
+	return newModelDownloads(newOpID(), t.TempDir(), map[string]string{"ollama": engines.ModelNamingImpliedLatestTag, "llamacpp": engines.ModelNamingExact, other.Name: engines.ModelNamingExact})
 }
 
 func reserveModelDownload(t *testing.T, d *modelDownloads, engine, model, naming string) *modelDownloadAttempt {
@@ -542,7 +546,7 @@ func TestModelDownloadGateOrderings(t *testing.T) {
 	if _, err := d.acquireWrite("llamacpp"); !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("writer behind reader = %v", err)
 	}
-	other, err := d.acquireWrite("ollama")
+	other, err := d.acquireWrite("llamacpp-custom")
 	if err != nil {
 		t.Fatal(err)
 	}

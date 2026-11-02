@@ -483,12 +483,10 @@ func TestModelMutationGuardBlocksDirectECEndpointsUntilConfirmed(t *testing.T) {
 // the withdrawal is confirmed.
 func TestModelMutationGuardBlocksCopyUntilConfirmed(t *testing.T) {
 	plentyOfDisk(t)
-	srcDir, dstDir := t.TempDir(), t.TempDir()
-	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
-	writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny:1b", 4096, 4)
-	copyTestNativeModels(t, srcExec, "ollama", "tiny:1b")
-	source := sourceFromExecutor(t, srcExec, "ollama", "tiny:1b")
-	dst := copyTestExecutor(t, "ollama", dstDir, true)
+	fixture := namedCustomCopyFixture(t, "tiny", 4096, 4)
+	source := sourceFromExecutor(t, fixture.source, "llamacpp", "tiny")
+	dstDir := filepath.Join(t.TempDir(), "model-store")
+	dst := copyTestExecutor(t, "llamacpp", dstDir, true)
 
 	var out lockedBuffer
 	m := NewManager(NewCodec(&out), dst, nil, "")
@@ -501,7 +499,7 @@ func TestModelMutationGuardBlocksCopyUntilConfirmed(t *testing.T) {
 	}
 	results := make(chan result, 1)
 	go func() {
-		res, err := dst.CopyModelFrom(context.Background(), source, "ollama", "tiny:1b", nil)
+		res, err := dst.CopyModelFrom(context.Background(), source, "llamacpp", "tiny", nil)
 		results <- result{res, err}
 	}()
 
@@ -509,7 +507,7 @@ func TestModelMutationGuardBlocksCopyUntilConfirmed(t *testing.T) {
 	if fetched := source.fetchedPaths(); len(fetched) != 0 {
 		t.Fatalf("the copy fetched %v before the withdrawal was confirmed", fetched)
 	}
-	root := filepath.Join(dstDir, "models")
+	root := dstDir
 	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the copy wrote %s before the withdrawal was confirmed (stat err %v)", root, err)
 	}
@@ -519,8 +517,8 @@ func TestModelMutationGuardBlocksCopyUntilConfirmed(t *testing.T) {
 	if got.err != nil {
 		t.Fatalf("copy: %v", got.err)
 	}
-	if got.res.Files != 3 {
-		t.Fatalf("copy result = %+v, want 3 files", got.res)
+	if got.res.Files != 1 {
+		t.Fatalf("copy result = %+v, want 1 file", got.res)
 	}
 	if fetched := source.fetchedPaths(); len(fetched) == 0 {
 		t.Fatal("the copy fetched nothing after the withdrawal was confirmed")

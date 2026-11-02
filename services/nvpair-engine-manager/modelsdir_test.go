@@ -152,9 +152,9 @@ func TestValidateRejectsRemovalsThatReachTheModelStore(t *testing.T) {
 
 func TestRemoveTreePreservingKeepsNestedStore(t *testing.T) {
 	root := t.TempDir()
-	engineRoot := filepath.Join(root, ".lmstudio")
+	engineRoot := filepath.Join(root, ".llamacpp")
 	models := filepath.Join(engineRoot, "models", "publisher", "repo")
-	binary := filepath.Join(engineRoot, "bin", "lms")
+	binary := filepath.Join(engineRoot, "bin", "llama-server")
 	internal := filepath.Join(engineRoot, ".internal", "state.json")
 	for _, dir := range []string{models, filepath.Dir(binary), filepath.Dir(internal)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -183,14 +183,14 @@ func TestRemoveTreePreservingKeepsNestedStore(t *testing.T) {
 }
 
 // TestRemoveTreePreservingKeepsASymlinkedStore is the guard for a model library
-// moved and linked back. With ~/.lmstudio/models a symlink to a sibling
+// moved and linked back. With ~/.llamacpp/models a symlink to a sibling
 // directory, a removal that matched the store by path kept the link and deleted
 // the sibling, which is where the models were.
 func TestRemoveTreePreservingKeepsASymlinkedStore(t *testing.T) {
-	engineRoot := filepath.Join(t.TempDir(), ".lmstudio")
+	engineRoot := filepath.Join(t.TempDir(), ".llamacpp")
 	weights := filepath.Join(engineRoot, "weights")
 	model := filepath.Join(weights, "model.gguf")
-	binary := filepath.Join(engineRoot, "bin", "lms")
+	binary := filepath.Join(engineRoot, "bin", "llama-server")
 	for _, file := range []string{model, binary} {
 		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 			t.Fatal(err)
@@ -278,16 +278,16 @@ func TestRemoveTreePreservingKeepsAStoreSpelledInAnotherCase(t *testing.T) {
 
 func TestRemoveTreePreservingRemovesUnrelatedTree(t *testing.T) {
 	root := t.TempDir()
-	installDir := filepath.Join(root, "engine-bin", "ollama")
+	installDir := filepath.Join(root, "engine-bin", "llamacpp")
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(installDir, "ollama"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(installDir, "llamacpp"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Ollama's models live outside the install dir, so this is a plain removal.
-	if err := removeTreePreserving(installDir, filepath.Join(root, ".ollama")); err != nil {
+	// The model store live outside the install dir, so this is a plain removal.
+	if err := removeTreePreserving(installDir, filepath.Join(root, ".llamacpp")); err != nil {
 		t.Fatalf("removeTreePreserving: %v", err)
 	}
 	if _, err := os.Stat(installDir); !os.IsNotExist(err) {

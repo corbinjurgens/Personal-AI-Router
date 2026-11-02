@@ -43,7 +43,7 @@ func victimDir(t *testing.T, dir string) string {
 func TestRemoveTreePreservingUnlinksJunctionedTarget(t *testing.T) {
 	root := t.TempDir()
 	keep := victimDir(t, filepath.Join(root, "elsewhere"))
-	link := filepath.Join(root, ".lmstudio")
+	link := filepath.Join(root, ".llamacpp")
 	junction(t, link, filepath.Dir(keep))
 
 	if err := removeTreePreserving(link, filepath.Join(link, "models")); err != nil {
@@ -64,7 +64,7 @@ func TestRemoveTreePreservingUnlinksJunctionedTarget(t *testing.T) {
 func TestRemoveTreePreservingUnlinksJunctionOnTheWayToTheStore(t *testing.T) {
 	root := t.TempDir()
 	keep := victimDir(t, filepath.Join(root, "elsewhere"))
-	engineRoot := filepath.Join(root, ".lmstudio")
+	engineRoot := filepath.Join(root, ".llamacpp")
 	if err := os.MkdirAll(engineRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
