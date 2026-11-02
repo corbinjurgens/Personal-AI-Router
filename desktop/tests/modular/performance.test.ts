@@ -223,6 +223,32 @@ describe('bounded broker performance projection', () => {
         expect(measured?.engineDecode).toBeNull()
     })
 
+    it('retains destination Strata identity and fractional native interval without deriving output throughput', () => {
+        const key = {
+            host: 'peer',
+            engine: 'strata-custom',
+            model: 'resolved-child/model',
+            fingerprint: 'strata-runtime-config-profile'
+        }
+        const profile = { engineFamily: 'strata', quantization: 'Q6_K', contextTokens: 16384 }
+        const engineDecode = { samples: 1, durationNs: 400_500_000, tokensPerSecond: 55.1 }
+        const measured = parsePerformanceProjection(
+            projection([
+                peer({
+                    summary: summary({
+                        entries: [entry({ key, profile, engineDecode, decode: null })]
+                    })
+                })
+            ])
+        ).get('peer')?.summary?.entries[0]
+
+        expect(measured?.key).toEqual(key)
+        expect(measured?.profile).toEqual(profile)
+        expect(measured?.engineDecode).toEqual(engineDecode)
+        expect(measured?.decode).toBeNull()
+        expect(measured?.firstTokenMs).toBeNull()
+    })
+
     const invalidReportedRates: [string, JsonObject][] = [
         ['missing samples', { durationNs: 100, tokensPerSecond: 1 }],
         ['null samples', { samples: null, durationNs: 100, tokensPerSecond: 1 }],
@@ -463,6 +489,82 @@ describe('node snapshot performance attachment', () => {
             revision: 3,
             entries: [{ samples: 1, newestAgeMs: 110, oldestAgeMs: 210 }]
         })
+    })
+
+    it('replaces native rate summaries without summing counts or retaining a prior rate', () => {
+        const reported = (revision: number, engineDecode: JsonValue): JsonObject =>
+            projection([
+                peer({
+                    summary: summary({
+                        revision,
+                        entries: [
+                            entry({
+                                samples: 3,
+                                completed: 2,
+                                cancelled: 1,
+                                engineDecode,
+                                decode: null
+                            })
+                        ]
+                    })
+                })
+            ])
+        const first = reported(3, {
+            samples: 2,
+            durationNs: 1_000_000_000,
+            tokensPerSecond: 49
+        })
+        change(first)
+        change(first)
+        expect(state.getNodesInitial().nodes.peer?.performance?.summary?.entries[0]).toMatchObject({
+            samples: 3,
+            completed: 2,
+            cancelled: 1,
+            engineDecode: { samples: 2, durationNs: 1_000_000_000, tokensPerSecond: 49 }
+        })
+
+        change(reported(4, { samples: 1, durationNs: 400_500_000, tokensPerSecond: 0 }))
+        expect(state.getNodesInitial().nodes.peer?.performance?.summary?.entries[0]).toMatchObject({
+            samples: 3,
+            engineDecode: { samples: 1, durationNs: 400_500_000, tokensPerSecond: 0 }
+        })
+        change(reported(5, null))
+        expect(state.getNodesInitial().nodes.peer?.performance?.summary?.entries[0]).toMatchObject({
+            samples: 3,
+            engineDecode: null,
+            decode: null
+        })
+    })
+
+    it('keeps route inputs and engine selections unchanged by native performance replacements', () => {
+        const available = state.getAvailableNodes()
+        const pollTargets = state.getNodeInfoPollTargets()
+        const engines = state.getEngineInitialState()
+        const workloads = state.getWorkloads()
+        const snapshot = projection([
+            peer({
+                summary: summary({
+                    entries: [
+                        entry({
+                            engineDecode: {
+                                samples: 1,
+                                durationNs: 400_500_000,
+                                tokensPerSecond: 55.1
+                            }
+                        })
+                    ]
+                })
+            })
+        ])
+
+        change(snapshot)
+        change(snapshot)
+
+        expect(state.getAvailableNodes()).toEqual(available)
+        expect(state.getNodeInfoPollTargets()).toEqual(pollTargets)
+        expect(state.getEngineInitialState()).toEqual(engines)
+        expect(state.getWorkloads()).toEqual(workloads)
+        expect(vi.mocked(emitBridgePush).mock.calls.map(call => call[0])).toEqual(['nodes:upsert'])
     })
 
     it('attaches cached data to late discovery and never to a different replacement host', () => {
