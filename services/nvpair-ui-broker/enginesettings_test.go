@@ -29,6 +29,7 @@ import (
 
 type settingsHarness struct {
 	b                   *Broker
+	engine              string
 	applies             atomic.Int32
 	proxyRebinds        atomic.Int32
 	fail                atomic.Bool
@@ -82,6 +83,12 @@ func newSettingsHarness(t *testing.T) *settingsHarness {
 	return newSettingsHarnessForEngine(t, "ollama")
 }
 
+// newLlamaCPPSettingsHarness is the settings harness for an example engine.
+func newLlamaCPPSettingsHarness(t *testing.T) *settingsHarness {
+	t.Helper()
+	return newSettingsHarnessForEngine(t, engines.NameLlamaCPP)
+}
+
 func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 	t.Helper()
 	return newServingSettingsHarness(t, engine, nil)
@@ -89,7 +96,7 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 
 func newServingSettingsHarness(t *testing.T, engine string, serving *engines.ServingConfig) *settingsHarness {
 	t.Helper()
-	h := &settingsHarness{b: &Broker{codec: NewCodec(&bytes.Buffer{}), nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}, settingsReplies: make(chan json.RawMessage, 8)}
+	h := &settingsHarness{engine: engine, b: &Broker{codec: NewCodec(&bytes.Buffer{}), nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}, settingsReplies: make(chan json.RawMessage, 8)}
 	ports := make([]int, 4)
 	for i := range ports {
 		ports[i] = h.reservePort(t)
@@ -170,7 +177,7 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 				h.launchMu.Unlock()
 				_ = codec.Respond(msg.ID, current)
 			case "engine:configured-ports":
-				_ = codec.Respond(msg.ID, map[string]any{"engines": []any{map[string]any{"engine": "lmstudio", "port": h.otherEnginePort.Load()}}})
+				_ = codec.Respond(msg.ID, map[string]any{"engines": []any{map[string]any{"engine": "llamacpp-custom", "port": h.otherEnginePort.Load()}}})
 			case "engine:preview-launch":
 				envelope, _ := settings.DecodeWorkerRequest[settings.Request](msg.Params)
 				p := envelope.Request
@@ -250,11 +257,11 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 
 func (h *settingsHarness) request(t *testing.T) settings.Request {
 	t.Helper()
-	s, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "ollama"}, "")
+	s, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: h.engine}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return settings.Request{Engine: "ollama", ExpectedRevision: s.Revision, RequestID: settingsID(), Settings: s.Settings}
+	return settings.Request{Engine: h.engine, ExpectedRevision: s.Revision, RequestID: settingsID(), Settings: s.Settings}
 }
 
 func brokerServingFixture() *engines.ServingConfig {
@@ -328,7 +335,7 @@ func TestWorkingSetLimitStatusReachesPublishedSettings(t *testing.T) {
 
 func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {
 	serving := brokerServingFixture()
-	h := newServingSettingsHarness(t, "ollama", serving)
+	h := newServingSettingsHarness(t, "llamacpp", serving)
 	p := h.request(t)
 	if !p.Settings.Serving.Equal(serving) {
 		t.Fatal("baseline reconstruction lost serving")
@@ -342,7 +349,7 @@ func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {
 	if err != nil || receipt.Phase != "succeeded" {
 		t.Fatalf("apply receipt %v: %v", receipt.Phase, err)
 	}
-	if !h.b.engineSettings["ollama"].Previous.Serving.Equal(serving) {
+	if !h.b.engineSettings["llamacpp"].Previous.Serving.Equal(serving) {
 		t.Fatal("journal previous lost serving")
 	}
 	h.failBeforeStop.Store(true)
@@ -354,7 +361,7 @@ func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {
 	}
 	h.failBeforeStop.Store(false)
 	// Crash after durable acceptance of the next retry, before worker apply.
-	record := h.b.engineSettings["ollama"]
+	record := h.b.engineSettings["llamacpp"]
 	record.Snapshot.Phase = "applying"
 	record.Snapshot.RequestID = "interrupted-retry"
 	record.Receipts["interrupted-retry"] = settingsReceipt{Revision: record.Snapshot.Revision, Phase: "applying"}
@@ -369,32 +376,32 @@ func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {
 	if h.applies.Load() != beforeRecovery+1 {
 		t.Fatal("interrupted recovery did not replay the accepted settings")
 	}
-	config, ok := h.b.explicitEngineSettings("ollama")
+	config, ok := h.b.explicitEngineSettings("llamacpp")
 	if !ok || !config.Serving.Equal(serving) {
 		t.Fatal("recovered config lost serving")
 	}
 	*config.Serving.Models[0].Memory.HostRAMBytes = 1
-	again, ok := h.b.explicitEngineSettings("ollama")
+	again, ok := h.b.explicitEngineSettings("llamacpp")
 	if !ok || !again.Serving.Equal(serving) {
 		t.Fatal("recovery config aliases journal")
 	}
-	if err := h.b.publishSwitchTarget(context.Background(), "ollama"); err != nil {
+	if err := h.b.publishSwitchTarget(context.Background(), "llamacpp"); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "ollama"}, "")
+	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
 	if err != nil || !snapshot.Settings.Serving.Equal(serving) {
 		t.Fatal("switch publication/readback lost serving")
 	}
 	h.b.engineConfigMu.Lock()
-	beforeRefresh := h.b.engineSettings["ollama"].Snapshot.Sequence
+	beforeRefresh := h.b.engineSettings["llamacpp"].Snapshot.Sequence
 	h.b.reconcileLegacySettingsLocked()
-	afterRefresh := h.b.engineSettings["ollama"].Snapshot.Sequence
+	afterRefresh := h.b.engineSettings["llamacpp"].Snapshot.Sequence
 	h.b.engineConfigMu.Unlock()
 	if beforeRefresh != afterRefresh {
 		t.Fatal("equivalent serving republished an unchanged refresh")
 	}
 	*snapshot.Settings.Serving.Models[0].Memory.VRAMBytes = 2
-	if !h.b.engineSettings["ollama"].Snapshot.Settings.Serving.Equal(serving) {
+	if !h.b.engineSettings["llamacpp"].Snapshot.Settings.Serving.Equal(serving) {
 		t.Fatal("readback aliases journal")
 	}
 	duplicate, err := h.b.applyEngineSettings(context.Background(), p, "")
@@ -405,7 +412,7 @@ func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {
 
 func TestSettingsServingJournalWriteFailureRestoresDeclaration(t *testing.T) {
 	serving := brokerServingFixture()
-	h := newServingSettingsHarness(t, "ollama", serving)
+	h := newServingSettingsHarness(t, "llamacpp", serving)
 	p := h.request(t)
 	p.Settings.Serving.Models[0].MaxOutputTokens++
 	path, err := h.b.engineSettingsPath()
@@ -421,7 +428,7 @@ func TestSettingsServingJournalWriteFailureRestoresDeclaration(t *testing.T) {
 	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err == nil {
 		t.Fatal("journal write succeeded unexpectedly")
 	}
-	if h.applies.Load() != 0 || !h.b.engineSettings["ollama"].Snapshot.Settings.Serving.Equal(serving) {
+	if h.applies.Load() != 0 || !h.b.engineSettings["llamacpp"].Snapshot.Settings.Serving.Equal(serving) {
 		t.Fatal("failed journal write changed declaration/runtime")
 	}
 }
@@ -441,7 +448,7 @@ func TestSettingsServingLegacyFingerprintByteStability(t *testing.T) {
 }
 
 func TestSettingsCoordinatorRevisionDedupNoopAndFailure(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	p := h.request(t)
 	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
 	if err != nil {
@@ -478,7 +485,7 @@ func TestSettingsCoordinatorRevisionDedupNoopAndFailure(t *testing.T) {
 	if err != nil || receipt.Phase != "failed" {
 		t.Fatalf("failure receipt %+v %v", receipt, err)
 	}
-	s := h.b.engineSettings["ollama"].Snapshot
+	s := h.b.engineSettings["llamacpp"].Snapshot
 	if !s.Settings.Equal(p.Settings) || s.Running || s.AppliedRevision >= s.Revision || s.Error == "" {
 		t.Fatalf("untruthful failed snapshot: %+v", s)
 	}
@@ -487,13 +494,13 @@ func TestSettingsCoordinatorRevisionDedupNoopAndFailure(t *testing.T) {
 	if _, err = h.b.applyEngineSettings(context.Background(), p, ""); err != nil {
 		t.Fatal(err)
 	}
-	if s := h.b.engineSettings["ollama"].Snapshot; !s.Running || s.Phase != "succeeded" {
+	if s := h.b.engineSettings["llamacpp"].Snapshot; !s.Running || s.Phase != "succeeded" {
 		t.Fatalf("retry lost resume intent: %+v", s)
 	}
 }
 
 func TestSettingsStoppedRetryPreservesPortReservation(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	p := h.request(t)
 	p.Settings.LaunchText += " --failed-start"
 	h.fail.Store(true)
@@ -503,7 +510,7 @@ func TestSettingsStoppedRetryPreservesPortReservation(t *testing.T) {
 	}
 	h.fail.Store(false)
 	p = h.request(t)
-	before := h.b.engineSettings["ollama"].Snapshot
+	before := h.b.engineSettings["llamacpp"].Snapshot
 	if before.Running {
 		t.Fatal("failed startup left the engine running")
 	}
@@ -541,14 +548,14 @@ func TestSettingsStoppedRetryPreservesPortReservation(t *testing.T) {
 	if _, err := h.b.applyEngineSettings(context.Background(), conflict, ""); err == nil {
 		t.Fatal("retry accepted a foreign occupied port")
 	}
-	if after := h.b.engineSettings["ollama"].Snapshot; after.Revision != before.Revision || !after.Settings.Equal(before.Settings) || h.applies.Load() != 1 {
+	if after := h.b.engineSettings["llamacpp"].Snapshot; after.Revision != before.Revision || !after.Settings.Equal(before.Settings) || h.applies.Load() != 1 {
 		t.Fatalf("rejected conflict changed settings or runtime: %+v, applies=%d", after, h.applies.Load())
 	}
 	receipt, err = h.b.applyEngineSettings(context.Background(), p, "")
 	if err != nil || receipt.Phase != "succeeded" || h.applies.Load() != 2 {
 		t.Fatalf("retry on reserved fixture port = %+v, %v, applies=%d", receipt, err, h.applies.Load())
 	}
-	if after := h.b.engineSettings["ollama"].Snapshot; !after.Running {
+	if after := h.b.engineSettings["llamacpp"].Snapshot; !after.Running {
 		t.Fatal("retry lost resume intent")
 	}
 }
@@ -565,11 +572,11 @@ func TestSettingsFailedApplyRestoresOnlyRunningReadyService(t *testing.T) {
 		{"proxy unavailable", true, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newSettingsHarness(t)
+			h := newLlamaCPPSettingsHarness(t)
 			p := h.request(t)
 			oldPort := p.Settings.ProxyPort
 			h.b.regCache = relay.NewRegistrationCache()
-			h.b.registerService(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: oldPort})
+			h.b.registerService(noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: oldPort})
 			h.failBeforeStop.Store(tc.stopFails)
 			h.fail.Store(true)
 			h.loseProxyOnStop.Store(!tc.proxyReady)
@@ -580,7 +587,7 @@ func TestSettingsFailedApplyRestoresOnlyRunningReadyService(t *testing.T) {
 			}
 			registered := h.b.regCache.Snapshot()
 			if tc.advertised {
-				if len(registered) != 1 || registered[0].Service != noderec.ServiceOllama || registered[0].Port != oldPort {
+				if len(registered) != 1 || registered[0].Service != noderec.ServiceLlamaCPP || registered[0].Port != oldPort {
 					t.Fatalf("running engine lost registration: %+v", registered)
 				}
 			} else if len(registered) != 0 {
@@ -630,7 +637,7 @@ func TestSettingsProxyRebindPushesLivePortToClusterManager(t *testing.T) {
 }
 
 func TestSettingsCoordinatorSerializesAndCancelsQueuedRequests(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	p := h.request(t)
 	p.Settings.LaunchText += " --first"
 	h.entered = make(chan struct{}, 1)
@@ -690,12 +697,12 @@ func TestSettingsApplyDoesNotBlockUnrelatedReads(t *testing.T) {
 }
 
 func TestSettingsResultPersistenceFailureReturnsFailedReceipt(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	p := h.request(t)
 	p.Settings.LaunchText += " --new"
 	h.failResultSave.Store(true)
 	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
-	if err != nil || receipt.Phase != "failed" || h.b.engineSettings["ollama"].Snapshot.Phase != "failed" {
+	if err != nil || receipt.Phase != "failed" || h.b.engineSettings["llamacpp"].Snapshot.Phase != "failed" {
 		t.Fatalf("result persistence failure claimed success: %+v %v", receipt, err)
 	}
 }
@@ -707,8 +714,8 @@ func TestSettingsJournalLoadRebasesOwnerWithoutChangingRecoveryDataOrDisk(t *tes
 		t.Fatal(err)
 	}
 	journal := []byte(`{
-		"ollama": {"snapshot": {"nodeId":"former-node","engine":"ollama","revision":9,"appliedRevision":7,"epoch":"former-epoch","sequence":42,"settings":{"serverPort":11436,"proxyPort":11434,"launchText":"--parallel 2"},"effectiveServerPort":11435,"effectiveProxyPort":11434,"running":true,"adopted":true,"editable":true,"reason":"fixture reason","format":"pair-arguments-v1","phase":"applying","error":"interrupted","requestId":"active-request"},"previous":{"serverPort":11435,"proxyPort":11434,"launchText":"--parallel 1"},"resume":true,"explicit":true,"receipts":{"active-request":{"hash":"active-hash","revision":9,"phase":"applying"},"earlier-request":{"hash":"earlier-hash","revision":7,"phase":"succeeded"}}},
-		"lmstudio": {"snapshot": {"engine":"lmstudio","revision":5,"appliedRevision":3,"epoch":"old-epoch","sequence":18,"settings":{"serverPort":1235,"proxyPort":1234,"launchText":"--fixture"},"phase":"failed","error":"startup failure","requestId":"failed-request"},"previous":{"serverPort":1236,"proxyPort":1234},"resume":false,"explicit":false,"receipts":{"failed-request":{"hash":"failed-hash","revision":5,"phase":"failed"}}}
+		"llamacpp": {"snapshot": {"nodeId":"former-node","engine":"llamacpp","revision":9,"appliedRevision":7,"epoch":"former-epoch","sequence":42,"settings":{"serverPort":8082,"proxyPort":8080,"launchText":"--parallel 2"},"effectiveServerPort":8081,"effectiveProxyPort":8080,"running":true,"adopted":true,"editable":true,"reason":"fixture reason","format":"pair-arguments-v1","phase":"applying","error":"interrupted","requestId":"active-request"},"previous":{"serverPort":8081,"proxyPort":8080,"launchText":"--parallel 1"},"resume":true,"explicit":true,"receipts":{"active-request":{"hash":"active-hash","revision":9,"phase":"applying"},"earlier-request":{"hash":"earlier-hash","revision":7,"phase":"succeeded"}}},
+		"llamacpp-custom": {"snapshot": {"engine":"llamacpp-custom","revision":5,"appliedRevision":3,"epoch":"old-epoch","sequence":18,"settings":{"serverPort":18081,"proxyPort":18080,"launchText":"--fixture"},"phase":"failed","error":"startup failure","requestId":"failed-request"},"previous":{"serverPort":18082,"proxyPort":18080},"resume":false,"explicit":false,"receipts":{"failed-request":{"hash":"failed-hash","revision":5,"phase":"failed"}}}
 	}`)
 	var want map[string]*engineSettingsRecord
 	if err := json.Unmarshal(journal, &want); err != nil {
@@ -755,7 +762,7 @@ func TestSettingsJournalLoadRebasesOwnerWithoutChangingRecoveryDataOrDisk(t *tes
 }
 
 func TestSettingsJournalFailureAndInterruptedRecovery(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	p := h.request(t)
 	p.Settings.LaunchText += " --new"
 	path, _ := h.b.engineSettingsPath()
@@ -771,7 +778,7 @@ func TestSettingsJournalFailureAndInterruptedRecovery(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	r := h.b.engineSettings["ollama"]
+	r := h.b.engineSettings["llamacpp"]
 	r.Snapshot.Settings = p.Settings
 	r.Snapshot.Revision++
 	r.Snapshot.Phase = "applying"
@@ -787,13 +794,13 @@ func TestSettingsJournalFailureAndInterruptedRecovery(t *testing.T) {
 	if !h.b.recoverEngineSettings() {
 		t.Fatal("recovery refused")
 	}
-	if h.applies.Load() != 1 || h.b.engineSettings["ollama"].Snapshot.Phase != "succeeded" {
+	if h.applies.Load() != 1 || h.b.engineSettings["llamacpp"].Snapshot.Phase != "succeeded" {
 		t.Fatal("accepted operation not recovered")
 	}
 	if !h.b.recoverEngineSettings() || h.applies.Load() != 1 {
 		t.Fatal("completed operation replayed")
 	}
-	if _, ok := h.b.explicitEngineSettings("ollama"); !ok {
+	if _, ok := h.b.explicitEngineSettings("llamacpp"); !ok {
 		t.Fatal("explicit startup preference lost")
 	}
 	data, err := os.ReadFile(path)
@@ -804,7 +811,7 @@ func TestSettingsJournalFailureAndInterruptedRecovery(t *testing.T) {
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved["ollama"] == nil || saved["ollama"].Snapshot.NodeID != "target" {
+	if saved["llamacpp"] == nil || saved["llamacpp"].Snapshot.NodeID != "target" {
 		t.Fatal("recovery did not persist the current settings owner")
 	}
 }

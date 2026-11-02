@@ -160,21 +160,21 @@ func buildApplyImpactFixture(t *testing.T) *Broker {
 	r.engineManagerSource = source
 	r.models.loadedSource = source
 	r.models.loadedProxy = proxy
-	r.models.active = &modelConfigAttempt{evidence: modelConfigEvidence{Worker: b.engineMgr, Source: source, Proxy: proxy}, prepare: nodepolicy.PrepareResidentParams{Engine: "ollama", ManagerIncarnation: "manager-1"}}
-	r.running["ollama"] = true
+	r.models.active = &modelConfigAttempt{evidence: modelConfigEvidence{Worker: b.engineMgr, Source: source, Proxy: proxy}, prepare: nodepolicy.PrepareResidentParams{Engine: "llamacpp", ManagerIncarnation: "manager-1"}}
+	r.running["llamacpp"] = true
 	r.runningGeneration = 1
-	r.runningObserved["ollama"] = 1
-	r.loaded["ollama"] = []string{"synthetic-model"}
-	r.intent["ollama"] = true
+	r.runningObserved["llamacpp"] = 1
+	r.loaded["llamacpp"] = []string{"synthetic-model"}
+	r.intent["llamacpp"] = true
 	r.haveAdmission = true
-	r.admission = nodepolicy.AdmissionState{Active: 2, Queued: 1, ActiveByEngine: map[string]int{"ollama": 2}}
+	r.admission = nodepolicy.AdmissionState{Active: 2, Queued: 1, ActiveByEngine: map[string]int{"llamacpp": 2}}
 	r.mu.Unlock()
-	b.engineSettings["ollama"] = &engineSettingsRecord{Snapshot: settings.Snapshot{Engine: "ollama", Epoch: b.engineSettingsEpoch, Revision: 4, AppliedRevision: 4, Phase: "succeeded", Settings: settings.Config{}}}
-	fingerprint, valid := settingsFingerprint(b.engineSettings["ollama"].Snapshot)
+	b.engineSettings["llamacpp"] = &engineSettingsRecord{Snapshot: settings.Snapshot{Engine: "llamacpp", Epoch: b.engineSettingsEpoch, Revision: 4, AppliedRevision: 4, Phase: "succeeded", Settings: settings.Config{}}}
+	fingerprint, valid := settingsFingerprint(b.engineSettings["llamacpp"].Snapshot)
 	if !valid {
 		t.Fatal("invalid synthetic settings baseline")
 	}
-	r.settingsIdentity = map[string]string{"ollama": fingerprint}
+	r.settingsIdentity = map[string]string{"llamacpp": fingerprint}
 	b.engineSwitch = &engineSwitchCoordinator{store: &engineSwitchStore{loaded: true, journal: settings.SwitchJournal{Receipts: map[string]settings.SwitchReceipt{}}}}
 	return b
 }
@@ -549,7 +549,7 @@ func TestBuildApplyImpactProjectsOnlyCurrentCachedOwners(t *testing.T) {
 		t.Fatalf("engines = %+v", impact.Engines)
 	}
 	engine := (*impact.Engines.Value)[0]
-	if engine.Engine != "ollama" || !engine.Running.Known || !*engine.Running.Value || !engine.DesiredState.Known || *engine.DesiredState.Value != "on" || !engine.LoadedModels.Known || !reflect.DeepEqual(*engine.LoadedModels.Value, []string{"synthetic-model"}) {
+	if engine.Engine != "llamacpp" || !engine.Running.Known || !*engine.Running.Value || !engine.DesiredState.Known || *engine.DesiredState.Value != "on" || !engine.LoadedModels.Known || !reflect.DeepEqual(*engine.LoadedModels.Value, []string{"synthetic-model"}) {
 		t.Fatalf("engine = %+v", engine)
 	}
 	if engine.Locked.Known || engine.ScopedStopAuthority.Known || impact.ExpectedSettings.LocksDigest.Known || impact.ExpectedSettings.IntentDigest.Known {
@@ -689,9 +689,9 @@ func TestBuildApplyImpactStoredFalsePauseIsEffectiveTrueWithoutWrites(t *testing
 
 func TestBuildApplyImpactKnownOperationsBlockWithoutInitializingOtherOwners(t *testing.T) {
 	b := buildApplyImpactFixture(t)
-	b.pendingInstallStarts = map[*pendingInstallStart]struct{}{&pendingInstallStart{engine: "ollama"}: {}}
-	b.activeSettings = map[string]activeSettingsOperation{"settings-op": {Engine: "ollama"}}
-	b.engineSwitch.store.journal.Receipts["switch"] = settings.SwitchReceipt{Request: settings.SwitchRequest{SourceEngine: "ollama", TargetEngine: "lmstudio"}}
+	b.pendingInstallStarts = map[*pendingInstallStart]struct{}{&pendingInstallStart{engine: "llamacpp"}: {}}
+	b.activeSettings = map[string]activeSettingsOperation{"settings-op": {Engine: "llamacpp"}}
+	b.engineSwitch.store.journal.Receipts["switch"] = settings.SwitchReceipt{Request: settings.SwitchRequest{SourceEngine: "llamacpp", TargetEngine: "llamacpp-custom"}}
 	impact, ok := b.cachedBuildApplyImpact()
 	if !ok || impact.Complete || !impact.ModelOperations.Known {
 		t.Fatalf("operations = %+v", impact)
@@ -716,7 +716,7 @@ func TestBuildApplyImpactKnownOperationsBlockWithoutInitializingOtherOwners(t *t
 func TestBuildApplyImpactPrivateSettingsOnlyLeaveAsDigests(t *testing.T) {
 	b := buildApplyImpactFixture(t)
 	// A private journal error must never be exported as operational detail.
-	b.engineSettings["ollama"].Snapshot.Error = "PRIVATE_SETTINGS_SECRET"
+	b.engineSettings["llamacpp"].Snapshot.Error = "PRIVATE_SETTINGS_SECRET"
 	impact, ok := b.cachedBuildApplyImpact()
 	if !ok {
 		t.Fatal("impact unavailable")
@@ -729,7 +729,7 @@ func TestBuildApplyImpactPrivateSettingsOnlyLeaveAsDigests(t *testing.T) {
 		t.Fatal("raw private settings escaped the owner")
 	}
 	first := *impact.Fences.SettingsRevision.Value
-	b.engineSettings["ollama"].Snapshot.Error = "CHANGED_PRIVATE_SETTINGS_SECRET"
+	b.engineSettings["llamacpp"].Snapshot.Error = "CHANGED_PRIVATE_SETTINGS_SECRET"
 	changed, ok := b.cachedBuildApplyImpact()
 	if !ok || !changed.Fences.SettingsRevision.Known || *changed.Fences.SettingsRevision.Value == first {
 		t.Fatal("private settings change was not fenced")
@@ -740,13 +740,13 @@ func TestBuildApplyImpactPrivateCanonicalSettingsExpectation(t *testing.T) {
 	b := buildApplyImpactFixture(t)
 	set := func(value string) {
 		t.Helper()
-		record := b.engineSettings["ollama"]
+		record := b.engineSettings["llamacpp"]
 		record.Snapshot.Settings.LaunchText = value
 		fingerprint, ok := settingsFingerprint(record.Snapshot)
 		if !ok {
 			t.Fatal("invalid settings fixture")
 		}
-		b.nodePolicy.settingsIdentity["ollama"] = fingerprint
+		b.nodePolicy.settingsIdentity["llamacpp"] = fingerprint
 	}
 	set("PRIVATE_LAUNCH_SECRET")
 	before, ok := b.cachedBuildApplyImpact()
@@ -776,12 +776,12 @@ func TestBuildApplyImpactSemanticExpectationsExcludeRuntimeRevisionChanges(t *te
 	b.nodePolicy.current.Revision = "23"
 	b.nodePolicy.activeRevision = "23"
 	b.engineSettingsEpoch = "settings-2"
-	b.engineSettings["ollama"].Snapshot.Epoch = b.engineSettingsEpoch
-	fingerprint, valid := settingsFingerprint(b.engineSettings["ollama"].Snapshot)
+	b.engineSettings["llamacpp"].Snapshot.Epoch = b.engineSettingsEpoch
+	fingerprint, valid := settingsFingerprint(b.engineSettings["llamacpp"].Snapshot)
 	if !valid {
 		t.Fatal("invalid settings fixture")
 	}
-	b.nodePolicy.settingsIdentity["ollama"] = fingerprint
+	b.nodePolicy.settingsIdentity["llamacpp"] = fingerprint
 	after, ok := b.cachedBuildApplyImpact()
 	if !ok || !before.ExpectedSettings.EngineSettingsDigest.Known || !after.ExpectedSettings.EngineSettingsDigest.Known {
 		t.Fatal("missing protected settings")
@@ -796,13 +796,13 @@ func TestBuildApplyImpactSemanticExpectationsExcludeRuntimeRevisionChanges(t *te
 
 func TestBuildApplyImpactOperationReplacementIsFenced(t *testing.T) {
 	b := buildApplyImpactFixture(t)
-	b.activeSettings = map[string]activeSettingsOperation{"old": {Engine: "ollama"}}
+	b.activeSettings = map[string]activeSettingsOperation{"old": {Engine: "llamacpp"}}
 	calls := 0
 	impact, ok := captureCachedBuildApplyImpact(func() (buildApplyOwnerRead, bool) {
 		calls++
 		if calls == 2 {
 			delete(b.activeSettings, "old")
-			b.activeSettings["new"] = activeSettingsOperation{Engine: "ollama"}
+			b.activeSettings["new"] = activeSettingsOperation{Engine: "llamacpp"}
 		}
 		return b.readCachedBuildApplyOwners()
 	})
@@ -858,7 +858,7 @@ func (o *buildApplyTestOwners) captureLocked() buildApplyCapturedOwners {
 			},
 			Maintenance:  buildapply.MaintenanceState{BuildApplyActive: buildapply.Known(o.b.buildApplyMaintenance.active != nil), ModelSettingsActive: buildapply.Known(len(o.b.buildApplyMaintenance.settings) != 0)},
 			Availability: buildapply.Known(r.live), PauseOrigin: buildapply.Known(string(r.current.PausedBy)),
-			Engines:    buildapply.Known([]buildapply.EngineFact{{Engine: "ollama", Active: buildapply.Known(false), Running: buildapply.Known(!paused), LoadedModels: buildapply.Known(loaded), DesiredState: buildapply.Known("on"), Locked: buildapply.Known(true), ScopedStopAuthority: buildapply.Known(true)}}),
+			Engines:    buildapply.Known([]buildapply.EngineFact{{Engine: "llamacpp", Active: buildapply.Known(false), Running: buildapply.Known(!paused), LoadedModels: buildapply.Known(loaded), DesiredState: buildapply.Known("on"), Locked: buildapply.Known(true), ScopedStopAuthority: buildapply.Known(true)}}),
 			ActiveWork: buildapply.Known(0), ModelOperations: buildapply.Known([]buildapply.ModelOperation{}), SettingsDifferences: buildapply.Known([]buildapply.SettingsDifference{}),
 			ExpectedSettings: buildapply.ExpectedSettings{
 				PolicyDigest: buildapply.Known(modelPolicyFingerprint(r.current)), EngineSettingsDigest: buildapply.Known("settings-" + o.settings),
@@ -890,9 +890,9 @@ func newBuildApplyTestFixture(t *testing.T) *buildApplyTestFixture {
 	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.running["ollama"] = true
-	r.intent["ollama"] = true
-	r.loaded["ollama"] = []string{"fixture-model"}
+	r.running["llamacpp"] = true
+	r.intent["llamacpp"] = true
+	r.loaded["llamacpp"] = []string{"fixture-model"}
 	r.haveAdmission = true
 	r.admission = nodepolicy.AdmissionState{ActiveByEngine: map[string]int{}}
 	r.mu.Unlock()
@@ -1061,7 +1061,7 @@ func TestBuildApplyKnownAdoptedEngineCannotGainStopAuthorityFromInjectedImpact(t
 	f := newBuildApplyTestFixture(t)
 	request := f.request(t)
 	before := f.b.localPolicy().Policy
-	f.b.engineSettings = map[string]*engineSettingsRecord{"lmstudio": {Snapshot: settings.Snapshot{Adopted: true}}}
+	f.b.engineSettings = map[string]*engineSettingsRecord{"llamacpp-custom": {Snapshot: settings.Snapshot{Adopted: true}}}
 	requireBuildApplyRefusal(t, f.b.prepareBuildApply(request), "unscoped_engine")
 	requireBuildApplyNoAcceptance(t, f, before)
 }
@@ -1200,7 +1200,7 @@ func TestBuildApplyFinishPreservesPauseProvenanceAndSavedIntent(t *testing.T) {
 				wantOrigin = nodepolicy.PausedLocally
 			}
 			policy := f.b.localPolicy().Policy
-			if policy.Availability != nodepolicy.Paused || policy.PausedBy != wantOrigin || !f.b.nodePolicy.intent["ollama"] {
+			if policy.Availability != nodepolicy.Paused || policy.PausedBy != wantOrigin || !f.b.nodePolicy.intent["llamacpp"] {
 				t.Fatalf("finish changed provenance or saved intent: %+v", policy)
 			}
 			if !reflect.DeepEqual(beforeCalls, buildApplyEffectCalls(f.engine.snapshot())) {
@@ -1312,7 +1312,7 @@ func TestBuildApplyReservationRefusesSettingsEntryPoints(t *testing.T) {
 }
 
 func TestBuildApplySettingsEntryLeaseCoversNativeApply(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	p := h.request(t)
 	p.Settings.LaunchText += " --maintenance-proof"
 	h.entered, h.release = make(chan struct{}, 1), make(chan struct{})
@@ -1386,9 +1386,9 @@ func TestBuildApplyPreparingReservationSurvivesDuplicateAndPrematureFinish(t *te
 		case engineSleepMethod:
 			once.Do(func() { close(stopping) })
 			<-release
-			return map[string]any{"engine": "ollama", "running": false, "terminationVerified": true}, ""
+			return map[string]any{"engine": "llamacpp", "running": false, "terminationVerified": true}, ""
 		case "engine:get-installed":
-			return json.RawMessage(`{"engines":[{"engine":"ollama","running":false,"terminationVerified":true}]}`), ""
+			return json.RawMessage(`{"engines":[{"engine":"llamacpp","running":false,"terminationVerified":true}]}`), ""
 		default:
 			return map[string]bool{"ok": true}, ""
 		}
@@ -1503,7 +1503,7 @@ func TestBuildApplyPhysicalStopUncertaintyRetainsMaintenance(t *testing.T) {
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
 		switch method {
 		case "engine:get-installed":
-			return json.RawMessage(`{"engines":[{"engine":"ollama","running":true}]}`), ""
+			return json.RawMessage(`{"engines":[{"engine":"llamacpp","running":true}]}`), ""
 		case engineSleepMethod:
 			return nil, "physical stop unverified"
 		default:

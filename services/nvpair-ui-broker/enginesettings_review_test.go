@@ -197,10 +197,10 @@ func TestEnabledEngineRestorationSurvivesInvalidSettingsJournal(t *testing.T) {
 }
 
 func TestSettingsFullCommandJournalMigratesBeforeRecovery(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	request := h.request(t)
 	h.b.engineConfigMu.Lock()
-	record := h.b.engineSettings["ollama"]
+	record := h.b.engineSettings["llamacpp"]
 	record.Snapshot.Format = "pair-launch-v1"
 	record.Snapshot.Settings.LaunchText = "managed serve --fixture-option --future-option"
 	record.Snapshot.Phase = "applying"
@@ -213,7 +213,7 @@ func TestSettingsFullCommandJournalMigratesBeforeRecovery(t *testing.T) {
 	if !h.b.recoverEngineSettings() {
 		t.Fatal("recovery failed")
 	}
-	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "ollama"}, "")
+	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

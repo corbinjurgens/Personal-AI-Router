@@ -26,12 +26,12 @@ func newMutationFixture(t *testing.T) *mutationFixture {
 	t.Helper()
 	ab := newActivatedBroker(t)
 	source := ab.b.activateEngineManagerSource()
-	seedStrictIdentity(ab.b, "ollama")
+	seedStrictIdentity(ab.b, "llamacpp")
 	ab.b.identityChanged()
 	// Let the seeded identity reach the proxy, so the next identity push it
 	// receives is the one the confirmation sends.
 	waitIdentity(t, ab.proxy, "the seeded identity", func(p nodepolicy.SetModelIdentityParams) bool {
-		_, ok := p.Engines["ollama"]
+		_, ok := p.Engines["llamacpp"]
 		return ok
 	})
 	worker, engine := attachBoundEngineManager(t, ab.b, source)
@@ -113,14 +113,14 @@ func TestModelMutationRequestWithdrawsBeforeTheProxyAccepts(t *testing.T) {
 		return f.acks.answer(method, params)
 	})
 
-	f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "mutation-1", "ollama"))
+	f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "mutation-1", "llamacpp"))
 	f.proxy.waitFor("the withdrawal push", func(calls []policyCall) bool {
 		return len(identityCalls(t, calls)) > before
 	})
 
 	// The confirmation request reached the proxy and has not been answered;
 	// the broker's join must already omit the engine.
-	if _, ok := joinedEngineIdentity(t, f.b, "ollama"); ok {
+	if _, ok := joinedEngineIdentity(t, f.b, "llamacpp"); ok {
 		t.Fatal("the broker still joins the engine's identity while the proxy has not acknowledged the withdrawal")
 	}
 	if replies := mutationReplies(t, f.engine); len(replies) != 0 {
@@ -132,7 +132,7 @@ func TestModelMutationRequestWithdrawsBeforeTheProxyAccepts(t *testing.T) {
 	if !reply.OK || reply.Code != 0 || reply.Error != "" {
 		t.Fatalf("reply = %+v, want success", reply)
 	}
-	if _, ok := joinedEngineIdentity(t, f.b, "ollama"); ok {
+	if _, ok := joinedEngineIdentity(t, f.b, "llamacpp"); ok {
 		t.Fatal("the engine's identity returned before engine-manager published a fresh snapshot")
 	}
 }
@@ -147,7 +147,7 @@ func TestModelMutationConfirmationFailureKeepsIdentityWithdrawn(t *testing.T) {
 		}
 		defer r.releasePush()
 
-		f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "busy-1", "ollama"))
+		f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "busy-1", "llamacpp"))
 		reply := waitMutationReply(t, f.engine, "busy-1")
 		if reply.OK || reply.Code != nodepolicy.ModelMutationWithdrawalFailed {
 			t.Fatalf("reply = %+v, want a withdrawal failure", reply)
@@ -155,7 +155,7 @@ func TestModelMutationConfirmationFailureKeepsIdentityWithdrawn(t *testing.T) {
 		if !strings.Contains(reply.Error, "the proxy is busy") {
 			t.Fatalf("reply error = %q, want the busy proxy text", reply.Error)
 		}
-		if _, ok := joinedEngineIdentity(t, f.b, "ollama"); ok {
+		if _, ok := joinedEngineIdentity(t, f.b, "llamacpp"); ok {
 			t.Fatal("a failed confirmation restored the engine's identity")
 		}
 	})
@@ -170,7 +170,7 @@ func TestModelMutationConfirmationFailureKeepsIdentityWithdrawn(t *testing.T) {
 			return f.acks.answer(method, params)
 		})
 
-		f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "refused-1", "ollama"))
+		f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "refused-1", "llamacpp"))
 		reply := waitMutationReply(t, f.engine, "refused-1")
 		if reply.OK || reply.Code != nodepolicy.ModelMutationWithdrawalFailed {
 			t.Fatalf("reply = %+v, want a withdrawal failure", reply)
@@ -178,7 +178,7 @@ func TestModelMutationConfirmationFailureKeepsIdentityWithdrawn(t *testing.T) {
 		if !strings.Contains(reply.Error, "refused to withdraw") {
 			t.Fatalf("reply error = %q, want the refusal text", reply.Error)
 		}
-		if _, ok := joinedEngineIdentity(t, f.b, "ollama"); ok {
+		if _, ok := joinedEngineIdentity(t, f.b, "llamacpp"); ok {
 			t.Fatal("a refused confirmation restored the engine's identity")
 		}
 	})
@@ -193,7 +193,7 @@ func TestModelMutationConfirmationFailureKeepsIdentityWithdrawn(t *testing.T) {
 			return f.acks.answer(method, params)
 		})
 
-		f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "silent-1", "ollama"))
+		f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "silent-1", "llamacpp"))
 		reply := waitMutationReply(t, f.engine, "silent-1")
 		if reply.OK || reply.Code != nodepolicy.ModelMutationWithdrawalFailed {
 			t.Fatalf("reply = %+v, want a transport failure", reply)
@@ -201,7 +201,7 @@ func TestModelMutationConfirmationFailureKeepsIdentityWithdrawn(t *testing.T) {
 		if !strings.Contains(reply.Error, "strict admission") {
 			t.Fatalf("reply error = %q, want the transport failure text", reply.Error)
 		}
-		if _, ok := joinedEngineIdentity(t, f.b, "ollama"); ok {
+		if _, ok := joinedEngineIdentity(t, f.b, "llamacpp"); ok {
 			t.Fatal("an unanswered confirmation restored the engine's identity")
 		}
 	})
@@ -210,15 +210,15 @@ func TestModelMutationConfirmationFailureKeepsIdentityWithdrawn(t *testing.T) {
 func TestModelMutationConfirmsWithNoRunningProxy(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	source := b.activateEngineManagerSource()
-	seedStrictIdentity(b, "ollama")
+	seedStrictIdentity(b, "llamacpp")
 	_, engine := attachBoundEngineManager(t, b, source)
 
-	b.forwardEngineNotificationFrom(source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "no-proxy-1", "ollama"))
+	b.forwardEngineNotificationFrom(source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "no-proxy-1", "llamacpp"))
 	reply := waitMutationReply(t, engine, "no-proxy-1")
 	if !reply.OK {
 		t.Fatalf("reply = %+v, want success with no proxy to withdraw from", reply)
 	}
-	if _, ok := joinedEngineIdentity(t, b, "ollama"); ok {
+	if _, ok := joinedEngineIdentity(t, b, "llamacpp"); ok {
 		t.Fatal("the engine's identity is still joined")
 	}
 }
@@ -227,18 +227,18 @@ func TestModelMutationFromAReplacedSourceLeavesTheReplacement(t *testing.T) {
 	ab := newActivatedBroker(t)
 	old := ab.b.activateEngineManagerSource()
 	attachBoundEngineManager(t, ab.b, old)
-	seedStrictIdentity(ab.b, "ollama")
+	seedStrictIdentity(ab.b, "llamacpp")
 
 	replacement := ab.b.activateEngineManagerSource()
-	ab.b.observeModelIdentity(replacement, engineManagerSnapshot("ollama"))
+	ab.b.observeModelIdentity(replacement, engineManagerSnapshot("llamacpp"))
 	_, replacementEngine := attachBoundEngineManager(t, ab.b, replacement)
-	if _, ok := joinedEngineIdentity(t, ab.b, "ollama"); !ok {
+	if _, ok := joinedEngineIdentity(t, ab.b, "llamacpp"); !ok {
 		t.Fatal("the replacement's identity is not joined before the stale request")
 	}
 
-	ab.b.forwardEngineNotificationFrom(old, nodepolicy.MethodModelMutationRequest, mutationParams(t, "stale-1", "ollama"))
+	ab.b.forwardEngineNotificationFrom(old, nodepolicy.MethodModelMutationRequest, mutationParams(t, "stale-1", "llamacpp"))
 
-	if _, ok := joinedEngineIdentity(t, ab.b, "ollama"); !ok {
+	if _, ok := joinedEngineIdentity(t, ab.b, "llamacpp"); !ok {
 		t.Fatal("a request from the replaced source withdrew the replacement's identity")
 	}
 	if replies := mutationReplies(t, replacementEngine); len(replies) != 0 {
@@ -249,13 +249,13 @@ func TestModelMutationFromAReplacedSourceLeavesTheReplacement(t *testing.T) {
 func TestModelMutationWaitsForTheStartWindowBinding(t *testing.T) {
 	ab := newActivatedBroker(t)
 	source := ab.b.activateEngineManagerSource()
-	seedStrictIdentity(ab.b, "ollama")
+	seedStrictIdentity(ab.b, "llamacpp")
 	peer, engine := newFakeWorkerPipe(t)
 	worker := &rpcWorker{peer: peer}
 	// Installed but not bound: the read pump can already deliver a request.
 	ab.b.setEngineMgr(worker)
 
-	ab.b.forwardEngineNotificationFrom(source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "start-1", "ollama"))
+	ab.b.forwardEngineNotificationFrom(source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "start-1", "llamacpp"))
 	if replies := mutationReplies(t, engine); len(replies) != 0 {
 		t.Fatalf("the broker replied before the worker was bound: %+v", replies)
 	}
@@ -270,7 +270,7 @@ func TestModelMutationWaitsForTheStartWindowBinding(t *testing.T) {
 func TestModelMutationRequestThatOutlivesItsSourceFails(t *testing.T) {
 	ab := newActivatedBroker(t)
 	source := ab.b.activateEngineManagerSource()
-	seedStrictIdentity(ab.b, "ollama")
+	seedStrictIdentity(ab.b, "llamacpp")
 	peer, engine := newFakeWorkerPipe(t)
 	ab.b.setEngineMgr(&rpcWorker{peer: peer})
 	// A long budget proves the failure below is prompt, not a timeout.
@@ -278,7 +278,7 @@ func TestModelMutationRequestThatOutlivesItsSourceFails(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- ab.b.confirmModelMutation(source, nodepolicy.ModelMutationRequest{RequestID: "retire-1", Engine: "ollama"})
+		done <- ab.b.confirmModelMutation(source, nodepolicy.ModelMutationRequest{RequestID: "retire-1", Engine: "llamacpp"})
 	}()
 	ab.b.retireEngineManagerSource(source)
 	ab.b.clearEngineMgrBinding(source)
@@ -299,7 +299,7 @@ func TestModelMutationRequestThatOutlivesItsSourceFails(t *testing.T) {
 func TestModelMutationPairMismatchFails(t *testing.T) {
 	ab := newActivatedBroker(t)
 	source := ab.b.activateEngineManagerSource()
-	seedStrictIdentity(ab.b, "ollama")
+	seedStrictIdentity(ab.b, "llamacpp")
 	firstPeer, firstEngine := newFakeWorkerPipe(t)
 	ab.b.setEngineMgr(&rpcWorker{peer: firstPeer})
 	// A different worker is installed, which clears the bound source.
@@ -307,7 +307,7 @@ func TestModelMutationPairMismatchFails(t *testing.T) {
 	ab.b.setEngineMgr(&rpcWorker{peer: secondPeer})
 	setActivationWait(ab.b, 100*time.Millisecond)
 
-	err := ab.b.confirmModelMutation(source, nodepolicy.ModelMutationRequest{RequestID: "mismatch-1", Engine: "ollama"})
+	err := ab.b.confirmModelMutation(source, nodepolicy.ModelMutationRequest{RequestID: "mismatch-1", Engine: "llamacpp"})
 	if err == nil {
 		t.Fatal("a confirmation without a bound pair succeeded")
 	}
@@ -322,10 +322,10 @@ func TestModelMutationClientRequestCannotConfirm(t *testing.T) {
 	f := newMutationFixture(t)
 	f.b.handleMessage(clientRequest(700, nodepolicy.MethodModelMutationRequest, map[string]any{
 		"requestId": "client-1",
-		"engine":    "ollama",
+		"engine":    "llamacpp",
 	}))
 
-	if _, ok := joinedEngineIdentity(t, f.b, "ollama"); !ok {
+	if _, ok := joinedEngineIdentity(t, f.b, "llamacpp"); !ok {
 		t.Fatal("a client request withdrew the engine's identity")
 	}
 	if replies := mutationReplies(t, f.engine); len(replies) != 0 {
@@ -339,7 +339,7 @@ func TestModelMutationRequestIsNotForwardedToSubscribedClients(t *testing.T) {
 	f.b.engineSubscribed = true
 	f.b.engineMu.Unlock()
 
-	f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "forward-1", "ollama"))
+	f.b.forwardEngineNotificationFrom(f.source, nodepolicy.MethodModelMutationRequest, mutationParams(t, "forward-1", "llamacpp"))
 
 	for _, frame := range f.out.frames() {
 		if frame.Method == nodepolicy.MethodModelMutationRequest {

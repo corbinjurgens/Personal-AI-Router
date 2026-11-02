@@ -349,8 +349,8 @@ func TestModelControlsBrokerAttributionWire(t *testing.T) {
 	}{
 		{"nil omission retains legacy fallback", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"]}`, nil},
 		{"outer empty remains authoritative", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"],"modelsByEngine":{}}`, map[string][]string{}},
-		{"per engine empty", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"],"modelsByEngine":{"ollama":[]}}`, map[string][]string{"ollama": {}}},
-		{"populated and empty siblings", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"],"modelsByEngine":{"ollama":["first","last"],"lmstudio":[]}}`, map[string][]string{"ollama": {"first", "last"}, "lmstudio": {}}},
+		{"per engine empty", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"],"modelsByEngine":{"llamacpp":[]}}`, map[string][]string{"llamacpp": {}}},
+		{"populated and empty siblings", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"],"modelsByEngine":{"llamacpp":["first","last"],"llamacpp-custom":[]}}`, map[string][]string{"llamacpp": {"first", "last"}, "llamacpp-custom": {}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var node noderec.DirectoryNode
@@ -555,7 +555,7 @@ func TestDiscoveryStoreScannerProjectionWins(t *testing.T) {
 func TestDiscoveryRelayCarriesPolicyAdvertisement(t *testing.T) {
 	adv := &nodepolicy.Advertisement{
 		Revision: "7",
-		Roles:    map[string]nodepolicy.AdvertisedRole{nodepolicy.TierWeak: {Engine: "ollama", Model: "qwen3:4b"}},
+		Roles:    map[string]nodepolicy.AdvertisedRole{nodepolicy.TierWeak: {Engine: "llamacpp", Model: "qwen3-4b"}},
 		PausedBy: nodepolicy.PausedByPeer,
 	}
 	s := newDiscoveryStore()

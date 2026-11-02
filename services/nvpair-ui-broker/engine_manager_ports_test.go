@@ -389,7 +389,7 @@ func TestEngineManagerPortsSettingsReserveConfiguredListeners(t *testing.T) {
 		{name: "cluster remains reserved", serverPort: 14321, proxyPort: 25200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
+			err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
 			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
 				t.Fatalf("settings validation error = %v, want PAIR reservation", err)
 			}
@@ -412,7 +412,7 @@ func TestEngineManagerPortsSettingsReserveTheRoutingListenerPort(t *testing.T) {
 		{name: "proxy port", serverPort: 25301, proxyPort: 25300},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
+			err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
 			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
 				t.Fatalf("settings validation error = %v, want the routing listener port reserved", err)
 			}
@@ -438,7 +438,7 @@ func TestEngineManagerPortsSettingsReleaseUnusedDefaults(t *testing.T) {
 		}
 	}()
 	current := settings.Snapshot{Running: true, EffectiveServerPort: 14322, EffectiveProxyPort: 14323}
-	if err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: 14322, ProxyPort: 14323}, current); err != nil {
+	if err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: 14322, ProxyPort: 14323}, current); err != nil {
 		t.Fatalf("unused default listener ports remain reserved: %v", err)
 	}
 }

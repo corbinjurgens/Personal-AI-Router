@@ -55,8 +55,8 @@ func TestIdentityCurrentModel(t *testing.T) {
 	test("agreeing implied latest aliases", "ollama", "a", map[string]string{" a ": modelDigestB, "a:latest": modelDigestB}, true)
 	test("conflicting implied latest aliases", "ollama", "a", map[string]string{"a": modelDigestB, "a:latest": otherDigest}, false)
 	test("conflicting reverse alias digest assignment", "ollama", "a:latest", map[string]string{"a": otherDigest, "a:latest": modelDigestB}, false)
-	test("exact names do not imply latest", "lmstudio", "a", map[string]string{"a:latest": modelDigestB}, false)
-	test("exact names trim whitespace", "lmstudio", "org/a", map[string]string{" org/a ": modelDigestB}, true)
+	test("exact names do not imply latest", "llamacpp", "a", map[string]string{"a:latest": modelDigestB}, false)
+	test("exact names trim whitespace", "llamacpp", "org/a", map[string]string{" org/a ": modelDigestB}, true)
 	test("reserved alias stays exempt", "ollama", "weak:latest", map[string]string{"weak": modelDigestB}, false)
 }
 

@@ -13,7 +13,6 @@ import (
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
-	"nvpair-shared/noderec"
 	"nvpair-ui-broker/relay"
 )
 
@@ -58,17 +57,17 @@ func TestEngineBindingOffersDescriptorDefaultConfiguration(t *testing.T) {
 
 func TestEngineBindingOffersProjectionContentionKeepsColdRegistration(t *testing.T) {
 	h := newBindingOfferHarness(t)
-	h.b.reconcileAdvertiseLMStudio(nil)
+	h.b.reconcileAdvertiseDynamicEngine(offerProfile(h), nil)
 	h.b.engineConfigMu.Lock()
 	// An unrelated advertiser or switch may hold this lock while a strict
 	// refresh runs. A missing sample must not remove another owner's service.
 	h.b.refreshStrictAdvertisement()
 	h.b.engineConfigMu.Unlock()
-	if got := h.b.regCache.Snapshot(); len(got) != 1 || got[0].Service != noderec.ServiceLMStudio {
+	if got := h.b.regCache.Snapshot(); len(got) != 1 || got[0].Service != offerProfile(h).DiscoveryService {
 		t.Fatalf("contended projection removed live cold facade: %+v", got)
 	}
 	h.b.refreshStrictAdvertisement()
-	if got := h.b.regCache.Snapshot(); len(got) != 1 || !h.b.lmstudioState().bindingRegistered.Load() {
+	if got := h.b.regCache.Snapshot(); len(got) != 1 || !h.b.engineProxy(offerProfile(h)).bindingRegistered.Load() {
 		t.Fatalf("republished offer has no registered facade: %+v", got)
 	}
 }
@@ -108,30 +107,35 @@ func TestEngineBindingOffersWithdrawDuringManagedBackendMove(t *testing.T) {
 
 func TestEngineBindingOffersAdvertiserPreservesSourceDrain(t *testing.T) {
 	h := newBindingOfferHarness(t)
-	h.b.reconcileAdvertiseLMStudio(nil)
+	h.b.reconcileAdvertiseDynamicEngine(offerProfile(h), nil)
 	r := h.b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.drains["lmstudio"] = true
+	r.drains["llamacpp-custom"] = true
 	r.mu.Unlock()
-	h.b.unregisterService(noderec.ServiceLMStudio)
-	h.b.reconcileAdvertiseLMStudio(nil)
-	if got := h.b.regCache.Snapshot(); len(got) != 0 || h.b.lmstudioState().bindingRegistered.Load() {
+	h.b.unregisterService(offerProfile(h).DiscoveryService)
+	h.b.reconcileAdvertiseDynamicEngine(offerProfile(h), nil)
+	if got := h.b.regCache.Snapshot(); len(got) != 0 || h.b.engineProxy(offerProfile(h)).bindingRegistered.Load() {
 		t.Fatalf("advertiser undid source drain: %+v", got)
 	}
 }
 
 func TestEngineBindingOffersHealthySwitchPublicationRetiresColdMarker(t *testing.T) {
 	h := newBindingOfferHarness(t)
-	h.b.reconcileAdvertiseLMStudio(nil)
-	if err := h.b.switchProxySetLocal(context.Background(), h.pp, "lmstudio", 12345, true); err != nil {
+	h.b.reconcileAdvertiseDynamicEngine(offerProfile(h), nil)
+	if err := h.b.switchProxySetLocal(context.Background(), h.pp, "llamacpp-custom", 12345, true); err != nil {
 		t.Fatal(err)
 	}
 	h.b.engineConfigMu.Lock()
 	h.b.withdrawBindingFacades(nil)
 	h.b.engineConfigMu.Unlock()
-	if got := h.b.regCache.Snapshot(); len(got) != 1 || h.b.lmstudioState().bindingRegistered.Load() {
+	if got := h.b.regCache.Snapshot(); len(got) != 1 || h.b.engineProxy(offerProfile(h)).bindingRegistered.Load() {
 		t.Fatalf("offer withdrawal removed ready-engine registration: %+v", got)
 	}
+}
+
+// offerProfile is the descriptor engine the binding-offer fixtures bind to.
+func offerProfile(h *boundHarness) engineProxyProfile {
+	return h.b.dynamicEngineProfiles()[0]
 }
 
 func newBindingOfferHarness(t *testing.T) *boundHarness {
@@ -142,7 +146,7 @@ func newBindingOfferHarness(t *testing.T) *boundHarness {
 	h.b.engineSettingsLoaded = true
 	r := h.b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.current.EngineBindings = nodepolicy.EngineBindings{{Engine: "lmstudio", Model: "model"}}
+	r.current.EngineBindings = nodepolicy.EngineBindings{{Engine: "llamacpp-custom", Model: "model"}}
 	r.mu.Unlock()
 	h.b.engineConfigMu.Unlock()
 	return h
@@ -150,21 +154,21 @@ func newBindingOfferHarness(t *testing.T) *boundHarness {
 
 func TestEngineBindingOffersStoppedFacadeRegistration(t *testing.T) {
 	h := newBindingOfferHarness(t)
-	h.b.reconcileAdvertiseLMStudio(nil) // stopped status short-circuits all health I/O
+	h.b.reconcileAdvertiseDynamicEngine(offerProfile(h), nil) // stopped status short-circuits all health I/O
 	registrations := h.b.regCache.Snapshot()
-	_, port := h.pp.Status("lmstudio")
-	if len(registrations) != 1 || registrations[0].Service != noderec.ServiceLMStudio || registrations[0].Port != port {
+	_, port := h.pp.Status("llamacpp-custom")
+	if len(registrations) != 1 || registrations[0].Service != offerProfile(h).DiscoveryService || registrations[0].Port != port {
 		t.Fatalf("stopped facade registrations=%+v actual port=%d", registrations, port)
 	}
 	var last proxyLocalBackend
 	for _, call := range h.proxy.snapshot() {
-		if call.method == "lmstudio:node/set-local-backend" {
+		if call.method == "e-llamacpp-custom:node/set-local-backend" {
 			if err := json.Unmarshal(call.params, &last); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	if last.Healthy || last.Port != 0 || last.Engine != "lmstudio" {
+	if last.Healthy || last.Port != 0 || last.Engine != "llamacpp-custom" {
 		t.Fatalf("cold registration invented backend readiness: %+v", last)
 	}
 	requireNoBoundEffects(t, h)
@@ -174,7 +178,7 @@ func TestEngineBindingOffersWithdrawUnknownOrVetoedEvidence(t *testing.T) {
 	test := func(name string, change func(*boundHarness)) {
 		t.Run(name, func(t *testing.T) {
 			h := newBindingOfferHarness(t)
-			h.b.reconcileAdvertiseLMStudio(nil)
+			h.b.reconcileAdvertiseDynamicEngine(offerProfile(h), nil)
 			h.b.engineConfigMu.Lock()
 			before := h.b.bindingOffersLocked()
 			h.b.engineConfigMu.Unlock()
@@ -206,7 +210,7 @@ func TestEngineBindingOffersWithdrawUnknownOrVetoedEvidence(t *testing.T) {
 	test("pause", policyChange(func(r *policyRuntime) { r.live = nodepolicy.Paused }))
 	test("pending activation", policyChange(func(r *policyRuntime) { r.activeRevision = "" }))
 	test("recovery", policyChange(func(r *policyRuntime) { r.recoveryRequired = true }))
-	test("source drain", policyChange(func(r *policyRuntime) { r.drains["lmstudio"] = true }))
+	test("source drain", policyChange(func(r *policyRuntime) { r.drains["llamacpp-custom"] = true }))
 	test("unresolved settings", func(h *boundHarness) {
 		h.b.engineConfigMu.Lock()
 		h.b.engineSettingsError = errors.New("settings recovery required")
@@ -214,20 +218,20 @@ func TestEngineBindingOffersWithdrawUnknownOrVetoedEvidence(t *testing.T) {
 	})
 	test("pending settings operation", func(h *boundHarness) {
 		h.b.engineConfigMu.Lock()
-		h.b.engineSettings = map[string]*engineSettingsRecord{"lmstudio": {Snapshot: settings.Snapshot{Revision: 2, AppliedRevision: 1, Phase: "applying"}}}
+		h.b.engineSettings = map[string]*engineSettingsRecord{"llamacpp-custom": {Snapshot: settings.Snapshot{Revision: 2, AppliedRevision: 1, Phase: "applying"}}}
 		h.b.engineConfigMu.Unlock()
 	})
 	test("manager replacement", policyChange(func(r *policyRuntime) { r.engineManagerSource = &engineManagerSource{} }))
 	test("stopped facade", func(h *boundHarness) {
 		h.pp.readyMu.Lock()
-		delete(h.pp.facadeState, "lmstudio")
+		delete(h.pp.facadeState, "llamacpp-custom")
 		h.pp.readyMu.Unlock()
 	})
 	test("locked", func(h *boundHarness) {
 		base := h.engine.answer
 		h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 			if method == "engine:get-installed" {
-				return map[string]any{"engines": []map[string]any{{"engine": "lmstudio", "installed": true, "running": false, "healthy": false, "locked": true}}}, ""
+				return map[string]any{"engines": []map[string]any{{"engine": "llamacpp-custom", "installed": true, "running": false, "healthy": false, "locked": true}}}, ""
 			}
 			return base(method, raw)
 		})
@@ -246,14 +250,14 @@ func TestEngineBindingOffersProjectionRefreshWithoutStrictChange(t *testing.T) {
 		t.Fatalf("unchanged strict readiness skipped offers: %+v", projections)
 	}
 	got := projections[len(projections)-1]
-	if got.StrictAdmission != nil || !reflect.DeepEqual(got.EngineBindingOffers.Models, []nodepolicy.Role{{Engine: "lmstudio", Model: "model"}}) {
+	if got.StrictAdmission != nil || !reflect.DeepEqual(got.EngineBindingOffers.Models, []nodepolicy.Role{{Engine: "llamacpp-custom", Model: "model"}}) {
 		t.Fatalf("projection=%+v", got)
 	}
 }
 
 func TestEngineBindingOffersClearingPublishesWithoutStrictChange(t *testing.T) {
 	h := newBindingOfferHarness(t)
-	h.b.reconcileAdvertiseLMStudio(nil)
+	h.b.reconcileAdvertiseDynamicEngine(offerProfile(h), nil)
 	h.engine.waitFor("initial offers", func([]policyCall) bool {
 		projections := nodeProjections(t, h.engine)
 		return len(projections) > 0 && projections[len(projections)-1].EngineBindingOffers != nil

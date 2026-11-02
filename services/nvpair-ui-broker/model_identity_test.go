@@ -27,7 +27,7 @@ func TestSettingsRecoveryPublishesIdentityAfterEarlyEngineReady(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	engine := attachFakeEngine(t, b)
 	launch := settings.LaunchState{
-		Engine: "ollama", ServerPort: 11434, EffectivePort: 11434,
+		Engine: "llamacpp", ServerPort: 11434, EffectivePort: 11434,
 		LaunchText: "serve", Running: true, Editable: true, Format: "pair-arguments-v1",
 	}
 	engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
@@ -38,10 +38,10 @@ func TestSettingsRecoveryPublishesIdentityAfterEarlyEngineReady(t *testing.T) {
 	})
 	pp, proxy := attachFakeProxy(t, b)
 	pp.readyMu.Lock()
-	pp.facadeState = map[string]proxyFacadeState{"ollama": {ready: true, port: 11435}}
+	pp.facadeState = map[string]proxyFacadeState{"llamacpp": {ready: true, port: 11435}}
 	pp.readyMu.Unlock()
 	source := b.activateEngineManagerSource()
-	b.observeModelIdentity(source, engineManagerSnapshot("ollama"))
+	b.observeModelIdentity(source, engineManagerSnapshot("llamacpp"))
 	// Run the engine:ready settings replay synchronously so it finishes before
 	// journal loading, without depending on the notification goroutine's timing.
 	b.replayLoadedEngineSettings()
@@ -55,14 +55,14 @@ func TestSettingsRecoveryPublishesIdentityAfterEarlyEngineReady(t *testing.T) {
 	if len(before.Engines) != 0 {
 		t.Fatalf("engine identity joined before settings journal loading: %+v", before)
 	}
-	settled := appliedSnapshot("ollama", 3)
+	settled := appliedSnapshot("llamacpp", 3)
 	settled.NodeID = b.nodeID
 	settled.Running = true
 	settled.Editable = true
 	settled.EffectiveServerPort = launch.EffectivePort
 	settled.EffectiveProxyPort = 11435
 	settled.Format = launch.Format
-	data, err := json.Marshal(map[string]*engineSettingsRecord{"ollama": {Snapshot: settled}})
+	data, err := json.Marshal(map[string]*engineSettingsRecord{"llamacpp": {Snapshot: settled}})
 	if err != nil {
 		t.Fatalf("encode settled settings journal: %v", err)
 	}
@@ -82,10 +82,10 @@ func TestSettingsRecoveryPublishesIdentityAfterEarlyEngineReady(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	b.engineConfigMu.Lock()
-	restored := b.engineSettings["ollama"].Snapshot.Clone()
-	readback, readErr := b.settingsSnapshotLocked(ctx, "ollama")
+	restored := b.engineSettings["llamacpp"].Snapshot.Clone()
+	readback, readErr := b.settingsSnapshotLocked(ctx, "llamacpp")
 	b.reconcileLegacySettingsLocked()
-	after := b.engineSettings["ollama"].Snapshot.Clone()
+	after := b.engineSettings["llamacpp"].Snapshot.Clone()
 	b.engineConfigMu.Unlock()
 	if readErr != nil {
 		t.Fatalf("read settled live settings: %v", readErr)
@@ -103,11 +103,11 @@ func TestSettingsRecoveryPublishesIdentityAfterEarlyEngineReady(t *testing.T) {
 	r.mu.Lock()
 	joined := r.modelIdentityLocked()
 	r.mu.Unlock()
-	if id := joined.Engines["ollama"]; id.SettingsFingerprint != fp || id.EngineRunID != "run-ollama" {
+	if id := joined.Engines["llamacpp"]; id.SettingsFingerprint != fp || id.EngineRunID != "run-llamacpp" {
 		t.Fatalf("recovery did not join applied settings and engine identity: %+v", joined)
 	}
 	waitIdentity(t, proxy, "recovered settings identity", func(p nodepolicy.SetModelIdentityParams) bool {
-		return p.Engines["ollama"].SettingsFingerprint == fp
+		return p.Engines["llamacpp"].SettingsFingerprint == fp
 	})
 	calls := engine.waitFor("recovered settings projection", func(calls []policyCall) bool {
 		for _, call := range calls {
@@ -240,37 +240,37 @@ func TestModelIdentityJoinsEngineManagerAndSettings(t *testing.T) {
 	ab := newActivatedBroker(t)
 	b := ab.b
 	source := b.activateEngineManagerSource()
-	b.forwardEngineNotificationFrom(source, engineModelIdentityMethod, engineManagerSnapshot("ollama", "lmstudio"))
-	b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("ollama", 3)})
-	fp, _ := settingsFingerprint(appliedSnapshot("ollama", 3))
+	b.forwardEngineNotificationFrom(source, engineModelIdentityMethod, engineManagerSnapshot("llamacpp", "llamacpp-custom"))
+	b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("llamacpp", 3)})
+	fp, _ := settingsFingerprint(appliedSnapshot("llamacpp", 3))
 	got := waitIdentity(t, ab.proxy, "the joined identity", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 1 })
-	want := nodepolicy.EngineIdentity{EngineRunID: "run-ollama", SettingsFingerprint: fp, LaunchDigest: launchDigestC, ModelDigests: map[string]string{"m:latest": modelDigestB}}
-	if id := got.Engines["ollama"]; id.EngineRunID != want.EngineRunID || id.SettingsFingerprint != want.SettingsFingerprint ||
+	want := nodepolicy.EngineIdentity{EngineRunID: "run-llamacpp", SettingsFingerprint: fp, LaunchDigest: launchDigestC, ModelDigests: map[string]string{"m:latest": modelDigestB}}
+	if id := got.Engines["llamacpp"]; id.EngineRunID != want.EngineRunID || id.SettingsFingerprint != want.SettingsFingerprint ||
 		id.LaunchDigest != want.LaunchDigest || id.ModelDigests["m:latest"] != modelDigestB {
-		t.Fatalf("identity = %+v, want %+v (lmstudio has no applied settings)", got, want)
+		t.Fatalf("identity = %+v, want %+v (llamacpp-custom has no applied settings)", got, want)
 	}
 
 	t.Run("a stop withdraws the engine", func(t *testing.T) {
-		b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
+		b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"llamacpp","running":false}`))
 		waitIdentity(t, ab.proxy, "the stopped engine withdrawn", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 0 })
 	})
 	t.Run("engine-manager exit withdraws every engine", func(t *testing.T) {
-		b.observeModelIdentity(source, engineManagerSnapshot("ollama"))
+		b.observeModelIdentity(source, engineManagerSnapshot("llamacpp"))
 		waitIdentity(t, ab.proxy, "the identity restored", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 1 })
 		b.retireEngineManagerSource(source)
 		waitIdentity(t, ab.proxy, "every engine withdrawn", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 0 })
 	})
 	t.Run("settings being applied withdraw the engine", func(t *testing.T) {
 		source = b.activateEngineManagerSource()
-		b.observeModelIdentity(source, engineManagerSnapshot("ollama"))
+		b.observeModelIdentity(source, engineManagerSnapshot("llamacpp"))
 		waitIdentity(t, ab.proxy, "the identity restored", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 1 })
-		applying := appliedSnapshot("ollama", 4)
+		applying := appliedSnapshot("llamacpp", 4)
 		applying.Phase = "applying"
 		b.observeSettingsIdentity([]settings.Snapshot{applying})
 		waitIdentity(t, ab.proxy, "the engine withdrawn", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 0 })
 	})
 	t.Run("a proxy restart is replayed the identity", func(t *testing.T) {
-		b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("ollama", 5)})
+		b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("llamacpp", 5)})
 		pp, proxy, _ := attachAckingProxy(t, b)
 		b.replayPolicyToProxy(context.Background(), pp)
 		// A push scheduled before the restart may reach the new process too.
@@ -281,7 +281,7 @@ func TestModelIdentityJoinsEngineManagerAndSettings(t *testing.T) {
 }
 
 func TestSettingsFingerprintCoversOnlyAppliedRevisions(t *testing.T) {
-	base, ok := settingsFingerprint(appliedSnapshot("ollama", 3))
+	base, ok := settingsFingerprint(appliedSnapshot("llamacpp", 3))
 	if !ok || len(base) != 64 {
 		t.Fatalf("fingerprint of an applied revision = %q, %v", base, ok)
 	}
@@ -295,7 +295,7 @@ func TestSettingsFingerprintCoversOnlyAppliedRevisions(t *testing.T) {
 		{"no epoch", func(s *settings.Snapshot) { s.Epoch = "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := appliedSnapshot("ollama", 3)
+			s := appliedSnapshot("llamacpp", 3)
 			tc.edit(&s)
 			if fp, ok := settingsFingerprint(s); ok {
 				t.Fatalf("fingerprint = %q, want none", fp)
@@ -311,14 +311,14 @@ func TestSettingsFingerprintCoversOnlyAppliedRevisions(t *testing.T) {
 		{"other launch text", func(s *settings.Snapshot) { s.Settings.LaunchText = "serve --ctx 2048" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := appliedSnapshot("ollama", 3)
+			s := appliedSnapshot("llamacpp", 3)
 			tc.edit(&s)
 			if fp, ok := settingsFingerprint(s); !ok || fp == base {
 				t.Fatalf("fingerprint = %q, %v; want a different one", fp, ok)
 			}
 		})
 	}
-	s := appliedSnapshot("ollama", 3)
+	s := appliedSnapshot("llamacpp", 3)
 	s.Sequence = 9
 	if fp, _ := settingsFingerprint(s); fp != base {
 		t.Fatal("a republication changed the fingerprint")
@@ -367,7 +367,7 @@ func TestStrictReadinessWithdrawnWhenIdentityChanges(t *testing.T) {
 // harness's, keeping its facade ports so previews still pass.
 func replaceSettingsProxy(t *testing.T, h *settingsHarness, answer func(string, json.RawMessage) (any, string)) *fakeWorker {
 	t.Helper()
-	old := h.b.settingsProxy("ollama")
+	old := h.b.settingsProxy("llamacpp")
 	old.readyMu.Lock()
 	state := make(map[string]proxyFacadeState, len(old.facadeState))
 	for k, v := range old.facadeState {
@@ -381,15 +381,15 @@ func replaceSettingsProxy(t *testing.T, h *settingsHarness, answer func(string, 
 }
 
 func TestSettingsApplyWithdrawsStrictIdentityFirst(t *testing.T) {
-	h := newSettingsHarness(t)
-	h.b.observeModelIdentity(h.b.activateEngineManagerSource(), engineManagerSnapshot("ollama"))
+	h := newLlamaCPPSettingsHarness(t)
+	h.b.observeModelIdentity(h.b.activateEngineManagerSource(), engineManagerSnapshot("llamacpp"))
 	p := h.request(t)
 	identities := func() []nodepolicy.SetModelIdentityParams { return identityCalls(t, h.unaddressedProxyCalls()) }
 	var before string
 	deadline := time.Now().Add(3 * time.Second)
 	for before == "" {
 		if got := identities(); len(got) > 0 {
-			before = got[len(got)-1].Engines["ollama"].SettingsFingerprint
+			before = got[len(got)-1].Engines["llamacpp"].SettingsFingerprint
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the proxy never received the engine's identity")
@@ -411,7 +411,7 @@ func TestSettingsApplyWithdrawsStrictIdentityFirst(t *testing.T) {
 	// engine:configure-launch has arrived: the proxy has already
 	// acknowledged an identity without the engine.
 	got := identities()
-	if _, present := got[len(got)-1].Engines["ollama"]; present {
+	if _, present := got[len(got)-1].Engines["llamacpp"]; present {
 		t.Fatalf("identity when the engine changes = %+v, want it withdrawn", got[len(got)-1])
 	}
 	close(h.release)
@@ -421,7 +421,7 @@ func TestSettingsApplyWithdrawsStrictIdentityFirst(t *testing.T) {
 	deadline = time.Now().Add(3 * time.Second)
 	for {
 		got := identities()
-		if id, ok := got[len(got)-1].Engines["ollama"]; ok && id.SettingsFingerprint != before {
+		if id, ok := got[len(got)-1].Engines["llamacpp"]; ok && id.SettingsFingerprint != before {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -440,7 +440,7 @@ func TestSettingsApplyFailsWithoutConfirmedWithdrawal(t *testing.T) {
 		{"the proxy does not answer", holdReply},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newSettingsHarness(t)
+			h := newLlamaCPPSettingsHarness(t)
 			setActivationWait(h.b, 200*time.Millisecond)
 			p := h.request(t)
 			replaceSettingsProxy(t, h, func(method string, _ json.RawMessage) (any, string) {
@@ -457,7 +457,7 @@ func TestSettingsApplyFailsWithoutConfirmedWithdrawal(t *testing.T) {
 			if receipt.Phase != "failed" || h.applies.Load() != 0 {
 				t.Fatalf("receipt = %+v with %d configure calls, want failed before the engine was touched", receipt, h.applies.Load())
 			}
-			snap, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "ollama"}, "")
+			snap, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp"}, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -470,7 +470,7 @@ func TestSettingsApplyFailsWithoutConfirmedWithdrawal(t *testing.T) {
 
 func TestSettingsWithdrawalNeedsNoProxyWhenNoneRuns(t *testing.T) {
 	b, _ := newPolicyBroker(t)
-	if err := b.withdrawSettingsIdentity(context.Background(), "ollama"); err != nil {
+	if err := b.withdrawSettingsIdentity(context.Background(), "llamacpp"); err != nil {
 		t.Fatalf("withdrawal with no proxy = %v, want nil", err)
 	}
 }

@@ -62,7 +62,7 @@ func runEngineNotificationServiceFixture() error {
 					return err
 				}
 			}
-			if err := publisher.Notify(engineModelIdentityMethod, engineManagerSnapshot("ollama")); err != nil {
+			if err := publisher.Notify(engineModelIdentityMethod, engineManagerSnapshot("llamacpp")); err != nil {
 				return err
 			}
 			for range engineNotificationQueueFrames*3 + 5 {
@@ -82,7 +82,7 @@ func runEngineNotificationServiceFixture() error {
 				return err
 			}
 		case "test:engine-alive":
-			if err := publisher.Notify(engineModelIdentityMethod, engineManagerSnapshot("ollama")); err != nil {
+			if err := publisher.Notify(engineModelIdentityMethod, engineManagerSnapshot("llamacpp")); err != nil {
 				return err
 			}
 			<-handled

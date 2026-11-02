@@ -61,9 +61,9 @@ func TestResidentProtectionPauseMayUnload(t *testing.T) {
 	worker := attachFakeEngine(t, b)
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "resident"}}
+	r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
 	r.mu.Unlock()
-	b.unloadModels("ollama", []string{"resident"}, "pause")
+	b.unloadModels("llamacpp", []string{"resident"}, "pause")
 	if got := worker.methods(""); !reflect.DeepEqual(got, []string{engineUnloadModelMethod}) {
 		t.Fatalf("pause calls = %v, want resident unload", got)
 	}
@@ -77,10 +77,10 @@ func TestResidentProtectionIdleSleepPlanning(t *testing.T) {
 	r.mu.Lock()
 	r.now = func() time.Time { return now }
 	r.current.Idle.StopEngineAfterMinutes = 1
-	r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "resident"}}
-	r.running["ollama"] = true
-	r.intent["ollama"] = true
-	r.runningSince["ollama"] = now.Add(-2 * time.Minute)
+	r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
+	r.running["llamacpp"] = true
+	r.intent["llamacpp"] = true
+	r.runningSince["llamacpp"] = now.Add(-2 * time.Minute)
 	r.mu.Unlock()
 	b.idleTick(context.Background())
 	if calls := worker.snapshot(); len(calls) != 0 {
@@ -106,33 +106,33 @@ func TestIdlePlanningWithdrawsEngineManagerSourceState(t *testing.T) {
 			r.current.Idle.StopEngineAfterMinutes = 1
 			r.mu.Unlock()
 			old := b.activateEngineManagerSource()
-			b.observeEngineRunningFrom(old, "ollama", true)
-			b.observeLoadedFrom(old, map[string][]string{"ollama": {"model"}})
-			b.observeIntentFrom(old, map[string]bool{"ollama": true})
+			b.observeEngineRunningFrom(old, "llamacpp", true)
+			b.observeLoadedFrom(old, map[string][]string{"llamacpp": {"model"}})
+			b.observeIntentFrom(old, map[string]bool{"llamacpp": true})
 			r.mu.Lock()
-			r.runningSince["ollama"] = now.Add(-2 * time.Minute)
-			r.residencyAt["ollama"] = now.Add(-2 * time.Minute)
-			r.idleUnloadedAt["ollama"] = now.Add(-2 * time.Minute)
-			r.idleSleptAt["ollama"] = now.Add(-3 * time.Minute)
+			r.runningSince["llamacpp"] = now.Add(-2 * time.Minute)
+			r.residencyAt["llamacpp"] = now.Add(-2 * time.Minute)
+			r.idleUnloadedAt["llamacpp"] = now.Add(-2 * time.Minute)
+			r.idleSleptAt["llamacpp"] = now.Add(-3 * time.Minute)
 			r.mu.Unlock()
 
 			current := transition(b, old)
 			// A late callback from the retired source must not restore its state.
-			b.observeEngineRunningFrom(old, "ollama", true)
-			b.observeLoadedFrom(old, map[string][]string{"ollama": {"model"}})
-			b.observeIntentFrom(old, map[string]bool{"ollama": true})
+			b.observeEngineRunningFrom(old, "llamacpp", true)
+			b.observeLoadedFrom(old, map[string][]string{"llamacpp": {"model"}})
+			b.observeIntentFrom(old, map[string]bool{"llamacpp": true})
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel() // Allow planning but prevent any worker RPC.
 			b.idleTick(ctx)
 			r.mu.Lock()
-			planned := r.idleSleptAt["ollama"]
-			_, running := r.running["ollama"]
-			_, loaded := r.loaded["ollama"]
-			_, intent := r.intent["ollama"]
-			_, observed := r.runningObserved["ollama"]
-			_, runningSince := r.runningSince["ollama"]
-			_, residencyAt := r.residencyAt["ollama"]
-			_, unloadedAt := r.idleUnloadedAt["ollama"]
+			planned := r.idleSleptAt["llamacpp"]
+			_, running := r.running["llamacpp"]
+			_, loaded := r.loaded["llamacpp"]
+			_, intent := r.intent["llamacpp"]
+			_, observed := r.runningObserved["llamacpp"]
+			_, runningSince := r.runningSince["llamacpp"]
+			_, residencyAt := r.residencyAt["llamacpp"]
+			_, unloadedAt := r.idleUnloadedAt["llamacpp"]
 			r.mu.Unlock()
 			if !planned.IsZero() {
 				t.Errorf("idle policy planned sleep for retired source's engine at %v", planned)
@@ -185,15 +185,15 @@ func TestResidentProtectionRechecksQueuedIdleSleep(t *testing.T) {
 	r.now = func() time.Time { return now }
 	r.current.Idle.UnloadAfterMinutes = 1
 	r.current.Idle.StopEngineAfterMinutes = 1
-	r.running["ollama"] = true
-	r.intent["ollama"] = true
-	r.runningSince["ollama"] = now.Add(-2 * time.Minute)
-	r.loaded["ollama"] = []string{"neighbor"}
+	r.running["llamacpp"] = true
+	r.intent["llamacpp"] = true
+	r.runningSince["llamacpp"] = now.Add(-2 * time.Minute)
+	r.loaded["llamacpp"] = []string{"neighbor"}
 	r.mu.Unlock()
 	worker.setAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == engineUnloadModelMethod {
 			r.mu.Lock()
-			r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "resident"}}
+			r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
 			r.mu.Unlock()
 		}
 		return map[string]bool{"ok": true}, ""

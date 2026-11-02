@@ -23,7 +23,7 @@ import (
 
 func TestLocalEnginePortRequiresCurrentManagerStatus(t *testing.T) {
 	b := &Broker{} // no engine-manager worker
-	for _, engine := range []string{"ollama", "lmstudio", "custom"} {
+	for _, engine := range []string{engines.NameLlamaCPP, "custom"} {
 		if got, ok := b.localEnginePort(engine); ok || got != 0 {
 			t.Fatalf("no engine-manager: %s port = (%d, %v), want (0, false)", engine, got, ok)
 		}
@@ -231,7 +231,7 @@ func TestEngineAdvertiserTracksEngineHealth(t *testing.T) {
 	}
 
 	profile := testDefaultEngineProxyProfile()
-	profile.DiscoveryService = noderec.ServiceLMStudio
+	profile.DiscoveryService = noderec.ServiceLlamaCPP
 	b := brokerWithEngineProxyProfile(profile)
 	b.regCache = relay.NewRegistrationCache()
 	b.engineProxy(profile).backendPort.Store(int32(backendPort))
@@ -259,7 +259,7 @@ func TestEngineAdvertiserTracksEngineHealth(t *testing.T) {
 
 func TestEngineAdvertiserRejectsSelfForwardLoop(t *testing.T) {
 	profile := testDefaultEngineProxyProfile()
-	profile.DiscoveryService = noderec.ServiceLMStudio
+	profile.DiscoveryService = noderec.ServiceLlamaCPP
 	b := brokerWithEngineProxyProfile(profile)
 	b.regCache = relay.NewRegistrationCache()
 	b.regCache.Register(noderec.RegisterParams{Service: profile.DiscoveryService, Port: 44000})

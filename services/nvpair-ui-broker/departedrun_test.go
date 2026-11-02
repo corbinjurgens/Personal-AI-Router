@@ -244,7 +244,7 @@ func TestDepartedRunHistoryReadWaitsForHistoryCallback(t *testing.T) {
 
 func departedRunInput(t *testing.T, id, origin, runID, state, destination string) workloadstore.Incoming {
 	t.Helper()
-	in := storeIncoming(id, origin, "ollama", runID, state, destination)
+	in := storeIncoming(id, origin, "llamacpp", runID, state, destination)
 	fields := privacyObject(t, in.Info)
 	fields["seq"] = json.RawMessage(`7`)
 	fields["startedAt"] = json.RawMessage(`2`)
@@ -397,7 +397,7 @@ func TestDepartedRun(t *testing.T) {
 			for key, expected := range map[string]string{
 				"error": `"proxy exited before the request finished"`, "createdAt": `1`,
 				"startedAt": `2`, "requesterId": `"requester"`, "requestedModel": `"requested"`,
-				"model": `"m"`, "engine": `"ollama"`, "originatedFrom": `"host"`,
+				"model": `"m"`, "engine": `"llamacpp"`, "originatedFrom": `"host"`,
 			} {
 				if string(fields[key]) != expected {
 					t.Fatalf("%s %s = %s, want %s", id, key, fields[key], expected)

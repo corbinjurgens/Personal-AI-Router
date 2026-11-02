@@ -20,7 +20,7 @@ import (
 )
 
 func TestSettingsDerivesCORSGuardFromAuthenticatedCaller(t *testing.T) {
-	h := newSettingsHarness(t)
+	h := newLlamaCPPSettingsHarness(t)
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
