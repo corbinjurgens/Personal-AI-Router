@@ -51,7 +51,7 @@ func TestServerCancelValidatesAndDedupsByCancelID(t *testing.T) {
 	if code := post(cancelFrame(t, cancelParams{WorkloadID: "1"})); code != http.StatusBadRequest {
 		t.Fatalf("cancel without origin = %d, want 400", code)
 	}
-	first := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "1", Engine: "ollama", RunID: "r1", Regenerate: true, CancelID: "c1"}
+	first := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "1", Engine: "llamacpp", RunID: "r1", Regenerate: true, CancelID: "c1"}
 	if code := post(cancelFrame(t, first)); code != http.StatusInternalServerError {
 		t.Fatalf("failed broker write = %d, want 500 so the sender retries", code)
 	}
@@ -80,7 +80,7 @@ func TestCancelRequiresCompleteTargetAtLocalAndPeerHops(t *testing.T) {
 	post := serveEventsOverMTLS(t, srv, self, peer)
 	test := func(name string, change func(*cancelParams)) {
 		t.Run(name, func(t *testing.T) {
-			p := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "7", Engine: "ollama", RunID: "r1", CancelID: "c1"}
+			p := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "7", Engine: "llamacpp", RunID: "r1", CancelID: "c1"}
 			change(&p)
 			data, err := json.Marshal(p)
 			if err != nil {
@@ -111,9 +111,9 @@ func TestCancelDedupIncludesCompleteTarget(t *testing.T) {
 	srv := NewServer(0, newDedupIndex(64), self, func(*Workload) error { return nil }, func(string, string) error { return nil })
 	srv.emitCancel = func(p cancelParams) error { got = append(got, p); return nil }
 	post := serveEventsOverMTLS(t, srv, self, peer)
-	first := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "7", Engine: "ollama", RunID: "r1", CancelID: "c1"}
+	first := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "7", Engine: "llamacpp", RunID: "r1", CancelID: "c1"}
 	otherEngine, otherRun, otherOrigin, otherWorkload := first, first, first, first
-	otherEngine.Engine = "lmstudio"
+	otherEngine.Engine = "llamacpp-custom"
 	otherRun.RunID = "r2"
 	otherOrigin.OriginatedFrom = "uuid-peer"
 	otherWorkload.WorkloadID = "8"
@@ -142,7 +142,7 @@ func TestCancelPeerRequiresCancellationID(t *testing.T) {
 	srv.emitCancel = func(cancelParams) error { emitted++; return nil }
 	post := serveEventsOverMTLS(t, srv, self, peer)
 	for _, id := range []string{"", string(bytes.Repeat([]byte("c"), 129))} {
-		p := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "7", Engine: "ollama", RunID: "r1", CancelID: id}
+		p := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "7", Engine: "llamacpp", RunID: "r1", CancelID: id}
 		if code := post(cancelFrame(t, p)); code != http.StatusBadRequest {
 			t.Fatalf("invalid cancel ID status=%d", code)
 		}
@@ -158,7 +158,7 @@ func TestCancelFanoutSaturationAndRelease(t *testing.T) {
 	var out bytes.Buffer
 	m := NewManager(NewCodec(&out), 0, "uuid-self-host", selfDir)
 	m.peers.Replace([]PeerNode{{ID: "origin-host", Host: peer.host, Addresses: []string{peer.host}, Port: peer.port, TXT: []string{clustertrust.ClusterUUIDTXTKey + "=uuid-peer"}}})
-	params := cancelParams{OriginatedFrom: "origin-host", WorkloadID: "7", Engine: "ollama", RunID: "r1", CancelID: "c1"}
+	params := cancelParams{OriginatedFrom: "origin-host", WorkloadID: "7", Engine: "llamacpp", RunID: "r1", CancelID: "c1"}
 	frame := cancelFrame(t, params)
 	data, err := json.Marshal(params)
 	if err != nil {
@@ -293,7 +293,7 @@ func TestLocalCancelGoesToTheOriginOrEveryPeer(t *testing.T) {
 		}
 	}
 
-	params, err := json.Marshal(map[string]any{"originatedFrom": "origin-host", "workloadId": "5", "engine": "ollama", "runId": "r1", "regenerate": true})
+	params, err := json.Marshal(map[string]any{"originatedFrom": "origin-host", "workloadId": "5", "engine": "llamacpp", "runId": "r1", "regenerate": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestLocalCancelGoesToTheOriginOrEveryPeer(t *testing.T) {
 		t.Fatalf("origin received %+v", got)
 	}
 
-	params, err = json.Marshal(map[string]any{"originatedFrom": "unknown-host", "workloadId": "6", "engine": "ollama", "runId": "r1"})
+	params, err = json.Marshal(map[string]any{"originatedFrom": "unknown-host", "workloadId": "6", "engine": "llamacpp", "runId": "r1"})
 	if err != nil {
 		t.Fatal(err)
 	}

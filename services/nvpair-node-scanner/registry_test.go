@@ -24,7 +24,7 @@ func TestRegistryRegisterAndRecord(t *testing.T) {
 		t.Error("register with port 0 should be ignored")
 	}
 
-	r.register(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 11434})
+	r.register(noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 8080})
 
 	rec := r.record()
 	if rec.HostUUID != "host-1" || rec.ClusterUUID != "clu-1" || rec.IP != "192.168.1.10" {
@@ -33,21 +33,21 @@ func TestRegistryRegisterAndRecord(t *testing.T) {
 	if p, ok := rec.Port(noderec.ServiceNodeInfo); !ok || p != 14318 {
 		t.Errorf("ni port = %d,%v", p, ok)
 	}
-	if p, ok := rec.Port(noderec.ServiceOllama); !ok || p != 11434 {
+	if p, ok := rec.Port(noderec.ServiceLlamaCPP); !ok || p != 8080 {
 		t.Errorf("ol port = %d,%v", p, ok)
 	}
 }
 
 func TestRegistryUnregister(t *testing.T) {
 	r := newRegistry("h", "", nil)
-	r.register(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: 11434})
-	if !r.unregister(noderec.ServiceOllama) {
+	r.register(noderec.RegisterParams{Service: noderec.ServiceLlamaCPP, Port: 8080})
+	if !r.unregister(noderec.ServiceLlamaCPP) {
 		t.Fatal("unregister should report a change")
 	}
-	if r.unregister(noderec.ServiceOllama) {
+	if r.unregister(noderec.ServiceLlamaCPP) {
 		t.Error("unregister of absent service should not report a change")
 	}
-	if _, ok := r.record().Port(noderec.ServiceOllama); ok {
+	if _, ok := r.record().Port(noderec.ServiceLlamaCPP); ok {
 		t.Error("ol should be gone")
 	}
 }

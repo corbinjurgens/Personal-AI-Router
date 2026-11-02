@@ -213,7 +213,7 @@ func TestGetInitialEmpty(t *testing.T) {
 // so reading the response side first does not race the update push.
 func TestReportRequestUpsertsAndEmitsUpdate(t *testing.T) {
 	m, rw := newTestManager(t)
-	e := sampleError("ollama-proxy:upstream-unreachable:node-a", 1000, "node-a unreachable")
+	e := sampleError("llamacpp-proxy:upstream-unreachable:node-a", 1000, "node-a unreachable")
 
 	m.handleMessage(requestMessage(1, "errors:report", e))
 
@@ -260,7 +260,7 @@ func TestReportNotificationUpsertsAndEmitsUpdate(t *testing.T) {
 // stale frame).
 func TestUpsertHighestTimestampWins(t *testing.T) {
 	m, rw := newTestManager(t)
-	id := "ollama-local:not-running"
+	id := "llamacpp-local:not-running"
 
 	// Initial report at ts=1000 wins.
 	m.handleMessage(notificationMessage("errors:report", sampleError(id, 1000, "v1")))
@@ -287,7 +287,7 @@ func TestUpsertHighestTimestampWins(t *testing.T) {
 // refactor doesn't quietly regress it.
 func TestUpsertEqualTimestampReplaces(t *testing.T) {
 	m, rw := newTestManager(t)
-	id := "ollama-local:install-failed"
+	id := "llamacpp-local:install-failed"
 
 	m.handleMessage(notificationMessage("errors:report", sampleError(id, 1000, "first")))
 	expectNotification(t, rw, "errors:update")
@@ -346,7 +346,7 @@ func TestClearAbsentIdIsNoOp(t *testing.T) {
 // producer says it's still broken."
 func TestAckUntilReemit(t *testing.T) {
 	m, rw := newTestManager(t)
-	id := "ollama-proxy:upstream-unreachable:peer-x"
+	id := "llamacpp-proxy:upstream-unreachable:peer-x"
 
 	m.handleMessage(notificationMessage("errors:report", sampleError(id, 1000, "first")))
 	expectNotification(t, rw, "errors:update")

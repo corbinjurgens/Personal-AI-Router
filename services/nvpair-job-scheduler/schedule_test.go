@@ -149,7 +149,7 @@ func TestApplyNodesChanged_KeysByHostUUID(t *testing.T) {
 
 	// A workload scheduledOn the UUID counts against that node — proving the
 	// scheduledOn value the proxy stamps (a UUID) matches the universe key.
-	m.catalog[wlKey{origin: "uuid-a", id: "w1"}] = wl("w1", "ollama", "running", "uuid-a", "uuid-a")
+	m.catalog[wlKey{origin: "uuid-a", id: "w1"}] = wl("w1", "llamacpp", "running", "uuid-a", "uuid-a")
 	_, ranks := m.rank()
 	for _, r := range ranks {
 		if r.ID == "uuid-a" && r.Pending != 1 {
@@ -169,9 +169,9 @@ func TestRank_ColdStartIDSort(t *testing.T) {
 // TestRank_AscendingByPending: least-loaded node first.
 func TestRank_AscendingByPending(t *testing.T) {
 	m := mgrWith(nopRW{}, []string{"a", "b", "c"},
-		wl("1", "ollama", "running", "x", "a"),
-		wl("2", "ollama", "running", "x", "a"),
-		wl("3", "ollama", "queued", "x", "c"),
+		wl("1", "llamacpp", "running", "x", "a"),
+		wl("2", "llamacpp", "running", "x", "a"),
+		wl("3", "llamacpp", "queued", "x", "c"),
 	)
 	order, ranks := m.rank()
 	assertStrs(t, order, []string{"b", "c", "a"}) // 0, 1, 2
@@ -183,7 +183,7 @@ func TestRank_AscendingByPending(t *testing.T) {
 func TestRank_CombinesPendingAndGPUPressure(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	m := mgrWith(nopRW{}, []string{"a", "b", "c", "d"},
-		wl("1", "ollama", "running", "x", "b"),
+		wl("1", "llamacpp", "running", "x", "b"),
 	)
 	for id, utilization := range map[string]uint32{
 		"a": 90,
@@ -236,7 +236,7 @@ func TestRank_UnknownAndStaleTelemetryUseNeutralPressure(t *testing.T) {
 // TestRank_UnplacedIgnored: a workload with no scheduledOn counts toward no node.
 func TestRank_UnplacedIgnored(t *testing.T) {
 	m := mgrWith(nopRW{}, []string{"a", "b"},
-		wl("1", "ollama", "running", "x", ""),
+		wl("1", "llamacpp", "running", "x", ""),
 	)
 	_, ranks := m.rank()
 	for _, r := range ranks {
@@ -249,7 +249,7 @@ func TestRank_UnplacedIgnored(t *testing.T) {
 // TestRank_ScheduledOnUnknownIgnored: work on a node not in discovery is dropped.
 func TestRank_ScheduledOnUnknownIgnored(t *testing.T) {
 	m := mgrWith(nopRW{}, []string{"a", "b"},
-		wl("1", "ollama", "running", "x", "ghost"),
+		wl("1", "llamacpp", "running", "x", "ghost"),
 	)
 	_, ranks := m.rank()
 	for _, r := range ranks {
@@ -262,8 +262,8 @@ func TestRank_ScheduledOnUnknownIgnored(t *testing.T) {
 // TestRank_TerminalStatesExcluded: only queued/running count.
 func TestRank_TerminalStatesExcluded(t *testing.T) {
 	m := mgrWith(nopRW{}, []string{"a", "b"},
-		wl("1", "ollama", "running", "x", "a"),   // a = 1
-		wl("2", "ollama", "completed", "x", "b"), // ignored
+		wl("1", "llamacpp", "running", "x", "a"),   // a = 1
+		wl("2", "llamacpp", "completed", "x", "b"), // ignored
 	)
 	order, _ := m.rank()
 	assertStrs(t, order, []string{"b", "a"}) // b=0 wins; a would tie only if completed counted
@@ -275,8 +275,8 @@ func TestRank_TerminalStatesExcluded(t *testing.T) {
 // requester walked away from is not occupying its node.
 func TestRank_CancelledExcluded(t *testing.T) {
 	m := mgrWith(nopRW{}, []string{"a", "b"},
-		wl("1", "ollama", "running", "x", "a"),   // a = 1
-		wl("2", "ollama", "cancelled", "x", "b"), // must not count toward b
+		wl("1", "llamacpp", "running", "x", "a"),   // a = 1
+		wl("2", "llamacpp", "cancelled", "x", "b"), // must not count toward b
 	)
 	order, ranks := m.rank()
 	assertStrs(t, order, []string{"b", "a"})
@@ -291,10 +291,10 @@ func TestRank_CancelledExcluded(t *testing.T) {
 func TestRank_NodeWideMixedEngineSynthetic(t *testing.T) {
 	rec := &capRW{}
 	m := mgrWith(rec, []string{"a", "b", "c"},
-		workload{ID: "1", Engine: "ollama", RunID: "o1", State: "running", OriginatedFrom: "x", ScheduledOn: "a"},
-		workload{ID: "2", Engine: "lmstudio", RunID: "l1", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"},
-		workload{ID: "3", Engine: "ollama", RunID: "o2", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"},
-		workload{ID: "4", Engine: "lmstudio", RunID: "l2", State: "running", OriginatedFrom: "x", ScheduledOn: "b"},
+		workload{ID: "1", Engine: "llamacpp", RunID: "o1", State: "running", OriginatedFrom: "x", ScheduledOn: "a"},
+		workload{ID: "2", Engine: "llamacpp-custom", RunID: "l1", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"},
+		workload{ID: "3", Engine: "llamacpp", RunID: "o2", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"},
+		workload{ID: "4", Engine: "llamacpp-custom", RunID: "l2", State: "running", OriginatedFrom: "x", ScheduledOn: "b"},
 	)
 	order, ranks := m.rank()
 	assertStrs(t, order, []string{"c", "b", "a"})
@@ -321,7 +321,7 @@ func TestRank_DescriptorEngineIdentity(t *testing.T) {
 		workload{ID: "1", Engine: "llamacpp-custom", RunID: "c1", State: "running", OriginatedFrom: "x", ScheduledOn: "a"},
 		workload{ID: "2", Engine: "llamacpp-custom", RunID: "c2", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"},
 		workload{ID: "5", Engine: "llamacpp-custom", RunID: "c3", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"},
-		workload{ID: "3", Engine: "ollama", RunID: "o1", State: "running", OriginatedFrom: "x", ScheduledOn: "b"},
+		workload{ID: "3", Engine: "llamacpp", RunID: "o1", State: "running", OriginatedFrom: "x", ScheduledOn: "b"},
 		workload{ID: "4", Engine: "bad/engine", RunID: "x1", State: "running", OriginatedFrom: "x", ScheduledOn: "b"},
 	)
 	order, ranks := m.rank()
@@ -389,7 +389,7 @@ func pressureOf(ranks []NodeRank, id string) int {
 	return -1
 }
 
-// TestApplyUpsert_CrossEngineSameIDDistinct: Ollama and LM Studio each mint id
+// TestApplyUpsert_CrossEngineSameIDDistinct: llama.cpp and a descriptor engine each mint id
 // "1" for the same origin. They must remain two catalog entries (keyed by
 // engine + runId), so node-wide pending includes both. Keyed on the bare
 // (origin,id) the second upsert would clobber the first.
@@ -397,8 +397,8 @@ func TestApplyUpsert_CrossEngineSameIDDistinct(t *testing.T) {
 	m := NewManager(NewCodec(nopRW{}), time.Second)
 	m.nodes["a"] = true
 	m.nodes["b"] = true
-	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "ollama", RunID: "r-oll", State: "running", OriginatedFrom: "x", ScheduledOn: "a"}))
-	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "lmstudio", RunID: "r-lms", State: "running", OriginatedFrom: "x", ScheduledOn: "b"}))
+	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "llamacpp", RunID: "r-llamacpp", State: "running", OriginatedFrom: "x", ScheduledOn: "a"}))
+	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "llamacpp-custom", RunID: "r-descriptor", State: "running", OriginatedFrom: "x", ScheduledOn: "b"}))
 
 	if len(m.catalog) != 2 {
 		t.Fatalf("catalog len = %d, want 2 (cross-engine id-1 collapsed?)", len(m.catalog))
@@ -414,8 +414,8 @@ func TestApplyUpsert_CrossEngineSameIDDistinct(t *testing.T) {
 func TestApplyUpsert_SameIDAcrossRestartDistinct(t *testing.T) {
 	m := NewManager(NewCodec(nopRW{}), time.Second)
 	m.nodes["a"] = true
-	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "ollama", RunID: "run-1", State: "running", OriginatedFrom: "x", ScheduledOn: "a"}))
-	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "ollama", RunID: "run-2", State: "running", OriginatedFrom: "x", ScheduledOn: "a"}))
+	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "llamacpp", RunID: "run-1", State: "running", OriginatedFrom: "x", ScheduledOn: "a"}))
+	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "llamacpp", RunID: "run-2", State: "running", OriginatedFrom: "x", ScheduledOn: "a"}))
 	if len(m.catalog) != 2 {
 		t.Fatalf("catalog len = %d, want 2 (same-id-across-restart collapsed?)", len(m.catalog))
 	}
@@ -429,8 +429,8 @@ func TestApplyUpsert_SameIDAcrossRestartDistinct(t *testing.T) {
 // that pair (mirroring the broker store's Remove).
 func TestApplyRemove_DropsEveryEngineForID(t *testing.T) {
 	m := NewManager(NewCodec(nopRW{}), time.Second)
-	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "ollama", RunID: "r-oll", State: "running", OriginatedFrom: "x", ScheduledOn: "a"}))
-	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "lmstudio", RunID: "r-lms", State: "running", OriginatedFrom: "x", ScheduledOn: "b"}))
+	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "llamacpp", RunID: "r-llamacpp", State: "running", OriginatedFrom: "x", ScheduledOn: "a"}))
+	m.applyUpsert(upsertJSON(t, workload{ID: "1", Engine: "llamacpp-custom", RunID: "r-descriptor", State: "running", OriginatedFrom: "x", ScheduledOn: "b"}))
 	if !m.applyRemove(removeJSON(t, "1", "x")) {
 		t.Fatal("removing pending work should report a load change")
 	}
@@ -441,7 +441,7 @@ func TestApplyRemove_DropsEveryEngineForID(t *testing.T) {
 
 func TestApplyUpsert_ActiveOnlyAndMeaningfulChanges(t *testing.T) {
 	m := NewManager(NewCodec(nopRW{}), time.Second)
-	base := workload{ID: "1", Engine: "ollama", RunID: "run", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"}
+	base := workload{ID: "1", Engine: "llamacpp", RunID: "run", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"}
 
 	if !m.applyUpsert(upsertJSON(t, base)) {
 		t.Fatal("new placed work should change pending load")
@@ -450,7 +450,7 @@ func TestApplyUpsert_ActiveOnlyAndMeaningfulChanges(t *testing.T) {
 	if m.applyUpsert(upsertJSON(t, base)) {
 		t.Fatal("queued->running on the same node should not change pending load")
 	}
-	if got := m.catalog[wlKey{origin: "x", engine: "ollama", runID: "run", id: "1"}].State; got != "running" {
+	if got := m.catalog[wlKey{origin: "x", engine: "llamacpp", runID: "run", id: "1"}].State; got != "running" {
 		t.Fatalf("catalog state = %q, want running", got)
 	}
 
@@ -493,7 +493,7 @@ func TestHandleMessage_RebalancesImmediatelyAcrossEngines(t *testing.T) {
 		Params:  json.RawMessage(`[{"hostUuid":"b"},{"hostUuid":"a"}]`),
 	})
 
-	job := workload{ID: "1", Engine: "lmstudio", RunID: "run", State: "queued", OriginatedFrom: "local", ScheduledOn: "a"}
+	job := workload{ID: "1", Engine: "llamacpp-custom", RunID: "run", State: "queued", OriginatedFrom: "local", ScheduledOn: "a"}
 	m.handleMessage(&Message{JSONRPC: "2.0", Method: "workloads:upsert", Params: upsertJSON(t, job)})
 	job.State = "running"
 	m.handleMessage(&Message{JSONRPC: "2.0", Method: "workloads:upsert", Params: upsertJSON(t, job)})
@@ -529,7 +529,7 @@ func TestHandleMessage_RebalancesOnFailoverRepoint(t *testing.T) {
 		Method:  "discovery:nodes-changed",
 		Params:  json.RawMessage(`[{"hostUuid":"a"},{"hostUuid":"b"},{"hostUuid":"c"}]`),
 	})
-	job := workload{ID: "1", Engine: "ollama", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "a"}
+	job := workload{ID: "1", Engine: "llamacpp", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "a"}
 	m.handleMessage(&Message{JSONRPC: "2.0", Method: "workloads:upsert", Params: upsertJSON(t, job)})
 	job.ScheduledOn = "c"
 	m.handleMessage(&Message{JSONRPC: "2.0", Method: "workloads:upsert", Params: upsertJSON(t, job)})
@@ -558,7 +558,7 @@ func TestRecomputeAll_SerializesOlderAndNewerResults(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("older recompute did not reach blocked write")
 	}
-	job := workload{ID: "1", Engine: "ollama", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "a"}
+	job := workload{ID: "1", Engine: "llamacpp", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "a"}
 	if !m.applyUpsert(upsertJSON(t, job)) {
 		t.Fatal("new workload should change pending load")
 	}
@@ -631,15 +631,15 @@ func TestEmit_OnChangeOnly(t *testing.T) {
 	m := mgrWith(rec, []string{"a", "b"})
 
 	m.recomputeAll(false)
-	if got := rec.orders("ollama"); len(got) != 1 {
+	if got := rec.orders("llamacpp"); len(got) != 1 {
 		t.Fatalf("first compute should emit once, got %d", len(got))
 	}
 	m.recomputeAll(false) // unchanged
-	if got := rec.orders("ollama"); len(got) != 1 {
+	if got := rec.orders("llamacpp"); len(got) != 1 {
 		t.Fatalf("unchanged order must not re-emit, got %d", len(got))
 	}
 	m.recomputeAll(true) // forced
-	if got := rec.orders("ollama"); len(got) != 2 {
+	if got := rec.orders("llamacpp"); len(got) != 2 {
 		t.Fatalf("forced tick must re-emit, got %d", len(got))
 	}
 }
@@ -647,11 +647,11 @@ func TestEmit_OnChangeOnly(t *testing.T) {
 func TestEmit_IncludesPendingRanks(t *testing.T) {
 	rec := &capRW{}
 	m := mgrWith(rec, []string{"a", "b"},
-		workload{ID: "b1", Engine: "ollama", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "b"},
+		workload{ID: "b1", Engine: "llamacpp", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "b"},
 	)
 
 	m.recomputeAll(false)
-	got := rec.priorities("ollama")
+	got := rec.priorities("llamacpp")
 	if len(got) != 1 {
 		t.Fatalf("priority snapshots = %d, want 1", len(got))
 	}
@@ -672,19 +672,19 @@ func TestEmit_IncludesPendingRanks(t *testing.T) {
 func TestEmit_PendingOnlyChangeRefreshesSnapshot(t *testing.T) {
 	rec := &capRW{}
 	m := mgrWith(rec, []string{"a", "b"},
-		workload{ID: "b1", Engine: "ollama", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "b"},
-		workload{ID: "b2", Engine: "lmstudio", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "b"},
+		workload{ID: "b1", Engine: "llamacpp", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "b"},
+		workload{ID: "b2", Engine: "llamacpp-custom", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "b"},
 	)
 	m.recomputeAll(false)
 
-	job := workload{ID: "a1", Engine: "ollama", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "a"}
+	job := workload{ID: "a1", Engine: "llamacpp", RunID: "run", State: "running", OriginatedFrom: "local", ScheduledOn: "a"}
 	if !m.applyUpsert(upsertJSON(t, job)) {
 		t.Fatal("new workload should change pending load")
 	}
 	m.recomputeAll(false)
 	m.recomputeAll(false) // identical snapshot stays quiet
 
-	got := rec.priorities("ollama")
+	got := rec.priorities("llamacpp")
 	if len(got) != 2 {
 		t.Fatalf("priority snapshots = %d, want initial plus pending-only refresh", len(got))
 	}
@@ -701,7 +701,7 @@ func TestEmit_EmptyUniverseSilent(t *testing.T) {
 	rec := &capRW{}
 	m := mgrWith(rec, nil)
 	m.recomputeAll(false)
-	if got := rec.orders("ollama"); len(got) != 0 {
+	if got := rec.orders("llamacpp"); len(got) != 0 {
 		t.Fatalf("empty universe should stay silent, got %v", got)
 	}
 }

@@ -51,12 +51,12 @@ func TestModelControlsScannerInventory(t *testing.T) {
 			// identifier positives (including512 bytes) in inventory/roles/proof,
 			// with representable permissions; invalid tokens still test filtering.
 			servedToken := tc.token
-			wantServed := nodepolicy.ServedModels{{Engine: "ollama", Model: "first"}}
+			wantServed := nodepolicy.ServedModels{{Engine: "llamacpp", Model: "first"}}
 			if tc.valid {
 				servedToken = `"last"`
-				wantServed = append(wantServed, nodepolicy.Role{Engine: "ollama", Model: "last"})
+				wantServed = append(wantServed, nodepolicy.Role{Engine: "llamacpp", Model: "last"})
 			}
-			body := fmt.Sprintf(`{"models":%s,"modelsByEngine":{"ollama":%s,"lmstudio":[]},"loadedByEngine":{"ollama":%s},"policy":{"revision":"7","servedModels":[{"engine":"ollama","model":"first"},{"engine":"ollama","model":%s}],"roles":{"weak":{"engine":"ollama","model":%s},"strong":{"engine":"ollama","model":"last"}},"strictAdmission":{"version":1,"models":[%s]}}}`, list, list, list, servedToken, tc.token, strict)
+			body := fmt.Sprintf(`{"models":%s,"modelsByEngine":{"llamacpp":%s,"llamacpp-custom":[]},"loadedByEngine":{"llamacpp":%s},"policy":{"revision":"7","servedModels":[{"engine":"llamacpp","model":"first"},{"engine":"llamacpp","model":%s}],"roles":{"weak":{"engine":"llamacpp","model":%s},"strong":{"engine":"llamacpp","model":"last"}},"strictAdmission":{"version":1,"models":[%s]}}}`, list, list, list, servedToken, tc.token, strict)
 			d := newRefreshTestDaemon()
 			d.modelsHTTP.Transport = serviceBuildTransport(func(r *http.Request) (*http.Response, error) {
 				if r.URL.Host != "127.0.0.1:24001" || r.URL.Path != "/v1/models" {
@@ -77,7 +77,7 @@ func TestModelControlsScannerInventory(t *testing.T) {
 				want = []string{"first", model, "last"}
 			}
 			node, present := d.dir.get("model-controls")
-			if !present || !reflect.DeepEqual(node.Models, want) || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"ollama": want, "lmstudio": {}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"ollama": want}) {
+			if !present || !reflect.DeepEqual(node.Models, want) || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"llamacpp": want, "llamacpp-custom": {}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"llamacpp": want}) {
 				t.Fatal("inventory lost valid siblings, order, attribution or known-empty engine")
 			}
 			if !reflect.DeepEqual(d.lastModels[node.HostUUID], want) || !reflect.DeepEqual(d.lastModelsByEngine[node.HostUUID], node.ModelsByEngine) || !reflect.DeepEqual(d.lastLoadedByEngine[node.HostUUID], node.LoadedByEngine) || !reflect.DeepEqual(d.lastPolicy[node.HostUUID], node.Policy) {
@@ -99,7 +99,7 @@ func TestModelControlsScannerInventory(t *testing.T) {
 			}
 			var strictModels []string
 			for _, entry := range capability.Models {
-				if entry.Engine != "ollama" {
+				if entry.Engine != "llamacpp" {
 					t.Fatal("supported capability lost engine attribution")
 				}
 				strictModels = append(strictModels, entry.Model)
@@ -122,7 +122,7 @@ func TestModelControlsScannerServedReferenceBounds(t *testing.T) {
 			}
 			// Encode raw input without ServedModels.MarshalJSON's strict write
 			// guard, then exercise the actual receive-side container contract.
-			ref, err := json.Marshal([]nodepolicy.Role{{Engine: "ollama", Model: tc.model}})
+			ref, err := json.Marshal([]nodepolicy.Role{{Engine: "llamacpp", Model: tc.model}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -131,7 +131,7 @@ func TestModelControlsScannerServedReferenceBounds(t *testing.T) {
 				t.Fatal("oversized encoded served reference was accepted")
 			}
 			d := newRefreshTestDaemon()
-			body := `{"models":["good"],"modelsByEngine":{"ollama":["good"]},"loadedByEngine":{"ollama":["good"]},"policy":{"revision":"7","servedModels":[{"engine":"ollama","model":"good"}]}}`
+			body := `{"models":["good"],"modelsByEngine":{"llamacpp":["good"]},"loadedByEngine":{"llamacpp":["good"]},"policy":{"revision":"7","servedModels":[{"engine":"llamacpp","model":"good"}]}}`
 			d.modelsHTTP.Transport = serviceBuildTransport(func(*http.Request) (*http.Response, error) {
 				return serviceBuildResponse(body, http.StatusOK), nil
 			})
@@ -168,7 +168,7 @@ func TestModelControlsScannerFutureCapability(t *testing.T) {
 
 func TestModelControlsScannerSuccessfulEmptyAndLastGood(t *testing.T) {
 	d := newRefreshTestDaemon()
-	body := `{"models":["good"],"modelsByEngine":{"ollama":["good"]},"loadedByEngine":{"ollama":["good"]},"policy":{"revision":"8","servedModels":[{"engine":"ollama","model":"good"}]}}`
+	body := `{"models":["good"],"modelsByEngine":{"llamacpp":["good"]},"loadedByEngine":{"llamacpp":["good"]},"policy":{"revision":"8","servedModels":[{"engine":"llamacpp","model":"good"}]}}`
 	d.modelsHTTP.Transport = serviceBuildTransport(func(*http.Request) (*http.Response, error) {
 		return serviceBuildResponse(body, http.StatusOK), nil
 	})
@@ -179,7 +179,7 @@ func TestModelControlsScannerSuccessfulEmptyAndLastGood(t *testing.T) {
 	lastGood, _ := d.dir.get("empty-controls")
 	for _, tc := range []struct{ name, raw string }{
 		{"nonstring flat model", `{"models":[7]}`},
-		{"nonarray engine models", `{"modelsByEngine":{"ollama":7}}`},
+		{"nonarray engine models", `{"modelsByEngine":{"llamacpp":7}}`},
 		{"trailing document", `{"models":["new"]} {}`},
 		{"invalid engine syntax in served reference", `{"models":["new"],"policy":{"servedModels":[{"engine":"unrecognized/engine","model":"new"}]}}`},
 	} {
@@ -214,12 +214,12 @@ func TestModelControlsScannerSuccessfulEmptyAndLastGood(t *testing.T) {
 			t.Fatal("valid dynamic engine advertisement was not cached with its attribution")
 		}
 	})
-	body = `{"models":["","bad\u007f"],"modelsByEngine":{"ollama":["bad\u0080"]},"loadedByEngine":{"ollama":["bad\u0000"]},"policy":{"revision":"9","servedModels":[{"engine":"ollama","model":""}]}}`
+	body = `{"models":["","bad\u007f"],"modelsByEngine":{"llamacpp":["bad\u0080"]},"loadedByEngine":{"llamacpp":["bad\u0000"]},"policy":{"revision":"9","servedModels":[{"engine":"llamacpp","model":""}]}}`
 	if !d.refreshNodeModels("empty-controls", "127.0.0.1", 24001, "") {
 		t.Fatal("successful all-invalid inventory did not replace last-good")
 	}
 	node, _ := d.dir.get("empty-controls")
-	if node.Models == nil || len(node.Models) != 0 || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"ollama": {}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"ollama": {}}) || node.Policy == nil || node.Policy.ServedModels == nil || len(node.Policy.ServedModels) != 0 {
+	if node.Models == nil || len(node.Models) != 0 || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"llamacpp": {}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"llamacpp": {}}) || node.Policy == nil || node.Policy.ServedModels == nil || len(node.Policy.ServedModels) != 0 {
 		t.Fatal("all-invalid success did not retain known-empty inventory and deny-all permission")
 	}
 	if d.lastModels[node.HostUUID] == nil || len(d.lastModels[node.HostUUID]) != 0 || !reflect.DeepEqual(d.lastModelsByEngine[node.HostUUID], node.ModelsByEngine) || !reflect.DeepEqual(d.lastLoadedByEngine[node.HostUUID], node.LoadedByEngine) {
@@ -283,7 +283,7 @@ func TestModelControlsScannerAttributionPresenceTransition(t *testing.T) {
 	}
 	assertEvent(true)
 	node, _ := d.dir.get("presence-transition")
-	if node.ModelsByEngine == nil || d.lastModelsByEngine[node.HostUUID] == nil || len(node.EngineModels("ollama")) != 0 || !reflect.DeepEqual(node.Models, []string{"good"}) {
+	if node.ModelsByEngine == nil || d.lastModelsByEngine[node.HostUUID] == nil || len(node.EngineModels("llamacpp")) != 0 || !reflect.DeepEqual(node.Models, []string{"good"}) {
 		t.Fatal("authoritative empty refresh did not replace flat fallback in directory and cache")
 	}
 	if d.refreshNodeModels("presence-transition", "127.0.0.1", 24001, "") {
@@ -298,7 +298,7 @@ func TestModelControlsScannerAttributionPresenceTransition(t *testing.T) {
 	}
 	assertEvent(false)
 	node, _ = d.dir.get("presence-transition")
-	if node.ModelsByEngine != nil || d.lastModelsByEngine[node.HostUUID] != nil || !reflect.DeepEqual(node.EngineModels("ollama"), []string{"good"}) {
+	if node.ModelsByEngine != nil || d.lastModelsByEngine[node.HostUUID] != nil || !reflect.DeepEqual(node.EngineModels("llamacpp"), []string{"good"}) {
 		t.Fatal("legacy nil attribution did not restore its existing flat fallback")
 	}
 	if d.refreshNodeModels("presence-transition", "127.0.0.1", 24001, "") || wire.Len() != 0 {
@@ -320,7 +320,7 @@ func TestModelControlsScannerEmptyAttributionNotification(t *testing.T) {
 	if err := json.Unmarshal(wire.Bytes(), &frame); err != nil {
 		t.Fatalf("decode actual emitted node event: %v", err)
 	}
-	if frame.Params.Node.ModelsByEngine == nil || len(frame.Params.Node.EngineModels("ollama")) != 0 || !reflect.DeepEqual(frame.Params.Node.Models, []string{"good"}) {
+	if frame.Params.Node.ModelsByEngine == nil || len(frame.Params.Node.EngineModels("llamacpp")) != 0 || !reflect.DeepEqual(frame.Params.Node.Models, []string{"good"}) {
 		t.Fatal("notification serialization lost authoritative empty attribution and enabled flat fallback")
 	}
 }
@@ -431,7 +431,7 @@ func TestRefreshPopulatesInitialEmptyInventory(t *testing.T) {
 	d := newRefreshTestDaemon()
 	_, port := startModelsStub(t, http.StatusOK, map[string]any{
 		"models":         []string{"llama3:8b", "qwen:0.5b"},
-		"modelsByEngine": map[string][]string{"ollama": {"llama3:8b"}, "lmstudio": {"qwen:0.5b"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"llama3:8b"}, "llamacpp-custom": {"qwen:0.5b"}},
 	})
 	seedEMNode(d, "peer-A", "127.0.0.1", port)
 
@@ -442,7 +442,7 @@ func TestRefreshPopulatesInitialEmptyInventory(t *testing.T) {
 	if want := []string{"llama3:8b", "qwen:0.5b"}; !reflect.DeepEqual(got.Models, want) {
 		t.Errorf("Models = %v, want %v", got.Models, want)
 	}
-	if want := map[string][]string{"ollama": {"llama3:8b"}, "lmstudio": {"qwen:0.5b"}}; !reflect.DeepEqual(got.ModelsByEngine, want) {
+	if want := map[string][]string{"llamacpp": {"llama3:8b"}, "llamacpp-custom": {"qwen:0.5b"}}; !reflect.DeepEqual(got.ModelsByEngine, want) {
 		t.Errorf("ModelsByEngine = %v, want %v", got.ModelsByEngine, want)
 	}
 }
@@ -484,7 +484,7 @@ func TestRefreshSelfDialsLoopback(t *testing.T) {
 	d := newRefreshTestDaemon() // reg self uuid = "self-node-uuid"
 	_, port := startModelsStub(t, http.StatusOK, map[string]any{
 		"models":         []string{"llama3:8b"},
-		"modelsByEngine": map[string][]string{"ollama": {"llama3:8b"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"llama3:8b"}},
 	})
 	// TEST-NET-1 (RFC 5737): guaranteed non-routable — only a loopback dial can
 	// reach the stub, which httptest binds on 127.0.0.1:port.
@@ -510,7 +510,7 @@ func TestRefreshPullDeleteAndUnchanged(t *testing.T) {
 	d := newRefreshTestDaemon()
 	stub, port := startModelsStub(t, http.StatusOK, map[string]any{
 		"models":         []string{"a"},
-		"modelsByEngine": map[string][]string{"ollama": {"a"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"a"}},
 	})
 	seedEMNode(d, "peer-B", "127.0.0.1", port)
 
@@ -526,7 +526,7 @@ func TestRefreshPullDeleteAndUnchanged(t *testing.T) {
 	// Pull: add a model -> exactly one change.
 	stub.set(http.StatusOK, map[string]any{
 		"models":         []string{"a", "b"},
-		"modelsByEngine": map[string][]string{"ollama": {"a", "b"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"a", "b"}},
 	})
 	if !d.refreshNodeModels("peer-B", "127.0.0.1", port, "") {
 		t.Fatal("a pull should report a change")
@@ -538,7 +538,7 @@ func TestRefreshPullDeleteAndUnchanged(t *testing.T) {
 	// Delete: remove a model -> exactly one change.
 	stub.set(http.StatusOK, map[string]any{
 		"models":         []string{"a"},
-		"modelsByEngine": map[string][]string{"ollama": {"a"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"a"}},
 	})
 	if !d.refreshNodeModels("peer-B", "127.0.0.1", port, "") {
 		t.Fatal("a delete should report a change")
@@ -555,7 +555,7 @@ func TestRefreshPullDeleteAndUnchanged(t *testing.T) {
 	// It must clear the stale model once and then remain stable.
 	stub.set(http.StatusOK, map[string]any{
 		"models":         []string{},
-		"modelsByEngine": map[string][]string{"ollama": {}},
+		"modelsByEngine": map[string][]string{"llamacpp": {}},
 	})
 	if !d.refreshNodeModels("peer-B", "127.0.0.1", port, "") {
 		t.Fatal("deleting the last model should report a change")
@@ -567,7 +567,7 @@ func TestRefreshPullDeleteAndUnchanged(t *testing.T) {
 	if len(got.Models) != 0 {
 		t.Errorf("Models after last delete = %v, want empty", got.Models)
 	}
-	if want := map[string][]string{"ollama": {}}; !reflect.DeepEqual(got.ModelsByEngine, want) {
+	if want := map[string][]string{"llamacpp": {}}; !reflect.DeepEqual(got.ModelsByEngine, want) {
 		t.Errorf("ModelsByEngine after last delete = %v, want %v", got.ModelsByEngine, want)
 	}
 }
@@ -579,7 +579,7 @@ func TestRefreshReorderOnlyIsNotAChange(t *testing.T) {
 	d := newRefreshTestDaemon()
 	stub, port := startModelsStub(t, http.StatusOK, map[string]any{
 		"models":         []string{"a", "b"},
-		"modelsByEngine": map[string][]string{"ollama": {"a", "b"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"a", "b"}},
 	})
 	seedEMNode(d, "peer-R", "127.0.0.1", port)
 	if !d.refreshNodeModels("peer-R", "127.0.0.1", port, "") {
@@ -587,7 +587,7 @@ func TestRefreshReorderOnlyIsNotAChange(t *testing.T) {
 	}
 	stub.set(http.StatusOK, map[string]any{
 		"models":         []string{"b", "a"},
-		"modelsByEngine": map[string][]string{"ollama": {"b", "a"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"b", "a"}},
 	})
 	if d.refreshNodeModels("peer-R", "127.0.0.1", port, "") {
 		t.Error("a mere reordering of the same models should not report a change")
@@ -601,7 +601,7 @@ func TestRefreshFetchFailureRetainsInventory(t *testing.T) {
 	d := newRefreshTestDaemon()
 	stub, port := startModelsStub(t, http.StatusOK, map[string]any{
 		"models":         []string{"keep-me"},
-		"modelsByEngine": map[string][]string{"ollama": {"keep-me"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"keep-me"}},
 	})
 	seedEMNode(d, "peer-C", "127.0.0.1", port)
 	if !d.refreshNodeModels("peer-C", "127.0.0.1", port, "") {
@@ -617,7 +617,7 @@ func TestRefreshFetchFailureRetainsInventory(t *testing.T) {
 	if want := []string{"keep-me"}; !reflect.DeepEqual(got.Models, want) {
 		t.Errorf("Models after failure = %v, want retained %v", got.Models, want)
 	}
-	if want := map[string][]string{"ollama": {"keep-me"}}; !reflect.DeepEqual(got.ModelsByEngine, want) {
+	if want := map[string][]string{"llamacpp": {"keep-me"}}; !reflect.DeepEqual(got.ModelsByEngine, want) {
 		t.Errorf("ModelsByEngine after failure = %v, want retained %v", got.ModelsByEngine, want)
 	}
 	d.infoMu.Lock()
@@ -627,7 +627,7 @@ func TestRefreshFetchFailureRetainsInventory(t *testing.T) {
 	if want := []string{"keep-me"}; !reflect.DeepEqual(cachedFlat, want) {
 		t.Errorf("cached flat inventory = %v, want retained %v", cachedFlat, want)
 	}
-	if want := map[string][]string{"ollama": {"keep-me"}}; !reflect.DeepEqual(cachedByEngine, want) {
+	if want := map[string][]string{"llamacpp": {"keep-me"}}; !reflect.DeepEqual(cachedByEngine, want) {
 		t.Errorf("cached per-engine inventory = %v, want retained %v", cachedByEngine, want)
 	}
 }
@@ -639,7 +639,7 @@ func TestRefreshPartialModelsByEngine(t *testing.T) {
 	d := newRefreshTestDaemon()
 	_, port := startModelsStub(t, http.StatusOK, map[string]any{
 		"models":         []string{"x", "y"},
-		"modelsByEngine": map[string][]string{"ollama": {"x"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"x"}},
 	})
 	seedEMNode(d, "peer-D", "127.0.0.1", port)
 	if !d.refreshNodeModels("peer-D", "127.0.0.1", port, "") {
@@ -649,7 +649,7 @@ func TestRefreshPartialModelsByEngine(t *testing.T) {
 	if want := []string{"x", "y"}; !reflect.DeepEqual(got.Models, want) {
 		t.Errorf("Models = %v, want %v", got.Models, want)
 	}
-	if want := map[string][]string{"ollama": {"x"}}; !reflect.DeepEqual(got.ModelsByEngine, want) {
+	if want := map[string][]string{"llamacpp": {"x"}}; !reflect.DeepEqual(got.ModelsByEngine, want) {
 		t.Errorf("ModelsByEngine = %v, want the partial map propagated verbatim %v", got.ModelsByEngine, want)
 	}
 }
@@ -660,8 +660,8 @@ func TestRefreshPopulatesLoadedByEngine(t *testing.T) {
 	d := newRefreshTestDaemon()
 	_, port := startModelsStub(t, http.StatusOK, map[string]any{
 		"models":         []string{"llama3:8b", "qwen:0.5b"},
-		"modelsByEngine": map[string][]string{"ollama": {"llama3:8b"}, "lmstudio": {"qwen:0.5b"}},
-		"loadedByEngine": map[string][]string{"ollama": {"llama3:8b"}, "lmstudio": {}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"llama3:8b"}, "llamacpp-custom": {"qwen:0.5b"}},
+		"loadedByEngine": map[string][]string{"llamacpp": {"llama3:8b"}, "llamacpp-custom": {}},
 	})
 	seedEMNode(d, "peer-L", "127.0.0.1", port)
 
@@ -669,7 +669,7 @@ func TestRefreshPopulatesLoadedByEngine(t *testing.T) {
 		t.Fatal("initial populate should report a change")
 	}
 	got, _ := d.dir.get("peer-L")
-	if want := map[string][]string{"ollama": {"llama3:8b"}, "lmstudio": {}}; !reflect.DeepEqual(got.LoadedByEngine, want) {
+	if want := map[string][]string{"llamacpp": {"llama3:8b"}, "llamacpp-custom": {}}; !reflect.DeepEqual(got.LoadedByEngine, want) {
 		t.Errorf("LoadedByEngine = %v, want %v", got.LoadedByEngine, want)
 	}
 }
@@ -682,8 +682,8 @@ func TestRefreshLoadedOnlyChangeReportsChange(t *testing.T) {
 	d := newRefreshTestDaemon()
 	stub, port := startModelsStub(t, http.StatusOK, map[string]any{
 		"models":         []string{"a"},
-		"modelsByEngine": map[string][]string{"ollama": {"a"}},
-		"loadedByEngine": map[string][]string{"ollama": {}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"a"}},
+		"loadedByEngine": map[string][]string{"llamacpp": {}},
 	})
 	seedEMNode(d, "peer-M", "127.0.0.1", port)
 	if !d.refreshNodeModels("peer-M", "127.0.0.1", port, "") {
@@ -693,22 +693,22 @@ func TestRefreshLoadedOnlyChangeReportsChange(t *testing.T) {
 	// Same installed list, but the model is now resident -> a change.
 	stub.set(http.StatusOK, map[string]any{
 		"models":         []string{"a"},
-		"modelsByEngine": map[string][]string{"ollama": {"a"}},
-		"loadedByEngine": map[string][]string{"ollama": {"a"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"a"}},
+		"loadedByEngine": map[string][]string{"llamacpp": {"a"}},
 	})
 	if !d.refreshNodeModels("peer-M", "127.0.0.1", port, "") {
 		t.Fatal("a loaded-set change should report a change even when the model list is unchanged")
 	}
 	got, _ := d.dir.get("peer-M")
-	if want := map[string][]string{"ollama": {"a"}}; !reflect.DeepEqual(got.LoadedByEngine, want) {
+	if want := map[string][]string{"llamacpp": {"a"}}; !reflect.DeepEqual(got.LoadedByEngine, want) {
 		t.Errorf("LoadedByEngine after load = %v, want %v", got.LoadedByEngine, want)
 	}
 
 	// A mere reordering of the same loaded set is not a change.
 	stub.set(http.StatusOK, map[string]any{
 		"models":         []string{"a"},
-		"modelsByEngine": map[string][]string{"ollama": {"a"}},
-		"loadedByEngine": map[string][]string{"ollama": {"a"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"a"}},
+		"loadedByEngine": map[string][]string{"llamacpp": {"a"}},
 	})
 	if d.refreshNodeModels("peer-M", "127.0.0.1", port, "") {
 		t.Error("an identical loaded set should not report a change")
@@ -721,8 +721,8 @@ func TestRefreshLoadedRetainedOnFailure(t *testing.T) {
 	d := newRefreshTestDaemon()
 	stub, port := startModelsStub(t, http.StatusOK, map[string]any{
 		"models":         []string{"keep-me"},
-		"modelsByEngine": map[string][]string{"ollama": {"keep-me"}},
-		"loadedByEngine": map[string][]string{"ollama": {"keep-me"}},
+		"modelsByEngine": map[string][]string{"llamacpp": {"keep-me"}},
+		"loadedByEngine": map[string][]string{"llamacpp": {"keep-me"}},
 	})
 	seedEMNode(d, "peer-N", "127.0.0.1", port)
 	if !d.refreshNodeModels("peer-N", "127.0.0.1", port, "") {
@@ -734,13 +734,13 @@ func TestRefreshLoadedRetainedOnFailure(t *testing.T) {
 		t.Error("a failed fetch should not report a change")
 	}
 	got, _ := d.dir.get("peer-N")
-	if want := map[string][]string{"ollama": {"keep-me"}}; !reflect.DeepEqual(got.LoadedByEngine, want) {
+	if want := map[string][]string{"llamacpp": {"keep-me"}}; !reflect.DeepEqual(got.LoadedByEngine, want) {
 		t.Errorf("LoadedByEngine after failure = %v, want retained %v", got.LoadedByEngine, want)
 	}
 	d.infoMu.Lock()
 	cachedLoaded := d.lastLoadedByEngine["peer-N"]
 	d.infoMu.Unlock()
-	if want := map[string][]string{"ollama": {"keep-me"}}; !reflect.DeepEqual(cachedLoaded, want) {
+	if want := map[string][]string{"llamacpp": {"keep-me"}}; !reflect.DeepEqual(cachedLoaded, want) {
 		t.Errorf("cached loaded inventory = %v, want retained %v", cachedLoaded, want)
 	}
 }
@@ -754,7 +754,7 @@ func TestRefreshPolicyAdvertisement(t *testing.T) {
 	inventory := func(revision string) map[string]any {
 		return map[string]any{
 			"models": []string{"a"},
-			"policy": map[string]any{"revision": revision, "roles": map[string]any{"weak": map[string]any{"engine": "ollama", "model": "a"}}},
+			"policy": map[string]any{"revision": revision, "roles": map[string]any{"weak": map[string]any{"engine": "llamacpp", "model": "a"}}},
 		}
 	}
 	stub, port := startModelsStub(t, http.StatusOK, inventory("1"))
@@ -762,7 +762,7 @@ func TestRefreshPolicyAdvertisement(t *testing.T) {
 	if !d.refreshNodeModels("peer-P", "127.0.0.1", port, "") {
 		t.Fatal("initial populate should report a change")
 	}
-	want := &nodepolicy.Advertisement{Revision: "1", Roles: map[string]nodepolicy.AdvertisedRole{nodepolicy.TierWeak: {Engine: "ollama", Model: "a"}}}
+	want := &nodepolicy.Advertisement{Revision: "1", Roles: map[string]nodepolicy.AdvertisedRole{nodepolicy.TierWeak: {Engine: "llamacpp", Model: "a"}}}
 	if got, _ := d.dir.get("peer-P"); !reflect.DeepEqual(got.Policy, want) {
 		t.Fatalf("Policy = %+v, want %+v", got.Policy, want)
 	}

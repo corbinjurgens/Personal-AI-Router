@@ -14,12 +14,12 @@ import (
 func TestEngineBindingOffersPinnedEnrichmentAndLastGood(t *testing.T) {
 	f := newScannerReverseFixture(t)
 	f.direct.Store(true)
-	raw := json.RawMessage(`{"revision":"1","roles":{},"engineBindingOffers":{"version":1,"models":[{"engine":"lmstudio","model":"cold-model"}]}}`)
+	raw := json.RawMessage(`{"revision":"1","roles":{},"engineBindingOffers":{"version":1,"models":[{"engine":"llamacpp-custom","model":"cold-model"}]}}`)
 	f.policy.Store(&raw)
 	node := f.node
 	f.d.enrich(&node)
-	want := &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role{{Engine: "lmstudio", Model: "cold-model"}}}
-	if node.Policy == nil || !reflect.DeepEqual(node.Policy.EngineBindingOffers, want) || !reflect.DeepEqual(node.EngineModels("ollama"), []string{"model"}) || len(node.EngineModels("lmstudio")) != 0 {
+	want := &nodepolicy.EngineBindingOffers{Version: 1, Models: []nodepolicy.Role{{Engine: "llamacpp-custom", Model: "cold-model"}}}
+	if node.Policy == nil || !reflect.DeepEqual(node.Policy.EngineBindingOffers, want) || !reflect.DeepEqual(node.EngineModels("llamacpp"), []string{"model"}) || len(node.EngineModels("llamacpp-custom")) != 0 {
 		t.Fatalf("offer changed inventory or was lost: %+v", node)
 	}
 	f.direct.Store(false)

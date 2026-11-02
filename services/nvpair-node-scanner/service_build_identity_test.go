@@ -235,8 +235,8 @@ func newServiceBuildPeerFixture(t *testing.T) (*daemon, noderec.PeerServicesClai
 		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: 14318}},
 		GPUs:           []GPUInfo{{Name: "previous GPU"}},
 		Models:         []string{"model-a"},
-		ModelsByEngine: map[string][]string{"ollama": {"model-a"}},
-		LoadedByEngine: map[string][]string{"ollama": {"model-a"}},
+		ModelsByEngine: map[string][]string{"llamacpp": {"model-a"}},
+		LoadedByEngine: map[string][]string{"llamacpp": {"model-a"}},
 		Policy:         &policy,
 	}
 	d.dir.installPeerServices(claim, node)

@@ -189,7 +189,7 @@ func TestWorkloadBroadcast_MTLSGate(t *testing.T) {
 
 	// A valid lifecycle frame (workload:started) so a member's POST reaches 200,
 	// not just "past the gate".
-	wl := &Workload{ID: "wl-1", Model: "llama", Engine: "ollama", State: StateRunning, OriginatedFrom: "uuid-b", CreatedAt: 1}
+	wl := &Workload{ID: "wl-1", Model: "llama", Engine: "llamacpp", State: StateRunning, OriginatedFrom: "uuid-b", CreatedAt: 1}
 	params, _ := json.Marshal(lifecycleParams{WorkloadInfo: wl})
 	frame, _ := json.Marshal(&Message{JSONRPC: "2.0", Method: MethodStarted, Params: json.RawMessage(params)})
 
@@ -252,7 +252,7 @@ func TestWorkloadEvents_UnauthenticatedIsAlwaysRefused(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	wl := &Workload{ID: "wl-1", Model: "llama", Engine: "ollama", State: StateRunning, OriginatedFrom: "uuid-peer", CreatedAt: 1}
+	wl := &Workload{ID: "wl-1", Model: "llama", Engine: "llamacpp", State: StateRunning, OriginatedFrom: "uuid-peer", CreatedAt: 1}
 	params, _ := json.Marshal(lifecycleParams{WorkloadInfo: wl})
 	frame, _ := json.Marshal(&Message{JSONRPC: "2.0", Method: MethodStarted, Params: json.RawMessage(params)})
 
