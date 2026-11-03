@@ -229,8 +229,6 @@ class ModularBridgeState {
     // we never fabricate a default — an unknown port surfaces as null, not a
     // guess. Keys map to relay sources through proxy-engines.ts.
     private proxyPorts: Record<ProxyEngine, number> = {
-        ollama: 0,
-        'lm-studio': 0,
         'llama-cpp': 0
     }
     private selfId: string | null = null

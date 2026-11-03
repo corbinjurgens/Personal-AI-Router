@@ -60,7 +60,7 @@ func TestDynamicEngineIdentity(t *testing.T) {
 // A dynamic key can never collide with a fixed one, and every carrier of a
 // key has room for the longest.
 func TestDynamicServiceKeys(t *testing.T) {
-	for _, key := range []servicekey.Key{servicekey.NodeInfo, servicekey.Ollama, servicekey.LMStudio, servicekey.LlamaCPP,
+	for _, key := range []servicekey.Key{servicekey.NodeInfo, servicekey.LlamaCPP,
 		servicekey.Errors, servicekey.Workload, servicekey.Cluster, servicekey.EngineManager, servicekey.EngineControl,
 		"e-", "e-a/b", "e-llamacpp", "x-strata", servicekey.Key("e-" + strings.Repeat("a", MaxDynamicIDLen+1))} {
 		if IsDynamicServiceKey(key) {

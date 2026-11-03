@@ -334,7 +334,7 @@ func TestProxyRestartsOnceForAChangedReferenceSet(t *testing.T) {
 			step("replacing the reference", "5", true, []nodepolicy.CredentialRef{unconfiguredRef}, []string{unconfiguredRef})
 			step("removing every reference", "5", true, nil, []string{})
 
-			if len(facades) > 0 && b.engineProxyHandle(mustEngineProxyProfile("ollama")) != pp {
+			if len(facades) > 0 && b.engineProxyHandle(mustEngineProxyProfile("llamacpp")) != pp {
 				t.Error("the restarted proxy does not serve the facade")
 			}
 			secretenvtest.AssertNoValue(t, "client stream", bufferText(sb.out))
@@ -343,7 +343,7 @@ func TestProxyRestartsOnceForAChangedReferenceSet(t *testing.T) {
 	}
 
 	test("listener only", true)
-	test("serving a facade", false, mustEngineProxyProfile("ollama").Name)
+	test("serving a facade", false, mustEngineProxyProfile("llamacpp").Name)
 }
 
 func bufferText(s *syncBuffer) string {

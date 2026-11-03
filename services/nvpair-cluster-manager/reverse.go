@@ -283,7 +283,7 @@ func reverseProtocol(service noderec.ServiceKey) (clustertrust.ReverseProtocol, 
 	switch service {
 	case noderec.ServiceNodeInfo:
 		return clustertrust.ReversePlain, true
-	case noderec.ServiceCluster, noderec.ServiceOllama, noderec.ServiceLMStudio,
+	case noderec.ServiceCluster,
 		noderec.ServiceLlamaCPP, noderec.ServiceEngineManager, noderec.ServiceEngineControl,
 		noderec.ServiceErrors, noderec.ServiceWorkload:
 		return clustertrust.ReverseTLS, true

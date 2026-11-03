@@ -8,6 +8,7 @@ import path from 'node:path'
 import { BrowserWindow } from 'electron'
 import { getCliBinDir } from '@/electron/service-bridge/modular-supervisor'
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
+import { isProxyEngine } from '@/electron/service-bridge/proxy-engines'
 import { inferenceDispatcherFileName } from '@/shared/constants/inference-dispatcher'
 import { currentPlatform } from '@/shared/utils/platform'
 import type { DispatcherBackend, DispatcherModel } from '@/shared/types/inference-dispatcher'
@@ -206,7 +207,7 @@ async function discoverTargets(executable: string): Promise<DemoTarget[]> {
     const bridge = getModularBridgeState()
     const reachable = DEMO_ENGINE_PROBES.map(probe => ({
         backend: probe.backend,
-        port: bridge.getProxyPort(probe.proxyEngine)
+        port: isProxyEngine(probe.proxyEngine) ? bridge.getProxyPort(probe.proxyEngine) : null
     })).filter(
         (probe): probe is { backend: DispatcherBackend; port: number } => probe.port !== null
     )

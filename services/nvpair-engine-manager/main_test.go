@@ -103,11 +103,12 @@ func managerFixtureOverlay(dir string) (string, error) {
 	if err := os.Mkdir(bundle, 0o700); err != nil {
 		return "", err
 	}
-	ports, err := privateFixturePorts(3)
+	engineNames := []string{"llamacpp"}
+	ports, err := privateFixturePorts(len(engineNames))
 	if err != nil {
 		return "", err
 	}
-	for i, engine := range []string{"ollama", "lmstudio", "llamacpp"} {
+	for i, engine := range engineNames {
 		data, err := json.Marshal(portFixtureManifest(engine, ports[i]))
 		if err != nil {
 			return "", err

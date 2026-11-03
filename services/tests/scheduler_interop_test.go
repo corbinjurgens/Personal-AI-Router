@@ -566,20 +566,16 @@ func TestProxySetPriorityViaBroker(t *testing.T) {
 	t.Logf("proxy accepted priority list of %d nodes via broker relay", r.Count)
 }
 
-// TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery: the scheduler
-// emits a node-wide ranking that may include peers without LM Studio. The
-// lmstudio-proxy must intersect that list with its own discovery set and never
-// dial a priority id that never advertised the lm service.
-func TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
-	if portBusy(1234) {
-		t.Skip("lmstudio-proxy default port 1234 already in use; skipping")
-	}
-
+// TestLlamaCPPProxyIgnoresPriorityNodesAbsentFromDiscovery: the scheduler
+// emits a node-wide ranking that may include peers without llama.cpp. The
+// llamacpp-proxy must intersect that list with its own discovery set and never
+// dial a priority id that never advertised the lc service.
+func TestLlamaCPPProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 	var hitsMu sync.Mutex
 	hits := map[string]int{}
 	realEngine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hitsMu.Lock()
-		hits["real-lm"]++
+		hits["real-engine"]++
 		hitsMu.Unlock()
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
@@ -589,7 +585,7 @@ func TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 	realPort := portOfURL(t, realEngine.URL)
 
 	stdin, msgs, stderr, cleanup := startBrokerWith(t,
-		"--proxy-path", proxyBin, "--proxy-engines", "lmstudio",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 	)
 	t.Cleanup(cleanup)
 	go func() {
@@ -598,21 +594,21 @@ func TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 	}()
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-	proxyPort := waitLMStudioProxyReady(t, stdin, msgs, 15*time.Second)
+	proxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
 
 	writeRawFrame(t, stdin, fmt.Sprintf(
-		`{"jsonrpc":"2.0","id":90,"method":"lmstudio-proxy:node/add-manual","params":{"id":"real-lm","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["chat-model"]}}`,
+		`{"jsonrpc":"2.0","id":90,"method":"llamacpp-proxy:node/add-manual","params":{"id":"real-engine","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["chat-model"]}}`,
 		realPort,
 	))
 	if resp := waitForResponse(t, msgs, 5*time.Second); resp.Error != nil {
-		t.Fatalf("lmstudio-proxy:node/add-manual rejected: %d %s", resp.Error.Code, resp.Error.Message)
+		t.Fatalf("llamacpp-proxy:node/add-manual rejected: %d %s", resp.Error.Code, resp.Error.Message)
 	}
 
-	// Priority puts a peer that never advertised LM Studio first. The proxy must
-	// skip it and route to the discovered real-lm node.
-	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":91,"method":"lmstudio-proxy:node/set-priority","params":{"generation":1,"nodes":["no-lm-peer","real-lm"]}}`)
+	// Priority puts a peer that never advertised llama.cpp first. The proxy must
+	// skip it and route to the discovered real-engine node.
+	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":91,"method":"llamacpp-proxy:node/set-priority","params":{"generation":1,"nodes":["no-engine-peer","real-engine"]}}`)
 	if resp := waitForResponse(t, msgs, 5*time.Second); resp.Error != nil {
-		t.Fatalf("lmstudio-proxy:node/set-priority rejected: %d %s", resp.Error.Code, resp.Error.Message)
+		t.Fatalf("llamacpp-proxy:node/set-priority rejected: %d %s", resp.Error.Code, resp.Error.Message)
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -632,8 +628,8 @@ func TestLMStudioProxyIgnoresPriorityNodesAbsentFromDiscovery(t *testing.T) {
 
 	hitsMu.Lock()
 	defer hitsMu.Unlock()
-	if hits["real-lm"] != 1 {
-		t.Fatalf("real-lm hits = %d, want 1 (priority phantom should be ignored)", hits["real-lm"])
+	if hits["real-engine"] != 1 {
+		t.Fatalf("real-engine hits = %d, want 1 (priority phantom should be ignored)", hits["real-engine"])
 	}
 }
 

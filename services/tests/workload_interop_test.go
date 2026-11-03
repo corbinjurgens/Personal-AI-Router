@@ -1471,17 +1471,11 @@ func testWorkloadFixtureIsolation(t *testing.T) {
 	})
 }
 
-// waitProxyReady polls ollama-proxy:get-status until the Ollama proxy reports ready
+// waitProxyReady polls llamacpp-proxy:get-status until the llama.cpp proxy reports ready
 // and returns its bound port.
 func waitProxyReady(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, timeout time.Duration) int {
 	t.Helper()
-	return waitEngineProxyReady(t, "ollama-proxy", stdin, msgs, timeout)
-}
-
-// waitLMStudioProxyReady is waitProxyReady for the LM Studio relay namespace.
-func waitLMStudioProxyReady(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, timeout time.Duration) int {
-	t.Helper()
-	return waitEngineProxyReady(t, "lmstudio-proxy", stdin, msgs, timeout)
+	return waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, timeout)
 }
 
 // engineReadyPollSeq hands every readiness poll a distinct JSON-RPC id. Based

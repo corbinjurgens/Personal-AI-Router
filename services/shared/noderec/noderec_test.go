@@ -378,7 +378,7 @@ func TestEngineModels(t *testing.T) {
 func TestParseTXT(t *testing.T) {
 	txt := []string{
 		"v=1", "uuid=host-abc", "cluster-uuid=clu-xyz", "ip=192.168.1.10",
-		"ni=14318", "ol=11434", "er=14319", "wl=14320", "cl=14321", "em=14322",
+		"ni=14318", "lc=8080", "er=14319", "wl=14320", "cl=14321", "em=14322",
 		"unknown=ignored", "bad=notaport",
 	}
 	r := ParseTXT(txt)
@@ -397,8 +397,8 @@ func TestParseTXT(t *testing.T) {
 	if p, ok := r.Port(ServiceEngineManager); !ok || p != 14322 {
 		t.Errorf("em port = %d,%v want 14322,true", p, ok)
 	}
-	if _, ok := r.Port(ServiceLMStudio); ok {
-		t.Error("lm should be absent")
+	if port, ok := r.Port(ServiceLlamaCPP); !ok || port != 8080 {
+		t.Errorf("lc port = %d,%v want 8080,true", port, ok)
 	}
 	// "unknown=" is not a service port; "bad=notaport" is skipped.
 	if _, ok := r.Services["unknown"]; ok {
@@ -480,8 +480,6 @@ func TestTransportPolicy(t *testing.T) {
 		mtlsUnclu bool // UsesMTLS when target not clustered
 	}{
 		{ServiceNodeInfo, TransportPlain, false, false},
-		{ServiceOllama, TransportPlain, false, false},
-		{ServiceLMStudio, TransportPlain, false, false},
 		{ServiceLlamaCPP, TransportPlain, false, false},
 		{ServiceEngineManager, TransportPlain, false, false},
 		{ServiceErrors, TransportMTLSWhenClustered, true, false},

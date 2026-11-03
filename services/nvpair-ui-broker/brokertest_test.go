@@ -103,7 +103,7 @@ func requireGateOpenNow(t *testing.T, gate <-chan struct{}, reason string) {
 // other route would reach code that production never reaches.
 func publishTestProxy(b *Broker, pp *proxyProcess) {
 	b.setProxyProcessHandle(pp)
-	for _, profile := range engineProxyProfiles {
+	for _, profile := range b.frontedEngineProfiles() {
 		b.setEngineProxyHandle(profile, pp)
 	}
 }

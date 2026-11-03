@@ -388,7 +388,7 @@ func newCatalogService() *catalogService {
 func (c *catalogService) Catalog(ctx context.Context, engine, platform, arch, query string) (CatalogResult, error) {
 	platform, arch = catalogTarget(platform, arch)
 	switch c.adapterFor(engine) {
-	case engines.NameOllama:
+	case modelFamilyOllama:
 		models, meta, err := c.ollamaCatalog()
 		if err != nil {
 			return CatalogResult{}, err
@@ -402,7 +402,7 @@ func (c *catalogService) Catalog(ctx context.Context, engine, platform, arch, qu
 			// nothing is dropped and the caller's target does not change it.
 			FetchedAt: meta.ScrapedAt,
 		}, nil
-	case engines.NameLMStudio:
+	case modelFamilyLMStudio:
 		models, fetchedAt, err := c.lmStudio.get(ctx)
 		if err != nil {
 			return CatalogResult{}, err

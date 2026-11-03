@@ -56,18 +56,6 @@ func TestBuiltInProfilesAreUnchanged(t *testing.T) {
 	openAI := []route{post("/v1/chat/completions"), post("/v1/completions"), post("/v1/embeddings")}
 	want := []engineProfile{
 		{
-			Engine: engines.Engine{Name: "ollama", DisplayName: "Ollama", DiscoveryService: "ol", FacadePort: 11434, EnginePortBase: 11435, PortFile: "proxy-port.json"},
-			Routes: slices.Concat([]route{
-				{Path: "/v1/models", Role: roleModelListOpenAIGET},
-			}, openAI, []route{post("/v1/messages")}),
-			StandalonePort: 11435, ModelNaming: exactID,
-		},
-		{
-			Engine:         engines.Engine{Name: "lmstudio", DisplayName: "LM Studio", DiscoveryService: "lm", FacadePort: 1234, EnginePortBase: 1235, PortFile: "lmstudio-proxy-port.json"},
-			Routes:         slices.Concat([]route{{Path: "/v1/models", Role: roleModelListOpenAIGET}}, openAI, []route{post("/v1/messages")}),
-			StandalonePort: 1234, ModelNaming: exactID,
-		},
-		{
 			Engine: engines.Engine{Name: "llamacpp", DisplayName: "llama.cpp", DiscoveryService: "lc", FacadePort: 8080, EnginePortBase: 8081, PortFile: "llamacpp-proxy-port.json"},
 			Routes: slices.Concat([]route{
 				{Path: "/models", Role: roleModelListOpenAIGET},

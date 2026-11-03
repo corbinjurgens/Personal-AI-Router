@@ -41,7 +41,6 @@ const srRuntimeEnv = "NVPAIR_SR_PROCESS_EXECUTABLE"
 const srNeighbor = "sr-neighbor"
 const srCustomRuntimeEnv = "NVPAIR_SR_CUSTOM_EXECUTABLE"
 const srCustomModel = "sr-custom"
-const srOllamaModel = "sr-ollama:latest"
 
 // This dispatch reuses the wrapper's fixed test image, rather than introducing
 // another executable path or a native engine. All qualification below is fixture-only.
@@ -120,9 +119,7 @@ type srRuntimeState struct {
 func runSRTargetRuntime() error {
 	engine := os.Getenv("NVPAIR_SR_TARGET_ENGINE")
 	model := srCustomModel
-	if engine == "ollama" {
-		model = srOllamaModel
-	} else if engine != "llamacpp-custom" {
+	if engine != "llamacpp-custom" {
 		return errors.New("invalid private switch engine")
 	}
 	path := os.Getenv("NVPAIR_SR_CUSTOM_CONFIG")
@@ -165,23 +162,6 @@ func runSRTargetRuntime() error {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/__sr/control" && r.Header.Get("X-NE-Fixture-Nonce") == config.Nonce:
 			result = state
-		case engine == "ollama" && r.Method == http.MethodGet && r.URL.Path == "/":
-			// Preserve the native health contract used by the strict identity case.
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			if _, err := io.WriteString(w, "Ollama is running"); err != nil {
-				state.Base.Unexpected++
-			}
-			return
-		case engine == "ollama" && r.Method == http.MethodGet && r.URL.Path == "/api/tags":
-			result = map[string]any{"models": []any{map[string]string{"name": model, "digest": hex.EncodeToString(digest[:])}}}
-		case engine == "ollama" && r.Method == http.MethodGet && r.URL.Path == "/api/ps":
-			models := []any{}
-			if state.Models[model].Loaded {
-				models = append(models, map[string]string{"name": model})
-			}
-			result = map[string]any{"models": models}
-		case engine == "ollama" && r.Method == http.MethodGet && r.URL.Path == "/api/version":
-			result = map[string]string{"version": "fixture-only"}
 		case r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models"):
 			status := "unloaded"
 			if state.Models[model].Loaded {
@@ -466,8 +446,8 @@ func newSRProcessFixture(t *testing.T) *srProcessFixture {
 	return newSRProcessFixtureWithRetention(t, false, "-1")
 }
 
-func newSRSwitchProcessFixture(t *testing.T, nativeEngine ...string) *srProcessFixture {
-	return newSRProcessFixtureWithRetry(t, true, "-1", time.Second, nativeEngine...)
+func newSRSwitchProcessFixture(t *testing.T) *srProcessFixture {
+	return newSRProcessFixtureWithRetry(t, true, "-1", time.Second)
 }
 
 func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention string) *srProcessFixture {
@@ -475,7 +455,7 @@ func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention
 	return newSRProcessFixtureWithRetry(t, switchTarget, retention, time.Second)
 }
 
-func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention string, retry time.Duration, nativeEngine ...string) *srProcessFixture {
+func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention string, retry time.Duration) *srProcessFixture {
 	t.Helper()
 	if runtime.GOOS != "windows" {
 		t.Skip("SR process evidence requires the Windows fixed-path lane")
@@ -483,13 +463,7 @@ func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention str
 	f := &srProcessFixture{neServingFixture: newNEServingFixture(t)}
 	f.residentRetryInterval = retry
 	if switchTarget {
-		engine := "llamacpp-custom"
-		if len(nativeEngine) == 1 && nativeEngine[0] == "ollama" {
-			engine = nativeEngine[0]
-		} else if len(nativeEngine) != 0 {
-			t.Fatal("unsupported native switch fixture engine")
-		}
-		f.enableSwitchTarget(t, engine)
+		f.enableSwitchTarget(t, "llamacpp-custom")
 	}
 	peerDir := filepath.Join(t.TempDir(), "cluster")
 	targetDir := filepath.Join(f.root, "cluster")
@@ -682,9 +656,6 @@ func (f *srProcessFixture) enableSwitchTarget(t *testing.T, engine string) {
 	}))
 	t.Cleanup(f.switchControl.Close)
 	probePath := "/v1/models"
-	if engine == "ollama" {
-		probePath = "/api/tags"
-	}
 	probe := map[string]any{"http": "http://127.0.0.1:{port}" + probePath, "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
 	configPath := filepath.Join(f.root, "switch-runtime.json")
 	jointWriteJSON(t, configPath, neRuntimeConfig{Root: f.root, Nonce: f.nonce, Port: f.switchEnginePort})
@@ -756,10 +727,6 @@ func (f *srProcessFixture) start(t *testing.T) {
 	}
 	probeURL := "http://127.0.0.1:{port}/v1/models"
 	proxyEngines := "llamacpp"
-	if f.switchEngine == "ollama" {
-		probeURL = "http://127.0.0.1:{port}/api/tags"
-		proxyEngines += ",ollama"
-	}
 	// Check the active switch target separately from NE's built-in isolation
 	// checks, while retaining every other private engine check.
 	for _, engine := range privateFixtureEngineNames() {
@@ -1936,15 +1903,14 @@ func TestServedResidentProcessResidency(t *testing.T) {
 }
 
 func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
-	// Strict capacity needs a broker settings fingerprint, which descriptor
-	// engines currently cannot publish. Preserve this native identity case.
-	f := newSRSwitchProcessFixture(t, "ollama")
+	// Exercise the node-wide resident limit across built-in and descriptor engines.
+	f := newSRSwitchProcessFixture(t)
 	// Observe the owned fake's actual launch digest before writing its synthetic
 	// qualification. The proxy reads that registry only at process startup.
-	f.call(t, "engine:start", map[string]string{"engine": "ollama"}, nil)
-	identity := regexp.MustCompile(`engine identity engine=ollama run_id=(run-[0-9a-f]+) launch_digest=([0-9a-f]{64}) models_with_digest=1`)
+	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"}, nil)
+	identity := regexp.MustCompile(`engine identity engine=llamacpp-custom run_id=(run-[0-9a-f]+) launch_digest=([0-9a-f]{64}) models_with_digest=1`)
 	var launch string
-	neEventually(t, "owned Ollama fixture content identity", neCallBudget, func() bool {
+	neEventually(t, "owned descriptor engine fixture content identity", neCallBudget, func() bool {
 		matches := identity.FindAllStringSubmatch(f.p.output.String(), -1)
 		if len(matches) == 0 {
 			return false
@@ -1959,7 +1925,7 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 		p.Admission.MemoryBudgetBytes = 2 * neMemory
 		p.Admission.SwitchModels = true
 		p.Idle.StartOnDemand = true
-		p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "sr-ollama", Engine: "ollama", Model: srOllamaModel, ContextTokens: neContext, MaxOutputTokens: neOutput, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "sr-ollama", Revision: "1"}})
+		p.Profiles = append(p.Profiles, nodepolicy.Profile{Name: "sr-custom", Engine: "llamacpp-custom", Model: srCustomModel, ContextTokens: neContext, MaxOutputTokens: neOutput, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "sr-custom", Revision: "1"}})
 	})
 	f.stop(t)
 	path := filepath.Join(f.app, "local-qualification.json")
@@ -1974,23 +1940,23 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	if err := neDecode(bytes.NewReader(data), &registry); err != nil {
 		t.Fatalf("decode SR cross-engine qualification registry: %v", err)
 	}
-	digest := sha256.Sum256([]byte(srOllamaModel))
-	qualification, err := json.Marshal(map[string]any{"id": "sr-ollama", "revision": "1", "engine": "ollama", "model": srOllamaModel, "modelDigests": []string{hex.EncodeToString(digest[:])}, "launchDigests": []string{launch}, "tokenizer": "synthetic-sr-tokenizer", "chatTemplate": "synthetic-sr-template", "contextTokens": neContext, "maxOutputTokens": neOutput, "routes": []string{"/v1/chat/completions"}, "shapes": map[string]any{"tools": false, "structuredOutput": []string{}, "reasoningReplay": false}, "accounting": map[string]any{"method": "utf8-bytes", "requestOverheadTokens": 8, "messageOverheadTokens": 4, "toolOverheadTokens": 0, "schemaOverheadTokens": 0}, "evidence": "Fixture-only cross-engine admission proof. No native Ollama, model, hardware or performance qualification."})
+	digest := sha256.Sum256([]byte(srCustomModel))
+	qualification, err := json.Marshal(map[string]any{"id": "sr-custom", "revision": "1", "engine": "llamacpp-custom", "model": srCustomModel, "modelDigests": []string{hex.EncodeToString(digest[:])}, "launchDigests": []string{launch}, "tokenizer": "synthetic-sr-tokenizer", "chatTemplate": "synthetic-sr-template", "contextTokens": neContext, "maxOutputTokens": neOutput, "routes": []string{"/v1/chat/completions"}, "shapes": map[string]any{"tools": false, "structuredOutput": []string{}, "reasoningReplay": false}, "accounting": map[string]any{"method": "utf8-bytes", "requestOverheadTokens": 8, "messageOverheadTokens": 4, "toolOverheadTokens": 0, "schemaOverheadTokens": 0}, "evidence": "Fixture-only cross-engine admission proof. No native descriptor engine, model, hardware or performance qualification."})
 	if err != nil {
-		t.Fatalf("encode SR synthetic Ollama qualification: %v", err)
+		t.Fatalf("encode SR synthetic descriptor engine qualification: %v", err)
 	}
 	registry.Qualifications = append(registry.Qualifications, qualification)
 	jointWriteJSON(t, path, registry)
 	f.start(t)
 	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
 	f.retainRuntime(t)
-	f.call(t, "engine:start", map[string]string{"engine": "ollama"}, nil)
+	f.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"}, nil)
 	var capability nodepolicy.StrictAdmissionModel
-	neEventually(t, "qualified Ollama destination after registry restart", neCallBudget, func() bool {
+	neEventually(t, "qualified descriptor engine destination after registry restart", neCallBudget, func() bool {
 		models := f.models(t)
 		if models.Policy != nil && models.Policy.StrictAdmission != nil {
 			for _, model := range models.Policy.StrictAdmission.Models {
-				if model.Engine == "ollama" && model.Model == srOllamaModel {
+				if model.Engine == "llamacpp-custom" && model.Model == srCustomModel {
 					capability = model
 					return true
 				}
@@ -1998,30 +1964,30 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 		}
 		return false
 	})
-	f.call(t, "ollama-proxy:node/add-manual", map[string]any{"id": "sr-ollama-self", "host": "127.0.0.1", "port": f.switchFacadePort, "addresses": []string{"127.0.0.1"}, "models": []string{srOllamaModel}}, nil)
-	f.call(t, "ollama-proxy:node/select", map[string]string{"id": "sr-ollama-self"}, nil)
-	neEventually(t, "healthy Ollama facade", neCallBudget, func() bool {
-		status, data, err := f.http(http.MethodGet, f.switchFacadePort, "/", nil, nil)
-		return err == nil && status == http.StatusOK && string(data) == "Ollama is running"
+	f.call(t, "llamacpp-custom-proxy:node/add-manual", map[string]any{"id": "sr-custom-self", "host": "127.0.0.1", "port": f.switchFacadePort, "addresses": []string{"127.0.0.1"}, "models": []string{srCustomModel}}, nil)
+	f.call(t, "llamacpp-custom-proxy:node/select", map[string]string{"id": "sr-custom-self"}, nil)
+	neEventually(t, "healthy descriptor engine facade", neCallBudget, func() bool {
+		status, _, err := f.http(http.MethodGet, f.switchFacadePort, "/v1/models", nil, nil)
+		return err == nil && status == http.StatusOK
 	})
 	f.resident(t, neModel)
 	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
 	neEventually(t, "source resident occupies the global model slot", neCallBudget, func() bool {
 		models := f.models(t)
-		return reflect.DeepEqual(models.Loaded["llamacpp"], []string{neModel}) && len(models.Loaded["ollama"]) == 0
+		return reflect.DeepEqual(models.Loaded["llamacpp"], []string{neModel}) && len(models.Loaded["llamacpp-custom"]) == 0
 	})
 	targetState := func() srRuntimeState {
 		t.Helper()
 		status, data, err := f.http(http.MethodGet, f.switchEnginePort, "/__sr/control", nil, nil)
 		var state srRuntimeState
 		if err != nil || status != http.StatusOK {
-			t.Fatalf("private Ollama control status=%d err=%v", status, err)
+			t.Fatalf("private descriptor engine control status=%d err=%v", status, err)
 		}
 		if err := neDecode(bytes.NewReader(data), &state); err != nil {
-			t.Fatalf("decode SR private Ollama runtime control: %v", err)
+			t.Fatalf("decode SR private descriptor engine runtime control: %v", err)
 		}
 		if state.Base.Nonce != f.nonce || state.Base.PID <= 0 {
-			t.Fatal("private Ollama runtime authentication failed")
+			t.Fatal("private descriptor engine runtime authentication failed")
 		}
 		return state
 	}
@@ -2032,14 +1998,14 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	}
 	source, target := f.control(t, ""), targetState()
 	sourceStarts, starts := len(f.starts(t)), targetStarts()
-	if source.Models[neModel] != (srEffects{Loaded: true, Loads: 1}) || source.Models[srNeighbor] != (srEffects{}) || target.Models[srOllamaModel] != (srEffects{}) || source.Base.Chats != 0 || target.Base.Chats != 0 || source.Content != 0 || target.Content != 0 || source.Base.Unexpected != 0 || target.Base.Unexpected != 0 || starts == 0 {
+	if source.Models[neModel] != (srEffects{Loaded: true, Loads: 1}) || source.Models[srNeighbor] != (srEffects{}) || target.Models[srCustomModel] != (srEffects{}) || source.Base.Chats != 0 || target.Base.Chats != 0 || source.Content != 0 || target.Content != 0 || source.Base.Unexpected != 0 || target.Base.Unexpected != 0 || starts == 0 {
 		t.Fatalf("last-slot fixture must start with only an idle hard resident: source=%+v target=%+v starts=%d", source, target, starts)
 	}
 	request := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 100, ColdStartBudgetMs: 1000, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-cross-engine-origin", RequestID: "1"}, Identity: capability.Identity}
 	if err := request.Validate(); err != nil {
 		t.Fatalf("validate cross-engine occupied request: %v", err)
 	}
-	body := []byte(`{"model":"sr-ollama:latest","messages":[{"role":"user","content":"fixture"}],"max_tokens":128,"stream":false}`)
+	body := []byte(`{"model":"sr-custom","messages":[{"role":"user","content":"fixture"}],"max_tokens":128,"stream":false}`)
 	unloadPattern := regexp.MustCompile(`(?m)^[^\r\n]*\[nvpair-ui-broker\] INFO model unloaded engine=(\S+) model=(\S+) reason=(\S+)\r?\n`)
 	refusalLogOffset := len(f.p.output.String())
 	started := time.Now()
@@ -2086,7 +2052,7 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	f.call(t, "engine:unload-model", map[string]string{"engine": "llamacpp", "model": neModel}, nil)
 	neEventually(t, "global model slot released by source readback", neCallBudget, func() bool {
 		models := f.models(t)
-		return len(models.Loaded["llamacpp"]) == 0 && len(models.Loaded["ollama"]) == 0 && !f.control(t, "").Models[neModel].Loaded
+		return len(models.Loaded["llamacpp"]) == 0 && len(models.Loaded["llamacpp-custom"]) == 0 && !f.control(t, "").Models[neModel].Loaded
 	})
 	released := f.control(t, "")
 	if released.Models[neModel] != (srEffects{Loads: 1, Unloads: 1}) || released.Models[srNeighbor] != source.Models[srNeighbor] {
@@ -2143,16 +2109,16 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	if err := json.Unmarshal(data, &completion); err != nil {
 		t.Fatalf("decode cross-engine released-slot completion: %v", err)
 	}
-	if completion.Model != srOllamaModel || len(completion.Choices) != 1 || completion.Choices[0].Message.Content != "fixture-only" {
+	if completion.Model != srCustomModel || len(completion.Choices) != 1 || completion.Choices[0].Message.Content != "fixture-only" {
 		t.Fatalf("released cross-engine slot status=%d completion=%+v", status, completion)
 	}
 	afterTarget = targetState()
-	if afterTarget.Base.PID != target.Base.PID || afterTarget.Models[srOllamaModel] != (srEffects{Loaded: true, Loads: 1, Chats: 1}) || afterTarget.Base.Loads != 1 || afterTarget.Base.Unloads != 0 || afterTarget.Base.Chats != 1 || afterTarget.Content != 0 || afterTarget.Base.Unexpected != 0 || afterTarget.Base.LeakedHeaders != 0 || targetStarts() != starts || len(f.starts(t)) != sourceStarts {
+	if afterTarget.Base.PID != target.Base.PID || afterTarget.Models[srCustomModel] != (srEffects{Loaded: true, Loads: 1, Chats: 1}) || afterTarget.Base.Loads != 1 || afterTarget.Base.Unloads != 0 || afterTarget.Base.Chats != 1 || afterTarget.Content != 0 || afterTarget.Base.Unexpected != 0 || afterTarget.Base.LeakedHeaders != 0 || targetStarts() != starts || len(f.starts(t)) != sourceStarts {
 		t.Fatalf("admissible target effects=%+v", afterTarget)
 	}
 	neEventually(t, "only the cross-engine demand owns the released slot", neCallBudget, func() bool {
 		models := f.models(t)
-		return len(models.Loaded["llamacpp"]) == 0 && reflect.DeepEqual(models.Loaded["ollama"], []string{srOllamaModel})
+		return len(models.Loaded["llamacpp"]) == 0 && reflect.DeepEqual(models.Loaded["llamacpp-custom"], []string{srCustomModel})
 	})
 	finalSource := f.control(t, "")
 	// A stale broker node/set-residency push can make target admission repeat

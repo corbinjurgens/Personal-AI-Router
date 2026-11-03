@@ -24,7 +24,7 @@
 //
 // Design decisions this package encodes:
 //
-//   - Name is lower-case and unpunctuated ("lmstudio", not "lm-studio"). The
+//   - Name is lower-case and unpunctuated ("llamacpp"). The
 //     desktop UI uses its own hyphenated spelling for display types and bridges
 //     to this one at the process boundary; that bridge is the only place the two
 //     vocabularies are allowed to meet.
@@ -34,8 +34,8 @@
 //
 //     ComponentName ("<Name>-proxy") is the per-engine facade identity: the
 //     JSON-RPC relay prefix, the error-ID prefix, and the TUI proxies-view tab.
-//     These are per-engine because a client addressing "ollama-proxy:nodes/list"
-//     or reading an "ollama-proxy:upstream-unreachable" error means that engine,
+//     These are per-engine because a client addressing "llamacpp-proxy:nodes/list"
+//     or reading a "llamacpp-proxy:upstream-unreachable" error means that engine,
 //     not whichever process happens to serve it.
 //
 //     ProxyComponent ("nvpair-proxy") is the process identity: the applog
@@ -56,12 +56,8 @@
 //     test passes. TestHealthProxyRowMatchesTheBrokerCrashIdentity in
 //     nvpair-tui/ui is what turns this paragraph into something enforced.
 //
-//     These were one value until the proxy binary began hosting more than one
-//     engine. Ollama's relay prefix was itself once the bare "proxy" while its
-//     error IDs were already "ollama-proxy" — two near-identical identities
-//     that coincided for LM Studio and diverged for Ollama, which is the trap
-//     this package exists to prevent. Keep the distinction explicit: a new
-//     identity belongs to the facade or to the process, never to both.
+//     Keep the distinction explicit: an identity belongs to the facade or to
+//     the process, never to both.
 //
 //   - FacadePort is the engine's own client-facing default — the port a stock
 //     install listens on, and therefore the port PAIR's compatibility proxy
@@ -69,10 +65,8 @@
 //     relocates the engine to free that port, and the base of the next-free-port
 //     search. The two must differ.
 //
-//   - All is ordered, and Ollama is first. The broker prepares managed ports in
-//     this order, and Ollama's preparation reserves any inherited OLLAMA_HOST
-//     alias that later engines must route around. Iterating a map here would
-//     make that a coin flip and the test that guards it a flake.
+//   - All is ordered so the broker prepares built-in facade ports in a
+//     deterministic order. Descriptor engines derive their identities separately.
 package engines
 
 import (
@@ -89,7 +83,7 @@ type Engine struct {
 	Name string
 
 	// DisplayName is the engine's name in user-facing text. Not derivable from
-	// Name: it carries capitalization and, for LM Studio, a space.
+	// Name: it carries capitalization and punctuation.
 	DisplayName string
 
 	// DiscoveryService is the compact TXT key under which a node advertises this
@@ -105,12 +99,8 @@ type Engine struct {
 	EnginePortBase int
 
 	// PortFile is the per-user file this engine's proxy persists its chosen
-	// port to. Declared rather than derived from Name, because Ollama's
-	// predates the multi-engine world and is the bare "proxy-port.json";
-	// deriving it would rename the file under every existing install and
-	// silently orphan the port a user had set. The proxy writes it and the
-	// broker reads it when reserving ports away from the OLLAMA_HOST alias,
-	// so the two must agree — which is why it lives here.
+	// port to. The proxy writes it and the broker reads it when reserving
+	// sibling facade ports, so both use this declaration.
 	PortFile string
 }
 
@@ -136,29 +126,11 @@ func (e Engine) ComponentName() string { return e.Name + "-proxy" }
 // The engine ids, for a caller that has to treat one engine differently from
 // another. Each is the Name of its entry below.
 const (
-	NameOllama   = "ollama"
-	NameLMStudio = "lmstudio"
 	NameLlamaCPP = "llamacpp"
 )
 
-// all is the ordered engine set. Ollama is first; see the package comment.
+// all is the ordered built-in engine set.
 var all = []Engine{
-	{
-		Name:             NameOllama,
-		DisplayName:      "Ollama",
-		DiscoveryService: servicekey.Ollama,
-		FacadePort:       11434,
-		EnginePortBase:   11435,
-		PortFile:         "proxy-port.json",
-	},
-	{
-		Name:             NameLMStudio,
-		DisplayName:      "LM Studio",
-		DiscoveryService: servicekey.LMStudio,
-		FacadePort:       1234,
-		EnginePortBase:   1235,
-		PortFile:         "lmstudio-proxy-port.json",
-	},
 	{
 		Name:             NameLlamaCPP,
 		DisplayName:      "llama.cpp",
@@ -201,7 +173,7 @@ func ByName(name string) (Engine, bool) {
 // process hosting several facades can tell which one a message concerns.
 //
 // This is the proxy's *internal* wire addressing, deliberately not
-// ComponentName: "ollama-proxy:" is what a client addresses the component by,
+// ComponentName: "llamacpp-proxy:" is what a client addresses the component by,
 // and reusing it here would leave two different meanings on one string. The
 // prefix matches the engine ids in facade/enable, so one message and its enable
 // name the facade the same way.

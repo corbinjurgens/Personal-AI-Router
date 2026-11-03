@@ -40,14 +40,6 @@ func TestBundledModelOperationsKeepTheirWire(t *testing.T) {
 	cases := []struct {
 		engine, op, action, params string
 	}{
-		{"ollama", "load", "run_model", `{"model":"m:1","stream":false}`},
-		{"ollama", "unload", "unload_model", `{"keep_alive":0,"model":"m:1"}`},
-		{"ollama", "delete", "delete_model", `{"name":"m:1"}`},
-		{"ollama", "pull", "pull_model", `{"name":"m:1"}`},
-		{"lmstudio", "load", "load_model", `{"model":"m:1"}`},
-		{"lmstudio", "unload", "unload_model", `{"model":"m:1"}`},
-		{"lmstudio", "delete", "delete_model", `{"model":"m:1"}`},
-		{"lmstudio", "pull", "pull_model", `{"model":"m:1"}`},
 		{"llamacpp", "load", "load_model", `{"model":"m:1"}`},
 		{"llamacpp", "unload", "unload_model", `{"model":"m:1"}`},
 		{"llamacpp", "delete", "delete_model", `{"model":"m:1"}`},
@@ -66,23 +58,13 @@ func TestBundledModelOperationsKeepTheirWire(t *testing.T) {
 	}
 }
 
-// Only Ollama's load waits longer than the ordinary budget, as before, and the
-// budget it binds is the former 10-minute load allowance.
+// The bundled engine uses the ordinary response budget for load.
 func TestBundledLoadBudgets(t *testing.T) {
 	ex := bundledTestExecutor(t)
-	want := map[string]time.Duration{"ollama": 10 * time.Minute, "lmstudio": 0, "llamacpp": 0}
+	want := map[string]time.Duration{"llamacpp": 0}
 	for engine, budget := range want {
 		if got := ex.loadResponseBudget(engine); got != budget {
 			t.Errorf("%s load budget = %s, want %s", engine, got, budget)
-		}
-	}
-	ollama, _ := ex.reg.Get("ollama")
-	if got := ollama.actionResponseBudget("run_model"); got != 10*time.Minute {
-		t.Errorf("ollama run_model budget = %s, want 10m, so engine:action keeps it too", got)
-	}
-	for _, action := range []string{"unload_model", "delete_model", "pull_model", "list_models"} {
-		if got := ollama.actionResponseBudget(action); got != 0 {
-			t.Errorf("ollama %s budget = %s, want the ordinary budget", action, got)
 		}
 	}
 }

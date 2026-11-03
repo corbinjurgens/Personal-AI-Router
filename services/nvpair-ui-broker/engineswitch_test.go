@@ -925,7 +925,7 @@ func TestSwitchCoordinatorCompletesAfterDurablePhasesAndPublication(t *testing.T
 func TestSettingsServingFullSwitchPreservesDeclarations(t *testing.T) {
 	test := func(name, failStep string) {
 		t.Run(name, func(t *testing.T) {
-			h := newSwitchHarnessFor(t, "lmstudio")
+			h := newSwitchHarnessFor(t, "llamacpp-custom")
 			h.failStep = failStep
 			serving := brokerServingFixture()
 			base := h.engine.answer
@@ -941,7 +941,7 @@ func TestSettingsServingFullSwitchPreservesDeclarations(t *testing.T) {
 				}
 				return settings.LaunchState{Engine: p.Engine, ServerPort: 12345, EffectivePort: 12345, Running: true, Editable: true, Format: "pair-arguments-v1", Serving: serving.Clone()}, ""
 			})
-			for _, engine := range []string{"llamacpp", "lmstudio"} {
+			for _, engine := range []string{"llamacpp", "llamacpp-custom"} {
 				snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: engine}, "")
 				if err != nil || !snapshot.Settings.Serving.Equal(serving) {
 					t.Fatal("switch baseline lost serving")
@@ -955,7 +955,7 @@ func TestSettingsServingFullSwitchPreservesDeclarations(t *testing.T) {
 			if !receipt.Terminal || (failStep == "" && receipt.Phase != settings.SwitchCompleted) || (failStep != "" && receipt.Phase == settings.SwitchCompleted) {
 				t.Fatalf("unexpected switch phase %s", receipt.Phase)
 			}
-			for _, engine := range []string{"llamacpp", "lmstudio"} {
+			for _, engine := range []string{"llamacpp", "llamacpp-custom"} {
 				snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: engine}, "")
 				if err != nil || !snapshot.Settings.Serving.Equal(serving) {
 					t.Fatal("switch completion/compensation lost declaration")

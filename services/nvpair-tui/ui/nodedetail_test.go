@@ -1090,14 +1090,11 @@ func TestProxyPortCellStates(t *testing.T) {
 // column depends on.
 func TestProxyIndexForEngine(t *testing.T) {
 	p := newProxyTracker()
-	if got := p.indexForEngine("ollama"); got != 0 {
-		t.Errorf("ollama -> %d, want 0", got)
-	}
-	if got := p.indexForEngine("lmstudio"); got != 1 {
-		t.Errorf("lmstudio -> %d, want 1", got)
+	if got := p.indexForEngine("llamacpp"); got != 0 {
+		t.Errorf("llamacpp -> %d, want 0", got)
 	}
 	// Case and padding must not decide whether a port renders.
-	if got := p.indexForEngine("  OLLAMA "); got != 0 {
+	if got := p.indexForEngine("  LLAMACPP "); got != 0 {
 		t.Errorf("normalisation failed: %d", got)
 	}
 	if got := p.indexForEngine("vllm"); got != -1 {

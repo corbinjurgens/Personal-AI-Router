@@ -36,6 +36,11 @@ func brokerWithEngineProxyProfile(profile engineProxyProfile) *Broker {
 		b.engineProxies = map[string]*engineProxyRuntime{
 			profile.Name: {profile: profile},
 		}
+		for _, sibling := range engineProxyProfiles {
+			if sibling.Name != profile.Name {
+				b.engineProxies[sibling.Name] = &engineProxyRuntime{profile: sibling}
+			}
+		}
 	})
 	return b
 }
@@ -43,6 +48,8 @@ func brokerWithEngineProxyProfile(profile engineProxyProfile) *Broker {
 func TestDefaultEngineFacadeRetriesAwayFromReservedPorts(t *testing.T) {
 	isolateBrokerTestConfig(t)
 	profile := testDefaultEngineProxyProfile()
+	profile.FacadePort = 8078
+	profile.EnginePortBase = 8079
 	b := brokerWithEngineProxyProfile(profile)
 
 	proxyClient, proxyServer := net.Pipe()
@@ -68,9 +75,9 @@ func TestDefaultEngineFacadeRetriesAwayFromReservedPorts(t *testing.T) {
 	if first.Port != profile.FacadePort {
 		t.Fatalf("first port = %d, want stock facade %d", first.Port, profile.FacadePort)
 	}
-	// 1234 is this backend and LM Studio's facade; 1235 is LM Studio's backend.
-	if second.Port != 1236 {
-		t.Fatalf("fallback port = %d, want 1236 after backend and sibling exclusions", second.Port)
+	// Skip this engine's 8079, llama.cpp's facade 8080 and its engine port 8081.
+	if second.Port != 8082 {
+		t.Fatalf("fallback port = %d, want 8082 after engine and sibling exclusions", second.Port)
 	}
 	if !second.IgnorePersistedPort {
 		t.Fatal("fallback retry could restore the port that just failed")

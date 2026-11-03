@@ -139,8 +139,6 @@ function emptyPresence(): EnginePresence {
 
 function emptyEngines(): Record<ProxyEngine, EnginePresence> {
     return {
-        ollama: emptyPresence(),
-        'lm-studio': emptyPresence(),
         'llama-cpp': emptyPresence()
     }
 }

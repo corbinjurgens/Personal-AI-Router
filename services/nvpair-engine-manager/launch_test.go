@@ -24,7 +24,7 @@ func (command launchCommand) text() (string, error) {
 func TestResolvedLaunchMatchesBundledEngines(t *testing.T) {
 	reg := loadWithOverrides(t, t.TempDir())
 	vars := map[string]string{"host": "127.0.0.1", "port": "12345", "cli": "/test path/lms", "install_dir": "/test path", "models_dir": "/test models"}
-	for _, engine := range []string{"ollama", "lmstudio", "llamacpp"} {
+	for _, engine := range []string{"llamacpp"} {
 		manifest, ok := reg.Get(engine)
 		if !ok {
 			t.Fatalf("missing bundled engine %q", engine)
@@ -36,16 +36,7 @@ func TestResolvedLaunchMatchesBundledEngines(t *testing.T) {
 				var launch launchCommand
 				var err error
 				var want []string
-				if engine == "ollama" {
-					launch, err = resolveProcessLaunch(platform.Runtime, "/test path/ollama", vars)
-					want = []string{"OLLAMA_HOST=127.0.0.1:12345", "/test path/ollama", "serve"}
-					if strings.HasPrefix(platformKey, "linux/") {
-						want = append([]string{"LD_LIBRARY_PATH=/test path/lib/ollama"}, want...)
-					}
-				} else if engine == "lmstudio" {
-					launch, err = resolveCommandLaunch(platform.Runtime.Start[0], vars)
-					want = []string{"/test path/lms", "server", "start", "--port", "12345", "--bind", "127.0.0.1"}
-				} else {
+				{
 					var bin string
 					bin, err = resolvePlaceholders(platform.Runtime.Bin, vars)
 					if err == nil {

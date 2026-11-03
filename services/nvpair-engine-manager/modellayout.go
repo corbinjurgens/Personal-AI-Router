@@ -65,7 +65,7 @@ func (e *Executor) modelStoreFor(engine string) (*engineState, engineModelStore,
 	}
 	store := engineModelStore{engine: engine, adapter: modelStoreAdapter(st.manifest.FamilyOrDefault())}
 	switch store.adapter {
-	case engines.NameOllama:
+	case modelFamilyOllama:
 		store.root = engineEnvValue(st, "OLLAMA_MODELS")
 		if store.root == "" && st.modelsDir != "" {
 			store.root = filepath.Join(st.modelsDir, "models")
@@ -75,7 +75,7 @@ func (e *Executor) modelStoreFor(engine string) (*engineState, engineModelStore,
 		if store.root == "" {
 			store.root = st.modelsDir
 		}
-	case engines.NameLMStudio:
+	case modelFamilyLMStudio:
 		store.root = st.modelsDir
 		if cli := st.plat.Runtime.CLI; cli != "" {
 			store.cli = expandPath(cli)
@@ -144,7 +144,7 @@ func (e *Executor) modelSourceFilesBound(ctx context.Context, engine, model stri
 	}
 	var list modelFileList
 	switch store.adapter {
-	case engines.NameOllama:
+	case modelFamilyOllama:
 		var old *sourceSnapshot
 		if expected != nil {
 			old = expected.source
@@ -182,7 +182,7 @@ func (e *Executor) modelSourceFilesBound(ctx context.Context, engine, model stri
 		}
 	case engines.NameLlamaCPP:
 		list, err = e.llamaExportFilesBound(ctx, st, store, model, access, expected)
-	case engines.NameLMStudio:
+	case modelFamilyLMStudio:
 		list, err = e.lmstudioSourceFilesBound(ctx, st, store, model, access, expected)
 	}
 	if err != nil {
@@ -306,11 +306,11 @@ func (e *Executor) planModelCopy(st *engineState, store engineModelStore, model 
 		plan, err = customArtifactPlan(store, model, list)
 	} else {
 		switch store.adapter {
-		case engines.NameOllama:
+		case modelFamilyOllama:
 			plan, err = ollamaPlan(store.root, model, list)
 		case engines.NameLlamaCPP:
 			plan, err = e.llamacppPlan(st, store.root, model, list)
-		case engines.NameLMStudio:
+		case modelFamilyLMStudio:
 			plan, err = e.lmstudioPlan(st, store, list)
 		default:
 			return copyPlan{}, fmt.Errorf("%w: %q", errModelCopyUnsupported, store.engine)

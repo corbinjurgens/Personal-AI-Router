@@ -429,32 +429,6 @@ func TestExpandPathForms(t *testing.T) {
 	}
 }
 
-func TestBundledWindowsLMStudioUninstallExpansion(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio manifest not loaded")
-	}
-	for _, arch := range []string{"amd64", "arm64"} {
-		p, ok := m.PlatformFor("windows", arch)
-		if !ok || p.Uninstall == nil || len(p.Uninstall.Run) == 0 {
-			t.Fatalf("windows/%s uninstall command missing", arch)
-		}
-		command := p.Uninstall.Run[len(p.Uninstall.Run)-1]
-		if got := expandPathForOS(command, "windows"); got != command {
-			t.Errorf("windows/%s uninstall command changed during expansion:\n got: %q\nwant: %q", arch, got, command)
-		}
-		for _, variable := range []string{"$root", "$_", "$env:USERPROFILE"} {
-			if !strings.Contains(command, variable) {
-				t.Errorf("windows/%s uninstall command is missing %q", arch, variable)
-			}
-		}
-	}
-}
-
 // TestBundledManifestsGolden validates the shipped manifests load and
 // validate (a typo would otherwise only surface as a runtime fatal).
 func TestBundledManifestsGolden(t *testing.T) {
@@ -462,7 +436,7 @@ func TestBundledManifestsGolden(t *testing.T) {
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 		t.Fatalf("bundled manifests invalid: %v", err)
 	}
-	for _, want := range []string{"ollama", "lmstudio", "llamacpp"} {
+	for _, want := range []string{"llamacpp"} {
 		m, ok := reg.Get(want)
 		if !ok {
 			t.Fatalf("missing bundled engine %q (have %v)", want, reg.Names())

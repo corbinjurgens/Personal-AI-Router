@@ -39,18 +39,6 @@ func TestBundledDescriptors(t *testing.T) {
 			ModelNaming: engines.ModelNamingExact, ModelStore: "llamacpp", Catalog: "llamacpp",
 			Operations: map[string]engines.OperationCapability{"load": {}, "unload": {}, "pull": {}, "delete": {}},
 		},
-		{
-			Engine: "lmstudio", Family: "lmstudio", Label: "LM Studio",
-			Protocols:   []string{engines.ProtocolOpenAIV1, engines.ProtocolAnthropicMessages},
-			ModelNaming: engines.ModelNamingExact, ModelStore: "lmstudio", Catalog: "lmstudio",
-			Operations: map[string]engines.OperationCapability{"load": {}, "unload": {}, "pull": {}, "delete": {}},
-		},
-		{
-			Engine: "ollama", Family: "ollama", Label: "Ollama",
-			Protocols:   []string{engines.ProtocolOllamaAPI, engines.ProtocolOpenAIV1, engines.ProtocolAnthropicMessages},
-			ModelNaming: engines.ModelNamingImpliedLatestTag, ModelStore: "ollama", Catalog: "ollama",
-			Operations: map[string]engines.OperationCapability{"load": {ResponseTimeoutS: 600}, "unload": {}, "pull": {}, "delete": {}},
-		},
 	}
 	got := reg.Descriptors()
 	if len(got) != len(all) {

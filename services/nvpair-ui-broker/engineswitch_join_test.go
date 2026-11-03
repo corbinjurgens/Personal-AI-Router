@@ -99,7 +99,7 @@ func TestSwitchIdentityWithdrawalFailurePreventsMutationAndCleanup(t *testing.T)
 }
 
 func TestSwitchSettingsPublicationKeepsReservedIdentitiesWithdrawn(t *testing.T) {
-	h := newSwitchHarnessFor(t, "lmstudio")
+	h := newSwitchHarnessFor(t, "llamacpp-custom")
 	p := h.request(t, "identity-refresh")
 	h.active.Store(1)
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err != nil {
@@ -108,8 +108,8 @@ func TestSwitchSettingsPublicationKeepsReservedIdentitiesWithdrawn(t *testing.T)
 	// Keep the coordinator in drain while a periodic settings publication runs.
 	h.b.engineConfigMu.Lock()
 	h.b.engineSettings = map[string]*engineSettingsRecord{
-		"llamacpp": {Snapshot: appliedSnapshot("llamacpp", 1)},
-		"lmstudio": {Snapshot: appliedSnapshot("lmstudio", 1)},
+		"llamacpp":        {Snapshot: appliedSnapshot("llamacpp", 1)},
+		"llamacpp-custom": {Snapshot: appliedSnapshot("llamacpp-custom", 1)},
 	}
 	h.b.publishSettingsLocked()
 	r := h.b.nodePolicyRuntime()

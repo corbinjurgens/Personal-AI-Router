@@ -350,7 +350,7 @@ func mustPid(t *testing.T, line string) int {
 // thing that actually makes the reservation map whole.
 func TestAllDefaultEnginesAreServedByOneProxyProcess(t *testing.T) {
 	configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
-	facadePorts := map[string]int{"ollama": freePort(t), "lmstudio": freePort(t), "llamacpp": freePort(t)}
+	facadePorts := map[string]int{"llamacpp": freePort(t)}
 	writePrivateBrokerEngineSettings(t, configDir, clusterDir, facadePorts)
 
 	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, configDir, clusterDir,
@@ -374,20 +374,13 @@ func TestAllDefaultEnginesAreServedByOneProxyProcess(t *testing.T) {
 
 	// Every facade must actually come up, or "one process" would be trivially
 	// true by one of them having failed.
-	ollamaPort := waitEngineProxyReady(t, "ollama-proxy", stdin, msgs, 15*time.Second)
-	lmstudioPort := waitEngineProxyReady(t, "lmstudio-proxy", stdin, msgs, 15*time.Second)
 	llamacppPort := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second)
-	for engine, port := range map[string]int{"ollama": ollamaPort, "lmstudio": lmstudioPort, "llamacpp": llamacppPort} {
+	for engine, port := range map[string]int{"llamacpp": llamacppPort} {
 		if port != facadePorts[engine] {
 			t.Fatalf("%s facade port=%d want private port=%d", engine, port, facadePorts[engine])
 		}
 	}
-	if len(map[int]bool{ollamaPort: true, lmstudioPort: true, llamacppPort: true}) != 3 {
-		t.Fatalf("facade ports must be distinct: ollama=%d lmstudio=%d llamacpp=%d",
-			ollamaPort, lmstudioPort, llamacppPort)
-	}
-	t.Logf("facades ready: ollama=%d lmstudio=%d llamacpp=%d",
-		ollamaPort, lmstudioPort, llamacppPort)
+	t.Logf("llama.cpp facade ready on private port %d", llamacppPort)
 
 	// Collect every spawn announced up to this point plus a settling window, so
 	// a second process starting late still shows up.

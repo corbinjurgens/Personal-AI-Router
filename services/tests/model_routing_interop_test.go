@@ -289,7 +289,7 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 	ineligible := newRoutingUpstream(t, http.StatusOK)
 
 	configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
-	facades := map[string]int{"llamacpp": freePort(t), "llamacpp-custom": freePort(t), "ollama": freePort(t)}
+	facades := map[string]int{"llamacpp": freePort(t), "llamacpp-custom": freePort(t)}
 	writePrivateBrokerEngineSettings(t, configDir, clusterDir, facades)
 	manifest := privateFixtureManifest(t, "llamacpp-custom", filepath.Join(configDir, "absent-models"), filepath.Join(configDir, "absent-engine"), map[string]any{"port": 0, "ready": nil, "health": nil})
 	manifest["protocols"] = []string{"openai-v1", "anthropic-messages"}
@@ -309,7 +309,7 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 	}...),
 		"--scanner-path", scanner,
 		"--engine-manager-path", engineMgrBin,
-		"--proxy-path", control.image, "--proxy-engines", "llamacpp,ollama",
+		"--proxy-path", control.image, "--proxy-engines", "llamacpp",
 	)
 	t.Cleanup(cleanup)
 	go func() {
@@ -320,7 +320,6 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 	control.ready(t, "llamacpp", facades["llamacpp"])
 	control.ready(t, "llamacpp-custom", facades["llamacpp-custom"])
-	control.ready(t, "ollama", facades["ollama"])
 
 	type proxyCase struct {
 		name   string
@@ -330,9 +329,6 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 	}
 	cases := []proxyCase{
 		{name: "llamacpp", engine: "llamacpp", path: "/v1/chat/completions", port: facades["llamacpp"]},
-		// llama.cpp's fixed profile does not classify the Anthropic route as
-		// inference. Keep the original native route-classification case.
-		{name: "ollama-anthropic", engine: "ollama", path: "/v1/messages", port: facades["ollama"]},
 		{name: "llamacpp-custom", engine: "llamacpp-custom", path: "/v1/chat/completions", port: facades["llamacpp-custom"]},
 		{name: "llamacpp-custom-anthropic", engine: "llamacpp-custom", path: "/v1/messages", port: facades["llamacpp-custom"]},
 	}

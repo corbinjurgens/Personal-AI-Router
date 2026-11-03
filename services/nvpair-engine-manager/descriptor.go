@@ -18,10 +18,16 @@ import (
 
 const descriptorsMethod = "engine:descriptors"
 
+// Coded adapter families are independent of built-in routing identities.
+const (
+	modelFamilyOllama   = "ollama"
+	modelFamilyLMStudio = "lmstudio"
+)
+
 // adapterFamilies are the families with a coded model-store adapter
 // (modellayout.go) and a download catalogue (catalog.go). An adapter is named
 // after its family.
-var adapterFamilies = []string{engines.NameOllama, engines.NameLMStudio, engines.NameLlamaCPP}
+var adapterFamilies = []string{modelFamilyOllama, modelFamilyLMStudio, engines.NameLlamaCPP}
 
 // modelStoreAdapter returns the model-store adapter a family selects, or "".
 func modelStoreAdapter(family string) string {

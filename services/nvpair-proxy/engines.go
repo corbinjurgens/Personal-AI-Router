@@ -72,12 +72,8 @@ type engineProfile struct {
 	Family string
 
 	// StandalonePort is the port the proxy binds when nothing passes --port
-	// and no port has been persisted. It must be neither FacadePort (which
-	// the engine itself owns) nor a port an engine is relocated onto.
-	//
-	// Ollama's 11435 currently equals its EnginePortBase, which violates that
-	// second half. It is left as-is because it is the value on disk in every
-	// existing install; see the plan's port-field note.
+	// and no port has been persisted. ReservedPersistedPort keeps the engine's
+	// managed port out of persisted proxy-port restoration.
 	StandalonePort int
 
 	// Routes classifies the paths this engine's clients call. It is NOT an
@@ -176,26 +172,10 @@ func (p engineProfile) dynamic() bool {
 var profiles = buildProfiles()
 
 func buildProfiles() []engineProfile {
-	ollama, _ := engines.ByName("ollama")
-	lmstudio, _ := engines.ByName("lmstudio")
 	llamacpp, _ := engines.ByName("llamacpp")
 	llamaCPPRoutes := slices.Concat(llamaCPPBaseRoutes, openAIInferenceRoutes)
 
 	return []engineProfile{
-		{
-			Engine:                ollama,
-			StandalonePort:        11435,
-			Routes:                slices.Concat(openAIModelListRoutes, openAIInferenceRoutes, anthropicInferenceRoutes),
-			ModelNaming:           exactID,
-			ReservedPersistedPort: 0,
-		},
-		{
-			Engine:                lmstudio,
-			StandalonePort:        1234,
-			Routes:                slices.Concat(openAIModelListRoutes, openAIInferenceRoutes, anthropicInferenceRoutes),
-			ModelNaming:           exactID,
-			ReservedPersistedPort: 0,
-		},
 		{
 			Engine:                llamacpp,
 			StandalonePort:        8080,

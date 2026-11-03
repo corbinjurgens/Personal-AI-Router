@@ -441,29 +441,7 @@ func TestConfiguredDetectionUninstallRefusesExternalExecutable(t *testing.T) {
 }
 
 func TestBundledDetectionAlternatives(t *testing.T) {
-	windowsOllama := []string{`{install_dir}\ollama.exe`, `%LOCALAPPDATA%\Programs\Ollama\ollama.exe`}
-	darwinOllama := []string{
-		"/Applications/Ollama.app/Contents/Resources/ollama",
-		"~/Applications/Ollama.app/Contents/Resources/ollama",
-		"{install_dir}/Ollama.app/Contents/Resources/ollama",
-	}
 	wantTemplates := map[string]map[string][]string{
-		"ollama": {
-			"windows/amd64": windowsOllama,
-			"windows/arm64": windowsOllama,
-			"darwin/amd64":  darwinOllama,
-			"darwin/arm64":  darwinOllama,
-			"linux/amd64":   {"{install_dir}/bin/ollama"},
-			"linux/arm64":   {"{install_dir}/bin/ollama"},
-		},
-		"lmstudio": {
-			"windows/amd64": {`%USERPROFILE%\.lmstudio\bin\lms.exe`},
-			"windows/arm64": {`%USERPROFILE%\.lmstudio\bin\lms.exe`},
-			"darwin/amd64":  {"~/.lmstudio/bin/lms"},
-			"darwin/arm64":  {"~/.lmstudio/bin/lms"},
-			"linux/amd64":   {"~/.lmstudio/bin/lms"},
-			"linux/arm64":   {"~/.lmstudio/bin/lms"},
-		},
 		"llamacpp": {
 			"windows/amd64": {`{install_dir}\llama-server.exe`},
 			"windows/arm64": {`{install_dir}\llama-server.exe`},

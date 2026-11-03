@@ -84,7 +84,10 @@ func (b *Broker) prepareExplicitEngineSettings(engine string) bool {
 	if !ok {
 		return false
 	}
-	profile, _ := engineProxyProfileFor(engine)
+	profile, ok := b.frontedEngineProfile(engine)
+	if !ok {
+		return false
+	}
 	state := b.engineProxy(profile)
 	state.explicitSettings.Store(true)
 	state.backendPort.Store(int32(config.ServerPort))

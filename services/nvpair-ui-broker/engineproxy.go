@@ -140,8 +140,6 @@ var engineProxyProfiles = buildEngineProxyProfiles()
 
 func buildEngineProxyProfiles() []engineProxyProfile {
 	brokerOnly := map[string]engineProxyProfile{
-		"ollama":   {Ownership: adoptedEngine, HealthProbePath: "/"},
-		"lmstudio": {Ownership: managedEngine, HealthProbePath: "/v1/models"},
 		"llamacpp": {Ownership: managedEngine, HealthProbePath: "/health"},
 	}
 	out := make([]engineProxyProfile, 0, len(engines.All()))
@@ -248,7 +246,7 @@ func (b *Broker) enableProxyFacadeWithFallback(
 	if err == nil || !stderrors.Is(err, errFacadeBindFailed) {
 		return err
 	}
-	if profile, ok := engineProxyProfileFor(spec.Engine); ok && b.engineProxy(profile).explicitSettings.Load() {
+	if profile, ok := b.frontedEngineProfile(spec.Engine); ok && b.engineProxy(profile).explicitSettings.Load() {
 		return err
 	}
 	// Teardown began between the attempt and the retry: stop here rather than
@@ -370,7 +368,7 @@ func (b *Broker) proxyEnabled(p engineProxyProfile) bool {
 // actually going to front, in table order. Preparation records each engine's
 // configured port without probing or relocating a process.
 func (b *Broker) prepareEnabledFacades() {
-	for _, profile := range engineProxyProfiles {
+	for _, profile := range b.frontedEngineProfiles() {
 		if !b.proxyEnabled(profile) {
 			continue
 		}
@@ -699,19 +697,26 @@ func planManagedEnginePorts(p engineProxyProfile, enabled bool, st enginePortSta
 
 // configuredEngineProxyPort reads a proxy's persisted port, or its facade default.
 func configuredEngineProxyPort(p engineProxyProfile) int {
+	if port := savedEngineProxyPort(p); port > 0 {
+		return port
+	}
+	return p.FacadePort
+}
+
+func savedEngineProxyPort(p engineProxyProfile) int {
 	path, err := appdir.Path(p.PortFile)
 	if err != nil {
-		return p.FacadePort
+		return 0
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return p.FacadePort
+		return 0
 	}
 	var stored struct {
 		Port int `json:"port"`
 	}
 	if json.Unmarshal(data, &stored) != nil || stored.Port < 1 || stored.Port > 65535 {
-		return p.FacadePort
+		return 0
 	}
 	return stored.Port
 }
@@ -719,7 +724,7 @@ func configuredEngineProxyPort(p engineProxyProfile) int {
 // siblingEngineProxyPorts is every port an engine other than self is going to
 // want, with the reason to show a user who collided with one: the facade it
 // claims, the backend base a managed engine gets relocated onto, and its
-// persisted port if it has one.
+// persisted, planned and live ports if it has them.
 //
 // A proxy's bind-failure fallback must leave sibling engine ports available
 // for the next desired-state restore.
@@ -730,7 +735,7 @@ func configuredEngineProxyPort(p engineProxyProfile) int {
 // so rather than the set quietly shrinking.
 func (b *Broker) siblingEngineProxyPorts(self engineProxyProfile) map[int]string {
 	reserved := map[int]string{}
-	for _, p := range engineProxyProfiles {
+	for _, p := range b.frontedEngineProfiles() {
 		if p.Name == self.Name {
 			continue
 		}
@@ -742,10 +747,15 @@ func (b *Broker) siblingEngineProxyPorts(self engineProxyProfile) map[int]string
 		// Managed ownership is prepared after this check and moves a colliding
 		// backend here, so nothing else may be sitting on it.
 		reserved[p.EnginePortBase] = fmt.Sprintf("the managed %s backend uses port %d%s", p.DisplayName, p.EnginePortBase, suffix)
-		// Written last so a persisted port outranks the defaults it may equal,
-		// matching the precedence this check has always had.
+		// Prefer the most concrete description when port sources coincide.
 		if persisted := configuredEngineProxyPort(p); persisted > 0 {
 			reserved[persisted] = fmt.Sprintf("the %s proxy is configured on port %d%s", p.DisplayName, persisted, suffix)
+		}
+		if planned := int(b.engineProxy(p).startupPort.Load()); planned > 0 {
+			reserved[planned] = fmt.Sprintf("the %s proxy is planned on port %d%s", p.DisplayName, planned, suffix)
+		}
+		if live := b.engineProxyListenPort(p); live > 0 {
+			reserved[live] = fmt.Sprintf("the %s proxy is listening on port %d%s", p.DisplayName, live, suffix)
 		}
 	}
 	return reserved

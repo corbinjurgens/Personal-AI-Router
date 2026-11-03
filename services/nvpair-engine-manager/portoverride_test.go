@@ -230,22 +230,38 @@ func TestUninstallerTakesOnlyLocationsFromAnOverride(t *testing.T) {
 // to remove around.
 func TestUninstallerIgnoresAnOverrideStoreHoldingWhatItRemoves(t *testing.T) {
 	host := runtime.GOOS + "/" + runtime.GOARCH
-	want := bundledHostPlatform(t, "lmstudio")
+	reg := buildBundledRegistry()
+	manifest, ok := reg.Get("llamacpp")
+	if !ok {
+		t.Fatal("llamacpp manifest missing")
+	}
+	want := bundledHostPlatform(t, "llamacpp")
+	if want.Uninstall == nil {
+		t.Fatal("llamacpp uninstall plan missing")
+	}
+	store := t.TempDir()
+	// Use an explicit disposable target to exercise static containment validation.
+	uninstall := *want.Uninstall
+	uninstall.Remove = []string{filepath.Join(store, "engine")}
+	want.Uninstall = &uninstall
+	manifest.Platforms[host] = want
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("invalid uninstall fixture: %v", err)
+	}
 	dir := t.TempDir()
 	override := map[string]any{
-		"engine":     "lmstudio",
-		"models_dir": "~",
+		"engine":     "llamacpp",
+		"models_dir": store,
 		"runtime":    map[string]any{"port": 21003},
 	}
-	if err := writeJSONAtomic(filepath.Join(dir, "lmstudio.json"), override); err != nil {
+	if err := writeJSONAtomic(filepath.Join(dir, "llamacpp.json"), override); err != nil {
 		t.Fatal(err)
 	}
 
-	reg := buildBundledRegistry()
 	reg.applyLocationOverrides(dir)
-	got, ok := reg.Get("lmstudio")
+	got, ok := reg.Get("llamacpp")
 	if !ok {
-		t.Fatal("lmstudio vanished from the registry")
+		t.Fatal("llamacpp vanished from the registry")
 	}
 	platform := got.Platforms[host]
 

@@ -20,8 +20,12 @@ func TestEngineBindingOffersDescriptorDefaultConfiguration(t *testing.T) {
 	h := newBindingOfferHarness(t)
 	d := testDescriptor("custom", engines.ProtocolOpenAIChat)
 	d.ModelNaming = engines.ModelNamingImpliedLatestTag
-	h.b.setDynamicEngines([]engines.Descriptor{d}, func(int) bool { return true })
-	profile := h.b.dynamicEngineProfiles()[0]
+	// In-flight harness projections may still reference the original engine.
+	h.b.setDynamicEngines([]engines.Descriptor{testDescriptor("llamacpp-custom", engines.ProtocolOpenAIChat), d}, func(int) bool { return true })
+	profile, ok := h.b.dynamicEngineProfile("custom")
+	if !ok {
+		t.Fatal("custom descriptor profile missing")
+	}
 	h.b.setEngineProxyHandle(profile, h.pp)
 	h.pp.readyMu.Lock()
 	h.pp.facadeState["custom"] = proxyFacadeState{ready: true, port: 18080}

@@ -1572,7 +1572,7 @@ func TestSameReadRequestMatchesShippedManifests(t *testing.T) {
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 		t.Fatalf("load bundled manifests: %v", err)
 	}
-	want := map[string]bool{"lmstudio": true, "llamacpp": true, "ollama": false}
+	want := map[string]bool{"llamacpp": true}
 	for name, shared := range want {
 		mf, ok := reg.Get(name)
 		if !ok {

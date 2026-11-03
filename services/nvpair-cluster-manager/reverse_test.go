@@ -857,7 +857,7 @@ func TestReverseProtocolGateBeforeLoopback(t *testing.T) {
 			conn.Close()
 		}
 	}()
-	keys := []noderec.ServiceKey{"cl", "ol", "lm", "lc", "em", "ec", "er", "wl"}
+	keys := []noderec.ServiceKey{"cl", "lc", "em", "ec", "er", "wl"}
 	services := make([]noderec.RegisterParams, 0, len(keys))
 	for _, key := range keys {
 		services = append(services, noderec.RegisterParams{Service: key, Port: ln.Addr().(*net.TCPAddr).Port})

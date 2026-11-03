@@ -455,24 +455,3 @@ func TestResultDigestIsListModelsOnly(t *testing.T) {
 		t.Fatal("a padded digest field name was accepted")
 	}
 }
-
-func TestOllamaManifestDeclaresContentDigests(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("ollama")
-	if !ok {
-		t.Fatal("ollama manifest not loaded")
-	}
-	if r := m.Actions["list_models"].Result; r == nil || r.Digest != "digest" {
-		t.Fatalf("ollama list_models result = %+v, want the digest field", r)
-	}
-	for _, other := range []string{"lmstudio", "llamacpp"} {
-		if om, ok := reg.Get(other); ok {
-			if r := om.Actions["list_models"].Result; r != nil && r.Digest != "" {
-				t.Errorf("%s declares a content digest %q it does not serve", other, r.Digest)
-			}
-		}
-	}
-}

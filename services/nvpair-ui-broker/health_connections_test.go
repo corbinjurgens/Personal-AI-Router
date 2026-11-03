@@ -48,8 +48,5 @@ func TestHealthChecksReuseConnections(t *testing.T) {
 			testFraming("chunked", true)
 		})
 	}
-
-	test("ollama", "/", mustEngineProxyProfile("ollama"))
-	test("lmstudio", "/v1/models", mustEngineProxyProfile("lmstudio"))
 	test("llamacpp", "/health", mustEngineProxyProfile("llamacpp"))
 }

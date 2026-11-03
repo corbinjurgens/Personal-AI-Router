@@ -142,7 +142,7 @@ func TestStopReclaimsOurOrphanOnManagedPort(t *testing.T) {
 }
 
 func TestStopDoesNotReclaimSameExternalImage(t *testing.T) {
-	bin := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "stop-external-same-image", "external-ollama"), testbin.Exe("external-ollama"))
+	bin := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "stop-external-same-image", "external-engine"), testbin.Exe("external-engine"))
 	copyFile(t, fakeEngineBin, bin)
 	port, err := freePort()
 	if err != nil {

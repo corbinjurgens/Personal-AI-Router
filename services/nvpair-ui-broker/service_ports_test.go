@@ -237,8 +237,8 @@ func TestServicePortsInvalidPlansRejectedBeforeAnyChild(t *testing.T) {
 		{name: "duplicate service ports", paths: workerPaths{nodeInfoPort: 25318, errorsPort: 25318}, want: "--node-info-port and --errors-port must differ (both are 25318)"},
 		{name: "override collides with a default", paths: workerPaths{workloadMgrPort: 14321}, want: "--workload-manager-port and --cluster-manager-port must differ (both are 14321)"},
 		{name: "service collides with engine-manager", paths: workerPaths{errorsPort: 25122, engineMgrHTTPPort: 25122}, want: "--errors-port and --engine-manager-http-port must differ (both are 25122)"},
-		{name: "compatibility facade reserved", paths: workerPaths{errorsPort: 1234}, want: "--errors-port 1234 is reserved: the LM Studio compatibility proxy uses port 1234"},
-		{name: "managed backend base reserved", paths: workerPaths{clusterMgrPort: 11435}, want: "--cluster-manager-port 11435 is reserved: the managed Ollama backend uses port 11435"},
+		{name: "compatibility facade reserved", paths: workerPaths{errorsPort: 8080}, want: "--errors-port 8080 is reserved: the llama.cpp compatibility proxy uses port 8080"},
+		{name: "managed backend base reserved", paths: workerPaths{clusterMgrPort: 8081}, want: "--cluster-manager-port 8081 is reserved: the managed llama.cpp backend uses port 8081"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			paths := tc.paths

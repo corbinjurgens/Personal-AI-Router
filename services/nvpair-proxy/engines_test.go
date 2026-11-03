@@ -74,14 +74,6 @@ func TestLlamaCPPModelListRoutes(t *testing.T) {
 
 // Routes is a classifier. Unlisted engine controls and OPTIONS pass through.
 func TestRoleForClassifiesOnlyDeclaredRoutes(t *testing.T) {
-	ollama, ok := profileFor("ollama")
-	if !ok {
-		t.Fatal("ollama profile missing")
-	}
-	lmstudio, ok := profileFor("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio profile missing")
-	}
 	llamacpp, ok := profileFor("llamacpp")
 	if !ok {
 		t.Fatal("llamacpp profile missing")
@@ -95,21 +87,15 @@ func TestRoleForClassifiesOnlyDeclaredRoutes(t *testing.T) {
 		wantRole routeRole
 		wantOK   bool
 	}{
-		{"ollama openai chat", ollama, "POST", "/v1/chat/completions", roleInferencePOST, true},
-		{"ollama anthropic messages", ollama, "POST", "/v1/messages", roleInferencePOST, true},
-		{"ollama openai list", ollama, "GET", "/v1/models", roleModelListOpenAIGET, true},
-		{"ollama models passthrough", ollama, http.MethodGet, "/models", 0, false},
-
-		{"lmstudio chat", lmstudio, "POST", "/v1/chat/completions", roleInferencePOST, true},
-		{"lmstudio anthropic messages", lmstudio, "POST", "/v1/messages", roleInferencePOST, true},
-		{"lmstudio list", lmstudio, "GET", "/v1/models", roleModelListOpenAIGET, true},
-		{"lmstudio models passthrough", lmstudio, http.MethodGet, "/models", 0, false},
+		{"llamacpp chat", llamacpp, "POST", "/v1/chat/completions", roleInferencePOST, true},
+		{"llamacpp list", llamacpp, "GET", "/v1/models", roleModelListOpenAIGET, true},
+		{"llamacpp messages passthrough", llamacpp, http.MethodPost, "/v1/messages", 0, false},
 
 		// The method is part of the classification. Without it a POST to the
 		// model-list path would be served as a list, and a GET to an
 		// inference path would emit a workload.
-		{"wrong method on list", ollama, "POST", "/v1/models", 0, false},
-		{"wrong method on inference", ollama, "GET", "/v1/chat/completions", 0, false},
+		{"wrong method on list", llamacpp, "POST", "/v1/models", 0, false},
+		{"wrong method on inference", llamacpp, "GET", "/v1/chat/completions", 0, false},
 		{"llamacpp models post passthrough", llamacpp, http.MethodPost, "/models", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,32 +147,27 @@ func TestNoDuplicateRoutePerMethod(t *testing.T) {
 }
 
 // The error-ID prefix derives from Name so it cannot disagree with the
-// broker's expectations. The persisted-port filename deliberately does NOT
-// derive: Ollama's predates the multi-engine world, and deriving it would
-// rename the file under every existing install and orphan the port a user set.
+// broker's expectations. The persisted-port filename comes from the shared table.
 func TestDerivedIdentifiers(t *testing.T) {
-	ollama, _ := profileFor("ollama")
-	lmstudio, _ := profileFor("lmstudio")
-
-	if got := ollama.PortFile; got != "proxy-port.json" {
-		t.Errorf("ollama PortFile = %q, want the pre-unification name", got)
+	profile, ok := profileFor("llamacpp")
+	if !ok {
+		t.Fatal("llamacpp profile missing")
 	}
-	if got := lmstudio.PortFile; got != "lmstudio-proxy-port.json" {
-		t.Errorf("lmstudio PortFile = %q", got)
+	if got := profile.PortFile; got != "llamacpp-proxy-port.json" {
+		t.Errorf("llamacpp PortFile = %q", got)
 	}
-	if got := upstreamUnreachableID(ollama, "peer-A"); got != "ollama-proxy:upstream-unreachable:peer-A" {
-		t.Errorf("ollama upstreamUnreachableID = %q", got)
-	}
-	if got := upstreamUnreachableID(lmstudio, "peer-A"); got != "lmstudio-proxy:upstream-unreachable:peer-A" {
-		t.Errorf("lmstudio upstreamUnreachableID = %q", got)
+	if got := upstreamUnreachableID(profile, "peer-A"); got != "llamacpp-proxy:upstream-unreachable:peer-A" {
+		t.Errorf("llamacpp upstreamUnreachableID = %q", got)
 	}
 }
 
 // chooseStartupPort restores a previously chosen port, except when the broker
 // forces one or when the stored value belongs to the engine itself.
 func TestChooseStartupPort(t *testing.T) {
-	ollama, _ := profileFor("ollama")
-	lmstudio, _ := profileFor("lmstudio")
+	profile, ok := profileFor("llamacpp")
+	if !ok {
+		t.Fatal("llamacpp profile missing")
+	}
 
 	for _, tc := range []struct {
 		name            string
@@ -197,12 +178,10 @@ func TestChooseStartupPort(t *testing.T) {
 		hasPersisted    bool
 		want            int
 	}{
-		{"restores persisted", ollama, 11435, false, 11500, true, 11500},
-		{"broker override wins", ollama, 11434, true, 11500, true, 11434},
-		{"no persisted value", ollama, 11435, false, 0, false, 11435},
-		{"lmstudio restores persisted", lmstudio, 1234, false, 1300, true, 1300},
-		{"lmstudio reserves nothing", lmstudio, 1234, false, 1235, true, 1235},
-		{"ollama reserves nothing", ollama, 11434, false, 11435, true, 11435},
+		{"restores persisted", profile, 8080, false, 8100, true, 8100},
+		{"broker override wins", profile, 8080, true, 8100, true, 8080},
+		{"no persisted value", profile, 8080, false, 0, false, 8080},
+		{"engine port is reserved", profile, 8080, false, 8081, true, 8080},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := chooseStartupPort(tc.profile, tc.flagPort, tc.ignorePersisted, tc.persisted, tc.hasPersisted)

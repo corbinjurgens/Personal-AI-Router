@@ -142,30 +142,6 @@ func TestLocalModelOperationsUseTypedMethods(t *testing.T) {
 	}
 }
 
-// TestPullSendsBothKeys guards the LM Studio fix: a pull must carry the model
-// under BOTH "name" (Ollama's /api/pull body key) and "model" (LM Studio's
-// `lms get {model}` CLI placeholder). Sending only "name" silently ran
-// `lms get "" --yes`, so the download never reached LM Studio. A pull has no
-// typed method yet, so it is still engine:action spelled by family.
-func TestPullSendsBothKeys(t *testing.T) {
-	for _, engine := range []string{engines.NameOllama, engines.NameLMStudio} {
-		method, envelope := localRequest(t, engine, "pull", "owner/model")
-		if method != "engine:action" {
-			t.Fatalf("%s: method = %q, want engine:action", engine, method)
-		}
-		if envelope["engine"] != engine || envelope["action"] != "pull_model" {
-			t.Fatalf("%s: envelope = %v", engine, envelope)
-		}
-		params, ok := envelope["params"].(map[string]any)
-		if !ok {
-			t.Fatalf("%s: params = %T, want map[string]any", engine, envelope["params"])
-		}
-		if params["name"] != "owner/model" || params["model"] != "owner/model" {
-			t.Errorf("%s: pull params = %v, want both name and model set", engine, params)
-		}
-	}
-}
-
 // TestPullDeadlineReportsDetachedNotSilence guards the acknowledgement for a
 // long download. A multi-gigabyte pull outlasts the reply deadline while the
 // engine keeps working, so a failure would be wrong — but the previous silence
@@ -240,16 +216,12 @@ func TestDeadlineLeniencyTracksOperationLength(t *testing.T) {
 // TestPullSpellsByFamily checks a pull is spelled by the engine's family, not
 // its ID: a llama.cpp fork pulls like llama.cpp, with the model under "model"
 // alone, since llama.cpp would take a second key as a parameter it does not
-// accept; an Ollama-family variant sends Ollama's "name".
+// accept. Other descriptor families use the conventional model key too.
 func TestPullSpellsByFamily(t *testing.T) {
 	pull := modelActions["pull"]
 	_, envelope := localModelRequest("llamacpp-custom", engines.NameLlamaCPP, pull, "m:Q4")
 	if !reflect.DeepEqual(envelope["params"], map[string]any{"model": "m:Q4"}) {
 		t.Errorf("llama.cpp fork pull params = %v, want only the model", envelope["params"])
-	}
-	_, envelope = localModelRequest("ollama-nightly", engines.NameOllama, pull, "m")
-	if params, _ := envelope["params"].(map[string]any); params["name"] != "m" {
-		t.Errorf("Ollama-family pull params = %v, want name set", envelope["params"])
 	}
 	_, envelope = localModelRequest("strata", "strata", pull, "m")
 	if !reflect.DeepEqual(envelope["params"], map[string]any{"model": "m"}) {

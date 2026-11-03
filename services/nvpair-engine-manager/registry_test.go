@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"nvpair-shared/engines"
 )
@@ -108,7 +107,7 @@ func TestManifestAuthStatuses(t *testing.T) {
 		if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 			t.Fatal(err)
 		}
-		for _, engine := range []string{"lmstudio", "ollama", "llamacpp"} {
+		for _, engine := range []string{"llamacpp"} {
 			t.Run(engine, func(t *testing.T) {
 				m, ok := reg.Get(engine)
 				if !ok {
@@ -119,9 +118,6 @@ func TestManifestAuthStatuses(t *testing.T) {
 					t.Fatalf("%s host platform missing", engine)
 				}
 				var want []int
-				if engine == "lmstudio" {
-					want = []int{http.StatusUnauthorized, http.StatusForbidden}
-				}
 				if !slices.Equal(p.Runtime.AuthStatuses, want) {
 					t.Errorf("runtime.auth_statuses = %v, want %v", p.Runtime.AuthStatuses, want)
 				}
@@ -174,7 +170,7 @@ func TestManifestAppProcesses(t *testing.T) {
 		if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 			t.Fatal(err)
 		}
-		for _, engine := range []string{"lmstudio", "ollama", "llamacpp"} {
+		for _, engine := range []string{"llamacpp"} {
 			t.Run(engine, func(t *testing.T) {
 				m, ok := reg.Get(engine)
 				if !ok {
@@ -185,9 +181,6 @@ func TestManifestAppProcesses(t *testing.T) {
 					t.Fatalf("%s host platform missing", engine)
 				}
 				var want []string
-				if engine == "lmstudio" {
-					want = []string{"LM Studio", "lm-studio", "llmster"}
-				}
 				if !slices.Equal(p.Runtime.AppProcesses, want) {
 					t.Errorf("runtime.app_processes = %v, want %v", p.Runtime.AppProcesses, want)
 				}
@@ -768,72 +761,25 @@ func TestApplyPlatformDefaults(t *testing.T) {
 	}
 }
 
-// TestBundledManifestsMerge guards the actual shipped manifests: they must
-// load, validate, and produce the right effective platforms after the
-// shared-base merge.
+// Bundled platforms inherit the shared runtime while supplying their binary.
 func TestBundledManifestsMerge(t *testing.T) {
-	reg, err := LoadRegistry("manifests")
-	if err != nil {
-		t.Fatalf("load bundled manifests: %v", err)
-	}
-
-	ol, ok := reg.Get("ollama")
-	if !ok {
-		t.Fatal("ollama not loaded")
-	}
-	if p, ok := ol.PlatformFor("linux", "amd64"); ok {
-		// linux env must deep-merge shared OLLAMA_HOST with per-platform LD_LIBRARY_PATH
-		if p.Runtime.Env["OLLAMA_HOST"] == "" || p.Runtime.Env["LD_LIBRARY_PATH"] == "" {
-			t.Errorf("ollama linux env merge missing a key: %v", p.Runtime.Env)
-		}
-		if p.Runtime.Port != 11434 || p.Runtime.Bin == "" {
-			t.Errorf("ollama linux runtime: port=%d bin=%q", p.Runtime.Port, p.Runtime.Bin)
-		}
-	} else {
-		t.Error("ollama linux/amd64 missing")
-	}
-
-	lm, ok := reg.Get("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio not loaded")
-	}
-	if p, ok := lm.PlatformFor("darwin", "arm64"); ok {
-		// per-platform cli override + inherited shared runtime (port/start)
-		if p.Runtime.CLI != "~/.lmstudio/bin/lms" {
-			t.Errorf("lmstudio darwin cli: %q", p.Runtime.CLI)
-		}
-		if p.Runtime.Port != 1235 || len(p.Runtime.Start) == 0 {
-			t.Errorf("lmstudio darwin inherited runtime missing: port=%d start=%v", p.Runtime.Port, p.Runtime.Start)
-		}
-	} else {
-		t.Error("lmstudio darwin/arm64 missing")
-	}
-}
-
-// TestBundledOllamaReadinessBudget pins the finite startup allowance used by
-// every supported platform. Ollama does not serve /api/version until GPU
-// discovery completes, which can exceed the previous 30-second allowance.
-func TestBundledOllamaReadinessBudget(t *testing.T) {
 	reg := NewRegistry()
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 		t.Fatal(err)
 	}
-	m, ok := reg.Get("ollama")
+	m, ok := reg.Get("llamacpp")
 	if !ok {
-		t.Fatal("ollama manifest not loaded")
+		t.Fatal("llamacpp manifest not loaded")
 	}
-	for key, p := range m.Platforms {
-		if p.Runtime.Ready == nil {
-			t.Errorf("%s: readiness probe missing", key)
-			continue
-		}
-		if got, want := p.Runtime.Ready.TimeoutS, 600; got != want {
-			t.Errorf("%s: readiness timeout = %ds, want %ds", key, got, want)
-		}
-		if readiness := time.Duration(p.Runtime.Ready.TimeoutS) * time.Second; remoteReadyResponseHeaderTimeout <= readiness {
-			t.Errorf("%s: remote readiness response-header timeout %s must exceed readiness timeout %s",
-				key, remoteReadyResponseHeaderTimeout, readiness)
-		}
+	for key, platform := range m.Platforms {
+		t.Run(key, func(t *testing.T) {
+			if platform.Runtime.Port != 8081 || platform.Runtime.Bin == "" || platform.Runtime.Env["LLAMA_CACHE"] != "{models_dir}" {
+				t.Fatalf("platform did not inherit shared runtime: %+v", platform.Runtime)
+			}
+			if strings.HasPrefix(key, "linux/") && platform.Runtime.Env["LD_LIBRARY_PATH"] != "{install_dir}" {
+				t.Fatalf("Linux environment did not merge with shared environment: %v", platform.Runtime.Env)
+			}
+		})
 	}
 }
 
@@ -845,64 +791,6 @@ func writeManifest(t *testing.T, dir, name string, m Manifest) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// TestOllamaManifestBindsLoopback pins the secure-inference policy: the bundled
-// Ollama manifest binds 127.0.0.1 so the engine is never directly LAN-reachable
-// — cluster peers reach it only through the promoted proxy's pin-gated mTLS
-// ingress. OLLAMA_HOST stays templated on {host} (which now resolves to
-// loopback).
-func TestOllamaManifestBindsLoopback(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("ollama")
-	if !ok {
-		t.Fatal("ollama manifest not loaded")
-	}
-	for key, p := range m.Platforms {
-		if p.Runtime.Bind != "127.0.0.1" {
-			t.Errorf("%s: runtime.bind = %q, want 127.0.0.1", key, p.Runtime.Bind)
-		}
-		if !strings.Contains(p.Runtime.Env["OLLAMA_HOST"], "{host}") {
-			t.Errorf("%s: OLLAMA_HOST %q should use {host}", key, p.Runtime.Env["OLLAMA_HOST"])
-		}
-	}
-}
-
-// TestLMStudioManifestBindsLoopback pins LM Studio to the same loopback-only
-// policy as Ollama: runtime.bind is 127.0.0.1 and the start command still
-// passes `--bind {host}` (which resolves to loopback), so the engine is reached
-// only through the promoted proxy's mTLS ingress, never directly on the LAN.
-func TestLMStudioManifestBindsLoopback(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio manifest not loaded")
-	}
-	for key, p := range m.Platforms {
-		if p.Runtime.Bind != "127.0.0.1" {
-			t.Errorf("%s: runtime.bind = %q, want 127.0.0.1", key, p.Runtime.Bind)
-		}
-		var hasBindFlag, hasHostToken bool
-		for _, cmd := range p.Runtime.Start {
-			for i, arg := range cmd {
-				if arg == "--bind" {
-					hasBindFlag = true
-					if i+1 < len(cmd) && cmd[i+1] == "{host}" {
-						hasHostToken = true
-					}
-				}
-			}
-		}
-		if !hasBindFlag || !hasHostToken {
-			t.Errorf("%s: start %v should pass --bind {host}", key, p.Runtime.Start)
-		}
 	}
 }
 
@@ -954,68 +842,5 @@ func TestLlamaCPPManifestDeclaresNativeCacheDelete(t *testing.T) {
 	}
 	if action.RestartAfter {
 		t.Error("llamacpp delete_model must not restart the router")
-	}
-}
-
-func TestLMStudioManifestUsesNativeSystemInventory(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio manifest not loaded")
-	}
-	action, ok := m.Actions["list_models"]
-	if !ok || action.HTTP == nil || action.Result == nil {
-		t.Fatalf("lmstudio list_models action is incomplete: %+v", action)
-	}
-	if action.HTTP.Method != "GET" || action.HTTP.Path != "/api/v1/models" {
-		t.Errorf("lmstudio list_models HTTP = %s %s, want GET /api/v1/models", action.HTTP.Method, action.HTTP.Path)
-	}
-	if action.Result.Array != "models" || action.Result.Field != "key" {
-		t.Errorf("lmstudio list_models result = %+v, want models[].key", action.Result)
-	}
-}
-
-// TestLMStudioInstallBootstrapSafety verifies that bootstrap fetch failures are
-// visible and Windows executes a downloaded .ps1
-// file rather than pipe remote content through Invoke-Expression.
-func TestLMStudioInstallBootstrapSafety(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatal(err)
-	}
-	m, ok := reg.Get("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio manifest not loaded")
-	}
-	for key, p := range m.Platforms {
-		if p.Install == nil {
-			continue
-		}
-		if strings.HasPrefix(key, "windows/") {
-			if len(p.Install.Script) != 0 {
-				t.Errorf("%s: install must not evaluate a remote script inline; got %v", key, p.Install.Script)
-			}
-			if p.Install.Fetch == nil || p.Install.Fetch.URL != "https://lmstudio.ai/install.ps1" {
-				t.Errorf("%s: install must download the official script through engine-manager; got %+v", key, p.Install.Fetch)
-			}
-			wantRun := []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File", "{download}"}
-			if !slices.Equal(p.Install.Run, wantRun) {
-				t.Errorf("%s: install run = %v, want %v", key, p.Install.Run, wantRun)
-			}
-			continue
-		}
-		if len(p.Install.Script) != 0 {
-			t.Errorf("%s: install must not interpolate paths into shell text; got %v", key, p.Install.Script)
-		}
-		if p.Install.Fetch == nil || p.Install.Fetch.URL != "https://lmstudio.ai/install.sh" {
-			t.Errorf("%s: install must download the official script through engine-manager; got %+v", key, p.Install.Fetch)
-		}
-		wantRun := []string{"bash", "{download}"}
-		if !slices.Equal(p.Install.Run, wantRun) {
-			t.Errorf("%s: install run = %v, want %v", key, p.Install.Run, wantRun)
-		}
 	}
 }

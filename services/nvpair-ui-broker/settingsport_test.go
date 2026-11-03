@@ -96,7 +96,7 @@ func TestBrokerLlamaCPPProxySetPortRejectsConflicts(t *testing.T) {
 		return 25001
 	})
 	test("another proxy listener", func(t *testing.T, h *settingsHarness, before settings.Snapshot) int {
-		_, port := h.b.engineProxyHandle(mustEngineProxyProfile("ollama")).Status("llamacpp-custom")
+		_, port := h.b.engineProxyHandle(mustEngineProxyProfile("llamacpp")).Status("llamacpp-custom")
 		return port
 	})
 	test("occupied listener", func(t *testing.T, h *settingsHarness, before settings.Snapshot) int {
@@ -117,7 +117,7 @@ func TestBrokerLlamaCPPProxySetPortPersistsOnlyRequestedFacade(t *testing.T) {
 	}
 	otherPorts := make(map[string]int)
 	for _, engine := range []string{"llamacpp-custom"} {
-		_, otherPorts[engine] = h.b.engineProxyHandle(mustEngineProxyProfile("ollama")).Status(engine)
+		_, otherPorts[engine] = h.b.engineProxyHandle(mustEngineProxyProfile("llamacpp")).Status(engine)
 	}
 	target := h.reservePort(t)
 	// The namespace determines the engine, even if parameters name another.
@@ -134,12 +134,12 @@ func TestBrokerLlamaCPPProxySetPortPersistsOnlyRequestedFacade(t *testing.T) {
 	if result.Port != target || h.proxyRebinds.Load() != 1 {
 		t.Fatalf("port=%d rebinds=%d, want port=%d and one rebind", result.Port, h.proxyRebinds.Load(), target)
 	}
-	ready, actual := h.b.engineProxyHandle(mustEngineProxyProfile("ollama")).Status("llamacpp")
+	ready, actual := h.b.engineProxyHandle(mustEngineProxyProfile("llamacpp")).Status("llamacpp")
 	if !ready || actual != target {
 		t.Fatalf("llama.cpp facade ready=%v port=%d, want %d", ready, actual, target)
 	}
 	for engine, want := range otherPorts {
-		_, actual := h.b.engineProxyHandle(mustEngineProxyProfile("ollama")).Status(engine)
+		_, actual := h.b.engineProxyHandle(mustEngineProxyProfile("llamacpp")).Status(engine)
 		if actual != want {
 			t.Fatalf("%s facade moved from %d to %d", engine, want, actual)
 		}

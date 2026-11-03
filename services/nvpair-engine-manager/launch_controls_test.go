@@ -134,7 +134,7 @@ func TestBundledLlamaCPPDisablesCORSByDefault(t *testing.T) {
 func TestBundledNetworkingControls(t *testing.T) {
 	reg := loadWithOverrides(t, t.TempDir())
 	// Adding a bundled engine requires an explicit networking review and cases.
-	wantEngines := []string{"llamacpp", "lmstudio", "ollama"}
+	wantEngines := []string{"llamacpp"}
 	names := reg.Names()
 	slices.Sort(names)
 	if !slices.Equal(names, wantEngines) {
@@ -152,12 +152,6 @@ func TestBundledNetworkingControls(t *testing.T) {
 				}
 				var valid, invalid []string
 				switch name {
-				case "lmstudio":
-					if !reflect.DeepEqual(policy.Controls, []LaunchControl{{Value: "{server.port}", Flags: []string{"--port", "-p"}}, {Value: "{server.host}", Flags: []string{"--bind"}, Env: []string{"LMS_SERVER_HOST"}}, {Value: "{cors.enabled}", Implicit: implicitLaunchValue("true"), Flags: []string{"--cors"}}}) {
-						t.Fatal("incomplete LM Studio controls")
-					}
-					valid = []string{"--port 23456", "--port=23456", "-p 23456", "-p23456", "-p=23456", `"-p" "23456"`, "--port 23456 -p23456", "-- -p23456"}
-					invalid = []string{"-p0", "-p65536", "-p", "-pno", "--port 23456 -p23457", "-vp23456", "-vp=23456", "--bind 0.0.0.0", "--bind=::", "LMS_SERVER_HOST=0.0.0.0", "--cors=false", "--cors=true", "--cors=", "-- --bind 0.0.0.0"}
 				case "llamacpp":
 					if !slices.Equal(policy.FixedArgs, []string{"--sleep-idle-seconds", "300", "--ctx-size", "8192", "--parallel", "1", "--cache-ram", "512"}) {
 						t.Fatal("llama.cpp fixed launch args are not the bundled defaults")
@@ -167,12 +161,6 @@ func TestBundledNetworkingControls(t *testing.T) {
 					}
 					valid = []string{"--host 127.0.0.1 --port 23456", "--host=127.0.0.1 --port=23456", "--port 23456 --cors-origins https://example.test"}
 					invalid = []string{"--host 0.0.0.0", "--host=::", "--port 0", "--port 65536", "--port", "--cors-origins=*", "--port 23456 --port 23457", "-- --host 0.0.0.0"}
-				default:
-					if !reflect.DeepEqual(policy.Controls, []LaunchControl{{Value: "{server.host}:{server.port}", Env: []string{"OLLAMA_HOST"}}, {Value: "{cors.origins}", Env: []string{"OLLAMA_ORIGINS"}}}) {
-						t.Fatal("incomplete Ollama controls")
-					}
-					valid = []string{`OLLAMA_HOST="127.0.0.1:23456"`, `OLLAMA_HOST='127.0.0.1:23456'`, "OLLAMA_HOST=127.0.0.1:23456"}
-					invalid = []string{"OLLAMA_HOST=0.0.0.0:23456", "OLLAMA_HOST=127.0.0.1:0", "OLLAMA_HOST=127.0.0.1:65536", `OLLAMA_ORIGINS='"*"'`, `OLLAMA_ORIGINS="'*'"`, `OLLAMA_ORIGINS='"http://*"'`, "OLLAMA_ORIGINS=http://localhost,*", "OLLAMA_HOST=127.0.0.1:23456 OLLAMA_HOST=0.0.0.0:23456"}
 				}
 				for _, text := range valid {
 					p := settingsRequest(t, e)

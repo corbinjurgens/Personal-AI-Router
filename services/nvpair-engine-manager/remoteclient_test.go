@@ -127,10 +127,8 @@ func TestRemoteStartUsesReadinessHeaderBudget(t *testing.T) {
 	}
 }
 
-// A remote Ollama load can withhold headers while a cold model loads. A remote
-// LM Studio delete can likewise restart the peer's engine before it replies.
-// Both need the longer response-header budget; other model calls remain bounded.
-// The load budget comes from the bundled manifests' load bindings.
+// A manifest-bound cold load and a remote delete use the longer response-header
+// budget; other model calls remain bounded.
 func TestRemoteSlowModelOperationsUseReadinessHeaderBudget(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !(r.Method == http.MethodPost && (r.URL.Path == controlLoadPath || r.URL.Path == controlDeletePath || r.URL.Path == controlUnloadPath)) {
@@ -143,26 +141,36 @@ func TestRemoteSlowModelOperationsUseReadinessHeaderBudget(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	manifest := llamaTestEngineManifest(fakeEngineBin)
+	manifest.Engine = "custom-load"
+	manifest.Actions["load_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/models/load"}}
+	manifest.Operations = map[string]OperationBinding{
+		"load": {Action: "load_model", ResponseTimeoutS: 60},
+	}
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("invalid load-budget fixture: %v", err)
+	}
+	ex := newTestExecutor(t, manifest)
 	base := http.DefaultTransport.(*http.Transport)
 	c := &remoteClient{
 		controlHTTP:      newRemoteHTTPClient(base, 20*time.Millisecond),
 		controlReadyHTTP: newRemoteHTTPClient(base, time.Second),
 		base:             srv.URL,
-		loadBudget:       bundledTestExecutor(t).loadResponseBudget,
+		loadBudget:       ex.loadResponseBudget,
 	}
-	ollama := modelActionRequest{Engine: "ollama", Model: "qwen2.5"}
-	if _, err := c.postJSON(context.Background(), controlLoadPath, "ollama", ollama); err != nil {
+	slow := modelActionRequest{Engine: "custom-load", Model: "fixture-model"}
+	if _, err := c.postJSON(context.Background(), controlLoadPath, slow.Engine, slow); err != nil {
 		t.Fatalf("remote load was cut off by the ordinary response-header budget: %v", err)
 	}
-	lmstudio := modelActionRequest{Engine: "lmstudio", Model: "qwen2.5"}
-	if _, err := c.postJSON(context.Background(), controlDeletePath, "lmstudio", lmstudio); err != nil {
+	ordinary := modelActionRequest{Engine: "llamacpp", Model: "fixture-model"}
+	if _, err := c.postJSON(context.Background(), controlDeletePath, ordinary.Engine, ordinary); err != nil {
 		t.Fatalf("remote delete was cut off by the ordinary response-header budget: %v", err)
 	}
-	if _, err := c.postJSON(context.Background(), controlLoadPath, "lmstudio", lmstudio); err == nil ||
+	if _, err := c.postJSON(context.Background(), controlLoadPath, ordinary.Engine, ordinary); err == nil ||
 		!strings.Contains(err.Error(), "timeout awaiting response headers") {
-		t.Fatalf("remote LM Studio load error = %v, want the ordinary bounded response-header timeout", err)
+		t.Fatalf("remote load error = %v, want the ordinary bounded response-header timeout", err)
 	}
-	if _, err := c.postJSON(context.Background(), controlUnloadPath, "ollama", ollama); err == nil ||
+	if _, err := c.postJSON(context.Background(), controlUnloadPath, slow.Engine, slow); err == nil ||
 		!strings.Contains(err.Error(), "timeout awaiting response headers") {
 		t.Fatalf("remote unload error = %v, want the ordinary bounded response-header timeout", err)
 	}
@@ -179,14 +187,12 @@ func TestRemoteReadinessBudgetCoversEngineStartupAllowance(t *testing.T) {
 		engine string
 		want   bool
 	}{
-		{controlStartPath, "ollama", true},
-		{controlDeletePath, "lmstudio", true},
-		{controlLoadPath, "ollama", true},
-		{controlLoadPath, "lmstudio", false},
+		{controlStartPath, "llamacpp", true},
+		{controlDeletePath, "llamacpp", true},
 		{controlLoadPath, "llamacpp", false},
 		{controlLoadPath, "peer-only", false},
-		{controlStopPath, "ollama", false},
-		{controlUnloadPath, "ollama", false},
+		{controlStopPath, "llamacpp", false},
+		{controlUnloadPath, "llamacpp", false},
 		{controlEnginesPath, "", false},
 	}
 	for _, tc := range cases {

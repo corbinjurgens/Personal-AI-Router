@@ -221,10 +221,12 @@ func (b *Broker) dynamicEngineFacadeSpec(profile engineProxyProfile) (enableFaca
 	if !ok {
 		return enableFacadeRequest{}, fmt.Errorf("engine %q is not a fronted descriptor engine", profile.Name)
 	}
+	state := b.engineProxy(profile)
 	return enableFacadeRequest{
-		Engine:     profile.Name,
-		Port:       int(b.engineProxy(profile).startupPort.Load()),
-		Descriptor: &d,
+		Engine:              profile.Name,
+		Port:                int(state.startupPort.Load()),
+		IgnorePersistedPort: state.explicitSettings.Load(),
+		Descriptor:          &d,
 	}, nil
 }
 

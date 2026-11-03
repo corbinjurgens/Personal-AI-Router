@@ -199,11 +199,8 @@ func (ds engineDescriptors) unsupported(engine string, act modelAction) error {
 }
 
 // downloadExamples show what a download name looks like for each engine family.
-// The families spell them very differently: an Ollama tag, a Hugging Face repo,
-// and a repo with its quantization after a colon.
+// llama.cpp names a repository with its quantization after a colon.
 var downloadExamples = map[string]string{
-	engines.NameOllama:   "llama3.2",
-	engines.NameLMStudio: "lmstudio-community/Qwen3-8B-GGUF",
 	engines.NameLlamaCPP: "ggml-org/gemma-3-1b-it-GGUF:Q4_K_M",
 }
 
@@ -218,17 +215,9 @@ func downloadPrompt(family, label string) string {
 
 // pullParams spells a local pull_model for an engine family.
 //
-// Ollama's pull takes "name" and LM Studio's takes "model", so both are sent
-// there. Every other family gets "model" alone, engine-manager's conventional
-// parameter: llama.cpp's pull would pass a second key to the engine as a
-// parameter it does not take.
+// The conventional parameter is "model" alone.
 func pullParams(family, model string) map[string]any {
-	switch family {
-	case engines.NameOllama, engines.NameLMStudio:
-		return map[string]any{"name": model, "model": model}
-	default:
-		return map[string]any{"model": model}
-	}
+	return map[string]any{"model": model}
 }
 
 // localModelRequest is the method and params of a model operation on this

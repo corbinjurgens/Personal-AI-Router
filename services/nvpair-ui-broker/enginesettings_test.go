@@ -80,7 +80,7 @@ func (h *settingsHarness) unaddressedProxyCalls() []policyCall {
 
 func newSettingsHarness(t *testing.T) *settingsHarness {
 	t.Helper()
-	return newSettingsHarnessForEngine(t, "ollama")
+	return newSettingsHarnessForEngine(t, "llamacpp")
 }
 
 // newLlamaCPPSettingsHarness is the settings harness for an example engine.
@@ -115,8 +115,6 @@ func newServingSettingsHarness(t *testing.T, engine string, serving *engines.Ser
 	h.b.setEngineMgr(worker)
 	proxyWorker, proxyCodec := newTestRPCWorkerPipe(t)
 	proxy := &proxyProcess{peer: proxyWorker.peer, facadeState: map[string]proxyFacadeState{
-		"ollama":          {ready: true, port: ports[1]},
-		"lmstudio":        {ready: true, port: ports[2]},
 		"llamacpp":        {ready: true, port: ports[3]},
 		"llamacpp-custom": {ready: true, port: ports[2]},
 	}}
@@ -413,26 +411,33 @@ func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {
 }
 
 func TestSettingsServingJournalWriteFailureRestoresDeclaration(t *testing.T) {
-	serving := brokerServingFixture()
-	h := newServingSettingsHarness(t, "llamacpp", serving)
-	p := h.request(t)
-	p.Settings.Serving.Models[0].MaxOutputTokens++
-	path, err := h.b.engineSettingsPath()
-	if err != nil {
-		t.Fatal(err)
+	test := func(engine string) {
+		t.Run(engine, func(t *testing.T) {
+			serving := brokerServingFixture()
+			h := newServingSettingsHarness(t, engine, serving)
+			p := h.request(t)
+			p.Settings.Serving.Models[0].MaxOutputTokens++
+			before := h.b.engineSettings[engine].clone()
+			path, err := h.b.engineSettingsPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err == nil {
+				t.Fatal("journal write succeeded unexpectedly")
+			}
+			if h.applies.Load() != 0 || h.proxyRebinds.Load() != 0 || !reflect.DeepEqual(h.b.engineSettings[engine], before) {
+				t.Fatal("failed journal write changed declaration/runtime")
+			}
+		})
 	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(path, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err == nil {
-		t.Fatal("journal write succeeded unexpectedly")
-	}
-	if h.applies.Load() != 0 || !h.b.engineSettings["llamacpp"].Snapshot.Settings.Serving.Equal(serving) {
-		t.Fatal("failed journal write changed declaration/runtime")
-	}
+	test("llamacpp")
+	test("llamacpp-custom")
 }
 
 func TestSettingsServingLegacyFingerprintByteStability(t *testing.T) {
@@ -604,9 +609,8 @@ func TestSettingsProxyRebindPushesLivePortToClusterManager(t *testing.T) {
 		engine  string
 		service noderec.ServiceKey
 	}{
-		{engine: "ollama", service: noderec.ServiceOllama},
-		{engine: "lmstudio", service: noderec.ServiceLMStudio},
 		{engine: "llamacpp", service: noderec.ServiceLlamaCPP},
+		{engine: "llamacpp-custom", service: "e-llamacpp-custom"},
 	} {
 		t.Run(tc.engine, func(t *testing.T) {
 			h := newSettingsHarnessForEngine(t, tc.engine)
@@ -621,6 +625,10 @@ func TestSettingsProxyRebindPushesLivePortToClusterManager(t *testing.T) {
 			awaitLocalServices(t, seen, 0)
 			h.b.registerService(noderec.RegisterParams{Service: tc.service, Port: p.Settings.ProxyPort})
 			awaitLocalServices(t, seen, 1)
+			preview, err := h.b.previewEngineSettings(context.Background(), p, "")
+			if err != nil || len(preview.Errors) != 0 || preview.Conflict != nil {
+				t.Fatalf("own registered facade rejected: %+v, %v", preview, err)
+			}
 			p.Settings.ProxyPort = h.reservePort(t)
 			p.Settings.LaunchText += " --rebind-fixture"
 			receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
@@ -680,7 +688,7 @@ func TestSettingsApplyDoesNotBlockUnrelatedReads(t *testing.T) {
 
 	read := make(chan error, 1)
 	go func() {
-		_, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "lmstudio"}, "")
+		_, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "llamacpp-custom"}, "")
 		read <- err
 	}()
 	select {

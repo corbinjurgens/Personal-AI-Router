@@ -113,7 +113,7 @@ func TestFacadeBindRaceRetriesInProcess(t *testing.T) {
 	const fallback = 12000
 	err := b.enableProxyFacadeWithFallback(context.Background(), proxy,
 		enableFacadeRequest{
-			Engine:              mustEngineProxyProfile("ollama").Name,
+			Engine:              mustEngineProxyProfile("llamacpp").Name,
 			Port:                24080,
 			IgnorePersistedPort: true,
 		},

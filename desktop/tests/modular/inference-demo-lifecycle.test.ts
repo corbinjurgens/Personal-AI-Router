@@ -252,16 +252,14 @@ describe('inference demo lifecycle', () => {
         if (llamaCPPRequest) expect(portOf(llamaCPPRequest)).toBe(8080)
     })
 
-    it('skips an engine whose proxy has not reported a port', async () => {
+    it('does not probe or schedule an engine whose proxy has not reported a port', async () => {
         proxyPorts.set('llama-cpp', null)
-        proxyPorts.set('lm-studio', 1234)
-        await startInferenceDemo()
+        await expect(startInferenceDemo()).rejects.toThrow(/no local inference engine/i)
         await vi.advanceTimersByTimeAsync(70_000)
 
-        expect(spawned.length).toBeGreaterThan(0)
-        for (const child of spawned) {
-            expect(portOf(child)).not.toBe(8080)
-        }
+        expect(probeArgs).toEqual([])
+        expect(spawned).toEqual([])
+        expect(getInferenceDemoState().status).toBe('idle')
     })
 
     it('rejects when no engine exposed a text-generation model', async () => {

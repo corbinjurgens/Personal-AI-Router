@@ -290,13 +290,11 @@ func TestNotifyPeerSettingsForwardsEverySupportedEngine(t *testing.T) {
 	}}
 	manager := &Manager{exec: exec}
 	manager.notifyPeerSettings("peer-node", []settings.Snapshot{
-		{NodeID: "untrusted-node", Engine: "ollama"},
-		{NodeID: "untrusted-node", Engine: "lmstudio"},
 		{NodeID: "untrusted-node", Engine: "llamacpp"},
 		{NodeID: "untrusted-node", Engine: "unsupported"},
 	})
 
-	wantEngines := []string{"ollama", "lmstudio", "llamacpp"}
+	wantEngines := []string{"llamacpp"}
 	if len(emitted) != len(wantEngines) {
 		t.Fatalf("emitted %d snapshots, want %d: %+v", len(emitted), len(wantEngines), emitted)
 	}

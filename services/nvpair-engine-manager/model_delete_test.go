@@ -233,38 +233,6 @@ func TestDeleteModelRestartFailureFailsTheAction(t *testing.T) {
 	}
 }
 
-// TestBundledManifestsRestartOnlyLMStudio guards the blast radius of
-// restart_after. Restarting interrupts whatever the engine is serving, so it is
-// justified only for an engine that cannot see a deletion any other way. If a
-// new manifest ever needs it, that is a deliberate decision — and it also has to
-// be mirrored in the desktop's EngineCapabilities so the UI still confirms
-// first (see desktop/tests/modular/delete-model-restart.test.ts).
-func TestBundledManifestsRestartOnlyLMStudio(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
-		t.Fatalf("LoadFS bundled: %v", err)
-	}
-	for engine, m := range reg.engines {
-		for name, act := range m.Actions {
-			if !act.RestartAfter {
-				continue
-			}
-			if engine != "lmstudio" {
-				t.Errorf("engine %q action %q declares restart_after; only lmstudio needs one", engine, name)
-			}
-			if name != "delete_model" {
-				t.Errorf("lmstudio action %q declares restart_after; only delete_model needs one", name)
-			}
-		}
-	}
-	if !reg.engines["lmstudio"].Actions["delete_model"].RestartAfter {
-		t.Fatal("lmstudio delete_model lost restart_after; a deleted model would keep being served")
-	}
-	if reg.engines["ollama"].Actions["delete_model"].RestartAfter {
-		t.Fatal("ollama delete_model declares restart_after; Ollama reflects deletions without a bounce")
-	}
-}
-
 // TestRestartAfterFitsRemoteReadinessBudget ties the manifest's readiness
 // allowance to what an initiating peer is willing to wait for. A remote delete
 // gets no reply until the post-delete restart is ready, and cutting it off

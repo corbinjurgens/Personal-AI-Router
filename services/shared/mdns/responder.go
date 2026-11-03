@@ -75,13 +75,13 @@ var (
 // for it on every multicast-capable IPv4 interface.
 type Responder struct {
 	instance string
-	service  string // e.g. "_nvpair-ollama._tcp"
+	service  string // e.g. "_nvpair-node._tcp"
 	domain   string // e.g. "local"
 	port     int
 	hostName string // e.g. "myhost.local."
 
-	serviceName  string // "_nvpair-ollama._tcp.local."
-	instanceName string // "myhost._nvpair-ollama._tcp.local."
+	serviceName  string // "_nvpair-node._tcp.local."
+	instanceName string // "myhost._nvpair-node._tcp.local."
 
 	// txtMu guards txt, which UpdateTXT can swap while Run is serving.
 	// Callers that never call UpdateTXT simply read the value set at

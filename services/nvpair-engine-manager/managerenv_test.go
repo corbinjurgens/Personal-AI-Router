@@ -83,7 +83,7 @@ func TestManagerFixtureBundleIsPrivate(t *testing.T) {
 	if err := reg.LoadFS(os.DirFS(filepath.Join(dir, "bundled")), "."); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(reg.Names(), []string{"llamacpp", "lmstudio", "ollama"}) {
+	if !slices.Equal(reg.Names(), []string{"llamacpp"}) {
 		t.Fatalf("fixture engines = %v", reg.Names())
 	}
 	for _, name := range reg.Names() {
