@@ -153,7 +153,6 @@ type Executor struct {
 	reporter            *Reporter
 	emit                func(method string, params any)
 	client              *http.Client
-	processes           processLister
 	// budgetClients holds one engine client per operation response budget a
 	// manifest declares (OperationBinding.ResponseTimeoutS), created on first
 	// use and reused so its connections are too. Guarded by budgetMu.
@@ -248,7 +247,6 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 		reporter:            reporter,
 		emit:                emit,
 		client:              newEngineHTTPClient(engineResponseHeaderTimeout),
-		processes:           listProcessNames,
 		progress:            newProgressHub(),
 		baseDir:             baseDir,
 		desired:             newDesiredStateStore(baseDir),

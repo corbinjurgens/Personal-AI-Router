@@ -660,7 +660,7 @@ func (f *srProcessFixture) enableSwitchTarget(t *testing.T, engine string) {
 	configPath := filepath.Join(f.root, "switch-runtime.json")
 	jointWriteJSON(t, configPath, neRuntimeConfig{Root: f.root, Nonce: f.nonce, Port: f.switchEnginePort})
 	runtimeConfig := map[string]any{
-		"mode": "process", "args": []string{"serve"}, "bin": f.image, "cli": filepath.Join(f.root, "absent-"+engine+"-cli"), "port": f.switchEnginePort, "bind": "127.0.0.1", "ready": probe, "health": probe,
+		"args": []string{"serve"}, "bin": f.image, "port": f.switchEnginePort, "bind": "127.0.0.1", "ready": probe, "health": probe,
 		"env":  map[string]string{srCustomRuntimeEnv: f.image, "NVPAIR_SR_CUSTOM_CONFIG": configPath, "NVPAIR_SR_TARGET_ENGINE": engine, "NVPAIR_TEST_SWITCH_CONTROL": f.switchControl.URL},
 		"stop": map[string]any{"signal": "term", "grace_s": 1},
 	}
@@ -744,7 +744,7 @@ func (f *srProcessFixture) start(t *testing.T) {
 		}
 		if engine == f.switchEngine {
 			platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
-			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || manifest.Runtime.Bin != f.image || manifest.Runtime.CLI != filepath.Join(f.root, "absent-"+f.switchEngine+"-cli") || manifest.Runtime.Port != f.switchEnginePort || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
+			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || manifest.Runtime.Bin != f.image || manifest.Runtime.Port != f.switchEnginePort || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
 				t.Fatal("switch target escaped private image, port or model directory")
 			}
 			continue
@@ -773,7 +773,7 @@ func (f *srProcessFixture) start(t *testing.T) {
 		f.call(t, "engine:describe", map[string]string{"engine": engine}, &manifest)
 		if engine == f.switchEngine {
 			platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
-			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || platform.Runtime.Bin != f.image || platform.Runtime.CLI != filepath.Join(f.root, "absent-"+f.switchEngine+"-cli") || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
+			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || platform.Runtime.Bin != f.image || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
 				t.Fatal("effective switch target escaped private image, port, probe or model directory")
 			}
 			continue

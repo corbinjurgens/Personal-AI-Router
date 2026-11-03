@@ -15,7 +15,7 @@ func bindingManifest() *Manifest {
 	m.Actions = map[string]Action{
 		"http_load":   {HTTP: &ActionHTTP{Method: "POST", Path: "/load"}},
 		"query_erase": {HTTP: &ActionHTTP{Method: "DELETE", Path: "/models", ParamsIn: "query"}},
-		"cli_load":    {Cmd: []string{"{cli}", "load", "{model}"}},
+		"cli_load":    {Cmd: []string{"{bin}", "load", "{model}"}},
 		"rm":          {RemovePath: &ActionRemovePath{Root: "{install_dir}", Path: "{install_dir}/{target}"}},
 		pullModelAction: {
 			HTTP:             &ActionHTTP{Method: "POST", Path: "/models"},

@@ -16,7 +16,6 @@
         { "flags": ["--port"], "value": "{server.port}" }
       ]
     },
-    "mode": "process",
     "bin": "/REPLACE_WITH_ABSOLUTE_PATH/python",
     "args": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py", "--engine", "strata", "--config", "/REPLACE_WITH_ABSOLUTE_PATH/config.json", "--host", "127.0.0.1", "--port", "{port}", "--lazy"],
     "bind": "127.0.0.1",

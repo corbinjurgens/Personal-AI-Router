@@ -1236,20 +1236,15 @@ extensibility story for an open-source product.
 - **Risk — dynamic port assignment**: manifest `port: 0` reserves the option; range/policy TBD (may move to a future supervisor).
 - **Risk — admin-only installers**: `mode: "admin"` is a flagged, refused exception, not the default; product direction is strictly user-mode.
 - **Risk — LAN-open inference bind (interim)**: inference engines default `runtime.bind` to `0.0.0.0` (ordinary engines stay loopback; a per-call `bind` re-pins). This is a deliberate, temporary exception to the loopback-only posture; narrow it once authenticated inference transport exists. The engine-manager `ec` control surface is already protected independently by pin-based mTLS.
-- **Future — declared/tunable env layer**: `runtime.env` is static today. A "declared tunables" layer (manifest-declared knobs, UI/broker-overridable per start) is worth adding; by env-richness the priority is llama.cpp/Jan → vLLM (GPT4All is flag/settings-driven, not env). Related: `runtime.env` is process-mode-only — extending it to command-mode start commands is a deliberate, still-open choice. See `MANIFEST.md` → "Engine config reference".
+- **Future — declared/tunable env layer**: `runtime.env` is static today. A "declared tunables" layer (manifest-declared knobs, UI/broker-overridable per start) is worth adding; by env-richness the priority is llama.cpp/Jan → vLLM (GPT4All is flag/settings-driven, not env). See `MANIFEST.md` → "Engine config reference".
 - **Model deletion where the vendor has no command**: implemented via the generic **`remove_path`** action kind — a manifest-declared, param-templated path the runner removes with safety rails (must resolve under a declared allowed root, reject `..`/symlink escapes). An action may declare `restart_after` to bounce a running server whose model index is built at startup and has no rescan, so clients are not offered the deleted model until it restarts. llama.cpp deletes native cache entries via `DELETE /models` with the exact model id in a URL-encoded query parameter; the router updates its inventory in-process, so it needs no restart.
 
 ## 5. Requirements
 
 **Functional**
-- Load + validate per-engine JSON manifests (bundled + user dir); select the host `<goos>/<goarch>` block; resolve placeholders (`{bin}`, `{cli}`, `{port}`, `{download}`, `{install_dir}`). Install commands also receive resolved download and destination paths in child-scoped `NVPAIR_INSTALL_*` environment variables so shell reparsing cannot corrupt them.
-- Support both `process` (owned foreground) and `command` (daemon + control-CLI) runtimes; execute detect / install / uninstall / start / stop / restart / status / health and HTTP **or** CLI actions; emit `engine:*` results and notifications.
-- For command-mode startup failures or cancellation after any start-command
-  attempt, run the bounded official stop command and use the configured
-  readiness endpoint to confirm listener closure before releasing the lifecycle
-  lock. A control CLI may detach a daemon before it returns, so cleanup must
-  also run when that CLI fails or is cancelled.
-- Bound process-mode stops: on Unix send SIGTERM to the owned process group, then SIGKILL after `runtime.stop.grace_s` (five seconds by default); `signal:"kill"` skips the grace. On Windows, windowless managed engines require immediate `taskkill /T /F`.
+- Load + validate per-engine JSON manifests (bundled + user dir); select the host `<goos>/<goarch>` block; resolve placeholders (`{bin}`, `{port}`, `{download}`, `{install_dir}`). Install commands also receive resolved download and destination paths in child-scoped `NVPAIR_INSTALL_*` environment variables so shell reparsing cannot corrupt them.
+- Run each engine as an owned foreground process; execute detect / install / uninstall / start / stop / restart / status / health and HTTP **or** CLI actions; emit `engine:*` results and notifications.
+- Bound stops: on Unix send SIGTERM to the owned process group, then SIGKILL after `runtime.stop.grace_s` (five seconds by default); `signal:"kill"` skips the grace. On Windows, windowless managed engines require immediate `taskkill /T /F`.
   Unix stop and orphan-reclaim signals target the group only when the PID is
   its group leader (`pgid == pid`); otherwise they target the PID alone.
 - Reclaim an adopted managed orphan only after authoritative executable-image
@@ -1416,7 +1411,7 @@ Notifications (service → caller): `engine:intent-changed{enabledByEngine, offB
 
 Notifications (caller → service): `engine:node-projection{policy, pausedLocally, managementBlocked}` carries this node's policy advertisement (`nvpair-shared/nodepolicy.Advertisement`: `revision`, `roles` per tier with the bounds of the matching profile, `pausedBy?`), local-pause provenance, and `managementBlocked`: whether a pause of either origin, accepted but not yet saved, draining or saved, fences peer management writes. The common mutation gate requires a known projection and enforces this bit after the current grant check. Local activation also refuses known blocked state; trusted local startup may proceed before the first projection. An older broker omits the bit, which reads as false; it is never derived from `pausedBy` or `pausedLocally`. The broker sends it after every persisted policy or availability change and again on every `engine:ready`, reading its current policy each time under one lock, so a later projection never carries older state. engine-manager keeps the last one in memory, replaced whole, never persisted; an undecodable one leaves the previous in place. `engine:models` and `GET /v1/models` return it as `policy`, omitted until the first push. `engine:models-changed` does not carry it.
 
-`engine:model-identity{engines}` is also a service → caller notification: a whole snapshot keyed by engine, each entry `{engineRunId, launchDigest, modelDigests}` with `modelDigests` keyed by model name. The loaded-model watcher emits it after its first sweep and whenever the snapshot changes; an absent engine has no current identity. Only running owned processes with a known launch digest are included, excluding adopted services and command-mode daemons. Model digests must come from an inventory of the same run and contain lowercase SHA-256 hex. Publication is ordered with `engine:state-changed`, so a running engine's identity cannot arrive after its stop. The broker adds its settings fingerprint before publishing the strict admission identity to the proxy.
+`engine:model-identity{engines}` is also a service → caller notification: a whole snapshot keyed by engine, each entry `{engineRunId, launchDigest, modelDigests}` with `modelDigests` keyed by model name. The loaded-model watcher emits it after its first sweep and whenever the snapshot changes; an absent engine has no current identity. Only running owned processes with a known launch digest are included, excluding adopted services. Model digests must come from an inventory of the same run and contain lowercase SHA-256 hex. Publication is ordered with `engine:state-changed`, so a running engine's identity cannot arrive after its stop. The broker adds its settings fingerprint before publishing the strict admission identity to the proxy.
 
 Before changing installed model content, the executor sends the broker the internal notification `engine:model-mutation-request{requestId, engine}` and waits for `engine:model-mutation-reply{requestId, engine, ok, error, code}`. Only a matching accepted reply permits the change. The broker conservatively withdraws the whole engine, retaining its applied settings fingerprint, and confirms destination withdrawal through the same proxy barrier as settings changes. These messages are never client RPCs or client events.
 
@@ -1867,40 +1862,6 @@ destination grants, Pause and recovery/admission retain their existing owners.
 - **Engine process crashes**: engine unavailable. → A watcher flips state, emits `engine:state-changed` + `errors:report` (`engine-manager:exited:<engine>`), then schedules the bounded saved-On relaunch episode (§4). Current On intent, pause/shutdown cancellation, switch ownership and reclaim fencing still govern every attempt; inference is not resumed. The parent's supervisor separately reports if the *manager itself* dies.
 - **`nvpair-errors` unavailable**: failures absent from the node's error list. → The Broker no-ops the forward; local applog + ring buffers still hold everything.
 - **Invalid / unknown-OS manifest**: that engine is unusable. → Reject at load with a specific error; other engines unaffected.
-
-Command-mode engines declaring `runtime.auth_statuses` and
-`runtime.app_processes` (currently LM Studio) diagnose failed start commands,
-failed readiness, and health-probe failures through the existing `errors:report`
-message. Start failures retain `engine-manager:start-failed:<engine>` with
-severity `error` and action `retry`; health failures retain
-`engine-manager:unhealthy:<engine>` with severity `warning` and action `none`.
-`engine:state-changed{EngineStatus}` and the error payloads are unchanged; no
-payload field was added. With `<Name>` replaced by the manifest's `display_name`,
-the messages are:
-
-- API-key refusal (a declared HTTP 401 or 403): `<Name> is running but requires an API key, and PAIR does not have one. Turn off API authentication in <Name>'s server settings, then try again.`
-- App or daemon process present but no connection: `Can't connect to <Name>. Does it have an API key set, or is its server off?`
-- No matching process: `Can't connect to <Name>, and no <Name> process is running. Open <Name>, then try again.`
-
-Auth evidence takes precedence over process inspection. Without diagnosis fields,
-or if process listing fails without auth evidence, the original failure wording
-is retained. Before a command-mode start, a declared auth response from the
-effective ready endpoint refuses the start without running either the start or
-cleanup stop command, leaving the listener unadopted. Explicit Stop and shutdown
-retain their existing behavior. After a start command is attempted, three
-consecutive readiness responses with a declared auth
-status fail readiness early (about 0.6 seconds for immediate responses); any
-other result resets that count. Other failures retain the existing readiness
-timeout (60 seconds for LM Studio), and failed-start stop-command cleanup is
-unchanged. This diagnosis does not add LM Studio API-key storage or use.
-
-LM Studio readiness remains its HTTP probe: process presence never makes an
-engine running, healthy, adopted, or routable. Diagnosis runs on a start attempt
-(including automatic relaunch) or in the health loop of an engine PAIR started
-or adopted through Start. An engine adopted only by a passive status read has
-no health loop and gets no health diagnosis. A health failure is reported even
-if a status read already changed `healthy` to false, and the report clears when
-the health probe recovers. Merely opening LM Studio does not trigger diagnosis.
 
 ## 13. Observability
 - **Logging**: structured `slog` to stderr via `nvpair-shared/applog` (captured by the parent's debug panel); per-engine stdout/stderr ring buffers; key events — install fetch/verify/run outcomes, start/ready/stop transitions, health flips, action invocations, every failure.

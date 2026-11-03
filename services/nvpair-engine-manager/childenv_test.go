@@ -95,31 +95,6 @@ func TestStartManagedProcFailureDoesNotExposeProviderSecrets(t *testing.T) {
 	secretenvtest.AssertNoValue(t, "start error", err.Error())
 }
 
-func TestRunPrivateLaunchCommandRemovesProviderSecrets(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		overrides map[string]string
-		exit      string
-	}{
-		{"inherited environment", nil, "0"},
-		{"caller overrides", sentinelOverrides(), "0"},
-		{"command fails", sentinelOverrides(), "1"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			report := secretenvtest.Prepare(t)
-			t.Setenv(secretenvtest.ExitEnv, tc.exit)
-			err := runPrivateLaunchCommand(context.Background(), []string{os.Args[0], "server", "start"}, tc.overrides, nil)
-			if (err != nil) != (tc.exit != "0") {
-				t.Fatalf("runPrivateLaunchCommand error = %v, want failure %v", err, tc.exit != "0")
-			}
-			if err != nil {
-				secretenvtest.AssertNoValue(t, "launch error", err.Error())
-			}
-			secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
-		})
-	}
-}
-
 func TestRunManifestCommandRemovesProviderSecrets(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

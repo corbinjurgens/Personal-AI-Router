@@ -810,7 +810,7 @@ func (f *ownerEvidenceProcessFixture) installManifests(t *testing.T) {
 		port := f.allocatePort(t)
 		f.enginePorts[engine] = port
 		probe := map[string]any{"http": "http://127.0.0.1:{port}/health", "status": http.StatusOK, "timeout_s": 5}
-		rt := map[string]any{"mode": "process", "bin": f.fake, "bind": "127.0.0.1", "port": port,
+		rt := map[string]any{"bin": f.fake, "bind": "127.0.0.1", "port": port,
 			// Readiness proves the contact counter is live. Omit the optional
 			// periodic health probe so only the evidence read is under test.
 			"env": map[string]string{"NVPAIR_OWNER_ENGINE_PORT": "{port}"}, "ready": probe,

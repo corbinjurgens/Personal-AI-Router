@@ -78,8 +78,8 @@ directly to the engine, not a command to paste into a system shell.
 For example:
 
 ```text
-OLLAMA_HOST=127.0.0.1:11435 OLLAMA_ORIGINS="https://example.com"
---port 1235 --bind 127.0.0.1 --future-option "two words"
+ENGINE_ADDR=127.0.0.1:18081 ENGINE_ORIGINS="https://example.com"
+--port 18081 --host 127.0.0.1 --future-option "two words"
 ```
 
 The settings validator checks valid environment assignments, declared loopback
@@ -238,18 +238,17 @@ preset keep the existing 8192/1 defaults.
 ## Launch resolution boundary
 
 `resolveProcessLaunch` returns the executable, argv and explicit environment
-that `bringUpProcess` uses. `resolveCommandLaunch` returns the executable and
-argv for each ordered command-mode start step. Existing trusted manifest
+that `bringUpProcess` uses. Existing trusted manifest
 placeholder/path expansion is preserved. The builders do not mutate the
 caller's resolution context.
 
 User arguments are combined **after** trusted manifest expansion;
-storing user text in `runtime.args` or `runtime.start` would interpret literal
+storing user text in `runtime.args` would interpret literal
 placeholders and environment references. Settings persist literal extra tokens
 in host-platform `runtime.launch_args` alongside the managed port. Explicit
 editable environment assignments are stored as a replacement array in `runtime.launch_env`,
 so editing or removing an assignment cannot leave an old value behind through
-manifest merging. These values reach both process and command-mode launches
+manifest merging. These values reach the launch
 literally, overriding inherited values. An empty array clears prior explicit
 editable assignments (inherited OS environment still applies). Environment names
 are not allowlisted, but a name in the reserved provider-secret namespace
@@ -258,29 +257,30 @@ variable and omits its value. Every process engine-manager starts, including
 engines, control and install commands and port-owner lookups, gets the
 inherited environment without that namespace, removed after any manifest or
 settings values are merged. Explicit assignments override manifest defaults, including
-values such as Linux Ollama's `LD_LIBRARY_PATH`; omitted defaults are restored
+values such as `LD_LIBRARY_PATH`; omitted defaults are restored
 from the manifest. Existing trusted `args`,
-`start`, `env`, install and other-platform overrides are preserved.
+`env`, install and other-platform overrides are preserved.
 
 ## Managed fields and preview
 
-`runtime.editable_launch` declares fixed startup arguments, an optional
-command-mode `start_index`, and field-binding `controls`. A control describes
+`runtime.editable_launch` declares fixed startup arguments and field-binding
+`controls`. A control describes
 its flag/environment names, a `value` format and an optional `implicit` value
 for flag presence. Binding syntax and policy are separate: the same parser reads
 all formats, while four PAIR fields enforce port, loopback and CORS policy.
 See [the schema and examples](MANIFEST.md#top-level-fields).
 
-Ollama binds `OLLAMA_HOST` to `{server.host}:{server.port}` and
-`OLLAMA_ORIGINS` to `{cors.origins}`. LM Studio binds `--port`/`-p` to
-`{server.port}`, `--bind`/`LMS_SERVER_HOST` to `{server.host}`, and `--cors`
-to `{cors.enabled}` with an implicit value of `true`. Managed network values
+llama.cpp binds `--host` to `{server.host}`, `--port` to `{server.port}` and
+`--cors-origins` to `{cors.origins}`. A control can instead bind an environment
+variable (`ENGINE_ADDR` to `{server.host}:{server.port}`), several flag aliases
+(`--port`/`-p`), or a flag whose presence carries an implicit value (`--cors` to
+`{cors.enabled}` with an implicit value of `true`). Managed network values
 replace every declared environment alias and use the first flag as canonical
 output for edited arguments. All CORS fields are local-only. Proxy ports are
 owned and validated by the broker, independently of engine argument syntax.
 The proxy always follows standard HTTP CORS responses, including absence of
 permission, independently of how an engine configures that policy.
-Environment assignments such as `OLLAMA_ORIGINS="http://localhost"` can be added,
+Environment assignments such as `ENGINE_ORIGINS="http://localhost"` can be added,
 edited or removed at the beginning of the text, before engine arguments. Names
 use letters, digits and underscores and start with a letter or underscore; duplicate names are invalid
 (case-insensitive on Windows). Values support spaces, empty strings and the
@@ -289,7 +289,7 @@ and storage, including extra surrounding quotes, scheme/host case and whitespace
 Each nonempty origin requires a scheme and specific host; wildcard subdomains
 and ports are allowed, but universal origins, credentials, paths and remaining
 quotes are rejected. Conflicting repeated origin lists are invalid. Environment values remain
-quoted in normalized commands. `OLLAMA_HOST` continues to synchronize with
+quoted in normalized commands. An environment variable bound to the server address continues to synchronize with
 the server-port field. The editor contains no executable/subcommand. Removing
 a managed option reinserts it. Equals-form ports and repeated identical ports
 normalize to one managed value; conflicting duplicate ports are invalid.
@@ -337,22 +337,20 @@ The broker-facing internal methods are `engine:get-launch`,
 documented in [ENGINE_SETTINGS.md](../nvpair-ui-broker/ENGINE_SETTINGS.md).
 
 Tests cover grammar and normalization, exact argv received by a real isolated
-child process, both lifecycle modes, preservation of override fields, reset to
+child process, flag and environment bindings, preservation of override fields, reset to
 defaults, platform precedence and replacement of an existing settings file.
 The existing engine-manager suite also exercises the JSON-RPC stdio path.
 
 ## Networking adapter coverage
 
-The bundled engines are Ollama, LM Studio, and llama.cpp. The shared parser
-contains no engine name checks. Their mandatory networking declarations and all
+The bundled engine is llama.cpp. The shared parser
+contains no engine name checks. Its mandatory networking declarations and all
 platform variants are pinned by TestBundledNetworkingControls; adding an engine
 requires extending that inventory and reviewing its networking alternatives.
 Other settings have no catalog.
 
 | Engine | Port/bind controls | CORS controls | Vendor reference |
 | --- | --- | --- | --- |
-| Ollama | OLLAMA_HOST | OLLAMA_ORIGINS, including vendor quote stripping | [Environment source](https://github.com/ollama/ollama/blob/main/envconfig/config.go) |
-| LM Studio | --port / -p; --bind / LMS_SERVER_HOST | --cors (no short alias) | [Server command source](https://github.com/lmstudio-ai/lms/blob/main/src/subcommands/server.ts) |
 | llama.cpp | --host; --port | --cors-origins | [Server reference](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) |
 
 Remote CORS comparisons use normalized policy. The broker derives the internal

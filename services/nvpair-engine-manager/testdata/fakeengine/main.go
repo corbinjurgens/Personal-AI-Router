@@ -148,8 +148,8 @@ func main() {
 		_ = json.NewEncoder(file).Encode(os.Args[1:])
 		_ = file.Close()
 	}
-	// Subcommands used by command-mode + cmd-action tests. They run and
-	// exit (no server), standing in for an engine's control CLI.
+	// Subcommands used by launch and cmd-action tests. They run and exit (no
+	// server), standing in for an engine's control CLI.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "oversized-output":

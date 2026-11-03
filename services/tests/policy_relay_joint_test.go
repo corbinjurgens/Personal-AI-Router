@@ -597,7 +597,7 @@ func jointIsolateEngines(t *testing.T, base string, port int) {
 	for _, engine := range privateFixtureEngineNames() {
 		absent := filepath.Join(base, "absent-"+engine)
 		probe := map[string]any{"http": "http://127.0.0.1:{port}/joint-no-engine", "status": 200, "timeout_s": 1, "interval_s": 60}
-		rt := map[string]any{"port": port, "bin": absent, "cli": absent, "ready": probe, "health": probe}
+		rt := map[string]any{"port": port, "bin": absent, "ready": probe, "health": probe}
 		jointWriteJSON(t, filepath.Join(jointAppDir(base), "engines", engine+".json"), privateFixtureManifest(t, engine, filepath.Join(base, "absent-models", engine), absent, rt))
 	}
 }

@@ -238,7 +238,7 @@ func TestLlamaSourceModelsReachTheLaunch(t *testing.T) {
 	manifest := testEngineManifest(fakeEngineBin)
 	manifest.Family = "llamacpp"
 	for key, platform := range manifest.Platforms {
-		platform.Runtime = Runtime{Mode: "process", Bin: fakeEngineBin, Port: port,
+		platform.Runtime = Runtime{Bin: fakeEngineBin, Port: port,
 			Args:  []string{"--port", "{port}"},
 			Env:   map[string]string{"FAKE_START_LOG": startLog, "FAKE_ADDR": "127.0.0.1:{port}"},
 			Ready: &Probe{TCP: "127.0.0.1:{port}"},

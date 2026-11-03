@@ -445,7 +445,7 @@ func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
 			jointWriteJSON(t, filepath.Join(jointAppDir(base), privateFixtureEngine(t, engine.name).PortFile), map[string]int{"port": engine.facade})
 		}
 		probe := map[string]any{"http": "http://127.0.0.1:{port}/", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
-		rt := map[string]any{"mode": "process", "bin": self, "port": engine.server, "bind": "127.0.0.1", "ready": probe, "health": probe,
+		rt := map[string]any{"bin": self, "port": engine.server, "bind": "127.0.0.1", "ready": probe, "health": probe,
 			"env":  map[string]string{"NVPAIR_TEST_SWITCH_ENGINE": self, "NVPAIR_TEST_SWITCH_NAME": engine.name, "NVPAIR_TEST_SWITCH_PORT": "{port}", "NVPAIR_TEST_SWITCH_CONTROL": f.control.URL},
 			"stop": map[string]any{"signal": "term", "grace_s": 1}}
 		jointWriteJSON(t, filepath.Join(jointAppDir(base), "engines", engine.name+".json"), privateFixtureManifest(t, engine.name, filepath.Join(base, "absent-models", engine.name), self, rt, engines.ProtocolOpenAIV1))

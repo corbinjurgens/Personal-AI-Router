@@ -57,13 +57,3 @@ func parsePSRecords(out []byte) ([]processRecord, error) {
 	}
 	return records, nil
 }
-
-func parsePSComm(out []byte) []string {
-	var names []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if name := strings.TrimSpace(line); name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
-}

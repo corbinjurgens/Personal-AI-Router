@@ -178,14 +178,13 @@ func TestConfiguredDetectionEnvironmentReferences(t *testing.T) {
 }
 
 func TestConfiguredDetectionReadinessCannotCompleteInstallation(t *testing.T) {
-	test := func(name, mode string) {
+	test := func(name string) {
 		t.Run(name, func(t *testing.T) {
 			ex, st := configuredDetectionExecutor(t)
 			removeDetectionFile(t, filepath.Join(st.installDir, "config.json"))
 			var status atomic.Int32
 			status.Store(http.StatusOK)
 			st.port = detectionServer(t, &status)
-			st.plat.Runtime.Mode = mode
 			marker := filepath.Join(t.TempDir(), "installer-ran")
 			st.plat.Install = &Install{Script: []string{fakeEngineBin, "touch", marker}}
 			got, err := ex.Status("fake")
@@ -210,8 +209,7 @@ func TestConfiguredDetectionReadinessCannotCompleteInstallation(t *testing.T) {
 			}
 		})
 	}
-	test("process listener", "process")
-	test("command listener", "command")
+	test("process listener")
 }
 
 func TestConfiguredDetectionAdoptedFileDisappearance(t *testing.T) {
@@ -558,11 +556,6 @@ func TestBundledDetectionAdoptionCompatibility(t *testing.T) {
 			t.Run(engine+"/"+platform, func(t *testing.T) {
 				p := m.Platforms[platform]
 				p.Detect = []string{filepath.Join(t.TempDir(), "absent-executable")}
-				if p.Runtime.modeOrDefault() == "command" {
-					// The existing command-mode contract requires its CLI even
-					// when the API is already live. It is never executed here.
-					writeDetectionFile(t, p.Detect[0])
-				}
 				p.Runtime.Health = nil
 				copy := *m
 				copy.Platforms = map[string]Platform{runtime.GOOS + "/" + runtime.GOARCH: p}

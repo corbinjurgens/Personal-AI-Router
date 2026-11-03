@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,16 +13,11 @@ import (
 	"testing"
 )
 
-func TestConfiguredDetectionCompleteCommandRejectsOccupiedListener(t *testing.T) {
+func TestConfiguredDetectionCompleteRejectsOccupiedListener(t *testing.T) {
 	ex, st := configuredDetectionExecutor(t)
 	var response atomic.Int32
 	response.Store(http.StatusServiceUnavailable)
 	st.port = detectionServer(t, &response)
-	startMarker := filepath.Join(t.TempDir(), "start-ran")
-	cleanupMarker := filepath.Join(t.TempDir(), "cleanup-ran")
-	st.plat.Runtime.Mode = "command"
-	st.plat.Runtime.Start = [][]string{{fakeEngineBin, "touch", startMarker}}
-	st.plat.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", cleanupMarker}, GraceS: 1}
 	st.plat.Runtime.Ready.TimeoutS = 1
 	if installed, err := ex.Detect("fake"); err != nil || !installed {
 		t.Fatalf("complete evidence = %v, %v", installed, err)
@@ -31,10 +25,11 @@ func TestConfiguredDetectionCompleteCommandRejectsOccupiedListener(t *testing.T)
 	if err := ex.Start(context.Background(), "fake"); err == nil || !strings.Contains(err.Error(), "occupied") {
 		t.Errorf("start against unidentified listener = %v, want occupied refusal", err)
 	}
-	for _, path := range []string{startMarker, cleanupMarker} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Errorf("command executed over unidentified listener (%s): %v", filepath.Base(path), err)
-		}
+	st.mu.Lock()
+	started := st.proc != nil
+	st.mu.Unlock()
+	if started {
+		t.Error("engine process started over unidentified listener")
 	}
 }
 

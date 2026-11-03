@@ -208,7 +208,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	rt := st.plat.Runtime
 	port := st.port
 	st.mu.Unlock()
-	if port == 0 && rt.modeOrDefault() == "process" && opts.ReclaimOwned {
+	if port == 0 && opts.ReclaimOwned {
 		port, err = e.desired.allocatedPort(engine)
 		if err != nil {
 			return err
@@ -297,7 +297,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 		}
 		return nil
 	}
-	if presence.Occupied && (rt.modeOrDefault() == "process" || len(st.plat.DetectRequired) > 0) {
+	if presence.Occupied {
 		return fmt.Errorf("cannot start engine %q on port %d: the port is occupied by a service that did not identify as %s", engine, port, st.manifest.DisplayName)
 	}
 	if !pathInstalled {
@@ -306,9 +306,6 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	vars := st.pathVars()
 	vars["host"] = effectiveBind(rt.Bind, opts.Bind)
 	vars["port"] = strconv.Itoa(port)
-	if rt.CLI != "" {
-		vars["cli"] = expandPath(rt.CLI)
-	}
 
 	st.mu.Lock()
 	st.port = port
@@ -413,14 +410,8 @@ func (e *Executor) bringUp(ctx context.Context, st *engineState, engine string, 
 }
 
 func (e *Executor) bringUpWithCleanup(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
-	if len(rt.ModelLoads) != 0 && (st.manifest.FamilyOrDefault() != "llamacpp" || rt.modeOrDefault() != "process") {
+	if len(rt.ModelLoads) != 0 && st.manifest.FamilyOrDefault() != "llamacpp" {
 		return modelLoadError("", "modelLoads", "Typed loads require an owned llama.cpp process.")
-	}
-	if strataServingRuntime(st, rt.Serving) && rt.modeOrDefault() != "process" {
-		return servingError("Prepared Strata requires an owned process launch.")
-	}
-	if rt.modeOrDefault() == "command" {
-		return e.bringUpCommand(ctx, cleanupCtx, st, engine, rt, port, vars)
 	}
 	return e.bringUpProcessWithCleanup(ctx, cleanupCtx, st, engine, rt, port, vars, prepareServingSnapshot)
 }
@@ -687,7 +678,7 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		credential, readyErr = e.credentialForCandidate(readyCtx, st, port)
 	}
 	if readyErr == nil {
-		readyErr = e.waitReady(readyCtx, rt.Ready, port, rt.AuthStatuses, credential)
+		readyErr = e.waitReady(readyCtx, rt.Ready, port, credential)
 	}
 	select {
 	case <-proc.done:
@@ -726,137 +717,6 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 	return nil
 }
 
-// bringUpCommand runs the manifest's ordered start commands (for a
-// daemon-style engine such as LM Studio), then waits for readiness.
-// There is no owned process — liveness comes from the probe.
-func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
-	credential := candidateCredential{port: port}
-	if rt.Ready != nil {
-		var err error
-		credential, err = e.credentialForCandidate(ctx, st, port)
-		if err != nil {
-			return err
-		}
-	}
-	if len(rt.AuthStatuses) > 0 {
-		_, status, err := e.probeStatus(ctx, rt.Ready, port, credential)
-		if err != nil {
-			return err
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if slices.Contains(rt.AuthStatuses, status) {
-			d := diagnosisAuthRequired
-			if credential.key != "" {
-				d = diagnosisAuthRejected
-			}
-			err := errors.New(diagnosisMessage(st.manifest.DisplayName, d))
-			e.reportStartFailedUnlessShuttingDown(ctx, engine, err)
-			return err
-		}
-	}
-	st.mu.Lock()
-	st.proc = nil
-	st.mu.Unlock()
-	startAttempted := false
-	cleanup := func(startErr error) error {
-		if !startAttempted {
-			return startErr
-		}
-		if stopErr := e.runCommandStopContext(cleanupCtx, st, engine, rt, port); stopErr != nil {
-			// A non-zero stop CLI can still have taken the daemon down. Confirm
-			// that before surfacing a cleanup failure.
-			if rt.Ready != nil && e.waitUnavailableContext(cleanupCtx, rt.Ready, port, time.Second) {
-				return startErr
-			}
-			return errors.Join(startErr, fmt.Errorf("clean up failed %s start: %w", engine, stopErr))
-		}
-		return startErr
-	}
-	for index := range rt.Start {
-		launch, err := resolveRuntimeCommand(rt, index, vars)
-		if err != nil {
-			e.reportStartFailedUnlessShuttingDown(ctx, engine, err)
-			return cleanup(err)
-		}
-		if launch.Bin == "" {
-			continue
-		}
-		if rt.EditableLaunch != nil && index == rt.EditableLaunch.StartIndex {
-			if err := validateEffectiveLaunch(rt, launch, vars["host"], vars["port"]); err != nil {
-				return cleanup(err)
-			}
-		}
-		argv := append([]string{launch.Bin}, launch.Args...)
-		// A control CLI may detach its daemon before returning, then fail or
-		// be cancelled. Attempt official cleanup once any start command runs,
-		// even when that command never reports success.
-		if err := ctx.Err(); err != nil {
-			return cleanup(err)
-		}
-		if err := e.activationVeto(engine); err != nil {
-			return cleanup(err)
-		}
-		start := func(cmd *exec.Cmd) error {
-			err := e.startActivationCommand(cmd)
-			if err == nil {
-				startAttempted = true
-			}
-			return err
-		}
-		if err := runPrivateLaunchCommandWithStart(ctx, argv, launch.Env, launchDiagnosticArgs(rt), start); err != nil {
-			werr := fmt.Errorf("start command failed: %w", err)
-			werr = e.diagnoseStartFailure(ctx, st, port, err, werr)
-			e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
-			return cleanup(werr)
-		}
-	}
-	if err := e.waitReady(ctx, rt.Ready, port, rt.AuthStatuses, credential); err != nil {
-		werr := fmt.Errorf("engine %q did not become ready: %w", engine, err)
-		werr = e.diagnoseStartFailure(ctx, st, port, err, werr)
-		e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
-		e.emitState(engine)
-		return cleanup(werr)
-	}
-	return nil
-}
-
-// Capture vendor startup diagnostics without interpreting engine options.
-func runPrivateLaunchCommand(ctx context.Context, argv []string, environment map[string]string, privateArgs []string) error {
-	return runPrivateLaunchCommandWithStart(ctx, argv, environment, privateArgs, func(cmd *exec.Cmd) error { return cmd.Start() })
-}
-
-// The projection gate covers only creation of the control process. Waiting for
-// a CLI (which may detach a daemon) must not prevent Pause from being stored.
-func (e *Executor) startActivationCommand(cmd *exec.Cmd) error {
-	e.nodeProjection.mu.Lock()
-	defer e.nodeProjection.mu.Unlock()
-	if e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked {
-		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
-	}
-	return cmd.Start()
-}
-
-func runPrivateLaunchCommandWithStart(ctx context.Context, argv []string, environment map[string]string, privateArgs []string, start func(*exec.Cmd) error) error {
-	if len(argv) == 0 {
-		return fmt.Errorf("launch executable is missing")
-	}
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	diagnostics := newStartupOutput(privateArgs, environment)
-	defer diagnostics.close()
-	cmd.Stdout, cmd.Stderr = diagnostics, diagnostics
-	cmd.Env = childEnv(environment)
-	configureSysProcAttr(cmd)
-	if err := start(cmd); err != nil {
-		return diagnostics.failure(fmt.Errorf("launch command failed: %w", err))
-	}
-	if err := cmd.Wait(); err != nil {
-		return diagnostics.failure(fmt.Errorf("launch command failed: %w", err))
-	}
-	return nil
-}
-
 // watch reports an unexpected engine exit (one not initiated by Stop).
 func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 	go func() {
@@ -891,9 +751,8 @@ func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 	}()
 }
 
-// Stop terminates a running engine. In process mode it signals the
-// owned process (graceful then forced); in command mode it runs the
-// manifest's stop command. No-op if not running. It is a local client's stop.
+// Stop terminates a running engine by signalling the owned process (graceful
+// then forced). No-op if not running. It is a local client's stop.
 func (e *Executor) Stop(engine string) error {
 	return e.StopFrom(engine, intentLocal)
 }
@@ -1041,7 +900,7 @@ func (e *Executor) doStopOwnedContext(ctx context.Context, st *engineState, engi
 	needsPortCleanup := st.running || fenced || st.portCleanupPending
 	st.mu.Unlock()
 	defer func() {
-		if err == nil && needsPortCleanup && rt.Port == 0 && rt.modeOrDefault() == "process" {
+		if err == nil && needsPortCleanup && rt.Port == 0 {
 			err = e.clearAllocatedPort(st, engine)
 		}
 	}()
@@ -1061,7 +920,6 @@ func (e *Executor) doStopOwnedContext(ctx context.Context, st *engineState, engi
 		e.markStopped(st, engine)
 		return nil
 	}
-	mode := rt.modeOrDefault()
 	st.mu.Lock()
 	if ownership != nil && (st.proc != ownership.process || st.runID != ownership.runID || !st.running || st.adopted || st.reclaimFailed || st.reclaimPID != 0) {
 		st.mu.Unlock()
@@ -1074,16 +932,7 @@ func (e *Executor) doStopOwnedContext(ctx context.Context, st *engineState, engi
 	proc := st.proc
 	port = st.port
 	adopted := st.adopted
-	if mode == "command" && adopted {
-		st.mu.Unlock()
-		if rt.Ready != nil && e.waitUnavailableContext(ctx, rt.Ready, port, time.Second) {
-			e.markStopped(st, engine)
-			return nil
-		}
-		e.emitState(engine)
-		return fmt.Errorf("cannot stop engine %q: it is running under external management; stop it in its own application, then retry", engine)
-	}
-	if mode != "command" && proc == nil {
+	if proc == nil {
 		st.mu.Unlock()
 		if adopted {
 			// Reuse the exact managed-install/image owner, including its PID
@@ -1122,70 +971,11 @@ func (e *Executor) doStopOwnedContext(ctx context.Context, st *engineState, engi
 	}
 	st.mu.Unlock()
 
-	if mode == "command" {
-		sp := rt.Stop
-		if sp == nil || len(sp.Cmd) == 0 {
-			return e.reconcileFailedCommandStop(st, engine, true, fmt.Errorf("cannot stop engine %q: no stop command is configured", engine))
-		}
-		stopErr := e.runCommandStopContext(ctx, st, engine, rt, port)
-		if stopErr != nil {
-			if ownership != nil || ctx.Err() != nil {
-				return stopErr // leave uncertain termination reserved
-			}
-			return e.reconcileFailedCommandStop(st, engine, rt.Ready == nil || !e.waitUnavailable(rt.Ready, port, time.Second), stopErr)
-		}
-	} else if proc != nil {
-		if err := proc.stopContext(ctx, stopGrace(rt)); err != nil {
-			return err
-		}
+	if err := proc.stopContext(ctx, stopGrace(rt)); err != nil {
+		return err
 	}
 
 	e.markStopped(st, engine)
-	return nil
-}
-
-// runCommandStop executes a command-mode engine's bounded official stop CLI
-// and confirms that its listener closes. It is shared by normal Stop and by
-// failed/cancelled startup cleanup after a start CLI has detached a daemon.
-func (e *Executor) runCommandStop(st *engineState, engine string, rt Runtime, port int) error {
-	return e.runCommandStopContext(context.Background(), st, engine, rt, port)
-}
-
-func (e *Executor) runCommandStopContext(ctx context.Context, st *engineState, engine string, rt Runtime, port int) error {
-	sp := rt.Stop
-	if sp == nil || len(sp.Cmd) == 0 {
-		return fmt.Errorf("cannot stop engine %q: no stop command is configured", engine)
-	}
-	vars := st.pathVars()
-	vars["port"] = strconv.Itoa(port)
-	if rt.CLI != "" {
-		vars["cli"] = expandPath(rt.CLI)
-	}
-	argv, err := resolveArgs(sp.Cmd, vars)
-	if err != nil {
-		return fmt.Errorf("resolve %s stop command: %w", engine, err)
-	}
-	for i := range argv {
-		argv[i] = expandPath(argv[i])
-	}
-	// Bound the stop CLI (e.g. `lms server stop`): the broker no longer
-	// force-kills engine-manager on a timeout, so an unbounded stop command
-	// would wedge StopAll and, in turn, the whole app shutdown.
-	stopCtx, cancelStop := context.WithTimeout(ctx, commandStopTimeout(rt))
-	runErr := e.runCommand(stopCtx, argv)
-	cancelStop()
-	if runErr != nil {
-		return fmt.Errorf("stop %s: %w", engine, runErr)
-	}
-	if rt.Ready != nil {
-		grace := 5 * time.Second
-		if sp.GraceS > 0 {
-			grace = time.Duration(sp.GraceS) * time.Second
-		}
-		if !e.waitUnavailableContext(ctx, rt.Ready, port, grace) {
-			return fmt.Errorf("stop %s: engine is still serving on port %d after %s", engine, port, grace)
-		}
-	}
 	return nil
 }
 
@@ -1205,11 +995,9 @@ func stopGrace(rt Runtime) time.Duration {
 	return grace
 }
 
-// commandStopTimeout bounds how long a command-mode stop CLI is allowed to run
-// before it is cancelled. Derived from the manifest grace with a floor, so a
-// hung stop command can never wedge StopAll now that the broker no longer
-// force-kills engine-manager on a timeout.
-func commandStopTimeout(rt Runtime) time.Duration {
+// stopTimeout bounds how long a stop may run: the manifest grace with a 5s
+// floor, so a hung stop can never wedge StopAll or the sleep that drives it.
+func stopTimeout(rt Runtime) time.Duration {
 	t := stopGrace(rt)
 	if t < 5*time.Second {
 		t = 5 * time.Second
@@ -1234,9 +1022,8 @@ func (e *Executor) markStopped(st *engineState, engine string) {
 	st.reclaimFailed = false
 	st.reclaimPID = 0
 	// Process stop/reclaim reaches this boundary only after its existing
-	// termination verification. Command completion alone does not prove that
-	// detached model processes have exited. Keep that physical fact unknown.
-	st.observeOwnerPresenceLocked(st.plat.Runtime.modeOrDefault() == "process")
+	// termination verification.
+	st.observeOwnerPresenceLocked(true)
 	st.mu.Unlock()
 	capture.retire()
 	// A deliberately-stopped engine has no live unhealthy/crash condition.
@@ -1353,46 +1140,6 @@ func probeListenerAddress(p *Probe, port int) (string, error) {
 	return "", errors.New("probe has no HTTP or TCP endpoint")
 }
 
-// reconcileFailedCommandStop keeps the in-memory state aligned with the
-// readiness endpoint after a stop command fails or fails to take effect.
-func (e *Executor) reconcileFailedCommandStop(st *engineState, engine string, running bool, stopErr error) error {
-	if !running {
-		e.markStopped(st, engine)
-		slog.Warn("engine stop command returned an error, but the endpoint is confirmed down", "engine", engine, "err", stopErr)
-		return nil
-	}
-	st.mu.Lock()
-	rt := st.plat.Runtime
-	st.mu.Unlock()
-	var port int
-	var healthCtx context.Context
-	var gen int64
-
-	st.mu.Lock()
-	port = st.port
-	st.running = true
-	// The stop did not take effect: the same process keeps its run id.
-	if st.runID == "" {
-		st.runID = newEngineRunID()
-	}
-	st.healthy = true
-	st.stopping = false
-	if rt.Health != nil {
-		st.gen++
-		gen = st.gen
-		var cancel context.CancelFunc
-		healthCtx, cancel = context.WithCancel(context.Background())
-		st.healthStop = cancel
-	}
-	st.mu.Unlock()
-
-	if healthCtx != nil {
-		go e.runHealth(healthCtx, st, engine, port, gen)
-	}
-	e.emitState(engine)
-	return stopErr
-}
-
 // Restart stops then starts the engine, holding the op lock across both
 // so nothing can interleave between the stop and the start.
 func (e *Executor) Restart(ctx context.Context, engine string) error {
@@ -1505,10 +1252,6 @@ func (e *Executor) runHealth(ctx context.Context, st *engineState, engine string
 			if !ok && !reported {
 				if probeErr != nil {
 					message = probeErr.Error()
-				} else if d, err := e.diagnoseConnection(ctx, st, port); err != nil {
-					message = err.Error()
-				} else if d != diagnosisNone {
-					message = diagnosisMessage(st.manifest.DisplayName, d)
 				}
 			}
 			st.mu.Lock()
@@ -1537,7 +1280,7 @@ func (e *Executor) runHealth(ctx context.Context, st *engineState, engine string
 	}
 }
 
-func (e *Executor) waitReady(ctx context.Context, p *Probe, port int, authStatuses []int, credential candidateCredential) error {
+func (e *Executor) waitReady(ctx context.Context, p *Probe, port int, credential candidateCredential) error {
 	if p == nil {
 		return nil
 	}
@@ -1546,25 +1289,13 @@ func (e *Executor) waitReady(ctx context.Context, p *Probe, port int, authStatus
 		timeout = time.Duration(p.TimeoutS) * time.Second
 	}
 	deadline := time.Now().Add(timeout)
-	authCount := 0
 	for {
-		ok, status, err := e.probeStatus(ctx, p, port, credential)
+		ok, err := e.probe(ctx, p, port, credential)
 		if err != nil {
 			return err
 		}
 		if ok {
 			return nil
-		}
-		if slices.Contains(authStatuses, status) {
-			authCount++
-			if authCount == 3 && ctx.Err() == nil {
-				if credential.key != "" {
-					return errAuthRejected
-				}
-				return errAuthRequired
-			}
-		} else {
-			authCount = 0
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("not ready after %s", timeout)

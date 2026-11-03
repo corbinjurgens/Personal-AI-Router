@@ -284,7 +284,7 @@ func prepareSwitchProcessFixture(t *testing.T, base string, ports fixtureService
 		// Overrides deep-merge with bundled manifests. Clear llama.cpp's
 		// router-role predicate: this fixture serves only a generic HTTP probe.
 		probe := map[string]any{"http": "http://127.0.0.1:{port}/", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
-		rt := map[string]any{"mode": "process", "bin": image, "port": engine.port, "bind": "127.0.0.1", "ready": probe, "health": probe,
+		rt := map[string]any{"bin": image, "port": engine.port, "bind": "127.0.0.1", "ready": probe, "health": probe,
 			"env":  map[string]string{"NVPAIR_TEST_SWITCH_ENGINE": image, "NVPAIR_TEST_SWITCH_NAME": engine.name, "NVPAIR_TEST_SWITCH_PORT": "{port}", "NVPAIR_TEST_SWITCH_CONTROL": f.control.URL},
 			"stop": map[string]any{"signal": "term", "grace_s": 1}}
 		jointWriteJSON(t, filepath.Join(jointAppDir(f.base), "engines", engine.name+".json"), privateFixtureManifest(t, engine.name, filepath.Join(f.base, "absent-models", engine.name), image, rt, engines.ProtocolOpenAIV1))

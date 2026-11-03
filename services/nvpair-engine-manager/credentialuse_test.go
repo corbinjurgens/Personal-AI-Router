@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -33,13 +34,40 @@ func ownServingCredential(st *engineState, port int) {
 	st.plat.Runtime.servingLaunch = &llamaServingLaunch{Credential: credentialTestKey}
 }
 
-// servingCredentialExecutor returns a diagnosis executor that owns the serving
-// credential for port.
-func servingCredentialExecutor(t *testing.T, endpoint string, port int) (*Executor, *engineState, string, string) {
+// newCredentialExecutor returns an executor whose fake engine probes endpoint.
+func newCredentialExecutor(t *testing.T, endpoint string, port int) (*Executor, *engineState) {
 	t.Helper()
-	ex, st, started, stopped := newDiagnosisExecutor(t, endpoint, port)
+	m := testEngineManifest(fakeEngineBin)
+	key := runtime.GOOS + "/" + runtime.GOARCH
+	p := m.Platforms[key]
+	p.Runtime = Runtime{
+		Bin: fakeEngineBin, Port: port,
+		Ready:  &Probe{HTTP: endpoint, Status: http.StatusOK, TimeoutS: 1},
+		Health: &Probe{HTTP: endpoint, Status: http.StatusOK, IntervalS: 1},
+	}
+	m.Platforms[key] = p
+	ex := newTestExecutor(t, m)
+	st, err := ex.state("fake")
+	if err != nil {
+		t.Fatalf("engine state: %v", err)
+	}
+	t.Cleanup(func() {
+		st.mu.Lock()
+		if st.healthStop != nil {
+			st.healthStop()
+		}
+		st.mu.Unlock()
+	})
+	return ex, st
+}
+
+// servingCredentialExecutor returns an executor that owns the serving
+// credential for port.
+func servingCredentialExecutor(t *testing.T, endpoint string, port int) (*Executor, *engineState) {
+	t.Helper()
+	ex, st := newCredentialExecutor(t, endpoint, port)
 	ownServingCredential(st, port)
-	return ex, st, started, stopped
+	return ex, st
 }
 
 func credentialResponse(t *testing.T, w http.ResponseWriter, value any) {
@@ -76,7 +104,7 @@ func assertCredentialNotPublic(t *testing.T, ex *Executor, out, logs *syncBuffer
 	}
 }
 
-func TestCredentialUseProbeDiagnosisHealthAndAction(t *testing.T) {
+func TestCredentialUseProbeHealthAndAction(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !(r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/api/tags")) {
@@ -91,8 +119,8 @@ func TestCredentialUseProbeDiagnosisHealthAndAction(t *testing.T) {
 		credentialResponse(t, w, map[string]any{"models": []string{}, "role": "router"})
 	}))
 	defer srv.Close()
-	port := diagnosisServerPort(t, srv)
-	ex, st, _, _ := servingCredentialExecutor(t, srv.URL, port)
+	port := probeServerPort(t, srv)
+	ex, st := servingCredentialExecutor(t, srv.URL, port)
 	c, err := ex.credentialForCandidate(t.Context(), st, port)
 	if err != nil {
 		t.Fatal(err)
@@ -100,9 +128,6 @@ func TestCredentialUseProbeDiagnosisHealthAndAction(t *testing.T) {
 	st.plat.Runtime.Ready.JSONMatch = &ProbeJSONMatch{Field: "role", Value: "router"}
 	if ok, status, err := ex.probeStatus(t.Context(), st.plat.Runtime.Ready, port, c); err != nil || !ok || status != http.StatusOK {
 		t.Fatal("keyed identity probe failed")
-	}
-	if d, err := ex.diagnoseConnection(t.Context(), st, port); err != nil || d != diagnosisAppRunning {
-		t.Fatal("diagnosis did not use the probe key")
 	}
 	st.mu.Lock()
 	st.running, st.healthy, st.gen = true, false, 1
@@ -134,75 +159,8 @@ func TestCredentialUseProbeDiagnosisHealthAndAction(t *testing.T) {
 	var response struct {
 		Models []string `json:"models"`
 	}
-	if json.Unmarshal(result, &response) != nil || response.Models == nil || requests.Load() < 4 {
+	if json.Unmarshal(result, &response) != nil || response.Models == nil || requests.Load() < 3 {
 		t.Fatal("keyed list_models did not return structured inventory")
-	}
-}
-
-func TestCredentialUseAbsentAndRejectedDiagnosis(t *testing.T) {
-	for _, configured := range []bool{false, true} {
-		name := "absent"
-		if configured {
-			name = "serving key rejected"
-		}
-		t.Run(name, func(t *testing.T) {
-			var attached atomic.Bool
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != "/" {
-					http.NotFound(w, r)
-					return
-				}
-				attached.Store(r.Header.Get("Authorization") != "")
-				w.WriteHeader(http.StatusForbidden)
-			}))
-			defer srv.Close()
-			want := diagnosisAuthRequired
-			if configured {
-				want = diagnosisAuthRejected
-			}
-			port := diagnosisServerPort(t, srv)
-			ex, st, started, stopped := newDiagnosisExecutor(t, srv.URL, port)
-			if configured {
-				ownServingCredential(st, port)
-			}
-			out, logs := credentialPublicOutput(t, ex)
-			d, err := ex.diagnoseConnection(t.Context(), st, port)
-			if err != nil || d != want || attached.Load() != configured {
-				t.Fatal("authentication diagnosis lacked request evidence")
-			}
-			if err := ex.Start(t.Context(), "fake"); err == nil || err.Error() != diagnosisMessage(st.manifest.DisplayName, want) {
-				t.Fatal("pre-existing authentication refusal lost its diagnosis")
-			}
-			if fileExists(started) || fileExists(stopped) {
-				t.Fatal("authentication refusal ran start/stop")
-			}
-			found := false
-			for _, frame := range out.frames() {
-				if frame.Method != "errors:report" {
-					continue
-				}
-				var report serviceError
-				if json.Unmarshal(frame.Params, &report) != nil || report.Message != diagnosisMessage(st.manifest.DisplayName, want) {
-					t.Fatal("failure notification lost structured diagnosis")
-				}
-				found = true
-			}
-			if !found {
-				t.Fatal("failure fixture emitted no error report")
-			}
-			assertCredentialNotPublic(t, ex, out, logs)
-			c, err := ex.credentialForCandidate(t.Context(), st, port)
-			if err != nil {
-				t.Fatal(err)
-			}
-			wantErr := errAuthRequired
-			if configured {
-				wantErr = errAuthRejected
-			}
-			if err := ex.waitReady(t.Context(), st.plat.Runtime.Ready, port, st.plat.Runtime.AuthStatuses, c); err != wantErr {
-				t.Fatal("readiness authentication evidence changed")
-			}
-		})
 	}
 }
 
@@ -249,7 +207,7 @@ func TestCredentialUseInitialURLAndTransportRefusal(t *testing.T) {
 		requests.Add(1)
 	}))
 	defer srv.Close()
-	port := diagnosisServerPort(t, srv)
+	port := probeServerPort(t, srv)
 	c := candidateCredential{key: credentialTestKey, port: port}
 	for _, endpoint := range []string{
 		"http://localhost:" + strconv.Itoa(port) + "/", "http://192.0.2.1:" + strconv.Itoa(port) + "/",
@@ -273,7 +231,7 @@ func TestCredentialUseInitialURLAndTransportRefusal(t *testing.T) {
 	if requests.Load() != 0 {
 		t.Fatal("refused URL made network requests")
 	}
-	keyed, st, _, _ := servingCredentialExecutor(t, srv.URL, port)
+	keyed, st := servingCredentialExecutor(t, srv.URL, port)
 	ownServingCredential(st, 0)
 	if _, err := keyed.credentialForCandidate(t.Context(), st, 0); err != errCredentialRequest {
 		t.Fatal("invalid candidate port accepted")
@@ -331,8 +289,8 @@ func TestCredentialUseRedirectsNeverFollow(t *testing.T) {
 		http.Redirect(w, r, destination.Load().(string), http.StatusTemporaryRedirect)
 	}))
 	defer source.Close()
-	port := diagnosisServerPort(t, source)
-	ex, st, _, _ := servingCredentialExecutor(t, source.URL, port)
+	port := probeServerPort(t, source)
+	ex, st := servingCredentialExecutor(t, source.URL, port)
 	st.running = true
 	for _, tc := range []struct{ name, destination string }{
 		{"same origin", source.URL + "/target"}, {"cross origin", strings.Replace(target.URL, "127.0.0.1", "localhost", 1) + "/target"}, {"different port", target.URL + "/target"},
@@ -377,8 +335,8 @@ func TestCredentialUseProxyNeverReceivesKey(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	port := diagnosisServerPort(t, srv)
-	ex, st, _, _ := servingCredentialExecutor(t, srv.URL, port)
+	port := probeServerPort(t, srv)
+	ex, st := servingCredentialExecutor(t, srv.URL, port)
 	tr, ok := ex.client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("missing transport")
@@ -427,7 +385,7 @@ func TestCredentialUseActionRedactsSuccessAndFailure(t *testing.T) {
 				}
 			}))
 			defer srv.Close()
-			ex, st, _, _ := servingCredentialExecutor(t, srv.URL, diagnosisServerPort(t, srv))
+			ex, st := servingCredentialExecutor(t, srv.URL, probeServerPort(t, srv))
 			st.running = true
 			result, err := ex.Action(t.Context(), "fake", "list_models", nil)
 			if tc.status == http.StatusOK {
@@ -469,7 +427,7 @@ func credentialOutput(out *syncBuffer) string {
 
 // Keep the fake CLI environment entirely separate from the serving API key.
 func TestCredentialUseCLIActionReceivesNoServingKey(t *testing.T) {
-	ex, st, _, _ := servingCredentialExecutor(t, "http://127.0.0.1:{port}/", diagnosisRefusedPort(t))
+	ex, st := servingCredentialExecutor(t, "http://127.0.0.1:{port}/", probeRefusedPort(t))
 	helper, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -490,8 +448,8 @@ func TestCredentialUseCLIActionReceivesNoServingKey(t *testing.T) {
 func TestCredentialUseTransportFailuresAreSanitized(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
-	port := diagnosisServerPort(t, srv)
-	ex, st, _, _ := servingCredentialExecutor(t, srv.URL, port)
+	port := probeServerPort(t, srv)
+	ex, st := servingCredentialExecutor(t, srv.URL, port)
 	transport, ok := ex.client.Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("missing transport")
@@ -505,9 +463,6 @@ func TestCredentialUseTransportFailuresAreSanitized(t *testing.T) {
 	}
 	if ok, _, err := ex.probeStatus(t.Context(), st.plat.Runtime.Ready, port, c); ok || err != errCredentialHTTP {
 		t.Fatal("probe exposed transport error")
-	}
-	if d, err := ex.diagnoseConnection(t.Context(), st, port); d != diagnosisNone || err != errCredentialHTTP {
-		t.Fatal("diagnosis replaced credential transport error")
 	}
 	st.running = true
 	if _, err := ex.Action(t.Context(), "fake", "list_models", nil); err != errCredentialHTTP {

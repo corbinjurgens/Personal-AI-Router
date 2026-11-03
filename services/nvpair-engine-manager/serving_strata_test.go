@@ -1058,18 +1058,6 @@ func TestStrataServingConfigDigestRequiresApproval(t *testing.T) {
 	}
 }
 
-func TestStrataServingCommandLaunchRejectedBeforeEffects(t *testing.T) {
-	f := newStrataServingFixture(t)
-	st := settingsState(t, f.ex)
-	rt := st.plat.Runtime
-	rt.Serving = f.request.Settings.Serving
-	rt.Mode = "command"
-	if err := f.ex.bringUp(context.Background(), st, "fake", rt, st.port, st.pathVars()); err == nil || !strings.Contains(err.Error(), "requires an owned process") {
-		t.Fatalf("command mode error = %v", err)
-	}
-	assertNoSpawn(t, f.llamaServingFixture)
-}
-
 func TestStrataDirectoryRequiresCleanNativeSpelling(t *testing.T) {
 	root := t.TempDir()
 	if err := strataDirectory(root); err != nil {

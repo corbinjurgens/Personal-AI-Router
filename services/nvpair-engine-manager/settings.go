@@ -88,17 +88,6 @@ func applyLiteralLaunch(rt Runtime, command launchCommand, vars map[string]strin
 	return command, nil
 }
 
-func resolveRuntimeCommand(rt Runtime, index int, vars map[string]string) (launchCommand, error) {
-	command, err := resolveCommandLaunch(rt.Start[index], vars)
-	if err != nil {
-		return launchCommand{}, err
-	}
-	if rt.EditableLaunch != nil && index == rt.EditableLaunch.StartIndex {
-		return applyLiteralLaunch(rt, command, vars)
-	}
-	return command, nil
-}
-
 // launchForState is read-only; callers hold opMu, and neither preview nor a
 // settings read probes ports, starts processes or writes configuration.
 func launchForState(st *engineState, port int) (launchCommand, error) {
@@ -112,20 +101,7 @@ func launchForState(st *engineState, port int) (launchCommand, error) {
 	vars := st.pathVars()
 	vars["host"] = effectiveBind(rt.Bind, "")
 	vars["port"] = strconv.Itoa(port)
-	if rt.CLI != "" {
-		vars["cli"] = expandPath(rt.CLI)
-	}
-	if rt.modeOrDefault() == "process" {
-		return resolveProcessLaunch(rt, bin, vars)
-	}
-	index := 0
-	if rt.EditableLaunch != nil {
-		index = rt.EditableLaunch.StartIndex
-	}
-	if index < 0 || index >= len(rt.Start) {
-		return launchCommand{}, fmt.Errorf("invalid editable start command")
-	}
-	return resolveRuntimeCommand(rt, index, vars)
+	return resolveProcessLaunch(rt, bin, vars)
 }
 
 func (e *Executor) launchStateLocked(engine string, st *engineState) settings.LaunchState {
@@ -189,7 +165,7 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 		result.Reason = "The engine launch configuration cannot be displayed."
 	case st.plat.Runtime.EditableLaunch == nil:
 		result.Reason = "This engine does not support launch settings."
-	case result.Running && result.Adopted && !canMoveAdoptedEngine(st.plat.Runtime.Mode, st.plat.Runtime.Stop):
+	case result.Running && result.Adopted:
 		result.Reason = "Stop this engine in its own application before changing settings."
 	default:
 		result.Editable = true
@@ -330,8 +306,8 @@ func workingSetLimitError(st *engineState, rt Runtime) string {
 	if runtime.GOOS != "windows" {
 		return "Working-set limits are available only on Windows."
 	}
-	if st.manifest.FamilyOrDefault() != "llamacpp" || rt.modeOrDefault() != "process" {
-		return "Working-set limits require a llama.cpp engine in process mode."
+	if st.manifest.FamilyOrDefault() != "llamacpp" {
+		return "Working-set limits require a llama.cpp engine."
 	}
 	return ""
 }
@@ -364,10 +340,6 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 	rt.ModelLoads = modelconfig.CloneLoads(request.Settings.ModelLoads)
 	rt.modelLoadOwner = e
 	if llamaServingRuntime(st, rt) {
-		if rt.modeOrDefault() != "process" {
-			result.Errors["serving"] = "Finite llama serving requires an owned process launch."
-			return result
-		}
 		rt = llamaServingBase(rt)
 	}
 	policy := rt.EditableLaunch
@@ -386,7 +358,6 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 	vars["host"] = host
 	vars["port"] = strconv.Itoa(request.Settings.ServerPort)
 	vars["bin"] = base.Bin
-	vars["cli"] = expandPath(rt.CLI)
 	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
 		return fail("PAIR-managed launch settings require a loopback bind.")
 	}

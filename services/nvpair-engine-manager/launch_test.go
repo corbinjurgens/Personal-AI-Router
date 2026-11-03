@@ -143,14 +143,6 @@ func TestCustomLlamaPresetFixedArgs(t *testing.T) {
 	}
 }
 
-func TestCommandLaunchRejectsEmptyExecutable(t *testing.T) {
-	for _, template := range [][]string{{"", "start"}, {"{cli}", "start"}} {
-		if _, err := resolveCommandLaunch(template, map[string]string{"cli": ""}); err == nil {
-			t.Fatal("empty executable must fail rather than skip the start command")
-		}
-	}
-}
-
 // The child receives the parser's output directly. This catches escaping
 // differences in the real Windows/POSIX argv path, not just parser symmetry.
 func TestLaunchTextReachesChildLiterally(t *testing.T) {
@@ -179,35 +171,28 @@ func TestLaunchTextReachesChildLiterally(t *testing.T) {
 }
 
 func TestLifecycleUsesResolvedLaunchBuilder(t *testing.T) {
-	for _, mode := range []string{"process", "command"} {
-		t.Run(mode, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "captured args.json")
-			port, err := freePort()
-			if err != nil {
-				t.Fatal(err)
-			}
-			manifest := testEngineManifest(fakeEngineBin)
-			for key, platform := range manifest.Platforms {
-				platform.Runtime = Runtime{Mode: mode, Bin: fakeEngineBin, Port: port,
-					Args:  []string{"{host}", "{port}", "two words", ""},
-					Start: [][]string{{fakeEngineBin, "captureargs", path, "{host}", "{port}", "two words", ""}},
-				}
-				if mode == "process" {
-					// Keep the process alive through readiness and durable PID save.
-					// The normal server records argv before opening its listener.
-					platform.Runtime.Env = map[string]string{"FAKE_START_LOG": path, "FAKE_ADDR": "127.0.0.1:{port}"}
-					platform.Runtime.Ready = &Probe{TCP: "127.0.0.1:{port}"}
-				}
-				manifest.Platforms[key] = platform
-			}
-			ex := newTestExecutor(t, manifest)
-			if err := ex.Start(context.Background(), "fake"); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = ex.Stop("fake") })
-			assertCapturedArgs(t, path, []string{"127.0.0.1", strconv.Itoa(port), "two words", ""})
-		})
+	path := filepath.Join(t.TempDir(), "captured args.json")
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
 	}
+	manifest := testEngineManifest(fakeEngineBin)
+	for key, platform := range manifest.Platforms {
+		// Keep the process alive through readiness and durable PID save.
+		// The normal server records argv before opening its listener.
+		platform.Runtime = Runtime{Bin: fakeEngineBin, Port: port,
+			Args:  []string{"{host}", "{port}", "two words", ""},
+			Env:   map[string]string{"FAKE_START_LOG": path, "FAKE_ADDR": "127.0.0.1:{port}"},
+			Ready: &Probe{TCP: "127.0.0.1:{port}"},
+		}
+		manifest.Platforms[key] = platform
+	}
+	ex := newTestExecutor(t, manifest)
+	if err := ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ex.Stop("fake") })
+	assertCapturedArgs(t, path, []string{"127.0.0.1", strconv.Itoa(port), "two words", ""})
 }
 
 func assertCapturedArgs(t *testing.T, path string, want []string) {

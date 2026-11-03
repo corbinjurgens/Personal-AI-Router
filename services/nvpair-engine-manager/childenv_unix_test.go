@@ -34,12 +34,9 @@ func TestPortOwnerLookupsRemoveProviderSecrets(t *testing.T) {
 	t.Run("ps", func(t *testing.T) {
 		report := secretenvtest.Prepare(t)
 		secretenvtest.OnPath(t, "nvpair-engine-manager", "secretenv-ps", "ps")
-		names, err := listProcessNames(context.Background())
-		if err != nil {
-			t.Fatalf("listProcessNames: %v", err)
-		}
-		if len(names) != 0 {
-			t.Fatalf("listProcessNames = %q; want no names from a silent child", names)
+		records, _ := listProcessRecords(context.Background())
+		if len(records) != 0 {
+			t.Fatalf("listProcessRecords = %v; want no records from a silent child", records)
 		}
 		secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
 	})
@@ -47,12 +44,12 @@ func TestPortOwnerLookupsRemoveProviderSecrets(t *testing.T) {
 		report := secretenvtest.Prepare(t)
 		secretenvtest.OnPath(t, "nvpair-engine-manager", "secretenv-ps", "ps")
 		t.Setenv(secretenvtest.ExitEnv, "1")
-		names, err := listProcessNames(context.Background())
+		records, err := listProcessRecords(context.Background())
 		if err == nil {
-			t.Fatal("listProcessNames succeeded after ps exited nonzero")
+			t.Fatal("listProcessRecords succeeded after ps exited nonzero")
 		}
-		if names != nil {
-			t.Fatalf("listProcessNames = %q; want no names after ps failure", names)
+		if records != nil {
+			t.Fatalf("listProcessRecords = %v; want no records after ps failure", records)
 		}
 		secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
 	})

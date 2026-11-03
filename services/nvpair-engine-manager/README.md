@@ -107,7 +107,7 @@ effective port, including a one-shot `StatusAtPort` port. The owned prepared
 key is selected only for the process that serves that port. HTTP actions and
 broker-only `internal:local-engine-credential` retrieval additionally require
 a running engine on its current port; adopted and stopped engines export no
-key. CLI actions/start commands receive no key in arguments or environment;
+key. CLI actions receive no key in arguments or environment;
 Strata's existing private launch contract is unchanged.
 
 Authenticated probes and HTTP actions share endpoint validation: initial URL
@@ -654,8 +654,8 @@ Notifications (service → caller): `engine:ready{version}`,
 `{engineRunId, launchDigest, modelDigests}` with `modelDigests` keyed by model
 name; emitted after the loaded-model watcher's first sweep and whenever the
 snapshot changes; absent engines have no current identity. Only running owned
-processes with a known launch digest are included, excluding adopted services
-and command-mode daemons; model digests must come from an inventory of the same
+processes with a known launch digest are included, excluding adopted services;
+model digests must come from an inventory of the same
 run and contain lowercase SHA-256 hex),
 `engine:models-changed{engine, models}` — pushed when an engine's set of
 loaded (in-memory) models changes (explicit load/unload, JIT auto-load, or
@@ -822,13 +822,6 @@ spawn cannot receive a graceful (non-`/F`) close, so stopping uses immediate
 Unix signals target the whole process group only when the target PID is its
 group leader; a nonleader is signalled alone. This also applies to orphan
 reclaim, so a shared group retains its unrelated processes.
-
-For command-mode engines, any attempted start command may have launched a
-detached daemon before returning. If startup fails or is cancelled, including
-during shutdown, cleanup runs the manifest's bounded stop command and confirms
-that the listener closes using the configured readiness endpoint before
-releasing the lifecycle lock. This also applies when the start CLI itself
-fails or is cancelled before returning.
 
 ### Adoption — start may attach to an engine it didn't launch
 
@@ -1480,40 +1473,6 @@ are recorded and surfaced as `errors:report` / `errors:clear`
 notifications using the `nvpair-shared/errors` wire shape. The broker
 (`nvpair-ui-broker`) forwards them to the `nvpair-errors` registry.
 Ids follow `engine-manager:<class>:<engine>`.
-
-Command-mode engines declaring `runtime.auth_statuses` and
-`runtime.app_processes` (currently LM Studio) diagnose failed start commands,
-failed readiness, and health-probe failures through the existing `errors:report`
-message. Start failures retain `engine-manager:start-failed:<engine>` with
-severity `error` and action `retry`; health failures retain
-`engine-manager:unhealthy:<engine>` with severity `warning` and action `none`.
-`engine:state-changed{EngineStatus}` and the error payloads are unchanged; no
-payload field was added. With `<Name>` replaced by the manifest's `display_name`,
-the messages are:
-
-- API-key refusal (a declared HTTP 401 or 403): `<Name> is running but requires an API key, and PAIR does not have one. Turn off API authentication in <Name>'s server settings, then try again.`
-- App or daemon process present but no connection: `Can't connect to <Name>. Does it have an API key set, or is its server off?`
-- No matching process: `Can't connect to <Name>, and no <Name> process is running. Open <Name>, then try again.`
-
-Auth evidence takes precedence over process inspection. Without diagnosis fields,
-or if process listing fails without auth evidence, the original failure wording
-is retained. Before a command-mode start, a declared auth response from the
-effective ready endpoint refuses the start without running either the start or
-cleanup stop command, leaving the listener unadopted. Explicit Stop and shutdown
-retain their existing behavior. After a start command is attempted, three
-consecutive readiness responses with a declared auth
-status fail readiness early (about 0.6 seconds for immediate responses); any
-other result resets that count. Other failures retain the existing readiness
-timeout (60 seconds for LM Studio), and failed-start stop-command cleanup is
-unchanged. This diagnosis does not add LM Studio API-key storage or use.
-
-LM Studio readiness remains its HTTP probe: process presence never makes an
-engine running, healthy, adopted, or routable. Diagnosis runs on a start attempt
-(including automatic relaunch) or in the health loop of an engine PAIR started
-or adopted through Start. An engine adopted only by a passive status read has
-no health loop and gets no health diagnosis. A health failure is reported even
-if a status read already changed `healthy` to false, and the report clears when
-the health probe recovers. Merely opening LM Studio does not trigger diagnosis.
 
 ## Security posture
 

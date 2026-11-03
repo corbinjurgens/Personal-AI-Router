@@ -72,15 +72,15 @@ func TestGenericControlSourcesAndLaunchConstruction(t *testing.T) {
 }
 
 func TestSavedControlsCannotBypassLaunchValidation(t *testing.T) {
-	for _, command := range []bool{false, true} {
-		e := settingsExecutor(t, command)
+	for _, flags := range []bool{false, true} {
+		e := settingsExecutor(t, flags)
 		rt := settingsState(t, e).plat.Runtime
 		request := settingsRequest(t, e)
 		launch, err := launchForState(settingsState(t, e), request.Settings.ServerPort)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if command {
+		if flags {
 			launch.Args = append(launch.Args, "-p0")
 		} else {
 			launch.Env["BROWSER_ORIGINS"] = `"*"`
@@ -88,7 +88,7 @@ func TestSavedControlsCannotBypassLaunchValidation(t *testing.T) {
 		if err := validateEffectiveLaunch(rt, launch, "127.0.0.1", fmt.Sprint(request.Settings.ServerPort)); err == nil {
 			t.Fatal("unsafe saved launch accepted")
 		}
-		if command {
+		if flags {
 			args := []string{"-p0"}
 			rt.LaunchArgs = &args
 		} else {
@@ -144,7 +144,7 @@ func TestBundledNetworkingControls(t *testing.T) {
 		manifest, _ := reg.Get(name)
 		for platform, config := range manifest.Platforms {
 			t.Run(name+"/"+platform, func(t *testing.T) {
-				e := settingsExecutor(t, config.Runtime.modeOrDefault() == "command")
+				e := settingsExecutor(t, false)
 				graftPlatform(t, e, config)
 				policy := config.Runtime.EditableLaunch
 				if policy == nil {
@@ -240,12 +240,12 @@ func TestCORSCanonicalization(t *testing.T) {
 }
 
 func TestRemoteCORSUsesCanonicalPolicyAndAuthoritativePreview(t *testing.T) {
-	for _, command := range []bool{false, true} {
-		t.Run(fmt.Sprint(command), func(t *testing.T) {
-			e := settingsExecutor(t, command)
+	for _, flags := range []bool{false, true} {
+		t.Run(fmt.Sprint(flags), func(t *testing.T) {
+			e := settingsExecutor(t, flags)
 			request := settingsRequest(t, e)
 			changed := "BROWSER_ORIGINS=https://example.test"
-			if command {
+			if flags {
 				changed = "--cors"
 			}
 			request.Settings.LaunchText = changed
@@ -258,7 +258,7 @@ func TestRemoteCORSUsesCanonicalPolicyAndAuthoritativePreview(t *testing.T) {
 				t.Fatal(err)
 			}
 			request = settingsRequest(t, e)
-			if command {
+			if flags {
 				request.Settings.LaunchText = "--cors --cors"
 			} else {
 				request.Settings.LaunchText = `BROWSER_ORIGINS='"https://EXAMPLE.test/"'`

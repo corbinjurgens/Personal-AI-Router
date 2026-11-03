@@ -221,23 +221,3 @@ func resolveProcessLaunch(rt Runtime, binPath string, vars map[string]string) (l
 	}
 	return applyLiteralLaunch(rt, launchCommand{Bin: binPath, Args: args, Env: env}, resolvedVars)
 }
-
-// resolveCommandLaunch preserves manifest expansion for trusted start steps.
-// Future user arguments must be added after this step so their values remain
-// literal. They must never be placed into the manifest template array.
-func resolveCommandLaunch(template []string, vars map[string]string) (launchCommand, error) {
-	argv, err := resolveArgs(template, vars)
-	if err != nil {
-		return launchCommand{}, err
-	}
-	if len(argv) == 0 {
-		return launchCommand{}, nil
-	}
-	for i := range argv {
-		argv[i] = expandPath(argv[i])
-	}
-	if argv[0] == "" {
-		return launchCommand{}, fmt.Errorf("start command executable is empty")
-	}
-	return launchCommand{Bin: argv[0], Args: argv[1:]}, nil
-}

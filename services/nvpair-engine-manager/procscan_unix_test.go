@@ -8,44 +8,26 @@ package main
 import (
 	"context"
 	"os"
-	"path/filepath"
-	"slices"
+	"strings"
 	"testing"
 )
 
 func procImage(pid int) string { return imagePathForPID(pid) }
 
-func TestParsePSComm(t *testing.T) {
-	test := func(name, output string, want []string) {
-		t.Run(name, func(t *testing.T) {
-			if got := parsePSComm([]byte(output)); !slices.Equal(got, want) {
-				t.Fatalf("parsePSComm = %q; want %q", got, want)
-			}
-		})
-	}
-	test("paths and spaces stay intact", " /sbin/launchd\n/Applications/llama.cpp Custom.app/Contents/MacOS/llama.cpp Custom\n llama-server \n", []string{
-		"/sbin/launchd",
-		"/Applications/llama.cpp Custom.app/Contents/MacOS/llama.cpp Custom",
-		"llama-server",
-	})
-	test("drops blank lines and trims whitespace", "\n \t\n\t/usr/bin/ps\r\n\n", []string{"/usr/bin/ps"})
-	test("no final newline", "llama-server", []string{"llama-server"})
-	test("empty output", "", nil)
-}
-
-func TestListProcessNamesIncludesSelf(t *testing.T) {
+func TestListProcessRecordsIncludesSelf(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatalf("resolve test executable: %v", err)
 	}
-	names, err := listProcessNames(context.Background())
+	records, err := listProcessRecords(context.Background())
 	if err != nil {
-		t.Fatalf("listProcessNames: %v", err)
+		t.Fatalf("listProcessRecords: %v", err)
 	}
-	if len(names) == 0 {
-		t.Fatal("listProcessNames returned no names")
+	want := normalizeProcessName(executable)
+	for _, record := range records {
+		if record.PID == os.Getpid() && strings.EqualFold(normalizeProcessName(record.Image), want) {
+			return
+		}
 	}
-	if !anyProcessMatches(names, []string{filepath.Base(executable)}) {
-		t.Fatalf("process list does not contain test executable %q", filepath.Base(executable))
-	}
+	t.Fatalf("process list does not contain test executable %q", want)
 }

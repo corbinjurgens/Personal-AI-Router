@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -358,50 +357,12 @@ func adoptedEngineFixture(t *testing.T, engine string, port int, rt Runtime) *Ex
 	return ex
 }
 
-func adoptedCommandEngineFixture(t *testing.T, engine string, port int) (*Executor, func() bool, func(int) bool) {
-	t.Helper()
-	dir := t.TempDir()
-	stopMarker := filepath.Join(dir, "stopped-{port}")
-	startMarker := filepath.Join(dir, "started-{port}")
-	ex := adoptedEngineFixture(t, engine, port, Runtime{
-		Mode:  "command",
-		Port:  port,
-		Start: [][]string{{fakeEngineBin, "touch", startMarker}},
-		Stop:  &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}},
-	})
-	return ex,
-		func() bool { return fileExists(filepath.Join(dir, "stopped-"+strconv.Itoa(port))) },
-		func(port int) bool { return fileExists(filepath.Join(dir, "started-"+strconv.Itoa(port))) }
-}
-
-func ownedCommandEngineFixture(t *testing.T, engine string, port int) (*Executor, func() bool, func(int) bool) {
-	t.Helper()
-	ex, stopped, started := adoptedCommandEngineFixture(t, engine, port)
-	state, err := ex.state(engine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state.mu.Lock()
-	state.adopted = false
-	state.mu.Unlock()
-	return ex, stopped, started
-}
-
 func adoptedProcessEngineFixture(t *testing.T, engine string, port int) *Executor {
 	t.Helper()
 	return adoptedEngineFixture(t, engine, port, Runtime{
 		Bin:  fakeEngineBin,
 		Port: port,
 		Stop: &StopSpec{Signal: "term", GraceS: 3},
-	})
-}
-
-func adoptedCommandEngineWithoutStopFixture(t *testing.T, engine string, port int) *Executor {
-	t.Helper()
-	return adoptedEngineFixture(t, engine, port, Runtime{
-		Mode:  "command",
-		Port:  port,
-		Start: [][]string{{fakeEngineBin, "echo", "up"}},
 	})
 }
 
@@ -498,40 +459,6 @@ func TestSetPortRejectsOutOfRange(t *testing.T) {
 	}
 }
 
-func TestSetPortRefusesAdoptedCommandEngine(t *testing.T) {
-	ports := privateTestPorts(t, 2)
-	oldPort, newPort := ports[0], ports[1]
-	ex, stopped, started := adoptedCommandEngineFixture(t, portFixtureCustomEngine(t).Name, oldPort)
-	if _, err := ex.SetPort(context.Background(), portFixtureCustomEngine(t).Name, newPort); err == nil || !strings.Contains(err.Error(), "external management") {
-		t.Fatalf("external command move = %v, want ownership refusal", err)
-	}
-	if stopped() || started(oldPort) || started(newPort) {
-		t.Fatal("refused external move invoked a stop or start command")
-	}
-	if status, err := ex.Status(portFixtureCustomEngine(t).Name); err != nil || status.Port != oldPort || !status.Running || !status.Healthy {
-		t.Fatalf("refused external move changed state: %+v, %v", status, err)
-	}
-	if _, err := os.Stat(filepath.Join(ex.overrideDir, "llamacpp-custom.json")); !os.IsNotExist(err) {
-		t.Fatalf("refused external move persisted an override: %v", err)
-	}
-}
-
-func TestSetPortMovesOwnedCommandEngine(t *testing.T) {
-	ports := privateTestPorts(t, 2)
-	oldPort, newPort := ports[0], ports[1]
-	ex, stopped, started := ownedCommandEngineFixture(t, portFixtureCustomEngine(t).Name, oldPort)
-	status, err := ex.SetPort(context.Background(), portFixtureCustomEngine(t).Name, newPort)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !stopped() || !started(newPort) {
-		t.Fatal("identified command engine was not stopped on the old port and restarted on the new port")
-	}
-	if status.Port != newPort || !status.Running {
-		t.Fatalf("moved status = %+v, want running on %d", status, newPort)
-	}
-}
-
 func TestSetPortStillRejectsAdoptedProcessEngine(t *testing.T) {
 	ports := privateTestPorts(t, 2)
 	ex := adoptedProcessEngineFixture(t, engines.NameLlamaCPP, ports[0])
@@ -546,37 +473,60 @@ func TestSetPortStillRejectsAdoptedProcessEngine(t *testing.T) {
 	}
 }
 
-func TestSetPortRejectsCommandEngineWithoutStopCommand(t *testing.T) {
+// ownedProcessEngineFixture starts the fake engine as an owned process serving
+// port, so a test can move it.
+func ownedProcessEngineFixture(t *testing.T, engine string, port int) *Executor {
+	t.Helper()
+	ex := adoptedEngineFixture(t, engine, port, Runtime{
+		Bin:   fakeEngineBin,
+		Env:   map[string]string{"FAKE_ADDR": "127.0.0.1:{port}"},
+		Port:  port,
+		Ready: &Probe{TCP: "127.0.0.1:{port}", TimeoutS: 10},
+		Stop:  &StopSpec{Signal: "term", GraceS: 3},
+	})
+	st, err := ex.state(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	st.running, st.healthy, st.adopted = false, false, false
+	st.mu.Unlock()
+	t.Cleanup(ex.StopAll)
+	if err := ex.Start(context.Background(), engine); err != nil {
+		t.Fatalf("start owned engine: %v", err)
+	}
+	return ex
+}
+
+func TestSetPortMovesOwnedProcessEngine(t *testing.T) {
 	ports := privateTestPorts(t, 2)
-	ex := adoptedCommandEngineWithoutStopFixture(t, "external", ports[0])
-	if _, err := ex.SetPort(context.Background(), "external", ports[1]); err == nil {
-		t.Fatal("command engine without official stop unexpectedly moved")
+	oldPort, newPort := ports[0], ports[1]
+	engine := portFixtureCustomEngine(t).Name
+	ex := ownedProcessEngineFixture(t, engine, oldPort)
+	status, err := ex.SetPort(context.Background(), engine, newPort)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if status, err := ex.Status("external"); err != nil || status.Port != ports[0] || !status.Running {
-		t.Fatalf("rejected command engine changed: status=%+v err=%v", status, err)
-	}
-	if _, err := os.Stat(filepath.Join(ex.overrideDir, "external.json")); !os.IsNotExist(err) {
-		t.Fatalf("rejected command engine persisted an override: %v", err)
+	if status.Port != newPort || !status.Running {
+		t.Fatalf("moved status = %+v, want running on %d", status, newPort)
 	}
 }
 
 func TestSetPortRestartsOldPortWhenPersistenceFails(t *testing.T) {
 	ports := privateTestPorts(t, 2)
 	oldPort, newPort := ports[0], ports[1]
-	ex, stopped, started := ownedCommandEngineFixture(t, portFixtureCustomEngine(t).Name, oldPort)
+	engine := portFixtureCustomEngine(t).Name
+	ex := ownedProcessEngineFixture(t, engine, oldPort)
 	blocked := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blocked, []byte("blocked"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	ex.overrideDir = blocked
 
-	if _, err := ex.SetPort(context.Background(), portFixtureCustomEngine(t).Name, newPort); err == nil {
+	if _, err := ex.SetPort(context.Background(), engine, newPort); err == nil {
 		t.Fatal("expected persistence failure")
 	}
-	if !stopped() || !started(oldPort) || started(newPort) {
-		t.Fatal("persistence failure did not stop and restore the engine on its old port")
-	}
-	if status, err := ex.Status(portFixtureCustomEngine(t).Name); err != nil || status.Port != oldPort || !status.Running {
+	if status, err := ex.Status(engine); err != nil || status.Port != oldPort || !status.Running {
 		t.Fatalf("restored status = %+v err=%v, want running on %d", status, err, oldPort)
 	}
 }

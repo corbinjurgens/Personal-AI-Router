@@ -404,10 +404,9 @@ func (e *Executor) runRemovePathAction(ctx context.Context, st *engineState, act
 // result (parsed as JSON when it is valid JSON, else a JSON string).
 func (e *Executor) runCmdAction(ctx context.Context, st *engineState, act Action, port int, params json.RawMessage) (json.RawMessage, error) {
 	// A caller param can never override a runner-owned placeholder
-	// ({bin},{cli},{port},{download},{install_dir}): those keys are dropped
+	// ({bin},{port},{download},{install_dir}): those keys are dropped
 	// from params, then seeded from trusted values — so a malicious param
-	// can't hijack argv[0]. Param values are also not env-expanded (only
-	// the manifest-authored {cli} value is).
+	// can't hijack argv[0]. Param values are also not env-expanded.
 	vars := map[string]string{}
 	if len(params) > 0 {
 		var pm map[string]any
@@ -423,9 +422,6 @@ func (e *Executor) runCmdAction(ctx context.Context, st *engineState, act Action
 	vars["port"] = strconv.Itoa(port)
 	for name, value := range st.pathVars() {
 		vars[name] = value
-	}
-	if cli := st.plat.Runtime.CLI; cli != "" {
-		vars["cli"] = expandPath(cli)
 	}
 
 	argv, err := resolveArgs(act.Cmd, vars)

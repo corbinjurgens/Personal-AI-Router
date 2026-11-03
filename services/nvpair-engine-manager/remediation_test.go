@@ -98,33 +98,39 @@ func TestValidateDownloadURL(t *testing.T) {
 }
 
 // TestUninstallRetries proves a failing uninstall command is retried
-// uninstallRetries times (the command-mode daemon-race mitigation).
+// uninstallRetries times (the mitigation for a process that briefly holds
+// files open after it is stopped).
 func TestUninstallRetries(t *testing.T) {
 	oldR, oldB := uninstallRetries, uninstallBackoff
 	uninstallRetries, uninstallBackoff = 3, 5*time.Millisecond
 	defer func() { uninstallRetries, uninstallBackoff = oldR, oldB }()
 
 	dir := t.TempDir()
+	baseDir := t.TempDir()
 	binCopy := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "uninstall-retries", "fake"), testbin.Exe("fake"))
 	copyFile(t, fakeEngineBin, binCopy)
+	// Uninstall only runs for an executable inside the managed install directory.
+	installed := filepath.Join(baseDir, "fake", testbin.Exe("fake"))
+	if err := os.MkdirAll(filepath.Dir(installed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installed, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	marker := filepath.Join(dir, "attempts")
 
-	m := llamaTestEngineManifest(binCopy)
+	m := llamaTestEngineManifest(installed)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
-	p.Runtime.Mode = "command"                                           // command-mode installs may legitimately live outside installDir
-	p.Detect = []string{binCopy}                                         // installed → uninstall runs the command
+	p.Detect = []string{installed}                                       // installed → uninstall runs the command
 	p.Uninstall = &Uninstall{Run: []string{binCopy, "failmark", marker}} // always exits 1, appends one byte
 	m.Platforms[key] = p
 
-	ex := newTestExecutor(t, m)
+	reg := NewRegistry()
+	reg.engines[m.Engine] = m
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
+	acceptModelMutations(ex)
 	ex.detectTimeout = 2 * time.Second
-	// A command-mode engine's files live wherever its vendor script put them, so
-	// uninstall declines one PAIR has no record of installing. Claim it, to reach
-	// the retry behavior under test.
-	if err := writeInstallMarker(filepath.Join(ex.baseDir, "fake"), "fake"); err != nil {
-		t.Fatal(err)
-	}
 	err := ex.Uninstall(context.Background(), "fake")
 	if err == nil || !strings.Contains(err.Error(), "after 3 attempts") {
 		t.Fatalf("expected uninstall failure after 3 attempts, got %v", err)
@@ -169,25 +175,28 @@ func hostKey() string { return runtime.GOOS + "/" + runtime.GOARCH }
 
 // TestActionReservedPlaceholderWins is the regression guard for the
 // security fix: a caller-supplied param must NOT be able to override a
-// reserved placeholder like {cli} and hijack argv[0].
+// reserved placeholder like {install_dir}.
 func TestActionReservedPlaceholderWins(t *testing.T) {
 	m := &Manifest{
 		Engine: "fake", DisplayName: "Fake", ManifestVersion: 1,
 		Platforms: map[string]Platform{hostKey(): {
 			Detect:  []string{fakeEngineBin},
-			Runtime: Runtime{CLI: fakeEngineBin, Bin: fakeEngineBin},
+			Runtime: Runtime{Bin: fakeEngineBin},
 		}},
-		Actions: map[string]Action{"echo": {Cmd: []string{"{cli}", "echo", "{model}"}}},
+		Actions: map[string]Action{"echo": {Cmd: []string{fakeEngineBin, "echo", "{install_dir}", "{model}"}}},
 	}
 	ex, _ := capturingExecutor(t, m)
 
-	// Malicious params try to override {cli} (argv[0]). Reserved must win,
-	// so the command runs fakeEngineBin (not the bogus path) and echoes
+	// Malicious params try to override {install_dir}. Reserved must win, so
+	// the command echoes the real install directory (not the bogus value) and
 	// the model value.
 	res, err := ex.Action(context.Background(), "fake", "echo",
-		json.RawMessage(`{"cli":"definitely-not-a-real-binary","model":"safevalue"}`))
+		json.RawMessage(`{"install_dir":"definitely-not-the-install-dir","model":"safevalue"}`))
 	if err != nil {
-		t.Fatalf("expected reserved {cli} to win and the command to run, got: %v", err)
+		t.Fatalf("expected reserved {install_dir} to win and the command to run, got: %v", err)
+	}
+	if strings.Contains(string(res), "definitely-not-the-install-dir") {
+		t.Fatalf("caller param overrode a reserved placeholder: %s", res)
 	}
 	if !strings.Contains(string(res), "safevalue") {
 		t.Fatalf("unexpected result: %s", res)
@@ -303,45 +312,6 @@ func TestInstallChecksumMismatchReported(t *testing.T) {
 	if !c.has("engine:install-progress") {
 		t.Fatal("expected an install-progress notification")
 	}
-}
-
-func TestHealthFlipReportsAndClears(t *testing.T) {
-	var healthy atomic.Bool
-	healthy.Store(true)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if healthy.Load() {
-			w.WriteHeader(http.StatusOK)
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-	}))
-	defer srv.Close()
-	port := portOf(t, srv.URL)
-
-	m := &Manifest{
-		Engine: "d", DisplayName: "Daemon", ManifestVersion: 1,
-		Platforms: map[string]Platform{hostKey(): {
-			Detect: []string{fakeEngineBin},
-			Runtime: Runtime{
-				Mode:   "command",
-				Port:   port,
-				Start:  [][]string{{fakeEngineBin, "echo", "up"}},
-				Stop:   &StopSpec{Cmd: []string{fakeEngineBin, "echo", "down"}},
-				Ready:  &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, TimeoutS: 5},
-				Health: &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, IntervalS: 1},
-			},
-		}},
-	}
-	ex, _ := capturingExecutor(t, m)
-	t.Cleanup(func() { _ = ex.Stop("d") })
-	if err := ex.Start(context.Background(), "d"); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	healthy.Store(false)
-	waitFor(t, 6*time.Second, func() bool { return hasErr(ex.Errors(), unhealthyID("d")) })
-	healthy.Store(true)
-	waitFor(t, 6*time.Second, func() bool { return !hasErr(ex.Errors(), unhealthyID("d")) })
 }
 
 func TestUnexpectedExitReported(t *testing.T) {
@@ -463,6 +433,55 @@ func TestDownloadSizeCap(t *testing.T) {
 	}
 }
 
+// ownedHealthManifest runs the fake engine as an owned process whose health
+// probe targets healthURL, so a test can flip health independently of the
+// process.
+func ownedHealthManifest(t *testing.T, healthURL string) *Manifest {
+	t.Helper()
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Manifest{
+		Engine: "d", DisplayName: "Daemon", ManifestVersion: 1,
+		Platforms: map[string]Platform{hostKey(): {
+			Detect: []string{fakeEngineBin},
+			Runtime: Runtime{
+				Bin:    fakeEngineBin,
+				Env:    map[string]string{"FAKE_ADDR": "127.0.0.1:{port}"},
+				Port:   port,
+				Stop:   &StopSpec{Signal: "term", GraceS: 3},
+				Ready:  &Probe{TCP: "127.0.0.1:{port}", TimeoutS: 10},
+				Health: &Probe{HTTP: healthURL, Status: 200, IntervalS: 1},
+			},
+		}},
+	}
+}
+
+func TestHealthFlipReportsAndClears(t *testing.T) {
+	var healthy atomic.Bool
+	healthy.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if healthy.Load() {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer srv.Close()
+
+	ex, _ := capturingExecutor(t, ownedHealthManifest(t, srv.URL))
+	t.Cleanup(func() { _ = ex.Stop("d") })
+	if err := ex.Start(context.Background(), "d"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	healthy.Store(false)
+	waitFor(t, 6*time.Second, func() bool { return hasErr(ex.Errors(), unhealthyID("d")) })
+	healthy.Store(true)
+	waitFor(t, 6*time.Second, func() bool { return !hasErr(ex.Errors(), unhealthyID("d")) })
+}
+
 // TestStopClearsUnhealthy guards that a deliberate stop clears a lingering
 // unhealthy error (the same fix-family as clearing exited on start).
 func TestStopClearsUnhealthy(t *testing.T) {
@@ -476,57 +495,15 @@ func TestStopClearsUnhealthy(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	port := portOf(t, srv.URL)
-	marker := filepath.Join(t.TempDir(), "stop-attempted")
 
-	m := &Manifest{
-		Engine: "d", DisplayName: "Daemon", ManifestVersion: 1,
-		Platforms: map[string]Platform{hostKey(): {
-			Detect: []string{fakeEngineBin},
-			Runtime: Runtime{
-				Mode:   "command",
-				Port:   port,
-				Start:  [][]string{{fakeEngineBin, "echo", "up"}},
-				Stop:   &StopSpec{Cmd: []string{fakeEngineBin, "touch", marker}, GraceS: 2},
-				Ready:  &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, TimeoutS: 5},
-				Health: &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, IntervalS: 1},
-			},
-		}},
-	}
-	ex, _ := capturingExecutor(t, m)
+	ex, _ := capturingExecutor(t, ownedHealthManifest(t, srv.URL))
 	if err := ex.Start(context.Background(), "d"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	state, err := ex.state("d")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The positive stop owns this daemon. The external refusal and stop
-	// sentinel are pinned by TestCommandStopRefusesAdoptedExternalOwner.
-	state.mu.Lock()
-	state.adopted = false
-	state.mu.Unlock()
 	healthy.Store(false)
 	waitFor(t, 6*time.Second, func() bool { return hasErr(ex.Errors(), unhealthyID("d")) })
-	closed := make(chan struct{})
-	go func() {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if fileExists(marker) {
-				srv.Close()
-				close(closed)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
 	if err := ex.Stop("d"); err != nil {
 		t.Fatalf("stop: %v", err)
-	}
-	select {
-	case <-closed:
-	case <-time.After(5 * time.Second):
-		t.Fatal("stop command did not close the test endpoint")
 	}
 	if hasErr(ex.Errors(), unhealthyID("d")) {
 		t.Fatal("stop must clear the lingering unhealthy error")

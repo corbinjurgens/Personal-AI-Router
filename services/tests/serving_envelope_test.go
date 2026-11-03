@@ -374,7 +374,7 @@ func newNEServingFixture(t *testing.T) *neServingFixture {
 		t.Fatal(err)
 	}
 	rt := map[string]any{
-		"mode": "process", "bin": image, "cli": filepath.Join(f.root, "absent-cli"), "port": f.enginePort, "bind": "127.0.0.1",
+		"bin": image, "port": f.enginePort, "bind": "127.0.0.1",
 		"env":    map[string]string{neRuntimeEnv: image},
 		"ready":  map[string]any{"http": "http://127.0.0.1:{port}/props", "status": 200, "timeout_s": 10, "json_match": map[string]string{"field": "role", "value": "router"}},
 		"health": map[string]any{"http": "http://127.0.0.1:{port}/health", "status": 200, "interval_s": 5},
@@ -456,7 +456,6 @@ func (f *neServingFixture) call(t *testing.T, method string, params, result any)
 
 type neFixtureRuntime struct {
 	Bin   string `json:"bin"`
-	CLI   string `json:"cli"`
 	Port  int    `json:"port"`
 	Ready struct {
 		HTTP string `json:"http"`
@@ -474,16 +473,16 @@ type neFixturePlatform struct {
 
 func (f *neServingFixture) assertRuntimeIsolation(t *testing.T, engine, level string, rt neFixtureRuntime, modelsDir string) {
 	t.Helper()
-	wantBin, wantCLI := filepath.Join(f.root, "absent-"+engine), filepath.Join(f.root, "absent-"+engine)
+	wantBin := filepath.Join(f.root, "absent-"+engine)
 	wantPort, wantProbe := f.inertPort, "http://127.0.0.1:{port}/joint-no-engine"
 	wantHealth, wantModels := wantProbe, filepath.Join(f.root, "absent-models", engine)
 	if engine == "llamacpp" {
-		wantBin, wantCLI = f.image, filepath.Join(f.root, "absent-cli")
+		wantBin = f.image
 		wantPort, wantProbe = f.enginePort, "http://127.0.0.1:{port}/props"
 		wantHealth, wantModels = "http://127.0.0.1:{port}/health", filepath.Join(f.root, "models")
 	}
-	if rt.Bin != wantBin || rt.CLI != wantCLI || rt.Port != wantPort || rt.Ready.HTTP != wantProbe || rt.Health.HTTP != wantHealth || modelsDir != wantModels || !neSafePort(rt.Port) {
-		t.Fatalf("%s %s isolation mismatch: bin=%t cli=%t port=%t ready=%t health=%t models=%t safe_port=%t", engine, level, rt.Bin == wantBin, rt.CLI == wantCLI, rt.Port == wantPort, rt.Ready.HTTP == wantProbe, rt.Health.HTTP == wantHealth, modelsDir == wantModels, neSafePort(rt.Port))
+	if rt.Bin != wantBin || rt.Port != wantPort || rt.Ready.HTTP != wantProbe || rt.Health.HTTP != wantHealth || modelsDir != wantModels || !neSafePort(rt.Port) {
+		t.Fatalf("%s %s isolation mismatch: bin=%t port=%t ready=%t health=%t models=%t safe_port=%t", engine, level, rt.Bin == wantBin, rt.Port == wantPort, rt.Ready.HTTP == wantProbe, rt.Health.HTTP == wantHealth, modelsDir == wantModels, neSafePort(rt.Port))
 	}
 }
 

@@ -1776,7 +1776,6 @@ func TestLlamaServingColdCommandLoadCancelledByStop(t *testing.T) {
 			}
 			root := t.TempDir()
 			parentFile, childFile := filepath.Join(root, "parent"), filepath.Join(root, "child")
-			st.plat.Runtime.Mode = "command"
 			st.manifest.Actions["warm"] = Action{Cmd: []string{bin, "hold", parentFile, childFile}}
 			st.manifest.Operations = map[string]OperationBinding{engines.OperationLoad: {Action: "warm"}}
 			ex.actionTimeout = time.Hour
@@ -1897,7 +1896,6 @@ func TestLlamaServingCommandExitedParentPipeBound(t *testing.T) {
 			}
 			root := t.TempDir()
 			parentFile, childFile := filepath.Join(root, "parent"), filepath.Join(root, "child")
-			st.plat.Runtime.Mode = "command"
 			st.manifest.Actions["warm"] = Action{Cmd: []string{bin, "exit", parentFile, childFile}}
 			st.manifest.Operations = map[string]OperationBinding{engines.OperationLoad: {Action: "warm"}}
 			ex.actionTimeout = time.Hour

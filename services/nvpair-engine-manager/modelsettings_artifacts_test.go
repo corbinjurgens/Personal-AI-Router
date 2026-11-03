@@ -129,10 +129,6 @@ func newInspectionFixture(t *testing.T, size int64) inspectionFixture {
 	writeTestFile(t, preset, []byte("[exact-alias]\nmodel = main.gguf\n"))
 	st.plat.Runtime.Args = []string{"--models-preset", preset}
 	ex.client = &http.Client{Transport: inspectionForbiddenHTTP{t}}
-	ex.processes = func(context.Context) ([]string, error) {
-		t.Error("inspection attempted process inventory")
-		return nil, errors.New("process inventory forbidden")
-	}
 	ex.modelMutationParent = func(context.Context, string) error {
 		t.Error("inspection attempted content mutation")
 		return errors.New("mutation forbidden")

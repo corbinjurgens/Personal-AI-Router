@@ -462,7 +462,7 @@ type ownerEngineEvidence struct {
 	Name                                            string
 	Registered, Supported, Cleanup                  bool
 	Installed, Running, PositiveStop, StopAuthority buildapply.Observation[bool]
-	RunID, RuntimeKind, AuthorityReason             string
+	RunID, AuthorityReason                          string
 	InstallRoot, ModelRoot                          string
 	RootsComplete                                   bool
 	RootsReason                                     string
@@ -513,7 +513,7 @@ type ownerStateCapture struct {
 	Installed, Running, Adopted, Stopping, ReclaimFailed, Done bool
 	ReclaimPID, Port                                           int
 	Process                                                    *managedProc
-	RunID, Kind, Install, Models                               string
+	RunID, Install, Models                                     string
 }
 
 // Registry construction is startup-owned. Membership is copied, then released
@@ -567,9 +567,6 @@ func (e *Executor) captureOwnerStates(saved desiredOwnerEvidence, reservations [
 			c.ReclaimFailed, c.ReclaimPID, c.Port = st.reclaimFailed, st.reclaimPID, st.port
 			c.Process, c.RunID, c.Install, c.Models = st.proc, st.runID, st.installDir, st.modelsDir
 			c.Relaunch = st.relaunch
-			if st.plat != nil {
-				c.Kind = st.plat.Runtime.modeOrDefault()
-			}
 			if c.Process != nil {
 				if c.Process.done == nil {
 					c.Done = true
@@ -696,14 +693,13 @@ func (e *Executor) captureOwnerUniverse(savedRead func() (desiredOwnerEvidence, 
 	for _, name := range names {
 		c := states[name.Name]
 		entry := ownerEngineEvidence{Name: name.Name, Registered: name.Registered, Supported: name.Supported, Cleanup: name.Cleanup,
-			RunID: c.RunID, RuntimeKind: c.Kind, Adopted: c.Adopted, ReclaimFailed: c.ReclaimFailed, ReclaimPID: c.ReclaimPID != 0,
+			RunID: c.RunID, Adopted: c.Adopted, ReclaimFailed: c.ReclaimFailed, ReclaimPID: c.ReclaimPID != 0,
 			InstallRoot: c.Install, ModelRoot: c.Models, RootsReason: "unmodeled_data_roots", AuthorityReason: "unobserved"}
 		// Only represented, resolved paths are usable protection roots. The
 		// manifest has no exhaustive data-root contract, so coverage stays unknown.
 		if c.Current == nil && c.StopOnly == nil && name.Registered && e.reg != nil {
 			if manifest := e.reg.engines[name.Name]; manifest != nil {
 				if platform, supported := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]; supported {
-					entry.RuntimeKind = platform.Runtime.modeOrDefault()
 					if filepath.IsAbs(e.baseDir) {
 						entry.InstallRoot = filepath.Join(e.baseDir, name.Name)
 					}

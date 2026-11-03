@@ -627,7 +627,7 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 	f.manager = filepath.Join(testbin.Dir(t, "tests", "model-settings", "model-settings-manager"), testbin.Exe("model-settings-manager"))
 	jointCopyExecutable(t, image, f.manager)
 	probe := map[string]any{"http": "http://127.0.0.1:{port}/props", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": map[string]string{"field": "role", "value": "router"}}
-	rt := map[string]any{"mode": "process", "bin": image, "port": f.targetPort, "bind": "127.0.0.1", "ready": probe, "health": probe,
+	rt := map[string]any{"bin": image, "port": f.targetPort, "bind": "127.0.0.1", "ready": probe, "health": probe,
 		"args": []string{"--models-preset", f.preset}, "editable_launch": map[string]any{"fixed_args": []string{}},
 		"env":  map[string]string{"LLAMA_CACHE": f.root, "NVPAIR_TEST_MODEL_ENGINE": image, "NVPAIR_TEST_MODEL_PORT": "{port}", "NVPAIR_TEST_MODEL_CONTROL": f.control, "NVPAIR_TEST_MODEL_CAPTURE": f.capture},
 		"stop": map[string]any{"signal": "term", "grace_s": 1}}

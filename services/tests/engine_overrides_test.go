@@ -24,8 +24,7 @@ import (
 )
 
 // writeDisabledBuiltinEngineOverrides fills missing built-in manifests without
-// replacing intentional private fake engines. Explicit empty auth statuses
-// replace inherited values, which require the readiness probe disabled here.
+// replacing intentional private fake engines.
 func writeDisabledBuiltinEngineOverrides(t *testing.T, root, appDir string) {
 	t.Helper()
 	dir := filepath.Join(appDir, "engines")
@@ -43,7 +42,7 @@ func writeDisabledBuiltinEngineOverrides(t *testing.T, root, appDir string) {
 		override := map[string]any{"engine": engine.Name, "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
 			"detect": []string{absent}, "models_dir": filepath.Join(root, "absent-models", engine.Name),
 			"runtime": map[string]any{
-				"port": 0, "bin": absent, "cli": absent, "ready": nil, "health": nil, "auth_statuses": []int{},
+				"port": 0, "bin": absent, "ready": nil, "health": nil,
 			},
 		}}}
 		data, err := json.Marshal(override)
@@ -155,7 +154,6 @@ func privateFixtureManifest(t *testing.T, name, models, image string, rt map[str
 	}
 	engine := privateFixtureEngine(t, name)
 	if engines.IsDynamicServiceKey(engine.DiscoveryService) {
-		rt["mode"] = "process"
 		manifest["display_name"] = engine.DisplayName
 		manifest["manifest_version"] = 1
 		manifest["family"] = "llamacpp"

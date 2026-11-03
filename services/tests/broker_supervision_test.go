@@ -507,7 +507,6 @@ func TestBrokerSpawnsAllModules(t *testing.T) {
 				Runtime struct {
 					Port          int `json:"port"`
 					Ready, Health json.RawMessage
-					AuthStatuses  []int `json:"auth_statuses"`
 				} `json:"runtime"`
 			} `json:"platforms"`
 		}
@@ -515,7 +514,7 @@ func TestBrokerSpawnsAllModules(t *testing.T) {
 			t.Fatalf("decode disabled %s: %v", engine.Name, err)
 		}
 		platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
-		if !ok || len(platform.Detect) != 1 || platform.Detect[0] != filepath.Join(configDir, "absent-"+engine.Name) || platform.Runtime.Port != 0 || (len(platform.Runtime.Ready) != 0 && string(platform.Runtime.Ready) != "null") || (len(platform.Runtime.Health) != 0 && string(platform.Runtime.Health) != "null") || len(platform.Runtime.AuthStatuses) != 0 {
+		if !ok || len(platform.Detect) != 1 || platform.Detect[0] != filepath.Join(configDir, "absent-"+engine.Name) || platform.Runtime.Port != 0 || (len(platform.Runtime.Ready) != 0 && string(platform.Runtime.Ready) != "null") || (len(platform.Runtime.Health) != 0 && string(platform.Runtime.Health) != "null") {
 			t.Fatalf("built-in %s fixture override did not disable detection and probes", engine.Name)
 		}
 	}
@@ -607,7 +606,7 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 		"engine": "llamacpp", "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
 			"detect": []string{absent}, "models_dir": filepath.Join(cfg, "absent-models", "llamacpp"),
 			"runtime": map[string]any{
-				"port": serverPort, "bin": absent, "cli": absent, "ready": nil, "health": nil, "auth_statuses": []int{},
+				"port": serverPort, "bin": absent, "ready": nil, "health": nil,
 			},
 		}},
 	})

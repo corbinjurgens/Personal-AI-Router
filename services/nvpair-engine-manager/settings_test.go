@@ -41,9 +41,9 @@ func workingSetSettingsExecutor(t *testing.T) *Executor {
 }
 
 func TestWorkingSetLimitRefusedApplyHasNoEffects(t *testing.T) {
-	test := func(name string, command bool, family string, limit int) {
+	test := func(name, family string, limit int) {
 		t.Run(name, func(t *testing.T) {
-			e := settingsExecutor(t, command)
+			e := settingsExecutor(t, false)
 			st := settingsState(t, e)
 			st.manifest.Family = family
 			path := filepath.Join(e.overrideDir, "fake.json")
@@ -51,7 +51,7 @@ func TestWorkingSetLimitRefusedApplyHasNoEffects(t *testing.T) {
 			if err := os.WriteFile(path, before, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			st.running, st.adopted = true, true
+			st.running = true
 			request := settingsRequest(t, e)
 			request.Settings.WorkingSetLimitMiB = &limit
 			preview := previewSettings(t, e, request)
@@ -70,17 +70,16 @@ func TestWorkingSetLimitRefusedApplyHasNoEffects(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !bytes.Equal(before, after) || !st.running || !st.adopted || st.plat.Runtime.WorkingSetLimitMiB != nil {
+			if !bytes.Equal(before, after) || !st.running || st.plat.Runtime.WorkingSetLimitMiB != nil {
 				t.Fatal("refused apply changed disk or engine state")
 			}
-			st.running, st.adopted = false, false
+			st.running = false
 		})
 	}
-	test("below minimum", false, "llamacpp", 255)
-	test("above maximum", false, "llamacpp", 1048577)
-	test("zero is not absence", false, "llamacpp", 0)
-	test("other engine family", false, "other-family", 256)
-	test("command mode", true, "llamacpp", 256)
+	test("below minimum", "llamacpp", 255)
+	test("above maximum", "llamacpp", 1048577)
+	test("zero is not absence", "llamacpp", 0)
+	test("other engine family", "other-family", 256)
 }
 
 func TestWorkingSetLimitApplyPersistsAndRestartsOwnedProcess(t *testing.T) {
@@ -250,7 +249,10 @@ func graftPlatform(t *testing.T, e *Executor, platform Platform) {
 	state.modelsDir = expandPath(platform.ModelsDir)
 }
 
-func settingsExecutor(t *testing.T, command bool) *Executor {
+// settingsExecutor builds a process-mode llama.cpp-family fake. Its managed
+// controls bind to environment variables, or to command-line flags when flags
+// is set.
+func settingsExecutor(t *testing.T, flags bool) *Executor {
 	t.Helper()
 	m := llamaTestEngineManifest(fakeEngineBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
@@ -262,10 +264,8 @@ func settingsExecutor(t *testing.T, command bool) *Executor {
 	p.Runtime.Port = port
 	p.Runtime.Args = []string{"serve"}
 	p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"serve"}, Controls: []LaunchControl{{Value: "{server.host}:{server.port}", Env: []string{"FAKE_ADDR"}}, {Value: "{cors.origins}", Env: []string{"BROWSER_ORIGINS"}}}}
-	if command {
-		p.Runtime.Mode = "command"
-		p.Runtime.CLI = fakeEngineBin
-		p.Runtime.Start = [][]string{{"{cli}", "server", "start", "--port", "{port}", "--bind", "{host}"}}
+	if flags {
+		p.Runtime.Args = []string{"server", "start", "--port", "{port}", "--bind", "{host}"}
 		p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"server", "start"}, Controls: []LaunchControl{{Value: "{server.port}", Flags: []string{"--port", "-p"}}, {Value: "{server.host}", Flags: []string{"--bind"}, Env: []string{"SERVER_HOST"}}, {Value: "{cors.enabled}", Implicit: implicitLaunchValue("true"), Flags: []string{"--cors"}}}}
 	}
 	m.Platforms[key] = p
@@ -435,8 +435,6 @@ func TestSettingsServingPreviewApplyAndUnrelatedEdit(t *testing.T) {
 func TestSettingsServingDuplicateRejectedBeforeEffects(t *testing.T) {
 	e := settingsExecutor(t, true)
 	st := settingsState(t, e)
-	stopMarker := filepath.Join(t.TempDir(), "stop-marker")
-	st.plat.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}}
 	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/" {
@@ -463,8 +461,8 @@ func TestSettingsServingDuplicateRejectedBeforeEffects(t *testing.T) {
 	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { t.Error("invalid serving rebound proxy"); return nil }); err == nil {
 		t.Error("invalid serving applied")
 	}
-	if _, err := os.Stat(stopMarker); !os.IsNotExist(err) {
-		t.Fatal("invalid declaration invoked stop")
+	if !st.running || !st.adopted {
+		t.Fatal("invalid declaration stopped the engine")
 	}
 	if probes.Load() != 0 {
 		t.Fatal("invalid declaration probed engine")
@@ -490,15 +488,13 @@ func TestSettingsServingChangeRequiresRestart(t *testing.T) {
 	}
 }
 
-// eachEngineMode runs test against both Runtime.Mode lifecycles: "process",
-// where this service spawns the engine and its managed controls bind to
-// environment variables, and "command", where a control CLI brings the engine
-// up and the same controls bind to flags. The launch settings path must behave
-// identically either way, so every mode-independent test here runs twice.
+// eachEngineMode runs test against both control bindings: environment
+// variables and command-line flags. The launch settings path must behave
+// identically either way, so every binding-independent test here runs twice.
 func eachEngineMode(t *testing.T, test func(*testing.T, *Executor)) {
 	t.Helper()
-	t.Run("process mode", func(t *testing.T) { test(t, settingsExecutor(t, false)) })
-	t.Run("command mode", func(t *testing.T) { test(t, settingsExecutor(t, true)) })
+	t.Run("environment controls", func(t *testing.T) { test(t, settingsExecutor(t, false)) })
+	t.Run("flag controls", func(t *testing.T) { test(t, settingsExecutor(t, true)) })
 }
 
 func previewSettings(t *testing.T, e *Executor, request settings.Request) settings.Preview {
@@ -1169,63 +1165,10 @@ func TestSettingsSwapsLiveServerAndProxyPorts(t *testing.T) {
 	}
 }
 
-func TestSettingsCommandLaunchPreservesLiteralsAndCleansFailedStart(t *testing.T) {
-	e := settingsExecutor(t, true)
-	st := settingsState(t, e)
-	capture := filepath.Join(t.TempDir(), "argv.json")
-	stopped := filepath.Join(t.TempDir(), "stopped")
-	rt := &st.plat.Runtime
-	rt.Start = [][]string{{fakeEngineBin, "captureargs", capture, "--port", "{port}", "--bind", "{host}"}}
-	rt.EditableLaunch.FixedArgs = []string{"captureargs", capture}
-	rt.Ready = nil
-	rt.Health = nil
-	rt.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopped}}
-	p := settingsRequest(t, e)
-	p.Settings.LaunchText += ` "{port}" "$HOME" "two words" ""`
-	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.Start(context.Background(), "fake"); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(capture)
-	var args []string
-	if err != nil || json.Unmarshal(data, &args) != nil || len(args) < 4 || !reflect.DeepEqual(args[len(args)-4:], []string{"{port}", "$HOME", "two words", ""}) {
-		t.Fatalf("command mode expanded literal options: %s %v", data, err)
-	}
-	if err := e.Stop("fake"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(stopped); err != nil {
-		t.Fatal(err)
-	}
-	p = settingsRequest(t, e)
-	p.Settings.LaunchText += " --fail-launch private-value"
-	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { return nil }); err != nil {
-		t.Fatal(err)
-	}
-	err = e.Start(context.Background(), "fake")
-	if err == nil || !strings.Contains(err.Error(), "invalid launch") || strings.Contains(err.Error(), "private-value") {
-		t.Fatalf("failed command output was not classified safely: %v", err)
-	}
-	if _, err := os.Stat(stopped); err != nil {
-		t.Fatal("failed first command did not run official cleanup")
-	}
-}
-
 func TestSettingsEnvironmentReachesEngineAndCanBeEditedAndRemoved(t *testing.T) {
-	for _, command := range []bool{false, true} {
-		t.Run(fmt.Sprint(command), func(t *testing.T) {
-			e := settingsExecutor(t, command)
-			st := settingsState(t, e)
-			if command {
-				capture := filepath.Join(t.TempDir(), "args.json")
-				rt := &st.plat.Runtime
-				rt.Start = [][]string{{fakeEngineBin, "captureargs", capture, "--port", "{port}", "--bind", "{host}"}}
-				rt.EditableLaunch.FixedArgs = []string{"captureargs", capture}
-				rt.Ready, rt.Health = nil, nil
-				rt.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", filepath.Join(t.TempDir(), "stopped")}}
-			}
+	for _, flags := range []bool{false, true} {
+		t.Run(fmt.Sprint(flags), func(t *testing.T) {
+			e := settingsExecutor(t, flags)
 			captureEnv := filepath.Join(t.TempDir(), "env.json")
 			prefix, err := formatLaunchText([]string{"PAIR_TEST_ENV_FILE=" + captureEnv, `PAIR_TEST_LITERAL=$HOME {port} C:\new\tools`, "PAIR_TEST_EMPTY="})
 			if err != nil {
@@ -1298,48 +1241,6 @@ func TestSettingsEnvironmentValidation(t *testing.T) {
 		if err != nil || len(result.Errors) == 0 {
 			t.Fatalf("invalid assignment accepted: %+v %v", result, err)
 		}
-	}
-}
-
-// A stop that fails has to leave the saved configuration alone. Persisting
-// first would put the new launch on disk while the live process kept the old
-// one, and the next start would adopt settings the user was told had failed.
-func TestSettingsFailedStopLeavesSavedConfigurationIntact(t *testing.T) {
-	e := settingsExecutor(t, true)
-	st := settingsState(t, e)
-	capture := filepath.Join(t.TempDir(), "argv.json")
-	rt := &st.plat.Runtime
-	rt.Start = [][]string{{fakeEngineBin, "captureargs", capture, "--port", "{port}", "--bind", "{host}"}}
-	rt.EditableLaunch.FixedArgs = []string{"captureargs", capture}
-	rt.Ready, rt.Health = nil, nil
-	rt.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "failmark", filepath.Join(t.TempDir(), "stop-attempts")}}
-	if err := e.Start(context.Background(), "fake"); err != nil {
-		t.Fatal(err)
-	}
-	override := filepath.Join(e.overrideDir, "fake.json")
-	before, err := os.ReadFile(override)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	request := settingsRequest(t, e)
-	request.Settings.LaunchText += " --parallel 7"
-	result, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: request.Settings}, func() error {
-		t.Error("rebound an engine that could not be stopped")
-		return nil
-	})
-	if err == nil {
-		t.Fatalf("failed stop reported success: %+v", result)
-	}
-	after, readErr := os.ReadFile(override)
-	if readErr != nil && !os.IsNotExist(readErr) {
-		t.Fatal(readErr)
-	}
-	if !bytes.Equal(before, after) {
-		t.Fatalf("stop failure still rewrote saved configuration: %q -> %q", before, after)
-	}
-	live := e.launchStateLocked("fake", st)
-	if strings.Contains(live.LaunchText, "--parallel 7") {
-		t.Fatalf("in-memory launch adopted the rejected change: %q", live.LaunchText)
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -126,10 +125,7 @@ func TestSwitchHistoricalLocalOffAdoptedSourceIsObservationOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stopMarker := filepath.Join(t.TempDir(), "unexpected-stop")
 	st.port = server.Listener.Addr().(*net.TCPAddr).Port
-	st.plat.Runtime.Mode = "command"
-	st.plat.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}}
 	if err := ex.desired.set("source", false, intentLocal); err != nil {
 		t.Fatal(err)
 	}
@@ -144,11 +140,8 @@ func TestSwitchHistoricalLocalOffAdoptedSourceIsObservationOnly(t *testing.T) {
 	if cleaned.Error != nil || cleaned.Observed.Source.Running == nil || !*cleaned.Observed.Source.Running || cleaned.Observed.Source.Intent != settings.SwitchIntentOff {
 		t.Fatalf("historical Off cleanup: %+v", cleaned)
 	}
-	if _, err := os.Stat(stopMarker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stop CLI ran without operation veto: %v", err)
-	}
 	switchStep(t, ex, p, settings.SwitchStepRelease)
-	// Avoid the fixture's shutdown running the intentionally forbidden CLI.
+	// The fixture's shutdown must not try to stop the external listener.
 	server.Close()
 	ex.markStopped(st, "source")
 }

@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,21 +24,20 @@ import (
 )
 
 func TestStopPauseOwnership(t *testing.T) {
-	t.Run("adopted command engine refuses unscoped stop", func(t *testing.T) {
+	t.Run("adopted engine refuses unscoped stop", func(t *testing.T) {
 		e := wakeTestExecutor(t, t.TempDir(), nil)
 		st, err := e.state("fake")
 		if err != nil {
 			t.Fatal(err)
 		}
 		st.mu.Lock()
-		st.plat.Runtime.Mode = "command"
 		st.plat.Runtime.Ready = nil
 		st.running = true
 		st.adopted = true
 		st.mu.Unlock()
 		err = e.Sleep("fake")
 		if err == nil || !strings.Contains(err.Error(), "external management") {
-			t.Fatalf("sleep of external command engine = %v", err)
+			t.Fatalf("sleep of external engine = %v", err)
 		}
 		st.mu.Lock()
 		running, adopted := st.running, st.adopted
@@ -51,7 +49,7 @@ func TestStopPauseOwnership(t *testing.T) {
 }
 
 func TestStopPauseOwnershipExternalEnginesHaveNoCleanupEffects(t *testing.T) {
-	test := func(name, mode string) {
+	test := func(name string) {
 		t.Run(name, func(t *testing.T) {
 			var unloads atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,13 +71,11 @@ func TestStopPauseOwnershipExternalEnginesHaveNoCleanupEffects(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			marker := filepath.Join(t.TempDir(), "unscoped-stop")
 			m := llamaTestEngineManifest(fakeEngineBin)
 			platform := m.Platforms[hostKey()]
-			platform.Runtime.Mode = mode
 			platform.Runtime.Port = port
 			platform.Runtime.Ready = &Probe{HTTP: server.URL, Status: http.StatusOK}
-			platform.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", marker}, GraceS: 1}
+			platform.Runtime.Stop = &StopSpec{GraceS: 1}
 			m.Platforms[hostKey()] = platform
 			m.Actions["loaded_models"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/loaded"}, Result: &ActionResult{Array: "models", Field: "name"}}
 			m.Actions["unload_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/unload"}}
@@ -98,9 +94,6 @@ func TestStopPauseOwnershipExternalEnginesHaveNoCleanupEffects(t *testing.T) {
 			if unloads.Load() != 0 {
 				t.Fatal("Pause unloaded an external model")
 			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("unscoped stop marker: %v", err)
-			}
 			if !portServing(port) {
 				t.Fatal("Pause terminated an external listener")
 			}
@@ -115,95 +108,7 @@ func TestStopPauseOwnershipExternalEnginesHaveNoCleanupEffects(t *testing.T) {
 			}
 		})
 	}
-	test("process owner", "process")
-	test("command owner", "command")
-}
-
-func TestStopPauseOwnershipCommandResidencyProof(t *testing.T) {
-	test := func(name string, retain bool) {
-		t.Run(name, func(t *testing.T) {
-			var resident atomic.Bool
-			resident.Store(true)
-			var unloads, stops atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !((r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/loaded")) || (r.Method == http.MethodPost && r.URL.Path == "/unload")) {
-					http.NotFound(w, r)
-					return
-				}
-				switch r.URL.Path {
-				case "/loaded":
-					rows := []map[string]string{}
-					if resident.Load() {
-						rows = append(rows, map[string]string{"name": "tiny"})
-					}
-					if err := json.NewEncoder(w).Encode(map[string]any{"models": rows}); err != nil {
-						t.Errorf("loaded reply: %v", err)
-					}
-				case "/unload":
-					var p struct {
-						Model string `json:"model"`
-					}
-					if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.Model != "tiny" {
-						t.Errorf("unload params: %+v, %v", p, err)
-						w.WriteHeader(http.StatusBadRequest)
-						return
-					}
-					unloads.Add(1)
-					if !retain {
-						resident.Store(false)
-					}
-					w.WriteHeader(http.StatusOK)
-				default:
-					w.WriteHeader(http.StatusOK)
-				}
-			}))
-			t.Cleanup(server.Close)
-			control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != "/" {
-					http.NotFound(w, r)
-					return
-				}
-				stops.Add(1)
-				if resident.Load() {
-					t.Error("server stop ran before empty residency proof")
-					w.WriteHeader(http.StatusConflict)
-					return
-				}
-				if err := server.Listener.Close(); err != nil {
-					t.Errorf("close owned fixture listener: %v", err)
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-			t.Cleanup(control.Close)
-			helper, err := os.Executable()
-			if err != nil {
-				t.Fatal(err)
-			}
-			ex := commandStopTestExecutor(t, server.URL, []string{helper, "command-test-helper", control.URL}, 1, false)
-			st, err := ex.state("command")
-			if err != nil {
-				t.Fatal(err)
-			}
-			st.manifest.Actions = map[string]Action{
-				"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/loaded"}, Result: &ActionResult{Array: "models", Field: "name"}},
-				"unload_model":  {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/unload"}},
-			}
-			ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-			err = ex.Sleep("command")
-			if retain {
-				if err == nil || stops.Load() != 0 || !resident.Load() {
-					t.Fatalf("surviving residency: err=%v stops=%d resident=%v", err, stops.Load(), resident.Load())
-				}
-			} else if err != nil || stops.Load() != 1 || resident.Load() || !ex.switchTerminated(st) {
-				t.Fatalf("physical stop: err=%v stops=%d resident=%v", err, stops.Load(), resident.Load())
-			}
-			if unloads.Load() != 1 {
-				t.Fatalf("unloads=%d, want one owned model unload", unloads.Load())
-			}
-		})
-	}
-	test("empty readback precedes server stop", false)
-	test("successful unload command with residency remaining is incomplete", true)
+	test("process owner")
 }
 
 func TestStopPauseOwnershipUnknownListenerRefuses(t *testing.T) {
@@ -234,30 +139,6 @@ func TestStopPauseOwnershipUnknownListenerRefuses(t *testing.T) {
 	}
 	if !portServing(port) {
 		t.Fatal("unknown listener was stopped")
-	}
-}
-
-func TestStopPauseOwnershipResidencyRequiresClassifiableRows(t *testing.T) {
-	spec := &ActionResult{Array: "models", Field: "key", Match: &ResultMatch{Field: "loaded_instances", Nonempty: true}}
-	for _, tc := range []struct {
-		name, body string
-		valid      bool
-		models     []string
-	}{
-		{name: "empty native inventory", body: `{"models":[]}`, valid: true, models: []string{}},
-		{name: "explicit empty residency", body: `{"models":[{"key":"tiny","loaded_instances":[]}]}`, valid: true, models: []string{}},
-		{name: "resident instance", body: `{"models":[{"key":"tiny","loaded_instances":[{}]}]}`, valid: true, models: []string{"tiny"}},
-		{name: "missing residency", body: `{"models":[{"key":"tiny"}]}`},
-		{name: "null residency", body: `{"models":[{"key":"tiny","loaded_instances":null}]}`},
-		{name: "invalid residency", body: `{"models":[{"key":"tiny","loaded_instances":false}]}`},
-		{name: "unidentified loaded instance", body: `{"models":[{"loaded_instances":[{}]}]}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			models, valid := commandResidentModels(json.RawMessage(tc.body), spec)
-			if valid != tc.valid || (valid && !reflect.DeepEqual(models, tc.models)) {
-				t.Fatalf("residency models=%v valid=%v; want %v/%v", models, valid, tc.models, tc.valid)
-			}
-		})
 	}
 }
 
@@ -578,55 +459,6 @@ func stopPauseOwnershipExternalExecutor(t *testing.T) (*Executor, *engineState) 
 	return ex, st
 }
 
-func TestStopPauseOwnershipStoppedCommandRequiresPositiveResidency(t *testing.T) {
-	test := func(name, readback string, wantStopped bool) {
-		t.Run(name, func(t *testing.T) {
-			port, err := freePort()
-			if err != nil {
-				t.Fatal(err)
-			}
-			m := llamaTestEngineManifest(fakeEngineBin)
-			p := m.Platforms[hostKey()]
-			p.Runtime.Mode, p.Runtime.Port = "command", port
-			p.Runtime.Ready = &Probe{HTTP: "http://127.0.0.1:" + strconv.Itoa(port), Status: http.StatusOK}
-			marker := filepath.Join(t.TempDir(), "unscoped-stop")
-			p.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", marker}}
-			m.Platforms[hostKey()] = p
-			m.Actions["loaded_models"] = Action{Cmd: []string{fakeEngineBin, "echo", readback}, Result: &ActionResult{Array: "models", Field: "name"}}
-			ex := newTestExecutor(t, m)
-			if err := ex.setDesiredEnabled("fake", true, intentLocal); err != nil {
-				t.Fatal(err)
-			}
-			ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-			check := func(owner *Executor) {
-				t.Helper()
-				err := owner.Sleep("fake")
-				if (err == nil) != wantStopped {
-					t.Fatalf("stopped command with readback %s: %v", readback, err)
-				}
-				if err != nil && !strings.Contains(err.Error(), `engine "fake"`) {
-					t.Fatalf("incomplete Pause omitted engine: %v", err)
-				}
-			}
-			check(ex)
-			check(ex) // A repeated Pause must obtain fresh native proof.
-			restarted := NewExecutor(ex.reg, NewReporter(nil), func(string, any) {}, ex.baseDir)
-			restarted.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-			check(restarted) // Paused startup has no running HTTP server.
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("stopped engine ran an unscoped stop: %v", err)
-			}
-			enabled, known, err := restarted.desired.get("fake")
-			if err != nil || !known || !enabled {
-				t.Fatalf("cleanup changed saved On: enabled=%v known=%v err=%v", enabled, known, err)
-			}
-		})
-	}
-	test("positive empty native inventory", `{"models":[]}`, true)
-	test("stopped server with resident model", `{"models":[{"name":"tiny"}]}`, false)
-	test("unknown residency", `{"models":null}`, false)
-}
-
 func TestStopPauseOwnershipExternalListenerClosureNeedsPIDExit(t *testing.T) {
 	test := func(name string, known, exited bool) {
 		t.Run(name, func(t *testing.T) {
@@ -681,104 +513,6 @@ func TestStopPauseOwnershipExternalListenerClosureNeedsPIDExit(t *testing.T) {
 	test("unknown external PID stays fenced", false, false)
 	test("observed external PID remains alive", true, false)
 	test("positive observed PID exit permits completion", true, true)
-}
-
-func TestStopPauseOwnershipCommandSpawnOrdersAgainstProjection(t *testing.T) {
-	ex := wakeTestExecutor(t, t.TempDir(), nil)
-	st, err := ex.state("fake")
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.opMu.Lock()
-	defer st.opMu.Unlock()
-	ctx, finish := ex.startContext(context.Background(), st)
-	defer finish()
-	marker := filepath.Join(t.TempDir(), "late-command")
-	rt := st.plat.Runtime
-	rt.Mode, rt.Ready = "command", nil
-	rt.Start = [][]string{{fakeEngineBin, "touch", marker}}
-	st.plat.Runtime = rt
-	// activationVeto reads the available projection first, then waits on the
-	// desired-state mutex. This holds the actual start between check and spawn.
-	ex.desired.mu.Lock()
-	releaseDesired := sync.OnceFunc(ex.desired.mu.Unlock)
-	defer releaseDesired()
-	done := make(chan error, 1)
-	go func() { done <- ex.bringUpCommand(ctx, context.Background(), st, "fake", rt, 0, st.pathVars()) }()
-	if err := servingWaitForPhase(context.Background(), "(*Executor).activationVeto("); err != nil {
-		t.Fatal(err)
-	}
-	// The command has passed its early check. Pause stores the projection but
-	// cannot reach the cancellation sweep while remote work holds its mutex.
-	ex.remoteWork.mu.Lock()
-	releaseRemote := sync.OnceFunc(ex.remoteWork.mu.Unlock)
-	defer releaseRemote()
-	manager := &Manager{exec: ex}
-	applied := make(chan struct{})
-	go func() {
-		manager.applyNodeProjection(&Message{Params: json.RawMessage(`{"managementBlocked":true}`)})
-		close(applied)
-	}()
-	if err := servingWaitForPhase(context.Background(), "(*Executor).cancelVetoedRemoteWork("); err != nil {
-		t.Fatal(err)
-	}
-	if rpcCode(context.Cause(ctx)) != codeLocalVeto {
-		t.Fatal("stored projection did not cancel execution independently of remote bookkeeping")
-	}
-	releaseDesired()
-	if err := awaitLockCommand(t, done); rpcCode(err) != codeLocalVeto {
-		t.Fatalf("command spawned after accepted Pause: %v", err)
-	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("post-fence process effect: %v", err)
-	}
-	releaseRemote()
-	select {
-	case <-applied:
-	case <-time.After(5 * time.Second):
-		t.Fatal("projection cancellation did not finish")
-	}
-}
-
-func TestStopPauseOwnershipCommandWaitDoesNotHoldProjectionGate(t *testing.T) {
-	ex := wakeTestExecutor(t, t.TempDir(), nil)
-	entered, release := make(chan struct{}), make(chan struct{})
-	unblock := sync.OnceFunc(func() { close(release) })
-	defer unblock()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		close(entered)
-		<-release
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(server.Close)
-	helper, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		done <- runPrivateLaunchCommandWithStart(context.Background(), []string{helper, "command-test-helper", server.URL}, nil, nil, ex.startActivationCommand)
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("private CLI did not reach wait barrier")
-	}
-	applied := make(chan struct{})
-	go func() { ex.nodeProjection.set(nodeProjection{ManagementBlocked: true}); close(applied) }()
-	select {
-	case <-applied:
-	case <-time.After(5 * time.Second):
-		t.Fatal("blocking CLI prevented Pause publication")
-	}
-	unblock()
-	if err := awaitLockCommand(t, done); err != nil {
-		t.Fatalf("private CLI completion: %v", err)
-	}
 }
 
 func TestStopPauseOwnershipNativeDispatchRechecksFinalFence(t *testing.T) {

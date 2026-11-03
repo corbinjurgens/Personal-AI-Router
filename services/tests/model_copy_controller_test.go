@@ -467,7 +467,7 @@ func newControllerCopyFixture(t *testing.T, descriptorEngines ...string) *contro
 		writeDisabledBuiltinEngineOverrides(t, n.base, jointAppDir(n.base))
 		for _, name := range descriptorEngines {
 			absent := filepath.Join(n.base, "absent-"+name)
-			rt := map[string]any{"mode": "process", "bin": absent, "port": 0}
+			rt := map[string]any{"bin": absent, "port": 0}
 			jointWriteJSON(t, filepath.Join(jointAppDir(n.base), "engines", name+".json"), privateFixtureManifest(t, name, filepath.Join(n.base, "absent-models", name), absent, rt))
 		}
 		// Known Off and locked also establish that COPY does not activate an engine.
@@ -599,7 +599,7 @@ func (f *controllerCopyFixture) writeManifestWithRouter(t *testing.T, n *task1No
 	if err := os.WriteFile(marker, []byte("fixture installation marker; not executable"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rt := map[string]any{"bin": marker, "cli": filepath.Join(n.base, "never-start-cli"), "port": 0, "args": args, "env": map[string]string{"LLAMA_CACHE": f.stores[n.uuid]}, "ready": nil, "health": nil, "auth_statuses": []int{}}
+	rt := map[string]any{"bin": marker, "port": 0, "args": args, "env": map[string]string{"LLAMA_CACHE": f.stores[n.uuid]}, "ready": nil, "health": nil}
 	rt["editable_launch"] = map[string]any{"fixed_args": []string{}}
 	if port != 0 {
 		if err := validateFixturePort(port); err != nil {

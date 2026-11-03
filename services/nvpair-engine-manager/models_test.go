@@ -1166,7 +1166,7 @@ func TestSameReadRequestRejectsDifferingOrSideEffectingActions(t *testing.T) {
 		{"different path", get("/m"), get("/n"), false},
 		{"different method", get("/m"), Action{HTTP: &ActionHTTP{Method: "POST", Path: "/m"}}, false},
 		{"restart after", get("/m"), restart, false},
-		{"cmd action", Action{Cmd: []string{"{cli}", "ls"}}, Action{Cmd: []string{"{cli}", "ls"}}, false},
+		{"cmd action", Action{Cmd: []string{"{bin}", "ls"}}, Action{Cmd: []string{"{bin}", "ls"}}, false},
 	}
 	for _, tc := range cases {
 		if got := sameReadRequest(tc.a, tc.b); got != tc.want {
