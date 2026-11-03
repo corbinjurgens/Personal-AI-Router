@@ -186,27 +186,24 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 		defer f.mu.Unlock()
 		var value any
 		switch r.URL.Path {
-		case "/api/tags":
-			value = map[string]any{"models": []map[string]string{{"name": "task2-model"}}}
-		case "/api/ps":
-			models := []map[string]string{}
+		case "/v1/models", "/models":
+			state := "unloaded"
 			if f.loaded {
-				models = append(models, map[string]string{"name": "task2-model"})
+				state = "loaded"
 			}
-			value = map[string]any{"models": models}
-		case "/api/generate":
+			value = map[string]any{"data": []map[string]any{{"id": "task2-model", "status": map[string]string{"value": state}}}}
+		case "/models/unload":
 			var body struct {
-				Model     string `json:"model"`
-				KeepAlive *int   `json:"keep_alive"`
+				Model string `json:"model"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || r.Method != http.MethodPost || body.Model != "task2-model" || body.KeepAlive == nil || *body.KeepAlive != 0 {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || r.Method != http.MethodPost || body.Model != "task2-model" {
 				t.Errorf("invalid safe unload: method=%s body=%+v err=%v", r.Method, body, err)
 				http.Error(w, "invalid unload", http.StatusBadRequest)
 				return
 			}
 			f.unloads++
 			f.loaded = false
-			value = map[string]any{"model": "task2-model", "done": true}
+			value = map[string]any{"success": true}
 		default:
 			value = map[string]string{"version": "task2-fake"}
 		}
@@ -234,9 +231,9 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 			t.Fatal(err)
 		}
 		writeDisabledBuiltinEngineOverrides(t, n.base, filepath.Dir(manifestDir))
-		task1WriteJSON(t, filepath.Join(manifestDir, "ollama.json"), map[string]any{
-			"engine":  "ollama",
-			"runtime": map[string]any{"port": fakePort, "ready": map[string]any{"http": "http://127.0.0.1:{port}/api/version", "status": 200}},
+		task1WriteJSON(t, filepath.Join(manifestDir, "llamacpp.json"), map[string]any{
+			"engine":  "llamacpp",
+			"runtime": map[string]any{"port": fakePort, "ready": map[string]any{"http": "http://127.0.0.1:{port}/v1/models", "status": 200, "json_match": nil}},
 			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
 				"detect": []string{nodeInfoBin}, "runtime": map[string]any{"bin": nodeInfoBin, "port": fakePort},
 			}},
@@ -414,7 +411,7 @@ func task2Relay(t *testing.T, source, target *task1Process, method string, param
 	if request.ID == "" || request.Caller != caller {
 		t.Fatalf("authenticated relay id=%q caller=%q want=%q", request.ID, request.Caller, caller)
 	}
-	if notification == "engine:settings-request" && (request.Method != "get" || request.Request.Engine != "ollama" || request.Request.ExpectedRevision != 7 || request.Request.NodeID != "") {
+	if notification == "engine:settings-request" && (request.Method != "get" || request.Request.Engine != "llamacpp" || request.Request.ExpectedRevision != 7 || request.Request.NodeID != "") {
 		t.Fatalf("settings relay lost target/revision: %+v", request)
 	}
 	if notification == "policy:request" && request.Method != "get" {
@@ -436,7 +433,7 @@ func task2Event(t *testing.T, p *task1Process, node string, sequence uint64) boo
 		if frame.Method == "engine:settings-changed" {
 			var snapshot settings.Snapshot
 			task2Decode(t, frame.Params, &snapshot)
-			if snapshot.NodeID == node && snapshot.Engine == "ollama" && snapshot.Sequence == sequence && snapshot.Revision == 7 && snapshot.Settings.ServerPort == 45678 {
+			if snapshot.NodeID == node && snapshot.Engine == "llamacpp" && snapshot.Sequence == sequence && snapshot.Revision == 7 && snapshot.Settings.ServerPort == 45678 {
 				return true
 			}
 		}
@@ -460,7 +457,7 @@ func TestReversePeerControlTask2WithoutScannerReadsAuthenticatedTarget(t *testin
 	task2Decode(t, f.engines[f.b.uuid].call(t, "engine:get-installed", nil).Result, &local)
 	wantPort := 0
 	for _, engine := range local.Engines {
-		if engine.Engine == "ollama" && engine.Running {
+		if engine.Engine == "llamacpp" && engine.Running {
 			wantPort = engine.Port
 		}
 	}
@@ -487,7 +484,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 	a, b := f.engines[f.a.uuid], f.engines[f.b.uuid]
 	ec := f.b.observers[noderec.ServiceEngineControl]
 	outer := f.a.observers[noderec.ServiceCluster]
-	snapshot := settings.Snapshot{NodeID: f.b.uuid, Engine: "ollama", Revision: 7, AppliedRevision: 7, Sequence: 1, Epoch: "task2-epoch", Settings: settings.Config{ServerPort: 45678}, Editable: true, Phase: "applied"}
+	snapshot := settings.Snapshot{NodeID: f.b.uuid, Engine: "llamacpp", Revision: 7, AppliedRevision: 7, Sequence: 1, Epoch: "task2-epoch", Settings: settings.Config{ServerPort: 45678}, Editable: true, Phase: "applied"}
 	assertEngines := func(t *testing.T, source *task1Process, target string) {
 		t.Helper()
 		response := source.call(t, "engine:remote-get-installed", map[string]string{"node": target})
@@ -500,7 +497,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 		}
 		task2Decode(t, response.Result, &result)
 		for _, engine := range result.Engines {
-			if engine.Engine == "ollama" && engine.Running && engine.Port > 0 {
+			if engine.Engine == "llamacpp" && engine.Running && engine.Port > 0 {
 				return
 			}
 		}
@@ -513,7 +510,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 		}
 		task1Eventually(t, "restricted ec entry, real node info and model inventory", 35*time.Second, func() bool {
 			node := f.restricted(t)
-			return node.ClusterUUID == f.b.uuid && node.Trusted && node.Services[noderec.ServiceEngineControl].Port == f.blockedPort && node.CPU != nil && node.CPU.Cores > 0 && reflect.DeepEqual(node.Models, []string{"task2-model"}) && reflect.DeepEqual(node.ModelsByEngine["ollama"], []string{"task2-model"})
+			return node.ClusterUUID == f.b.uuid && node.Trusted && node.Services[noderec.ServiceEngineControl].Port == f.blockedPort && node.CPU != nil && node.CPU.Cores > 0 && reflect.DeepEqual(node.Models, []string{"task2-model"}) && reflect.DeepEqual(node.ModelsByEngine["llamacpp"], []string{"task2-model"})
 		})
 		f.mu.Lock()
 		infoCalls := f.infoCalls
@@ -547,7 +544,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 		task1Eventually(t, "outer session restored", 15*time.Second, func() bool { return outer.established(f.b.uuid) >= 3 })
 	})
 	t.Run("settings policy and live events retain authenticated caller", func(t *testing.T) {
-		response := task2Relay(t, a, b, "engine:remote-get-settings", settings.Request{NodeID: f.b.uuid, Engine: "ollama", ExpectedRevision: 7}, "engine:settings-request", "engine:settings-reply", f.a.uuid, snapshot)
+		response := task2Relay(t, a, b, "engine:remote-get-settings", settings.Request{NodeID: f.b.uuid, Engine: "llamacpp", ExpectedRevision: 7}, "engine:settings-request", "engine:settings-reply", f.a.uuid, snapshot)
 		var actual settings.Snapshot
 		task2Decode(t, response.Result, &actual)
 		if !reflect.DeepEqual(actual, snapshot) {
@@ -634,7 +631,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 			}
 		}
 		ec.mu.Unlock()
-		response := task2Response(t, a, a.send(t, "engine:remote-unload-model", map[string]string{"node": f.b.uuid, "engine": "ollama", "model": "task2-model"}, true))
+		response := task2Response(t, a, a.send(t, "engine:remote-unload-model", map[string]string{"node": f.b.uuid, "engine": "llamacpp", "model": "task2-model"}, true))
 		if response.Error == nil {
 			t.Fatal("interrupted mutation falsely reported success")
 		}
@@ -669,7 +666,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 		task1Eventually(t, "recovered settings event", 15*time.Second, func() bool { return task2Event(t, a, f.b.uuid, 4) })
 		task1Eventually(t, "scanner reports unloaded fixture inventory", 35*time.Second, func() bool {
 			node := f.restricted(t)
-			loaded, known := node.LoadedByEngine["ollama"]
+			loaded, known := node.LoadedByEngine["llamacpp"]
 			return node.ClusterUUID == f.b.uuid && node.Trusted && reflect.DeepEqual(node.Models, []string{"task2-model"}) && known && len(loaded) == 0
 		})
 		f.mu.Lock()

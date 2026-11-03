@@ -347,10 +347,10 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 				t.Fatal("concurrent inference stopped before control completed")
 			}
 			line, err := reader.ReadString('\n')
-			if err != nil || line != "{\"model\":\"phase04:latest\",\"response\":\"second\",\"done\":true}\n" {
+			if err != nil || line != "data: {\"model\":\"phase04\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"second\"},\"finish_reason\":\"stop\"}]}\n" {
 				t.Fatalf("concurrent inference second chunk=%q err=%v", line, err)
 			}
-			if tail, err := io.ReadAll(reader); err != nil || len(tail) != 0 {
+			if tail, err := io.ReadAll(reader); err != nil || string(tail) != "\ndata: [DONE]\n\n" {
 				t.Fatalf("concurrent inference tail=%q err=%v", tail, err)
 			}
 			manager.mu.Lock()

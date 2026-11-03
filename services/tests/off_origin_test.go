@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"nvpair-shared/engineintent"
-	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 )
 
@@ -22,18 +21,18 @@ func TestOBOffOrigin(t *testing.T) {
 	t.Run("local Off", func(t *testing.T) {
 		f := newPolicyJointFixture(t)
 		c := subscribeOBIntent(t, f.target)
-		c.call(t, "engine:stop", map[string]string{"engine": "ollama"})
-		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local}))
+		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp"})
+		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"llamacpp": engineintent.Local}))
 	})
 
 	t.Run("peer Off", func(t *testing.T) {
 		f := newPolicyJointFixture(t, jointAvailable)
 		c := subscribeOBIntent(t, f.target)
-		f.http(t, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusOK)
-		want := obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Peer})
+		f.http(t, "/v1/engines/stop", map[string]any{"engine": "llamacpp"}, http.StatusOK)
+		want := obIntent(false, map[string]engineintent.Origin{"llamacpp": engineintent.Peer})
 		c.assertIntent(t, want)
 		// A second peer Off must preserve its origin too.
-		f.http(t, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusOK)
+		f.http(t, "/v1/engines/stop", map[string]any{"engine": "llamacpp"}, http.StatusOK)
 		c.assertIntent(t, want)
 	})
 
@@ -42,11 +41,11 @@ func TestOBOffOrigin(t *testing.T) {
 		// disposable manifests/settings, and loopback engine/controller ports.
 		f := newSwitchProcessFixture(t)
 		c := subscribeOBIntent(t, f.p)
-		c.call(t, "engine:stop", map[string]string{"engine": "ollama"})
-		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local}))
-		c.call(t, "engine:start", map[string]string{"engine": "ollama"})
+		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
+		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"llamacpp-custom": engineintent.Local}))
+		c.call(t, "engine:start", map[string]string{"engine": "llamacpp-custom"})
 		c.assertIntent(t, obIntent(true, map[string]engineintent.Origin{}))
-		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), true, "")
+		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), "llamacpp-custom", true, "")
 	})
 
 	t.Run("legacy known Off projects local", func(t *testing.T) {
@@ -56,26 +55,26 @@ func TestOBOffOrigin(t *testing.T) {
 		// Seed disk state only while the manager is stopped. Include an
 		// unregistered stale origin to prove it cannot leak onto the wire.
 		jointWriteJSON(t, path, map[string]any{
-			"engines": map[string]bool{"ollama": false},
+			"engines": map[string]bool{"llamacpp-custom": false},
 			"offBy":   map[string]string{"unregistered-ob-engine": "peer"},
 		})
 		f.startTarget(t)
 		c := subscribeOBIntent(t, f.target)
-		want := obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local})
+		want := obIntent(false, map[string]engineintent.Origin{"llamacpp-custom": engineintent.Local})
 		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), want)
 		// A separate mutation produces a push without replacing the legacy
 		// engine's missing persisted provenance.
 		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp"})
 		want.OffByEngine["llamacpp"] = engineintent.Local
 		c.assertIntent(t, want)
-		assertOBStoredIntent(t, path, false, "")
+		assertOBStoredIntent(t, path, "llamacpp-custom", false, "")
 	})
 
 	t.Run("unknown has no origin", func(t *testing.T) {
 		f := newPolicyJointFixture(t)
 		c := subscribeOBIntent(t, f.target)
 		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), obIntent(false, map[string]engineintent.Origin{}))
-		// Publishing another engine's Off must leave never-saved ollama
+		// Publishing another engine's Off must leave never-saved custom engine
 		// false without attributing that default to a local or peer action.
 		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp"})
 		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"llamacpp": engineintent.Local}))
@@ -84,10 +83,10 @@ func TestOBOffOrigin(t *testing.T) {
 	t.Run("restart preserves origin", func(t *testing.T) {
 		f := newPolicyJointFixture(t, jointAvailable)
 		c := subscribeOBIntent(t, f.target)
-		f.http(t, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusOK)
-		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Peer}))
+		f.http(t, "/v1/engines/stop", map[string]any{"engine": "llamacpp-custom"}, http.StatusOK)
+		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"llamacpp-custom": engineintent.Peer}))
 		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp"})
-		want := obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Peer, "llamacpp": engineintent.Local})
+		want := obIntent(false, map[string]engineintent.Origin{"llamacpp-custom": engineintent.Peer, "llamacpp": engineintent.Local})
 		c.assertIntent(t, want)
 		f.target.cleanup()
 		f.startTarget(t)
@@ -95,24 +94,24 @@ func TestOBOffOrigin(t *testing.T) {
 		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), want)
 		// Reassert peer Off to obtain a subscribed post-restart push while
 		// retaining both the peer and the untouched local origin.
-		f.http(t, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusOK)
+		f.http(t, "/v1/engines/stop", map[string]any{"engine": "llamacpp-custom"}, http.StatusOK)
 		c.assertIntent(t, want)
 	})
 
 	t.Run("peer Off preserves local origin and explicit lock", func(t *testing.T) {
 		f := newPolicyJointFixture(t, jointAvailable)
 		c := subscribeOBIntent(t, f.target)
-		c.call(t, "engine:stop", map[string]string{"engine": "ollama"})
-		want := obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local})
+		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp"})
+		want := obIntent(false, map[string]engineintent.Origin{"llamacpp": engineintent.Local})
 		c.assertIntent(t, want)
 		// A live HTTP 503 sink proves neither health nor physical shutdown.
 		// Close the owned probe listener so locking verifies a stopped engine.
 		f.inert.Close()
-		c.call(t, "engine:set-lock", map[string]any{"engine": "ollama", "locked": true})
-		f.http(t, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusOK)
+		c.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp", "locked": true})
+		f.http(t, "/v1/engines/stop", map[string]any{"engine": "llamacpp"}, http.StatusOK)
 		c.assertIntent(t, want)
-		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), false, engineintent.Local)
-		body := f.http(t, "/v1/engines/start", map[string]any{"engine": "ollama"}, http.StatusConflict)
+		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), "llamacpp", false, engineintent.Local)
+		body := f.http(t, "/v1/engines/start", map[string]any{"engine": "llamacpp"}, http.StatusConflict)
 		var refusal struct {
 			Code  string `json:"code"`
 			Error string `json:"error"`
@@ -124,7 +123,7 @@ func TestOBOffOrigin(t *testing.T) {
 		if refusal.Code != "engine_locked" || refusal.Error != locked {
 			t.Fatalf("peer start refusal = %+v, want exact engine lock", refusal)
 		}
-		response := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "ollama"}, 30*time.Second)
+		response := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "llamacpp"}, 30*time.Second)
 		if response.Error == nil || response.Error.Code != -32013 || response.Error.Message != "remote /v1/engines/start: HTTP 409: "+locked || len(response.Result) != 0 {
 			t.Fatalf("peer start RPC refusal = %+v, want exact engine lock", response.Error)
 		}
@@ -134,22 +133,22 @@ func TestOBOffOrigin(t *testing.T) {
 	t.Run("unlocked saved local Off permits peer start", func(t *testing.T) {
 		f, _, newClient := newSwitchClientFixture(t)
 		c := subscribeOBIntent(t, f.p)
-		pid := f.pid(t, "ollama")
-		c.call(t, "engine:stop", map[string]string{"engine": "ollama"})
-		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local}))
+		pid := f.pid(t, "llamacpp-custom")
+		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
+		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"llamacpp-custom": engineintent.Local}))
 		assertSwitchProcessStopped(t, pid)
 		path := filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json")
-		assertOBStoredIntent(t, path, false, engineintent.Local)
+		assertOBStoredIntent(t, path, "llamacpp-custom", false, engineintent.Local)
 		// Only the owned fake engine image and loopback controller can start.
-		managementHTTP(t, newClient(), f.ports.engineControl, http.MethodPost, "/v1/engines/start", map[string]string{"engine": "ollama"}, http.StatusOK)
+		managementHTTP(t, newClient(), f.ports.engineControl, http.MethodPost, "/v1/engines/start", map[string]string{"engine": "llamacpp-custom"}, http.StatusOK)
 		c.assertIntent(t, obIntent(true, map[string]engineintent.Origin{}))
-		assertOBStoredIntent(t, path, true, "")
+		assertOBStoredIntent(t, path, "llamacpp-custom", true, "")
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if len(f.starts["ollama"]) != 2 || len(f.starts["llamacpp"]) != 0 {
+		if len(f.starts["llamacpp-custom"]) != 2 || len(f.starts["llamacpp"]) != 0 {
 			t.Fatalf("peer start changed unexpected engine execution: %v", f.starts)
 		}
-		if f.starts["ollama"][1] == pid {
+		if f.starts["llamacpp-custom"][1] == pid {
 			t.Fatal("peer start did not replace the stopped fixture engine")
 		}
 	})
@@ -234,10 +233,10 @@ func decodeOBIntent(t *testing.T, raw json.RawMessage) engineintent.Snapshot {
 	return snapshot
 }
 
-func obIntent(ollamaOn bool, origins map[string]engineintent.Origin) engineintent.Snapshot {
+func obIntent(sourceOn bool, origins map[string]engineintent.Origin) engineintent.Snapshot {
 	enabled := make(map[string]bool)
-	for _, name := range engines.Names() {
-		enabled[name] = name == "ollama" && ollamaOn
+	for _, name := range privateFixtureEngineNames() {
+		enabled[name] = name == "llamacpp-custom" && sourceOn
 	}
 	return engineintent.Snapshot{EnabledByEngine: enabled, OffByEngine: origins}
 }
@@ -249,7 +248,7 @@ func assertOBIntent(t *testing.T, got, want engineintent.Snapshot) {
 	}
 }
 
-func assertOBStoredIntent(t *testing.T, path string, enabled bool, origin engineintent.Origin) {
+func assertOBStoredIntent(t *testing.T, path, engine string, enabled bool, origin engineintent.Origin) {
 	t.Helper()
 	var stored struct {
 		Engines map[string]bool                `json:"engines"`
@@ -258,11 +257,11 @@ func assertOBStoredIntent(t *testing.T, path string, enabled bool, origin engine
 	if err := json.Unmarshal(readPolicyBytes(t, path), &stored); err != nil {
 		t.Fatalf("decode desired state: %v", err)
 	}
-	if on, known := stored.Engines["ollama"]; !known || on != enabled {
-		t.Fatalf("stored ollama intent = %t (known %t), want %t", on, known, enabled)
+	if on, known := stored.Engines[engine]; !known || on != enabled {
+		t.Fatalf("stored %s intent = %t (known %t), want %t", engine, on, known, enabled)
 	}
-	got, present := stored.OffBy["ollama"]
+	got, present := stored.OffBy[engine]
 	if got != origin || present != (origin != "") {
-		t.Fatalf("stored ollama origin = %q (present %t), want %q", got, present, origin)
+		t.Fatalf("stored %s origin = %q (present %t), want %q", engine, got, present, origin)
 	}
 }

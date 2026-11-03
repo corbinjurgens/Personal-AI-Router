@@ -417,9 +417,7 @@ func (f *modelSettingsProcessFixture) assertEngineManifests(t *testing.T) {
 	}
 	seen := map[int]bool{}
 	ports := []int{f.ports.nodeInfo, f.ports.errors, f.ports.workload, f.ports.clusterManager, f.ports.engineManagerHTTP, f.ports.engineControl, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.scannerPort, portOfURL(t, f.control), portOfURL(t, f.switchProcessFixture.control.URL)}
-	if f.proxyProbeImage != "" {
-		ports = append(ports, f.proxyProbePort)
-	}
+	ports = append(ports, f.proxyControl.port)
 	for _, port := range ports {
 		if err := validateFixturePort(port); err != nil {
 			t.Fatal(err)
@@ -429,7 +427,7 @@ func (f *modelSettingsProcessFixture) assertEngineManifests(t *testing.T) {
 		}
 		seen[port] = true
 	}
-	for _, name := range engines.Names() {
+	for _, name := range privateFixtureEngineNames() {
 		var manifest struct {
 			ModelsDir string                    `json:"models_dir"`
 			Runtime   modelSettingsRuntimeCheck `json:"runtime"`
@@ -446,7 +444,7 @@ func (f *modelSettingsProcessFixture) assertEngineManifests(t *testing.T) {
 		}
 		expectedImage := filepath.Join(f.base, "absent-"+name)
 		expectedRoot := filepath.Join(f.base, "absent-models", name)
-		active := name == "llamacpp" || name == "ollama"
+		active := name == "llamacpp" || name == "llamacpp-custom"
 		if active {
 			expectedImage = f.image
 		}
@@ -469,7 +467,7 @@ func (f *modelSettingsProcessFixture) assertEngineManifests(t *testing.T) {
 		}
 		expectedPort := f.targetPort
 		selector := "NVPAIR_TEST_MODEL_ENGINE"
-		if name == "ollama" {
+		if name == "llamacpp-custom" {
 			expectedPort = f.sourcePort
 			selector = "NVPAIR_TEST_SWITCH_ENGINE"
 		}
@@ -499,7 +497,7 @@ func (f *modelSettingsProcessFixture) assertEngineImages(t *testing.T) {
 	defer f.switchProcessFixture.mu.Unlock()
 	for engine, identities := range f.engineIdentities {
 		for _, identity := range identities {
-			if (engine != "llamacpp" && engine != "ollama") || !modelSettingsSamePath(identity.Path, f.image) || identity.PID == int32(os.Getpid()) {
+			if (engine != "llamacpp" && engine != "llamacpp-custom") || !modelSettingsSamePath(identity.Path, f.image) || identity.PID == int32(os.Getpid()) {
 				t.Errorf("launched engine %s is not the expected fixed fake child", engine)
 			}
 		}
@@ -640,9 +638,9 @@ func prepareModelSettingsProcessFixture(t *testing.T) *modelSettingsProcessFixtu
 		"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{image}, "models_dir": f.root, "runtime": rt}},
 	})
 	var other map[string]any
-	otherPath := filepath.Join(jointAppDir(base), "engines", "ollama.json")
+	otherPath := filepath.Join(jointAppDir(base), "engines", "llamacpp-custom.json")
 	modelSettingsDecode(t, readLiveDurableFile(t, otherPath), &other)
-	other["models_dir"] = filepath.Join(base, "absent-models", "ollama")
+	other["models_dir"] = filepath.Join(base, "absent-models", "llamacpp-custom")
 	platforms, ok := other["platforms"].(map[string]any)
 	if !ok {
 		t.Fatal("invalid private platform override")
@@ -673,9 +671,8 @@ func (f *modelSettingsProcessFixture) enableAdmissionProbe(t *testing.T) {
 	if f.p != nil || f.proxyProbeImage != "" {
 		t.Fatal("admission probe must be enabled once before broker startup")
 	}
-	f.proxyProbeImage = filepath.Join(testbin.Dir(t, "tests", "performance-observations", "observation-proxy"), testbin.Exe("observation-proxy"))
-	jointCopyExecutable(t, f.image, f.proxyProbeImage)
-	f.proxyProbePort = freePort(t)
+	f.proxyProbeImage = f.proxyControl.image
+	f.proxyProbePort = f.proxyControl.port
 }
 
 func (f *modelSettingsProcessFixture) assertHeldAdmission(t *testing.T) {
@@ -731,21 +728,16 @@ func (f *modelSettingsProcessFixture) useCopiedStore(t *testing.T, root string) 
 func (f *modelSettingsProcessFixture) startModelSettings(t *testing.T) {
 	t.Helper()
 	f.assertEngineManifests(t)
-	proxyPath := proxyBin
-	env := []string{
+	env := append(f.proxyControl.env(), []string{
 		"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort),
 		"NVPAIR_TEST_MODEL_MANAGER=" + f.manager, "NVPAIR_TEST_MODEL_REAL_MANAGER=" + engineMgrBin, "NVPAIR_TEST_MODEL_CONTROL=" + f.control,
-	}
-	if f.proxyProbeImage != "" {
-		proxyPath = f.proxyProbeImage
-		env = append(env, "NVPAIR_OBSERVATION_PROXY_FIXTURE="+f.proxyProbeImage, "NVPAIR_OBSERVATION_REAL_PROXY="+proxyBin, "NVPAIR_OBSERVATION_PROXY_CONTROL="+strconv.Itoa(f.proxyProbePort))
-	}
-	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", f.manager, "--engine-manager-control-host", "127.0.0.1", "--proxy-path", proxyPath, "--proxy-engines", "ollama,llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
+	}...)
+	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", f.manager, "--engine-manager-control-host", "127.0.0.1", "--proxy-path", f.proxyControl.image, "--proxy-engines", "llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
 	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, env, args...)
 	// Registered after process cleanup so a failed assertion cannot leave its
 	// own controller barrier blocking EOF and force-kill cleanup.
 	t.Cleanup(f.unblockModelSettings)
-	for _, path := range []string{f.manager, engineMgrBin, proxyBin, f.scanner} {
+	for _, path := range []string{f.manager, engineMgrBin, proxyBin, f.scanner, f.proxyControl.image} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
 			t.Fatal(err)
@@ -753,18 +745,11 @@ func (f *modelSettingsProcessFixture) startModelSettings(t *testing.T) {
 		f.p.paths = append(f.p.paths, canonical)
 	}
 	f.p.ports = append(f.p.ports, f.scannerPort, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.ports.engineControl)
-	if f.proxyProbeImage != "" {
-		canonical, err := canonicalServicePath(f.proxyProbeImage)
-		if err != nil {
-			t.Fatal(err)
-		}
-		f.p.paths = append(f.p.paths, canonical)
-		f.p.ports = append(f.p.ports, f.proxyProbePort)
-	}
+	f.p.ports = append(f.p.ports, f.proxyControl.port)
 	waitForMethod(t, f.p.msgs, "app:ready", 30*time.Second)
-	waitProxyReady(t, f.p.in, f.p.msgs, 20*time.Second)
-	waitEngineProxyReady(t, "llamacpp-proxy", f.p.in, f.p.msgs, 20*time.Second)
-	for _, engine := range []string{"ollama", "llamacpp", "lmstudio"} {
+	f.proxyControl.ready(t, "llamacpp-custom", f.facadePort)
+	f.proxyControl.ready(t, "llamacpp", f.targetFacadePort)
+	for _, engine := range engines.Names() {
 		f.rpcOK(t, "engine:get-settings", map[string]string{"engine": engine})
 	}
 }

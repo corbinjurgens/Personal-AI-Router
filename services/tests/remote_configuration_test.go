@@ -94,8 +94,8 @@ func TestXARemoteConfigurationService(t *testing.T) {
 	if !t.Run("local policy edit with roles and served set", func(t *testing.T) {
 		before := decodeServicePolicy(t, c.mustCall(t, "905", "policy:get", nil))
 		draft := before
-		draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "xa-model"}}
-		draft.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "xa-model"}}
+		draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "xa-model"}}
+		draft.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "xa-model"}}
 		m := c.mustCall(t, "906", "policy:set", mustMarshal(t, map[string]any{"policy": draft, "expectedPersistedRevision": before.Revision}))
 		var accepted struct {
 			Policy          nodepolicy.Policy `json:"policy"`
@@ -151,15 +151,15 @@ func TestXARemoteConfigurationService(t *testing.T) {
 
 	if !t.Run("engine intent through the service", func(t *testing.T) {
 		decodeOBIntent(t, c.mustCall(t, "907", "engine:intent", nil).Result)
-		c.mustCall(t, "908", "engine:stop", mustMarshal(t, map[string]string{"engine": "ollama"}))
+		c.mustCall(t, "908", "engine:stop", mustMarshal(t, map[string]string{"engine": "llamacpp"}))
 		nextID := 1000
 		task1Eventually(t, "service intent push", 10*time.Second, func() bool {
 			m := c.mustCall(t, strconv.Itoa(nextID), "engine:intent", nil)
 			nextID++
-			return decodeOBIntent(t, m.Result).OffByEngine["ollama"] == engineintent.Local
+			return decodeOBIntent(t, m.Result).OffByEngine["llamacpp"] == engineintent.Local
 		})
-		c.mustCall(t, "911", "engine:set-lock", mustMarshal(t, map[string]any{"engine": "ollama", "locked": true}))
-		status, _, body := managementHTTPResponse(t, rf.allowed, rf.ports.engineControl, http.MethodPost, "/v1/engines/start", map[string]any{"engine": "ollama"})
+		c.mustCall(t, "911", "engine:set-lock", mustMarshal(t, map[string]any{"engine": "llamacpp", "locked": true}))
+		status, _, body := managementHTTPResponse(t, rf.allowed, rf.ports.engineControl, http.MethodPost, "/v1/engines/start", map[string]any{"engine": "llamacpp"})
 		var refusal struct {
 			Code  string `json:"code"`
 			Error string `json:"error"`
@@ -320,7 +320,7 @@ func TestXARemoteConfigurationVeto(t *testing.T) {
 
 	if !t.Run("remote start is vetoed while paused", func(t *testing.T) {
 		task1Eventually(t, "remote start refused by local pause", 15*time.Second, func() bool {
-			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "ollama"}, 30*time.Second)
+			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "llamacpp"}, 30*time.Second)
 			return m.Error != nil && m.Error.Code == -32011 && m.Error.Message == "remote /v1/engines/start: HTTP 409: This node is paused. Resume it on this node before managing it remotely." && len(m.Result) == 0
 		})
 	}) {
@@ -333,17 +333,17 @@ func TestXARemoteConfigurationVeto(t *testing.T) {
 			t.Fatalf("local resume failed: code=%d", local.Error.Code)
 		}
 		c := subscribeOBIntent(t, f.target)
-		c.call(t, "engine:stop", map[string]string{"engine": "ollama"})
-		want := obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local})
+		c.call(t, "engine:stop", map[string]string{"engine": "llamacpp"})
+		want := obIntent(false, map[string]engineintent.Origin{"llamacpp": engineintent.Local})
 		c.assertIntent(t, want)
 		f.inert.Close()
-		c.call(t, "engine:set-lock", map[string]any{"engine": "ollama", "locked": true})
+		c.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp", "locked": true})
 		task1Eventually(t, "remote start refused by explicit engine lock", 15*time.Second, func() bool {
-			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "ollama"}, 30*time.Second)
+			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "llamacpp"}, 30*time.Second)
 			return m.Error != nil && m.Error.Code == -32013 && m.Error.Message == "remote /v1/engines/start: HTTP 409: This engine is locked on this node. Unlock it on this node before starting or loading a model." && len(m.Result) == 0
 		})
 		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), want)
-		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), false, engineintent.Local)
+		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), "llamacpp", false, engineintent.Local)
 	})
 }
 
@@ -389,7 +389,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 			t.Fatalf("stale switch receipt = %+v, want correlated terminal configuration conflict", st.Receipt)
 		}
 		staleReceipt = *st.Receipt
-		f.pid(t, "ollama")
+		f.pid(t, "llamacpp-custom")
 		assertNoTargetStart(t)
 	}) {
 		return
@@ -404,7 +404,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 			t.Fatalf("paused switch error = %+v, want common pause refusal", m.Error)
 		}
 		assertNoVetoReceipt(t)
-		f.pid(t, "ollama")
+		f.pid(t, "llamacpp-custom")
 		assertNoTargetStart(t)
 	}) {
 		return
@@ -416,7 +416,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 			t.Fatalf("repeated paused switch error = %+v, want common pause refusal", m.Error)
 		}
 		assertNoVetoReceipt(t)
-		f.pid(t, "ollama")
+		f.pid(t, "llamacpp-custom")
 		assertNoTargetStart(t)
 	}) {
 		return
@@ -464,7 +464,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 
 	t.Run("reused request ID with another payload is refused", func(t *testing.T) {
 		bad := successReq
-		bad.SourceEngine, bad.TargetEngine = "llamacpp", "ollama"
+		bad.SourceEngine, bad.TargetEngine = "llamacpp", "llamacpp-custom"
 		id := origin.send(t, settings.RemoteSwitchMethod, bad, true)
 		m := task2Response(t, origin, id)
 		if m.Error == nil || m.Error.Code != settings.SwitchInvalidParamsCode || m.Error.Message != "Request ID was already used by another caller or payload.\n" {
@@ -476,10 +476,10 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 		}
 		f.pid(t, "llamacpp")
 		f.mu.Lock()
-		sourceStarts := len(f.starts["ollama"])
+		sourceStarts := len(f.starts["llamacpp-custom"])
 		f.mu.Unlock()
 		if sourceStarts != 2 {
-			t.Fatalf("ollama starts=%d, want initial start and resume wake", sourceStarts)
+			t.Fatalf("custom engine starts=%d, want initial start and resume wake", sourceStarts)
 		}
 		journal, err := settings.DecodeSwitchJournal(readLiveDurableFile(t, filepath.Join(p.mesh.b.base, "engine-switch-operations.json")))
 		if err != nil {
@@ -538,7 +538,7 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 
 	if !t.Run("allowed peer sets roles", func(t *testing.T) {
 		draft := xaPeerDraft(t, j.want)
-		draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "joint-local"}}
+		draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "llamacpp", Model: "joint-local"}}
 		res := j.rpc(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision}).Result
 		var accepted struct {
 			Policy nodepolicy.PeerPolicy `json:"policy"`
@@ -559,7 +559,7 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 	if !t.Run("target advertises roles", func(t *testing.T) {
 		task1Eventually(t, "roles projection", 10*time.Second, func() bool {
 			adv := xaEngineModelsPolicy(t, j.target)
-			return adv != nil && adv.Revision == j.want.Revision && adv.Roles["weak"].Engine == "ollama" && adv.Roles["weak"].Model == "joint-local"
+			return adv != nil && adv.Revision == j.want.Revision && adv.Roles["weak"].Engine == "llamacpp" && adv.Roles["weak"].Model == "joint-local"
 		})
 	}) {
 		return
@@ -568,7 +568,7 @@ func TestXARemoteConfigurationRoles(t *testing.T) {
 	if !t.Run("denied peer cannot change roles", func(t *testing.T) {
 		before := readPolicyBytes(t, j.path)
 		draft := xaPeerDraft(t, j.want)
-		draft.Roles = map[string]nodepolicy.Role{"strong": {Engine: "ollama", Model: "joint-local"}}
+		draft.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp", Model: "joint-local"}}
 		managementHTTP(t, f.denied, j.ports[1], http.MethodPost, "/v1/node-policy/set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision}, http.StatusConflict)
 		j.assertUnchanged(t, before)
 	}) {
@@ -642,12 +642,12 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 		if !t.Run("served subset with resident declaration", func(t *testing.T) {
 			draft := xaPeerDraft(t, j.want)
 			draft.Profiles = append(draft.Profiles, nodepolicy.Profile{
-				Name: "xa-resident", Engine: "ollama", Model: "joint-local",
+				Name: "xa-resident", Engine: "llamacpp", Model: "joint-local",
 				ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1,
 				Qualification: &nodepolicy.QualificationRef{ID: "xa-qual", Revision: "1"},
 			})
-			draft.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "joint-local"}}
-			draft.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "joint-local"}}
+			draft.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "joint-local"}}
+			draft.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "joint-local"}}
 			setDeclaration(t, draft)
 		}) {
 			return
@@ -664,8 +664,8 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 
 		if !t.Run("resident outside served is refused", func(t *testing.T) {
 			draft := xaPeerDraft(t, j.want)
-			draft.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "other"}}
-			if !reflect.DeepEqual(draft.ResidentModels, nodepolicy.ResidentModels{{Engine: "ollama", Model: "joint-local"}}) {
+			draft.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "other"}}
+			if !reflect.DeepEqual(draft.ResidentModels, nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "joint-local"}}) {
 				t.Fatal("rejected draft lost its joint-local resident declaration")
 			}
 			m := j.originCall(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision})
@@ -723,13 +723,13 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 	t.Run("proxy enforces served set at its facade", func(t *testing.T) {
 		s := newSwitchProcessFixture(t)
 		s.unblock()
-		s.rpcOK(t, "ollama-proxy:node/add-manual", map[string]any{"id": "xa-self", "host": "127.0.0.1", "port": s.facadePort, "addresses": []string{"127.0.0.1"}, "models": []string{"switch-model"}})
-		s.rpcOK(t, "ollama-proxy:node/select", map[string]string{"id": "xa-self"})
+		s.rpcOK(t, "llamacpp-custom-proxy:node/add-manual", map[string]any{"id": "xa-self", "host": "127.0.0.1", "port": s.facadePort, "addresses": []string{"127.0.0.1"}, "models": []string{"switch-model"}})
+		s.rpcOK(t, "llamacpp-custom-proxy:node/select", map[string]string{"id": "xa-self"})
 		client := &http.Client{Timeout: 30 * time.Second}
 		t.Cleanup(client.CloseIdleConnections)
 		generate := func() (*http.Response, []byte) {
 			t.Helper()
-			resp, err := client.Post("http://127.0.0.1:"+strconv.Itoa(s.facadePort)+"/api/generate", "application/json", strings.NewReader(`{"model":"switch-model","stream":false,"prompt":"fixture"}`))
+			resp, err := client.Post("http://127.0.0.1:"+strconv.Itoa(s.facadePort)+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"switch-model","stream":false,"messages":[{"role":"user","content":"fixture"}]}`))
 			if err != nil {
 				t.Fatalf("facade generation request: %v", err)
 			}
@@ -784,12 +784,15 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 				t.Fatalf("facade generation status=%d, want %d", resp.StatusCode, http.StatusOK)
 			}
 			var result struct {
-				Done bool `json:"done"`
+				Model   string `json:"model"`
+				Choices []struct {
+					FinishReason string `json:"finish_reason"`
+				} `json:"choices"`
 			}
 			if err := json.Unmarshal(body, &result); err != nil {
 				t.Fatalf("decode facade generation completion: %v", err)
 			}
-			if !result.Done {
+			if result.Model != "switch-model" || len(result.Choices) != 1 || result.Choices[0].FinishReason != "stop" {
 				t.Fatal("facade generation did not complete")
 			}
 		}
@@ -814,7 +817,7 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 		// Engine start completes before the broker's advertisement poll supplies
 		// the proxy's healthy local endpoint. Wait through the facade itself.
 		task1Eventually(t, "facade self model inventory", 10*time.Second, func() bool {
-			resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(s.facadePort) + "/api/tags")
+			resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(s.facadePort) + "/v1/models")
 			if err != nil {
 				t.Fatalf("facade inventory request: %v", err)
 			}
@@ -825,8 +828,8 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 			}
 			var inventory struct {
 				Models []struct {
-					Name string `json:"name"`
-				} `json:"models"`
+					Name string `json:"id"`
+				} `json:"data"`
 				Error string `json:"error"`
 			}
 			if err := json.Unmarshal(body, &inventory); err != nil {
@@ -850,11 +853,11 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 		assertDone(generate())
 		setServed(nodepolicy.ServedModels{})
 		assertNotServed(generate())
-		setServed(nodepolicy.ServedModels{{Engine: "ollama", Model: "other"}})
+		setServed(nodepolicy.ServedModels{{Engine: "llamacpp-custom", Model: "other"}})
 		assertNotServed(generate())
-		setServed(nodepolicy.ServedModels{{Engine: "ollama", Model: "switch-model"}})
+		setServed(nodepolicy.ServedModels{{Engine: "llamacpp-custom", Model: "switch-model"}})
 		assertDone(generate())
-		s.pid(t, "ollama")
+		s.pid(t, "llamacpp-custom")
 		s.mu.Lock()
 		targetStarts := len(s.starts["llamacpp"])
 		s.mu.Unlock()

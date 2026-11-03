@@ -53,7 +53,7 @@ func TestWorkloadDepartedRunRetired(t *testing.T) {
 		if pid2 == pid1 {
 			t.Fatalf("replacement proxy PID = %d, want a different PID", pid2)
 		}
-		f.port = waitProxyReady(t, f.stdin, f.control, 15*time.Second)
+		f.port = waitEngineProxyReady(t, "llamacpp-proxy", f.stdin, f.control, 15*time.Second)
 		f.selectEngine(t)
 		secondRequest := f.startRequest(t)
 		replacement := waitDepartedRunFrame(t, f.events, "workloads:upsert", 15*time.Second, func(p departedRunParams) bool {
@@ -189,8 +189,8 @@ func waitDepartedRunFrame(t *testing.T, messages <-chan jsonrpc.Message, method 
 
 func assertDepartedRunRunning(t *testing.T, w departedRunInfo) {
 	t.Helper()
-	if w.ID != "1" || w.Engine != "ollama" || w.RunID == "" || w.OriginatedFrom == "" || w.Model != "departed-run-model" {
-		t.Fatalf("running workload identity/model = %+v, want complete ollama identity, reused ID 1 and departed-run-model", w)
+	if w.ID != "1" || w.Engine != "llamacpp" || w.RunID == "" || w.OriginatedFrom == "" || w.Model != "departed-run-model" {
+		t.Fatalf("running workload identity/model = %+v, want complete llamacpp identity, reused ID 1 and departed-run-model", w)
 	}
 	if w.State != "running" || w.Seq <= 0 || w.StartedAt == nil || w.CompletedAt != nil || w.Error != nil {
 		t.Fatalf("workload did not commit a nonterminal running frame: %+v", w)
@@ -262,7 +262,7 @@ func startDepartedRunFixture(t *testing.T, clusterDir string, extraArgs ...strin
 	t.Helper()
 	configDir := t.TempDir()
 	proxyPort := freePort(t)
-	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"ollama": proxyPort})
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"llamacpp": proxyPort})
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	stopEngine := func() { releaseOnce.Do(func() { close(release) }) }
@@ -271,9 +271,9 @@ func startDepartedRunFixture(t *testing.T, clusterDir string, extraArgs ...strin
 			t.Errorf("read fake engine request: %v", err)
 			return
 		}
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		if _, err := io.WriteString(w, `{"message":{"role":"assistant","content":"ready"},"done":false}`+"\n"); err != nil {
+		if _, err := io.WriteString(w, `data: {"id":"fixture","model":"departed-run-model","choices":[{"index":0,"delta":{"role":"assistant","content":"ready"},"finish_reason":null}]}`+"\n\n"); err != nil {
 			t.Errorf("write fake engine first chunk: %v", err)
 			return
 		}
@@ -296,7 +296,7 @@ func startDepartedRunFixture(t *testing.T, clusterDir string, extraArgs ...strin
 	var cancel context.CancelFunc
 	f.ctx, cancel = context.WithCancel(context.Background())
 	args := append([]string{
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 		"--workload-manager-path", workloadMgrBin,
 	}, extraArgs...)
 	stdin, messages, stderr, cleanup := startBrokerWithDirs(t, configDir, clusterDir, args...)
@@ -375,9 +375,9 @@ func startDepartedRunFixture(t *testing.T, clusterDir string, extraArgs ...strin
 	if !subscription.Subscribed {
 		t.Fatal("workloads:subscribe did not acknowledge subscribed:true")
 	}
-	f.port = waitProxyReady(t, f.stdin, f.control, 15*time.Second)
+	f.port = waitEngineProxyReady(t, "llamacpp-proxy", f.stdin, f.control, 15*time.Second)
 	if f.port != proxyPort {
-		t.Fatalf("Ollama proxy port=%d want private port=%d", f.port, proxyPort)
+		t.Fatalf("llama.cpp proxy port=%d want private port=%d", f.port, proxyPort)
 	}
 	f.selectEngine(t)
 	return f
@@ -406,11 +406,11 @@ func (f *departedRunFixture) call(t *testing.T, method, params string) jsonrpc.M
 
 func (f *departedRunFixture) selectEngine(t *testing.T) {
 	t.Helper()
-	params := fmt.Sprintf(`{"id":"fake-departed-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["departed-run-model"]}`, f.enginePort)
-	if reply := f.call(t, "ollama-proxy:node/add-manual", params); reply.Error != nil {
+	params := fmt.Sprintf(`{"id":"fake-departed-llamacpp","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["departed-run-model"]}`, f.enginePort)
+	if reply := f.call(t, "llamacpp-proxy:node/add-manual", params); reply.Error != nil {
 		t.Fatalf("add fake engine: %+v", reply.Error)
 	}
-	if reply := f.call(t, "ollama-proxy:node/select", `{"id":"fake-departed-ollama"}`); reply.Error != nil {
+	if reply := f.call(t, "llamacpp-proxy:node/select", `{"id":"fake-departed-llamacpp"}`); reply.Error != nil {
 		t.Fatalf("select fake engine: %+v", reply.Error)
 	}
 }
@@ -443,7 +443,7 @@ func (f *departedRunFixture) initialWorkload(t *testing.T, key departedRunKey) d
 
 func (f *departedRunFixture) startRequest(t *testing.T) <-chan departedRunHTTPResult {
 	t.Helper()
-	req, err := http.NewRequestWithContext(f.ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/chat", f.port), strings.NewReader(`{"model":"departed-run-model","messages":[],"stream":true}`))
+	req, err := http.NewRequestWithContext(f.ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", f.port), strings.NewReader(`{"model":"departed-run-model","messages":[],"stream":true}`))
 	if err != nil {
 		t.Fatalf("create inference request: %v", err)
 	}

@@ -469,12 +469,12 @@ func (f *stopPauseFixture) assertPaused(t *testing.T, origin nodepolicy.PauseOri
 	task2Decode(t, f.call(t, "engine:get-installed", nil), &inventory)
 	seen := make(map[string]bool)
 	for _, status := range inventory.Engines {
-		if seen[status.Engine] || status.Running == nil || *status.Running {
+		if !slices.Contains(privateFixtureEngineNames(), status.Engine) || seen[status.Engine] || status.Running == nil || *status.Running {
 			t.Fatalf("current-manager shutdown inventory=%+v", status)
 		}
 		seen[status.Engine] = true
 	}
-	if len(seen) != len(engines.Names()) {
+	if len(seen) != len(privateFixtureEngineNames()) {
 		t.Fatalf("current-manager inventory incomplete: %v", seen)
 	}
 	if fetchServicePolicy(t, f.client).Availability != nodepolicy.Paused {
@@ -644,9 +644,9 @@ func testStopPauseFence(t *testing.T, mode string, peerOrigin bool) {
 	policy := fetchServicePolicy(t, f.client).Policy
 	policy.Admission.MaxConcurrentPerModel = 3
 	setServicePolicy(t, f.client, policy)
-	f.call(t, "engine:set-lock", map[string]any{"engine": "ollama", "locked": true})
-	f.call(t, "engine:set-lock", map[string]any{"engine": "ollama", "locked": false})
-	f.call(t, "engine:stop", map[string]string{"engine": "ollama"})
+	f.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp-custom", "locked": true})
+	f.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp-custom", "locked": false})
+	f.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
 	// Explicit unload can fail because its HTTP server was physically stopped;
 	// that transport failure must not be an availability veto or cause a wake.
 	unload, err := f.client.call(strconv.FormatInt(newRPCID(), 10), "engine:unload-model", mustMarshal(t, map[string]string{"engine": "llamacpp", "model": "switch-model"}), serviceCallTimeout)
@@ -1038,8 +1038,8 @@ func testStopPauseDrain(t *testing.T, escalate bool) {
 func testStopPauseRestart(t *testing.T, locked bool) {
 	f := newStopPauseFixture(t)
 	f.startModel(t)
-	f.call(t, "engine:stop", map[string]string{"engine": "ollama"})
-	f.call(t, "engine:set-lock", map[string]any{"engine": "ollama", "locked": locked})
+	f.call(t, "engine:stop", map[string]string{"engine": "llamacpp-custom"})
+	f.call(t, "engine:set-lock", map[string]any{"engine": "llamacpp-custom", "locked": locked})
 	policy := fetchServicePolicy(t, f.client).Policy
 	profile := fixtureResidentProfile()
 	// Resident configuration requires a qualification reference. This is only
@@ -1059,7 +1059,7 @@ func testStopPauseRestart(t *testing.T, locked bool) {
 		Locked  map[string]bool `json:"locked"`
 	}
 	task2Decode(t, readLiveDurableFile(t, intentPath), &before)
-	if !before.Engines["llamacpp"] || before.Engines["ollama"] || before.Locked["ollama"] != locked {
+	if !before.Engines["llamacpp"] || before.Engines["llamacpp-custom"] || before.Locked["llamacpp-custom"] != locked {
 		t.Fatalf("Pause changed On/Off/lock: %+v", before)
 	}
 	if err := f.service.cleanupChecked(); err != nil {
@@ -1093,7 +1093,7 @@ func testStopPauseRestart(t *testing.T, locked bool) {
 		Running bool  `json:"running"`
 		Locked  *bool `json:"locked"`
 	}
-	task2Decode(t, f.call(t, "engine:status", map[string]string{"engine": "ollama"}), &status)
+	task2Decode(t, f.call(t, "engine:status", map[string]string{"engine": "llamacpp-custom"}), &status)
 	if status.Running || status.Locked == nil || *status.Locked != locked {
 		t.Fatalf("Resume activated saved-Off/locked engine: %+v", status)
 	}
@@ -1276,13 +1276,15 @@ func (p *stopPausePeer) assertPaused(t *testing.T) {
 		} `json:"engines"`
 	}
 	task2Decode(t, p.engine.rpcOK(t, "engine:get-installed", nil), &inventory)
-	if len(inventory.Engines) != len(engines.Names()) {
+	if len(inventory.Engines) != len(privateFixtureEngineNames()) {
 		t.Fatal("peer current-manager shutdown inventory incomplete")
 	}
+	seen := make(map[string]bool)
 	for _, status := range inventory.Engines {
-		if status.Running == nil || *status.Running {
+		if !slices.Contains(privateFixtureEngineNames(), status.Engine) || seen[status.Engine] || status.Running == nil || *status.Running {
 			t.Fatalf("peer shutdown inventory=%+v", status)
 		}
+		seen[status.Engine] = true
 	}
 }
 
@@ -1320,7 +1322,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	releasePeer := holdStopPauseServicePorts(t, ports)
 	e := prepareSwitchProcessFixture(t, base, ports, "")
 	peerNative := newStopPauseNative(t, e, false)
-	facades := map[string]int{"ollama": e.facadePort, "llamacpp": e.targetFacadePort}
+	facades := map[string]int{"llamacpp-custom": e.facadePort, "llamacpp": e.targetFacadePort}
 	for _, name := range engines.Names() {
 		if _, exists := facades[name]; !exists {
 			facades[name] = freePort(t)
@@ -1361,7 +1363,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 		return response.StatusCode == http.StatusOK
 	})
 	f.publishDirectory(t, noderec.DirectoryNode{HostUUID: peerID, ClusterUUID: peerID, Name: peerID, IP: "127.0.0.1", Trusted: true,
-		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceOllama: {Port: e.facadePort}, noderec.ServiceLlamaCPP: {Port: e.targetFacadePort}},
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{privateFixtureEngine(t, "llamacpp-custom").DiscoveryService: {Port: e.facadePort}, noderec.ServiceLlamaCPP: {Port: e.targetFacadePort}},
 		Models:   inventory.Models, ModelsByEngine: inventory.ByEngine, LoadedByEngine: inventory.Loaded, Policy: inventory.Policy})
 	p.publishTarget(t, f)
 	return f, p

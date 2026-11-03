@@ -104,7 +104,7 @@ func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
 	event := noderec.NodeEvent{Node: noderec.DirectoryNode{
 		HostUUID: "j304-private-owner", Name: "j304-private-owner", IP: "127.0.0.1",
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: portOfURL(t, upstream.URL)}},
-		Models:   models, ModelsByEngine: map[string][]string{"llamacpp": models, "ollama": {}},
+		Models:   models, ModelsByEngine: map[string][]string{"llamacpp": models, "llamacpp-custom": {}},
 		LoadedByEngine: map[string][]string{"llamacpp": models},
 		Policy: &nodepolicy.Advertisement{Revision: "304", Roles: map[string]nodepolicy.AdvertisedRole{
 			"weak": {Engine: "llamacpp", Model: concrete}, "medium": {Engine: "llamacpp", Model: multibyte512}, "strong": {Engine: "llamacpp", Model: overlong},
@@ -274,7 +274,7 @@ func newRoutingUpstream(t *testing.T, status int) *routingUpstream {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if status == http.StatusOK {
-			_, _ = io.WriteString(w, `{"done":true,"choices":[]}`)
+			_, _ = io.WriteString(w, `{"choices":[]}`)
 			return
 		}
 		_, _ = io.WriteString(w, `{"error":"model not found"}`)
@@ -289,8 +289,12 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 	ineligible := newRoutingUpstream(t, http.StatusOK)
 
 	configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
-	facades := map[string]int{"ollama": freePort(t), "lmstudio": freePort(t)}
+	facades := map[string]int{"llamacpp": freePort(t), "llamacpp-custom": freePort(t), "ollama": freePort(t)}
 	writePrivateBrokerEngineSettings(t, configDir, clusterDir, facades)
+	manifest := privateFixtureManifest(t, "llamacpp-custom", filepath.Join(configDir, "absent-models"), filepath.Join(configDir, "absent-engine"), map[string]any{"port": 0, "ready": nil, "health": nil})
+	manifest["protocols"] = []string{"openai-v1", "anthropic-messages"}
+	jointWriteJSON(t, filepath.Join(jointAppDir(configDir), "engines", "llamacpp-custom.json"), manifest)
+	control := newFixtureProxyControl(t)
 	// Reuse the registered empty-directory scanner, so the strict candidates
 	// below come only from the test's manual overlay, never host discovery.
 	self, err := os.Executable()
@@ -299,13 +303,13 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 	}
 	scanner := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
 	jointCopyExecutable(t, self, scanner)
-	stdin, msgs, stderr, cleanup := startBrokerWithDirsAndEnv(t, configDir, clusterDir, []string{
+	_, msgs, stderr, cleanup := startBrokerWithDirsAndEnv(t, configDir, clusterDir, append(control.env(), []string{
 		"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(freePort(t)),
-	},
+	}...),
 		"--scanner-path", scanner,
 		"--engine-manager-path", engineMgrBin,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama,lmstudio",
+		"--proxy-path", control.image, "--proxy-engines", "llamacpp,ollama",
 	)
 	t.Cleanup(cleanup)
 	go func() {
@@ -314,23 +318,29 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 	}()
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-	ollamaPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
-	lmstudioPort := waitLMStudioProxyReady(t, stdin, msgs, 15*time.Second)
-	if ollamaPort != facades["ollama"] || lmstudioPort != facades["lmstudio"] {
-		t.Fatalf("facade ports = ollama:%d lmstudio:%d, want private plan %v", ollamaPort, lmstudioPort, facades)
-	}
+	control.ready(t, "llamacpp", facades["llamacpp"])
+	control.ready(t, "llamacpp-custom", facades["llamacpp-custom"])
+	control.ready(t, "ollama", facades["ollama"])
 
 	type proxyCase struct {
-		name      string
-		rpcPrefix string
-		path      string
-		port      int
+		name   string
+		engine string
+		path   string
+		port   int
 	}
 	cases := []proxyCase{
-		{name: "ollama", rpcPrefix: "ollama-proxy", path: "/api/chat", port: ollamaPort},
-		{name: "ollama-anthropic", rpcPrefix: "ollama-proxy", path: "/v1/messages", port: ollamaPort},
-		{name: "lmstudio", rpcPrefix: "lmstudio-proxy", path: "/v1/chat/completions", port: lmstudioPort},
-		{name: "lmstudio-anthropic", rpcPrefix: "lmstudio-proxy", path: "/v1/messages", port: lmstudioPort},
+		{name: "llamacpp", engine: "llamacpp", path: "/v1/chat/completions", port: facades["llamacpp"]},
+		// llama.cpp's fixed profile does not classify the Anthropic route as
+		// inference. Keep the original native route-classification case.
+		{name: "ollama-anthropic", engine: "ollama", path: "/v1/messages", port: facades["ollama"]},
+		{name: "llamacpp-custom", engine: "llamacpp-custom", path: "/v1/chat/completions", port: facades["llamacpp-custom"]},
+		{name: "llamacpp-custom-anthropic", engine: "llamacpp-custom", path: "/v1/messages", port: facades["llamacpp-custom"]},
+	}
+	proxyCall := func(t *testing.T, engine, method string, params any) {
+		t.Helper()
+		if response := control.call(t, engine, method, params); response.Error != nil {
+			t.Fatalf("fixture proxy %s: %v", method, response.Error)
+		}
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
@@ -356,7 +366,6 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 				{id: unknownID, port: portOfURL(t, ineligible.server.URL)},
 			}
 
-			requestID := 1000 + caseIndex*10
 			for _, node := range nodes {
 				params := map[string]any{
 					"id":        node.id,
@@ -367,10 +376,9 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 				if node.models != nil {
 					params["models"] = node.models
 				}
-				callBrokerRPC(t, stdin, msgs, requestID, tc.rpcPrefix+":node/add-manual", params)
-				requestID++
+				proxyCall(t, tc.engine, "node/add-manual", params)
 			}
-			callBrokerRPC(t, stdin, msgs, requestID, tc.rpcPrefix+":node/set-priority", map[string]any{
+			proxyCall(t, tc.engine, "node/set-priority", map[string]any{
 				// Both facades share one proxy process, so every snapshot must
 				// advance the process-wide generation.
 				"generation": caseIndex + 1,

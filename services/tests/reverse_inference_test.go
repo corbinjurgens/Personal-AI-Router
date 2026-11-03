@@ -31,7 +31,7 @@ import (
 	"nvpair-shared/noderec"
 )
 
-const phase04Model = "phase04:latest"
+const phase04Model = "phase04"
 
 // The broker boundary supplies discovery and current service registrations.
 // Every transport, private gateway and target handler runs its production main.
@@ -68,35 +68,42 @@ func newPhase04Engine(t *testing.T) *phase04Engine {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/tags", "/api/ps":
-			if err := json.NewEncoder(w).Encode(map[string]any{"models": []map[string]string{{"name": phase04Model}}}); err != nil {
+			// Preserve the native store-copy fixture's original inventory surface.
+			if err := json.NewEncoder(w).Encode(map[string]any{"models": []map[string]string{{"name": phase04Model + ":latest"}}}); err != nil {
 				t.Error(err)
 			}
-		case "/api/generate":
-			var input struct {
-				Model  string `json:"model"`
-				Prompt string `json:"prompt"`
+		case "/v1/models", "/models":
+			if err := json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": phase04Model, "status": map[string]string{"value": "loaded"}}}}); err != nil {
+				t.Error(err)
 			}
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Model != phase04Model {
-				t.Errorf("fixture inference input: %+v, %v", input, err)
+		case "/v1/chat/completions":
+			var input struct {
+				Model    string `json:"model"`
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Model != phase04Model || len(input.Messages) != 1 {
+				t.Errorf("fixture inference model=%q messages=%d decode=%v", input.Model, len(input.Messages), err)
 				http.Error(w, "bad input", http.StatusBadRequest)
 				return
 			}
 			e.mu.Lock()
-			e.calls[input.Prompt]++
+			e.calls[input.Messages[0].Content]++
 			e.mu.Unlock()
-			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("X-Phase04-Stream", "preserved")
 			w.WriteHeader(http.StatusOK)
-			if _, err := io.WriteString(w, "{\"model\":\"phase04:latest\",\"response\":\"first\",\"done\":false}\n"); err != nil {
+			if _, err := io.WriteString(w, `data: {"model":"phase04","choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]}`+"\n\n"); err != nil {
 				return
 			}
 			w.(http.Flusher).Flush()
-			if input.Prompt == "cancel" || input.Prompt == "drop" {
+			if input.Messages[0].Content == "cancel" || input.Messages[0].Content == "drop" {
 				<-r.Context().Done()
-				e.canceled <- input.Prompt
+				e.canceled <- input.Messages[0].Content
 				return
 			}
-			if input.Prompt == "direct-drop" {
+			if input.Messages[0].Content == "direct-drop" {
 				select {
 				case <-e.release:
 				case <-r.Context().Done():
@@ -112,7 +119,7 @@ func newPhase04Engine(t *testing.T) *phase04Engine {
 				}
 				return
 			}
-			if strings.HasPrefix(input.Prompt, "concurrent-") {
+			if strings.HasPrefix(input.Messages[0].Content, "concurrent-") {
 				select {
 				case <-e.release:
 				case <-r.Context().Done():
@@ -121,7 +128,10 @@ func newPhase04Engine(t *testing.T) *phase04Engine {
 			}
 			// A distinct later flush makes buffering observable to the caller.
 			time.Sleep(75 * time.Millisecond)
-			if _, err := io.WriteString(w, "{\"model\":\"phase04:latest\",\"response\":\"second\",\"done\":true}\n"); err != nil {
+			if _, err := io.WriteString(w, `data: {"model":"phase04","choices":[{"index":0,"delta":{"content":"second"},"finish_reason":"stop"}]}`+"\n\n"); err != nil {
+				return
+			}
+			if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
 				return
 			}
 			w.(http.Flusher).Flush()
@@ -196,7 +206,7 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		n.cert = mintClusterIdentity(t, dir, uuid)
 		task1WriteJSON(t, filepath.Join(dir, "identity.json"), map[string]any{"node_uuid": uuid, "created_at": 1})
 		task1WriteJSON(t, filepath.Join(dir, "admission.json"), map[string]any{"counter": 1, "activated": 1, "clusterId": task1ClusterID, "epoch": 1})
-		for _, service := range []noderec.ServiceKey{noderec.ServiceCluster, noderec.ServiceEngineControl, noderec.ServiceEngineManager, noderec.ServiceNodeInfo, noderec.ServiceOllama} {
+		for _, service := range []noderec.ServiceKey{noderec.ServiceCluster, noderec.ServiceEngineControl, noderec.ServiceEngineManager, noderec.ServiceNodeInfo, noderec.ServiceLlamaCPP} {
 			n.ports[service] = temporaryClusterPort(t)
 		}
 		if f.control.a == nil {
@@ -227,11 +237,19 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		}
 		writeDisabledBuiltinEngineOverrides(t, n.base, filepath.Dir(manifestDir))
 		port := f.engines[n.uuid].port
+		// Native store-copy cases retain their separate Ollama store adapter.
 		task1WriteJSON(t, filepath.Join(manifestDir, "ollama.json"), map[string]any{
 			"engine":  "ollama",
 			"runtime": map[string]any{"port": port, "env": map[string]string{"OLLAMA_MODELS": f.stores[n.uuid]}, "ready": map[string]any{"http": "http://127.0.0.1:{port}/api/version", "status": 200}},
 			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
 				"detect": []string{nodeInfoBin}, "models_dir": filepath.Join(n.base, "ollama-models"), "runtime": map[string]any{"bin": nodeInfoBin, "port": port},
+			}},
+		})
+		task1WriteJSON(t, filepath.Join(manifestDir, "llamacpp.json"), map[string]any{
+			"engine":  "llamacpp",
+			"runtime": map[string]any{"port": port, "env": map[string]string{"LLAMA_CACHE": f.stores[n.uuid]}, "ready": map[string]any{"http": "http://127.0.0.1:{port}/v1/models", "status": 200, "json_match": nil}},
+			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
+				"detect": []string{nodeInfoBin}, "models_dir": filepath.Join(n.base, "llamacpp-models"), "runtime": map[string]any{"bin": nodeInfoBin, "port": port},
 			}},
 		})
 		var members []task1Member
@@ -254,8 +272,8 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		bindProxyFixtureIdentity(t, n.uuid, func(method string, params any) jsonrpc.Message {
 			return p.call(t, method, params)
 		})
-		p.call(t, "facade/enable", map[string]any{"engine": "ollama", "port": n.ports[noderec.ServiceOllama], "ignorePersistedPort": true})
-		p.call(t, engines.AddressMethod("ollama", "node/set-local-backend"), map[string]any{"engine": "ollama", "host": "127.0.0.1", "port": f.engines[n.uuid].port, "healthy": true})
+		p.call(t, "facade/enable", map[string]any{"engine": "llamacpp", "port": n.ports[noderec.ServiceLlamaCPP], "ignorePersistedPort": true})
+		p.call(t, engines.AddressMethod("llamacpp", "node/set-local-backend"), map[string]any{"engine": "llamacpp", "host": "127.0.0.1", "port": f.engines[n.uuid].port, "healthy": true})
 		f.proxies[n.uuid] = p
 		n.cm = startTask1Process(t, n.base, clusterMgrBin, "--config-dir", n.base, "--port", strconv.Itoa(n.ports[noderec.ServiceCluster]))
 		n.cm.call(t, "cluster:get-node-id", nil)
@@ -263,7 +281,7 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 			{Service: noderec.ServiceCluster, Port: n.observers[noderec.ServiceCluster].port},
 			{Service: noderec.ServiceEngineControl, Port: f.files[n.uuid].port},
 			{Service: noderec.ServiceEngineManager, Port: n.ports[noderec.ServiceEngineManager]},
-			{Service: noderec.ServiceOllama, Port: n.ports[noderec.ServiceOllama]},
+			{Service: noderec.ServiceLlamaCPP, Port: n.ports[noderec.ServiceLlamaCPP]},
 		}})
 	}
 	task1Eventually(t, "production outer reverse session", 15*time.Second, func() bool {
@@ -272,15 +290,15 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 	for _, n := range nodes {
 		peer := f.peer(n)
 		directory := f.control.directory(peer)
-		port := peer.ports[noderec.ServiceOllama]
+		port := peer.ports[noderec.ServiceLlamaCPP]
 		ec := f.files[peer.uuid].port
 		if peer == f.control.b {
 			port, ec = f.control.blockedPort, f.control.blockedPort
 		}
-		directory.Services[noderec.ServiceOllama] = noderec.ServiceStatus{Port: port, Probe: noderec.ProbeUnreachable}
+		directory.Services[noderec.ServiceLlamaCPP] = noderec.ServiceStatus{Port: port, Probe: noderec.ProbeUnreachable}
 		directory.Services[noderec.ServiceEngineControl] = noderec.ServiceStatus{Port: ec}
-		directory.ModelsByEngine = map[string][]string{"ollama": {phase04Model}}
-		f.proxies[n.uuid].send(t, engines.AddressMethod("ollama", noderec.NotifyNodes), noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{directory}}, false)
+		directory.ModelsByEngine = map[string][]string{"llamacpp": {phase04Model}}
+		f.proxies[n.uuid].send(t, engines.AddressMethod("llamacpp", noderec.NotifyNodes), noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{directory}}, false)
 		// Destination-owned copy coordination resolves this manager's host ID
 		// from the broker directory, independently of its cluster principal.
 		self := f.control.directory(n)
@@ -292,7 +310,7 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		}, false)
 		// A read on the same stream joins both fixture inputs before copy starts.
 		manager.call(t, "engine:configured-ports", nil)
-		f.proxies[n.uuid].call(t, engines.AddressMethod("ollama", "node/select"), map[string]string{"id": peer.uuid})
+		f.proxies[n.uuid].call(t, engines.AddressMethod("llamacpp", "node/select"), map[string]string{"id": peer.uuid})
 	}
 	return f
 }
@@ -306,11 +324,11 @@ func (f *phase04Fixture) peer(n *task1Node) *task1Node {
 
 func phase04Request(t *testing.T, ctx context.Context, source *task1Node, mode string) *http.Response {
 	t.Helper()
-	body, err := json.Marshal(map[string]any{"model": phase04Model, "prompt": mode, "stream": true})
+	body, err := json.Marshal(map[string]any{"model": phase04Model, "messages": []map[string]string{{"role": "user", "content": mode}}, "stream": true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/api/generate", source.ports[noderec.ServiceOllama]), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", source.ports[noderec.ServiceLlamaCPP]), bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,29 +349,37 @@ func phase04AssertInterruptedTail(t *testing.T, r io.Reader, label string) {
 	if err != nil {
 		t.Fatalf("%s: read error %v, want clean EOF after an error frame (remainder=%q)", label, err, remainder)
 	}
-	line, rest, ok := bytes.Cut(remainder, []byte("\n"))
-	if !ok || len(rest) != 0 {
-		t.Fatalf("%s remainder=%q, want exactly one newline-terminated error frame", label, remainder)
+	frames := strings.Split(string(remainder), "\n\n")
+	if len(frames) != 3 || !strings.HasPrefix(frames[0], "data: ") || frames[1] != "data: [DONE]" || frames[2] != "" {
+		t.Fatalf("%s remainder=%q, want one SSE error frame and DONE", label, remainder)
 	}
+	line := []byte(strings.TrimPrefix(frames[0], "data: "))
 	var frame map[string]json.RawMessage
 	if err := json.Unmarshal(line, &frame); err != nil {
 		t.Fatalf("%s tail %q is not a JSON frame: %v", label, line, err)
 	}
-	var message string
-	if len(frame) != 1 || json.Unmarshal(frame["error"], &message) != nil || message == "" {
+	var failure struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	}
+	if len(frame) != 1 || json.Unmarshal(frame["error"], &failure) != nil || failure.Message == "" || failure.Type != "server_error" || failure.Code != "stream_interrupted" {
 		t.Fatalf("%s tail %q, want a single non-empty error member", label, line)
 	}
 }
 
 func phase04FirstChunk(t *testing.T, resp *http.Response) *bufio.Reader {
 	t.Helper()
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Phase04-Stream") != "preserved" || resp.Header.Get("Content-Type") != "application/x-ndjson" {
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Phase04-Stream") != "preserved" || resp.Header.Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("stream response status=%d headers=%v", resp.StatusCode, resp.Header)
 	}
 	r := bufio.NewReader(resp.Body)
 	line, err := r.ReadString('\n')
-	if err != nil || line != "{\"model\":\"phase04:latest\",\"response\":\"first\",\"done\":false}\n" {
+	if err != nil || line != `data: {"model":"phase04","choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]}`+"\n" {
 		t.Fatalf("first chunk %q, %v", line, err)
+	}
+	if line, err := r.ReadString('\n'); err != nil || line != "\n" {
+		t.Fatalf("first SSE separator %q, %v", line, err)
 	}
 	return r
 }
@@ -366,10 +392,10 @@ func phase04AssertOrdered(t *testing.T, f *phase04Fixture, source *task1Node, mo
 	defer resp.Body.Close()
 	r := phase04FirstChunk(t, resp)
 	line, err := r.ReadString('\n')
-	if err != nil || line != "{\"model\":\"phase04:latest\",\"response\":\"second\",\"done\":true}\n" {
+	if err != nil || line != `data: {"model":"phase04","choices":[{"index":0,"delta":{"content":"second"},"finish_reason":"stop"}]}`+"\n" {
 		t.Fatalf("second chunk %q, %v", line, err)
 	}
-	if remainder, err := io.ReadAll(r); err != nil || len(remainder) != 0 {
+	if remainder, err := io.ReadAll(r); err != nil || string(remainder) != "\ndata: [DONE]\n\n" {
 		t.Fatalf("stream termination %q, %v", remainder, err)
 	}
 	if got := f.engines[target.uuid].count(mode); got != before+1 {
@@ -381,7 +407,7 @@ func TestReverseInferencePhase04(t *testing.T) {
 	f := newPhase04Fixture(t)
 	a, b := f.control.a, f.control.b
 	t.Run("blocked service remains a discovered eligible model owner", func(t *testing.T) {
-		response := f.proxies[a.uuid].call(t, engines.AddressMethod("ollama", "nodes/list"), nil)
+		response := f.proxies[a.uuid].call(t, engines.AddressMethod("llamacpp", "nodes/list"), nil)
 		var result struct {
 			Nodes []struct {
 				ID     string   `json:"id"`

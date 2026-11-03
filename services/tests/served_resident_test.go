@@ -39,7 +39,8 @@ import (
 const srRuntimeArg = "--sr-process-runtime"
 const srRuntimeEnv = "NVPAIR_SR_PROCESS_EXECUTABLE"
 const srNeighbor = "sr-neighbor"
-const srOllamaRuntimeEnv = "NVPAIR_SR_OLLAMA_EXECUTABLE"
+const srCustomRuntimeEnv = "NVPAIR_SR_CUSTOM_EXECUTABLE"
+const srCustomModel = "sr-custom"
 const srOllamaModel = "sr-ollama:latest"
 
 // This dispatch reuses the wrapper's fixed test image, rather than introducing
@@ -64,18 +65,18 @@ func init() {
 			os.Exit(0)
 		}
 	}
-	if selected := os.Getenv(srOllamaRuntimeEnv); selected != "" && len(os.Args) > 1 && os.Args[1] == "serve" {
+	if selected := os.Getenv(srCustomRuntimeEnv); selected != "" && len(os.Args) > 1 && os.Args[1] == "serve" {
 		image, err := os.Executable()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "SR Ollama fixture executable lookup failed:", err)
+			fmt.Fprintln(os.Stderr, "SR custom descriptor fixture executable lookup failed:", err)
 			os.Exit(2)
 		}
 		if runtime.GOOS != "windows" || selected != image || !neFixedTestImage(image) || len(os.Args) != 2 {
-			fmt.Fprintln(os.Stderr, "SR Ollama fixture requires Windows, the selected fixed test image and only the serve argument")
+			fmt.Fprintln(os.Stderr, "SR custom descriptor fixture requires Windows, the selected fixed test image and only the serve argument")
 			os.Exit(2)
 		}
-		if err := runSROllamaRuntime(); err != nil {
-			fmt.Fprintln(os.Stderr, "SR Ollama fixture launch failed:", err)
+		if err := runSRTargetRuntime(); err != nil {
+			fmt.Fprintln(os.Stderr, "SR custom descriptor fixture launch failed:", err)
 			os.Exit(2)
 		}
 		os.Exit(0)
@@ -115,9 +116,16 @@ type srRuntimeState struct {
 }
 
 // This owned process supplies synthetic B identity and observable cold inference,
-// without claiming an Ollama native serving envelope or resident-load support.
-func runSROllamaRuntime() error {
-	path := os.Getenv("NVPAIR_SR_OLLAMA_CONFIG")
+// without claiming a native serving envelope or resident-load support.
+func runSRTargetRuntime() error {
+	engine := os.Getenv("NVPAIR_SR_TARGET_ENGINE")
+	model := srCustomModel
+	if engine == "ollama" {
+		model = srOllamaModel
+	} else if engine != "llamacpp-custom" {
+		return errors.New("invalid private switch engine")
+	}
+	path := os.Getenv("NVPAIR_SR_CUSTOM_CONFIG")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -127,7 +135,7 @@ func runSROllamaRuntime() error {
 		return err
 	}
 	if !neSafePort(config.Port) || !filepath.IsAbs(config.Root) || path != filepath.Join(config.Root, "switch-runtime.json") || config.Nonce == "" {
-		return errors.New("invalid private Ollama fixture configuration")
+		return errors.New("invalid private custom descriptor fixture configuration")
 	}
 	listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(config.Port)))
 	if err != nil {
@@ -136,7 +144,7 @@ func runSROllamaRuntime() error {
 	defer listener.Close()
 	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	defer client.CloseIdleConnections()
-	response, err := client.Get(os.Getenv("NVPAIR_TEST_SWITCH_CONTROL") + "/started?engine=ollama&pid=" + strconv.Itoa(os.Getpid()))
+	response, err := client.Get(os.Getenv("NVPAIR_TEST_SWITCH_CONTROL") + "/started?engine=" + engine + "&pid=" + strconv.Itoa(os.Getpid()))
 	if err != nil {
 		return err
 	}
@@ -144,10 +152,10 @@ func runSROllamaRuntime() error {
 		return err
 	}
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("private Ollama start callback: HTTP %d", response.StatusCode)
+		return fmt.Errorf("private custom descriptor start callback: HTTP %d", response.StatusCode)
 	}
-	digest := sha256.Sum256([]byte(srOllamaModel))
-	state := srRuntimeState{Base: neRuntimeState{Nonce: config.Nonce, PID: os.Getpid()}, Models: map[string]srEffects{srOllamaModel: {}}}
+	digest := sha256.Sum256([]byte(model))
+	state := srRuntimeState{Base: neRuntimeState{Nonce: config.Nonce, PID: os.Getpid()}, Models: map[string]srEffects{model: {}}}
 	var mu sync.Mutex
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -157,25 +165,29 @@ func runSROllamaRuntime() error {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/__sr/control" && r.Header.Get("X-NE-Fixture-Nonce") == config.Nonce:
 			result = state
-		case r.Method == http.MethodGet && r.URL.Path == "/":
-			// The broker probes Ollama's root independently of manifest readiness.
+		case engine == "ollama" && r.Method == http.MethodGet && r.URL.Path == "/":
+			// Preserve the native health contract used by the strict identity case.
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			if _, err := io.WriteString(w, "Ollama is running"); err != nil {
 				state.Base.Unexpected++
 			}
 			return
-		case r.Method == http.MethodGet && r.URL.Path == "/api/tags":
-			result = map[string]any{"models": []any{map[string]string{"name": srOllamaModel, "digest": hex.EncodeToString(digest[:])}}}
-		case r.Method == http.MethodGet && r.URL.Path == "/api/ps":
+		case engine == "ollama" && r.Method == http.MethodGet && r.URL.Path == "/api/tags":
+			result = map[string]any{"models": []any{map[string]string{"name": model, "digest": hex.EncodeToString(digest[:])}}}
+		case engine == "ollama" && r.Method == http.MethodGet && r.URL.Path == "/api/ps":
 			models := []any{}
-			if state.Models[srOllamaModel].Loaded {
-				models = append(models, map[string]string{"name": srOllamaModel})
+			if state.Models[model].Loaded {
+				models = append(models, map[string]string{"name": model})
 			}
 			result = map[string]any{"models": models}
-		case r.Method == http.MethodGet && r.URL.Path == "/api/version":
+		case engine == "ollama" && r.Method == http.MethodGet && r.URL.Path == "/api/version":
 			result = map[string]string{"version": "fixture-only"}
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
-			result = map[string]any{"object": "list", "data": []any{map[string]string{"id": srOllamaModel}}}
+		case r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models"):
+			status := "unloaded"
+			if state.Models[model].Loaded {
+				status = "loaded"
+			}
+			result = map[string]any{"data": []any{map[string]any{"id": model, "digest": hex.EncodeToString(digest[:]), "status": map[string]string{"value": status}}}}
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 			state.Base.Chats++
 			if r.Header.Get(nodepolicy.StrictAdmissionHeader) != "" {
@@ -190,12 +202,12 @@ func runSROllamaRuntime() error {
 				MaxTokens int  `json:"max_tokens"`
 				Stream    bool `json:"stream"`
 			}
-			if err := neDecode(r.Body, &request); err != nil || request.Model != srOllamaModel || request.Stream || len(request.Messages) != 1 || request.MaxTokens != neOutput {
+			if err := neDecode(r.Body, &request); err != nil || request.Model != model || request.Stream || len(request.Messages) != 1 || request.MaxTokens != neOutput {
 				state.Base.Unexpected++
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			effect := state.Models[srOllamaModel]
+			effect := state.Models[model]
 			if !effect.Loaded {
 				effect.Loaded = true
 				effect.Loads++
@@ -203,8 +215,8 @@ func runSROllamaRuntime() error {
 				state.Base.Loaded = true
 			}
 			effect.Chats++
-			state.Models[srOllamaModel] = effect
-			result = map[string]any{"id": "sr-ollama-chat", "object": "chat.completion", "model": srOllamaModel, "choices": []any{map[string]any{"index": 0, "message": map[string]string{"role": "assistant", "content": "fixture-only"}, "finish_reason": "stop"}}}
+			state.Models[model] = effect
+			result = map[string]any{"id": "sr-custom-chat", "object": "chat.completion", "model": model, "choices": []any{map[string]any{"index": 0, "message": map[string]string{"role": "assistant", "content": "fixture-only"}, "finish_reason": "stop"}}}
 		default:
 			state.Content++
 			state.Base.Unexpected++
@@ -435,10 +447,12 @@ func runSRRuntime(args []string) error {
 }
 
 type srProcessFixture struct {
+	switchProxy *fixtureProxyControl
 	*neServingFixture
 	relay            *srWorkerRelay
 	peerClient       *http.Client
 	switchTarget     bool
+	switchEngine     string
 	switchEnginePort int
 	switchFacadePort int
 	switchControl    *httptest.Server
@@ -452,8 +466,8 @@ func newSRProcessFixture(t *testing.T) *srProcessFixture {
 	return newSRProcessFixtureWithRetention(t, false, "-1")
 }
 
-func newSRSwitchProcessFixture(t *testing.T) *srProcessFixture {
-	return newSRProcessFixtureWithRetention(t, true, "-1")
+func newSRSwitchProcessFixture(t *testing.T, nativeEngine ...string) *srProcessFixture {
+	return newSRProcessFixtureWithRetry(t, true, "-1", time.Second, nativeEngine...)
 }
 
 func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention string) *srProcessFixture {
@@ -461,7 +475,7 @@ func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention
 	return newSRProcessFixtureWithRetry(t, switchTarget, retention, time.Second)
 }
 
-func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention string, retry time.Duration) *srProcessFixture {
+func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention string, retry time.Duration, nativeEngine ...string) *srProcessFixture {
 	t.Helper()
 	if runtime.GOOS != "windows" {
 		t.Skip("SR process evidence requires the Windows fixed-path lane")
@@ -469,7 +483,13 @@ func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention str
 	f := &srProcessFixture{neServingFixture: newNEServingFixture(t)}
 	f.residentRetryInterval = retry
 	if switchTarget {
-		f.enableSwitchTarget(t)
+		engine := "llamacpp-custom"
+		if len(nativeEngine) == 1 && nativeEngine[0] == "ollama" {
+			engine = nativeEngine[0]
+		} else if len(nativeEngine) != 0 {
+			t.Fatal("unsupported native switch fixture engine")
+		}
+		f.enableSwitchTarget(t, engine)
 	}
 	peerDir := filepath.Join(t.TempDir(), "cluster")
 	targetDir := filepath.Join(f.root, "cluster")
@@ -621,10 +641,12 @@ func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention str
 
 // Switch and cross-engine contention own a second fake engine. Its settings and
 // executable are private before the first broker start; other SR cases keep
-// the NE fixture's single-facade startup and inert Ollama manifest.
-func (f *srProcessFixture) enableSwitchTarget(t *testing.T) {
+// the NE fixture's single-facade startup and absent-engine manifests.
+func (f *srProcessFixture) enableSwitchTarget(t *testing.T, engine string) {
 	t.Helper()
 	f.switchTarget = true
+	f.switchEngine = engine
+	f.switchProxy = newFixtureProxyControl(t)
 	reservations := []net.Listener{listenFixtureLoopback(t), listenFixtureLoopback(t)}
 	f.switchEnginePort = reservations[0].Addr().(*net.TCPAddr).Port
 	f.switchFacadePort = reservations[1].Addr().(*net.TCPAddr).Port
@@ -645,7 +667,7 @@ func (f *srProcessFixture) enableSwitchTarget(t *testing.T) {
 		}
 	}
 	f.switchControl = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/started" || r.URL.Query().Get("engine") != "ollama" {
+		if r.URL.Path != "/started" || r.URL.Query().Get("engine") != engine {
 			http.Error(w, "unexpected fake engine callback", http.StatusBadRequest)
 			return
 		}
@@ -659,19 +681,28 @@ func (f *srProcessFixture) enableSwitchTarget(t *testing.T) {
 		f.switchMu.Unlock()
 	}))
 	t.Cleanup(f.switchControl.Close)
-	probe := map[string]any{"http": "http://127.0.0.1:{port}/api/tags", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
+	probePath := "/v1/models"
+	if engine == "ollama" {
+		probePath = "/api/tags"
+	}
+	probe := map[string]any{"http": "http://127.0.0.1:{port}" + probePath, "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
 	configPath := filepath.Join(f.root, "switch-runtime.json")
 	jointWriteJSON(t, configPath, neRuntimeConfig{Root: f.root, Nonce: f.nonce, Port: f.switchEnginePort})
 	runtimeConfig := map[string]any{
-		"mode": "process", "bin": f.image, "cli": filepath.Join(f.root, "absent-ollama-cli"), "port": f.switchEnginePort, "bind": "127.0.0.1", "ready": probe, "health": probe,
-		"env":  map[string]string{srOllamaRuntimeEnv: f.image, "NVPAIR_SR_OLLAMA_CONFIG": configPath, "NVPAIR_TEST_SWITCH_CONTROL": f.switchControl.URL},
+		"mode": "process", "args": []string{"serve"}, "bin": f.image, "cli": filepath.Join(f.root, "absent-"+engine+"-cli"), "port": f.switchEnginePort, "bind": "127.0.0.1", "ready": probe, "health": probe,
+		"env":  map[string]string{srCustomRuntimeEnv: f.image, "NVPAIR_SR_CUSTOM_CONFIG": configPath, "NVPAIR_SR_TARGET_ENGINE": engine, "NVPAIR_TEST_SWITCH_CONTROL": f.switchControl.URL},
 		"stop": map[string]any{"signal": "term", "grace_s": 1},
 	}
 	modelsDir := filepath.Join(f.root, "switch-models")
-	jointWriteJSON(t, filepath.Join(f.app, "engines", "ollama.json"), map[string]any{
-		"engine": "ollama", "runtime": runtimeConfig, "models_dir": modelsDir,
-		"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{f.image}, "runtime": runtimeConfig, "models_dir": modelsDir}},
-	})
+	manifest := privateFixtureManifest(t, engine, modelsDir, f.image, runtimeConfig, engines.ProtocolOpenAIV1)
+	if engine == "llamacpp-custom" {
+		manifest["actions"] = map[string]any{
+			"list_models":   map[string]any{"http": map[string]any{"method": "GET", "path": "/v1/models"}, "result": map[string]any{"array": "data", "field": "id", "digest": "digest"}},
+			"loaded_models": map[string]any{"http": map[string]any{"method": "GET", "path": "/models"}, "result": map[string]any{"array": "data", "field": "id", "match": map[string]any{"field": "status.value", "in": []string{"loaded"}}}},
+		}
+	}
+	jointWriteJSON(t, filepath.Join(f.app, "engines", engine+".json"), manifest)
+	jointWriteJSON(t, filepath.Join(f.app, privateFixtureEngine(t, engine).PortFile), map[string]int{"port": f.switchFacadePort})
 	journalPath := filepath.Join(f.root, "engine-settings-operations.json")
 	data, err := os.ReadFile(journalPath)
 	if err != nil {
@@ -681,10 +712,28 @@ func (f *srProcessFixture) enableSwitchTarget(t *testing.T) {
 	if err := json.Unmarshal(data, &journal); err != nil {
 		t.Fatalf("decode SR switch settings journal: %v", err)
 	}
-	journal["ollama"] = map[string]any{"explicit": true, "snapshot": settings.Snapshot{
-		Engine: "ollama", Revision: 1, AppliedRevision: 1, Phase: "idle", Format: "pair-arguments-v1", Settings: settings.Config{ServerPort: f.switchEnginePort, ProxyPort: f.switchFacadePort},
+	journal[engine] = map[string]any{"explicit": true, "snapshot": settings.Snapshot{
+		Engine: engine, Revision: 1, AppliedRevision: 1, Phase: "idle", Format: "pair-arguments-v1", Settings: settings.Config{ServerPort: f.switchEnginePort, ProxyPort: f.switchFacadePort},
 	}}
 	jointWriteJSON(t, journalPath, journal)
+}
+
+func (f *srProcessFixture) call(t *testing.T, method string, params, out any) {
+	t.Helper()
+	if f.switchProxy != nil {
+		if result, handled := f.switchProxy.componentCall(t, method, params); handled {
+			if result.Error != nil {
+				t.Fatalf("%s: %v", method, result.Error)
+			}
+			if out != nil {
+				if err := json.Unmarshal(result.Result, out); err != nil {
+					t.Fatalf("decode %s: %v", method, err)
+				}
+			}
+			return
+		}
+	}
+	f.neServingFixture.call(t, method, params, out)
 }
 
 func (f *srProcessFixture) start(t *testing.T) {
@@ -705,9 +754,15 @@ func (f *srProcessFixture) start(t *testing.T) {
 	if f.p != nil {
 		t.Fatal("fixture broker already running")
 	}
-	// The default NE isolation checks expect Ollama to remain inert. Check the
-	// switch target separately, and still check every other private engine.
-	for _, engine := range engines.Names() {
+	probeURL := "http://127.0.0.1:{port}/v1/models"
+	proxyEngines := "llamacpp"
+	if f.switchEngine == "ollama" {
+		probeURL = "http://127.0.0.1:{port}/api/tags"
+		proxyEngines += ",ollama"
+	}
+	// Check the active switch target separately from NE's built-in isolation
+	// checks, while retaining every other private engine check.
+	for _, engine := range privateFixtureEngineNames() {
 		data, err := os.ReadFile(filepath.Join(f.app, "engines", engine+".json"))
 		if err != nil || len(data) > neLimit {
 			t.Fatalf("%s cannot read private manifest: %v", engine, err)
@@ -720,9 +775,9 @@ func (f *srProcessFixture) start(t *testing.T) {
 		if err := json.Unmarshal(data, &manifest); err != nil {
 			t.Fatalf("decode %s private SR manifest: %v", engine, err)
 		}
-		if engine == "ollama" {
+		if engine == f.switchEngine {
 			platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
-			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || manifest.Runtime.Bin != f.image || manifest.Runtime.CLI != filepath.Join(f.root, "absent-ollama-cli") || manifest.Runtime.Port != f.switchEnginePort || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != "http://127.0.0.1:{port}/api/tags" || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
+			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || manifest.Runtime.Bin != f.image || manifest.Runtime.CLI != filepath.Join(f.root, "absent-"+f.switchEngine+"-cli") || manifest.Runtime.Port != f.switchEnginePort || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
 				t.Fatal("switch target escaped private image, port or model directory")
 			}
 			continue
@@ -730,11 +785,11 @@ func (f *srProcessFixture) start(t *testing.T) {
 		f.assertRuntimeIsolation(t, engine, "raw shared", manifest.Runtime, manifest.ModelsDir)
 		f.assertPlatformIsolation(t, engine, "raw host", manifest.Platforms)
 	}
-	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", proxyBin, "--proxy-engines=llamacpp,ollama", "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
+	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", f.switchProxy.image, "--proxy-engines=" + proxyEngines, "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
 	args = append(args, f.residentFixtureWaitArgs()...)
-	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
-	f.p.ports = append(f.p.ports, f.ports.engineControl, f.scannerPort, f.facadePort, f.switchEnginePort, f.switchFacadePort)
-	for _, path := range []string{engineMgrBin, proxyBin, f.scanner} {
+	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, append(f.switchProxy.env(), "OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort)), args...)
+	f.p.ports = append(f.p.ports, f.ports.engineControl, f.scannerPort, f.facadePort, f.switchEnginePort, f.switchFacadePort, f.switchProxy.port)
+	for _, path := range []string{engineMgrBin, proxyBin, f.switchProxy.image, f.scanner} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
 			t.Fatalf("canonicalize SR switch service image %s: %v", path, err)
@@ -742,22 +797,16 @@ func (f *srProcessFixture) start(t *testing.T) {
 		f.p.paths = append(f.p.paths, canonical)
 	}
 	waitForMethod(t, f.p.msgs, "app:ready", neCallBudget)
-	for _, facade := range []struct {
-		name string
-		port int
-	}{{"llamacpp-proxy", f.facadePort}, {"ollama-proxy", f.switchFacadePort}} {
-		if port := waitEngineProxyReady(t, facade.name, f.p.in, f.p.msgs, neCallBudget); port != facade.port {
-			t.Fatalf("%s bound port %d, want reserved %d", facade.name, port, facade.port)
-		}
-	}
-	for _, engine := range engines.Names() {
+	f.switchProxy.ready(t, "llamacpp", f.facadePort)
+	f.switchProxy.ready(t, f.switchEngine, f.switchFacadePort)
+	for _, engine := range privateFixtureEngineNames() {
 		var manifest struct {
 			Platforms map[string]neFixturePlatform `json:"platforms"`
 		}
 		f.call(t, "engine:describe", map[string]string{"engine": engine}, &manifest)
-		if engine == "ollama" {
+		if engine == f.switchEngine {
 			platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
-			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || platform.Runtime.Bin != f.image || platform.Runtime.CLI != filepath.Join(f.root, "absent-ollama-cli") || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != "http://127.0.0.1:{port}/api/tags" || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
+			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || platform.Runtime.Bin != f.image || platform.Runtime.CLI != filepath.Join(f.root, "absent-"+f.switchEngine+"-cli") || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != probeURL || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
 				t.Fatal("effective switch target escaped private image, port, probe or model directory")
 			}
 			continue
@@ -1562,7 +1611,7 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				starts[engine] = append([]int32(nil), pids...)
 			}
 			f.mu.Unlock()
-			// This shared fake observes starts and /api/generate only; its generic
+			// This shared fake observes starts and /v1/chat/completions only; its generic
 			// fallback does not report other routes. These checks make no claim
 			// about arbitrary unload/content requests or unexpected fake routes.
 			assertNoStartsOrGenerate := func(t *testing.T) {
@@ -1575,12 +1624,12 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				}
 				select {
 				case <-f.inflight:
-					t.Fatal("unqualified configuration edit dispatched synthetic /api/generate")
+					t.Fatal("unqualified configuration edit dispatched synthetic /v1/chat/completions")
 				default:
 				}
 			}
-			model := nodepolicy.Role{Engine: "ollama", Model: "switch-model:latest"}
-			neighbor := nodepolicy.Role{Engine: "ollama", Model: srNeighbor + ":latest"}
+			model := nodepolicy.Role{Engine: "llamacpp-custom", Model: "switch-model"}
+			neighbor := nodepolicy.Role{Engine: "llamacpp-custom", Model: srNeighbor}
 			var profiles []nodepolicy.Profile
 			for _, ref := range []nodepolicy.Role{model, neighbor} {
 				profiles = append(profiles, nodepolicy.Profile{
@@ -1887,7 +1936,9 @@ func TestServedResidentProcessResidency(t *testing.T) {
 }
 
 func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
-	f := newSRSwitchProcessFixture(t)
+	// Strict capacity needs a broker settings fingerprint, which descriptor
+	// engines currently cannot publish. Preserve this native identity case.
+	f := newSRSwitchProcessFixture(t, "ollama")
 	// Observe the owned fake's actual launch digest before writing its synthetic
 	// qualification. The proxy reads that registry only at process startup.
 	f.call(t, "engine:start", map[string]string{"engine": "ollama"}, nil)
@@ -2624,7 +2675,7 @@ func TestServedResidentProcessSwitch(t *testing.T) {
 	neEventually(t, "source inference reached fake runtime", 10*time.Second, func() bool { return f.control(t, "").HeldChats == 1 })
 	var status settings.SwitchStatus
 	f.call(t, settings.SwitchStatusMethod, settings.SwitchStatusRequest{}, &status)
-	request := settings.SwitchRequest{RequestID: "sr-resident-drain", SourceEngine: "llamacpp", TargetEngine: "ollama", ExpectedRevision: status.ConfigurationRevision}
+	request := settings.SwitchRequest{RequestID: "sr-resident-drain", SourceEngine: "llamacpp", TargetEngine: "llamacpp-custom", ExpectedRevision: status.ConfigurationRevision}
 	f.call(t, settings.SwitchMethod, request, nil)
 	neEventually(t, "switch entered drain", 40*time.Second, func() bool {
 		f.call(t, settings.SwitchStatusMethod, settings.SwitchStatusRequest{RequestID: request.RequestID}, &status)

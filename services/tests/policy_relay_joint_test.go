@@ -15,12 +15,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
 
 	"nvpair-shared/clustertrust"
-	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -399,7 +399,7 @@ func newPolicyJointFixture(t *testing.T, options ...policyJointFixtureOption) *p
 	f.want, err = nodepolicy.Parse([]byte(`{
 		"version":2,"revision":"12","availability":"paused",
 		"tiers":{
-			"weak":[{"kind":"api","deployment":"free-small"},{"kind":"local","engine":"ollama","model":"joint-local","contextTokens":8192,"capabilities":["tools"]},{"kind":"api","deployment":"paid-big"}],
+			"weak":[{"kind":"api","deployment":"free-small"},{"kind":"local","engine":"llamacpp","model":"joint-local","contextTokens":8192,"capabilities":["tools"]},{"kind":"api","deployment":"paid-big"}],
 			"strong":[{"kind":"api","deployment":"paid-big"}]
 		},
 		"routing":{
@@ -563,7 +563,7 @@ func jointExpectedPeer(p nodepolicy.Policy) nodepolicy.PeerPolicy {
 		Version: 2, Revision: p.Revision, Availability: p.Availability,
 		Pause: p.Pause, Admission: p.Admission, Idle: p.Idle, Profiles: p.Profiles, Roles: map[string]nodepolicy.Role{}, TierPolicy: p.TierPolicy,
 		ServedModels: p.ServedModels, ResidentModels: p.ResidentModels,
-		Tiers: map[string][]nodepolicy.TierEntry{"weak": {{Kind: "local", Engine: "ollama", Model: "joint-local", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{"tools"}}}},
+		Tiers: map[string][]nodepolicy.TierEntry{"weak": {{Kind: "local", Engine: "llamacpp", Model: "joint-local", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{"tools"}}}},
 	}
 }
 
@@ -594,16 +594,11 @@ func jointAppDir(base string) string {
 
 func jointIsolateEngines(t *testing.T, base string, port int) {
 	t.Helper()
-	for _, engine := range engines.Names() {
+	for _, engine := range privateFixtureEngineNames() {
 		absent := filepath.Join(base, "absent-"+engine)
 		probe := map[string]any{"http": "http://127.0.0.1:{port}/joint-no-engine", "status": 200, "timeout_s": 1, "interval_s": 60}
 		rt := map[string]any{"port": port, "bin": absent, "cli": absent, "ready": probe, "health": probe}
-		jointWriteJSON(t, filepath.Join(jointAppDir(base), "engines", engine+".json"), map[string]any{
-			"engine": engine, "runtime": rt, "models_dir": filepath.Join(base, "absent-models", engine),
-			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
-				"detect": []string{absent}, "runtime": rt, "models_dir": filepath.Join(base, "absent-models", engine),
-			}},
-		})
+		jointWriteJSON(t, filepath.Join(jointAppDir(base), "engines", engine+".json"), privateFixtureManifest(t, engine, filepath.Join(base, "absent-models", engine), absent, rt))
 	}
 }
 
@@ -618,12 +613,12 @@ func assertJointEngineIsolation(t *testing.T, process *interopProcess, port int)
 			Port      int    `json:"port"`
 		} `json:"engines"`
 	}
-	if response.Error != nil || json.Unmarshal(response.Result, &result) != nil || len(result.Engines) != len(engines.Names()) {
+	if response.Error != nil || json.Unmarshal(response.Result, &result) != nil || len(result.Engines) != len(privateFixtureEngineNames()) {
 		t.Fatal("isolated engine inventory was not returned")
 	}
 	seen := make(map[string]bool)
 	for _, engine := range result.Engines {
-		if _, known := engines.ByName(engine.Engine); !known || seen[engine.Engine] || engine.Installed || engine.Running || engine.Port != port {
+		if known := slices.Contains(privateFixtureEngineNames(), engine.Engine); !known || seen[engine.Engine] || engine.Installed || engine.Running || engine.Port != port {
 			t.Fatal("engine isolation override was not applied to every bundled engine")
 		}
 		seen[engine.Engine] = true

@@ -50,7 +50,7 @@ func TestLinkedModelsProcess(t *testing.T) {
 		{"custom reverse", "linked-custom-reverse", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newControllerCopyFixture(t)
+			f := newControllerCopyFixture(t, "llamacpp-custom")
 			linkedTargets := t.TempDir()
 			f.directoryToManagers(t, tc.reverse)
 			linkedWatchSentinel(t, f, []byte("unlisted sentinel"))
@@ -155,7 +155,7 @@ func TestLinkedModelsProcess(t *testing.T) {
 			}
 			for _, changed := range []url.Values{
 				{"engine": {"llamacpp"}, "model": {tc.alias}, "path": {model.manifest.Files[0].Path}, "exportId": {"wrong"}},
-				{"engine": {"ollama"}, "model": {tc.alias}, "path": {model.manifest.Files[0].Path}, "exportId": {model.manifest.ExportID}},
+				{"engine": {"llamacpp-custom"}, "model": {tc.alias}, "path": {model.manifest.Files[0].Path}, "exportId": {model.manifest.ExportID}},
 				{"engine": {"llamacpp"}, "model": {"not-listed"}, "path": {model.manifest.Files[0].Path}, "exportId": {model.manifest.ExportID}},
 			} {
 				for _, method := range []string{http.MethodGet, http.MethodHead} {
@@ -176,7 +176,7 @@ func TestLinkedModelsProcess(t *testing.T) {
 				}
 			}
 			wrongEngine := f.request(tc.alias, "")
-			wrongEngine.Engine = "ollama"
+			wrongEngine.Engine = "llamacpp-custom"
 			for _, bad := range []controllerCopyRequest{f.request(tc.alias, "wrong"), f.request("not-listed", ""), wrongEngine, f.request(filepath.Dir(outsideSibling), "")} {
 				id := f.broker.send(t, "engine:copy-model", bad, true)
 				refused := controllerCopyResponse(t, f.broker, id)

@@ -9,7 +9,7 @@
 //     event POSTed to the manager's inter-node HTTP endpoint surfaces on the
 //     broker's opt-in workloads:* client stream as workloads:upsert.
 //   - Outbound (proxy -> broker -> manager -> peer): a real inference
-//     request through the supervised ollama-proxy produces a workload event
+//     request through the supervised llamacpp-proxy produces a workload event
 //     that the broker stamps with the local node id and the manager
 //     broadcasts to a peer supplied over discovery:nodes (a stub mTLS server).
 //
@@ -472,8 +472,8 @@ func TestWorkloadOutOfOrderSuppressed(t *testing.T) {
 	peer := fx.clientAsPeer(t)
 	// Same (originatedFrom, id, createdAt) — one workload, two lifecycle events,
 	// delivered terminal-first (the inversion the network can produce).
-	const failedEvent = `{"jsonrpc":"2.0","method":"workload:errored","params":{"workloadInfo":{"id":"ooo-1","model":"m","engine":"ollama","state":"failed","originatedFrom":"peer-ooo","scheduledOn":"peer-ooo","createdAt":1716998400000,"startedAt":1716998400000,"completedAt":1716998400500,"error":"upstream returned HTTP 400","requesterId":null}}}`
-	const runningEvent = `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"ooo-1","model":"m","engine":"ollama","state":"running","originatedFrom":"peer-ooo","scheduledOn":"peer-ooo","createdAt":1716998400000,"startedAt":1716998400000,"completedAt":null,"error":null,"requesterId":null}}}`
+	const failedEvent = `{"jsonrpc":"2.0","method":"workload:errored","params":{"workloadInfo":{"id":"ooo-1","model":"m","engine":"llamacpp","state":"failed","originatedFrom":"peer-ooo","scheduledOn":"peer-ooo","createdAt":1716998400000,"startedAt":1716998400000,"completedAt":1716998400500,"error":"upstream returned HTTP 400","requesterId":null}}}`
+	const runningEvent = `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"ooo-1","model":"m","engine":"llamacpp","state":"running","originatedFrom":"peer-ooo","scheduledOn":"peer-ooo","createdAt":1716998400000,"startedAt":1716998400000,"completedAt":null,"error":null,"requesterId":null}}}`
 
 	postPeerEvent(t, peer, endpoint, failedEvent, 15*time.Second)
 	failed := waitForWorkloadEvent(t, msgs, "workloads:upsert", "ooo-1", 10*time.Second)
@@ -592,7 +592,7 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	// the manager's inter-node endpoint. The broker relays it to us as a
 	// tracked workloads:upsert. Stamped with the peer's HostUUID (not its
 	// name), as a real proxy does.
-	peerEvent := fmt.Sprintf(`{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"wl-nodeloss-1","model":"llama-3-8b","engine":"ollama","state":"running","originatedFrom":%q,"scheduledOn":%q,"createdAt":1716998400000,"startedAt":1716998400000,"completedAt":null,"error":null,"requesterId":null}}}`, peerUUID, peerUUID)
+	peerEvent := fmt.Sprintf(`{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"wl-nodeloss-1","model":"llama-3-8b","engine":"llamacpp","state":"running","originatedFrom":%q,"scheduledOn":%q,"createdAt":1716998400000,"startedAt":1716998400000,"completedAt":null,"error":null,"requesterId":null}}}`, peerUUID, peerUUID)
 	postPeerEvent(t, fx.clientAsPeer(t), endpoint, peerEvent, 15*time.Second)
 
 	running := waitForWorkloadEvent(t, msgs, "workloads:upsert", "wl-nodeloss-1", 10*time.Second)
@@ -622,7 +622,7 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 }
 
 // TestWorkloadManagerOutboundBroadcast drives the full outbound chain: a
-// real inference request through the supervised ollama-proxy produces a
+// real inference request through the supervised llamacpp-proxy produces a
 // workload event that the broker stamps and forwards to the manager, which
 // broadcasts it to a discovered peer.
 func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
@@ -777,8 +777,8 @@ func workloadPrivacyInjectionFrames(completed workloadBroadcastFrame) ([]jsonrpc
 func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	t.Helper()
 	var measuredRequests atomic.Int32
-	ollama := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/chat" {
+	llamacpp := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
 			http.NotFound(w, r)
 			return
 		}
@@ -791,19 +791,19 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			} `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Errorf("decode synthetic Ollama request: %v", err)
+			t.Errorf("decode synthetic llama.cpp request: %v", err)
 			http.Error(w, "invalid fixture request", http.StatusBadRequest)
 			return
 		}
 		if (request.Model != workloadBroadcastModel && request.Model != workloadBroadcastReadyModel) ||
 			len(request.Messages) != 1 || request.Messages[0].Role != "user" || request.Messages[0].Content != workloadBroadcastMessage {
-			t.Error("fake Ollama received unexpected model/messages")
+			t.Error("fake llama.cpp received unexpected model/messages")
 			http.Error(w, "unexpected fixture request", http.StatusBadRequest)
 			return
 		}
 		for name, marker := range workloadBroadcastPrivateValues() {
 			if request.Private[name] != marker {
-				t.Errorf("fake Ollama did not receive the private %s input marker", name)
+				t.Errorf("fake llama.cpp did not receive the private %s input marker", name)
 				http.Error(w, "missing private fixture input", http.StatusBadRequest)
 				return
 			}
@@ -814,16 +814,16 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(map[string]any{
-			"done": true, "message": map[string]string{"role": "assistant", "content": workloadBroadcastResponse},
+			"choices": []map[string]any{{"index": 0, "message": map[string]string{"role": "assistant", "content": workloadBroadcastResponse}, "finish_reason": "stop"}},
 			"private": workloadBroadcastPrivateValues(),
 		}); err != nil {
-			t.Errorf("write fake Ollama completion: %v", err)
+			t.Errorf("write fake llama.cpp completion: %v", err)
 		}
 	}))
-	ollamaPort := ollama.Listener.Addr().(*net.TCPAddr).Port
+	llamacppPort := llamacpp.Listener.Addr().(*net.TCPAddr).Port
 	t.Cleanup(func() {
-		ollama.Close()
-		assertInteropListenerClosed(t, ollamaPort)
+		llamacpp.Close()
+		assertInteropListenerClosed(t, llamacppPort)
 	})
 
 	// Stub peer: a real cluster peer (cross-pinned with the node under test) that
@@ -858,11 +858,11 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	proxyPort := temporaryClusterPort(t)
 	// Persist an explicit startup choice in the broker's temporary journal;
 	// changing a proxy port later requires an engine-manager we do not need.
-	journal := map[string]any{"ollama": map[string]any{
+	journal := map[string]any{"llamacpp": map[string]any{
 		"explicit": true,
 		"snapshot": map[string]any{
-			"engine": "ollama", "revision": 1, "appliedRevision": 1, "phase": "idle", "format": "pair-arguments-v1",
-			"settings": map[string]any{"serverPort": ollamaPort, "proxyPort": proxyPort, "launchText": ""},
+			"engine": "llamacpp", "revision": 1, "appliedRevision": 1, "phase": "idle", "format": "pair-arguments-v1",
+			"settings": map[string]any{"serverPort": llamacppPort, "proxyPort": proxyPort, "launchText": ""},
 		},
 	}}
 	if err := os.WriteFile(filepath.Join(filepath.Dir(fx.nodeDir), "engine-settings-operations.json"), mustMarshal(t, journal), 0o600); err != nil {
@@ -874,7 +874,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	}}}
 	args := append([]string{"--scanner-path", scanner, "--cluster-dir", fx.nodeDir}, ports.args()...)
 	args = append(args,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 		"--workload-manager-path", bridge,
 	)
 	p := startInteropProcess(t, base, brokerBin, workerPort, []string{
@@ -900,8 +900,8 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 	t.Log("broker ready")
 
-	// The proxy reports its bound port asynchronously; poll ollama-proxy:get-status.
-	if readyPort := waitProxyReady(t, stdin, msgs, 15*time.Second); readyPort != proxyPort {
+	// The proxy reports its bound port asynchronously; poll llamacpp-proxy:get-status.
+	if readyPort := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second); readyPort != proxyPort {
 		t.Fatalf("proxy port=%d want fixture port=%d", readyPort, proxyPort)
 	}
 	p.ports = append(p.ports, proxyPort, scannerPort)
@@ -930,17 +930,17 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	t.Logf("fixture_inventory owned=%+v", owned)
 	t.Logf("proxy ready on port %d", proxyPort)
 
-	// Register the fake Ollama as a manual node and pin it as the target so
+	// Register the fake llama.cpp as a manual node and pin it as the target so
 	// the proxy forwards there deterministically.
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":%q,"host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":[%q,%q]}}`, workloadBroadcastNode, ollamaPort, workloadBroadcastModel, workloadBroadcastReadyModel))
+	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"llamacpp-proxy:node/add-manual","params":{"id":%q,"host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":[%q,%q]}}`, workloadBroadcastNode, llamacppPort, workloadBroadcastModel, workloadBroadcastReadyModel))
 	if reply := waitForResponse(t, msgs, 5*time.Second); reply.Error != nil {
 		t.Fatalf("add manual upstream: %+v", reply.Error)
 	}
-	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":%q}}`, workloadBroadcastNode))
+	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":51,"method":"llamacpp-proxy:node/select","params":{"id":%q}}`, workloadBroadcastNode))
 	if reply := waitForResponse(t, msgs, 5*time.Second); reply.Error != nil {
 		t.Fatalf("select upstream: %+v", reply.Error)
 	}
-	t.Log("fake ollama pinned as proxy target")
+	t.Log("fake llamacpp pinned as proxy target")
 
 	// A completed warmup is the discovery/delivery barrier. All frames,
 	// including warmups and teardown, remain in the privacy capture.
@@ -953,7 +953,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			"private": workloadBroadcastPrivateValues(),
 		})
 		resp, err := client.Post(
-			fmt.Sprintf("http://127.0.0.1:%d/api/chat", proxyPort),
+			fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", proxyPort),
 			"application/json",
 			bytes.NewReader(body),
 		)
@@ -969,17 +969,19 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			t.Fatalf("inference status=%d want=200", resp.StatusCode)
 		}
 		var completion struct {
-			Done    bool `json:"done"`
-			Message struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"message"`
+			Choices []struct {
+				Message struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
 			Private map[string]string `json:"private"`
 		}
-		if err := json.Unmarshal(responseBody, &completion); err != nil || !completion.Done {
-			t.Fatalf("inference completion done=%t err=%v", completion.Done, err)
+		if err := json.Unmarshal(responseBody, &completion); err != nil || len(completion.Choices) != 1 || completion.Choices[0].FinishReason != "stop" {
+			t.Fatalf("inference completion choices=%d err=%v", len(completion.Choices), err)
 		}
-		if completion.Message.Role != "assistant" || completion.Message.Content != workloadBroadcastResponse {
+		if completion.Choices[0].Message.Role != "assistant" || completion.Choices[0].Message.Content != workloadBroadcastResponse {
 			t.Fatal("client did not receive the synthetic private response marker")
 		}
 		for name, marker := range workloadBroadcastPrivateValues() {
@@ -1045,7 +1047,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			if info.Model != workloadBroadcastModel {
 				continue
 			}
-			if info.OriginatedFrom != fx.nodeUUID || info.Engine != "ollama" || info.ID == "" || info.RunID == "" {
+			if info.OriginatedFrom != fx.nodeUUID || info.Engine != "llamacpp" || info.ID == "" || info.RunID == "" {
 				t.Fatalf("broadcast identity: origin=%q engine=%q workload=%q run=%q", info.OriginatedFrom, info.Engine, info.ID, info.RunID)
 			}
 			if id == "" {
@@ -1088,7 +1090,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			}
 			for _, record := range initial.Requests {
 				if record.Request.OriginNodeID == fx.nodeUUID && record.Request.ProxyRunID == runID && record.Request.RequestID == id {
-					if record.State != "completed" || record.Workload == nil || record.Workload.Engine != "ollama" || record.Workload.ID != id || record.Workload.ProxyRunID != runID {
+					if record.State != "completed" || record.Workload == nil || record.Workload.Engine != "llamacpp" || record.Workload.ID != id || record.Workload.ProxyRunID != runID {
 						t.Fatalf("private history and measured workload disagree: %+v", record)
 					}
 					return true
@@ -1121,7 +1123,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 				t.Fatal("broker accepted malformed worker injection")
 			}
 			if info.ID == workloadBroadcastControlID {
-				if info.OriginatedFrom != fx.nodeUUID || info.RunID != runID || info.Engine != "ollama" || info.Model != workloadBroadcastControlModel || info.State != "completed" {
+				if info.OriginatedFrom != fx.nodeUUID || info.RunID != runID || info.Engine != "llamacpp" || info.Model != workloadBroadcastControlModel || info.State != "completed" {
 					t.Fatal("accepted injection control has the wrong origin/run/engine/model/state")
 				}
 				injected = true
@@ -1204,7 +1206,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 			}
 			// Broker startup rehydration forwards canonical workload frames;
 			// only the manager's later heartbeat adds resync:true.
-			if info.OriginatedFrom != fx.nodeUUID || info.RunID != runID || info.Engine != "ollama" || frame.Method != "workload:completed" || info.State != "completed" || info.Seq != terminalSeq {
+			if info.OriginatedFrom != fx.nodeUUID || info.RunID != runID || info.Engine != "llamacpp" || frame.Method != "workload:completed" || info.State != "completed" || info.Seq != terminalSeq {
 				t.Fatalf("restarted manager replay identity/state: origin=%q run=%q engine=%q method=%q state=%q seq=%d want seq=%d", info.OriginatedFrom, info.RunID, info.Engine, frame.Method, info.State, info.Seq, terminalSeq)
 			}
 			if info.ID == id && info.Model == workloadBroadcastModel {
@@ -1228,7 +1230,7 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 	if measuredRequests.Load() != 1 || len(capture) == 0 {
 		t.Fatalf("measured upstream requests=%d peer frames=%d, want one request and nonempty capture", measuredRequests.Load(), len(capture))
 	}
-	t.Logf("outbound controls: origin=%q engine=ollama run=%q workload=%q submitted/terminal delivered, private input/output observed, projected injection and restart replay observed", fx.nodeUUID, runID, id)
+	t.Logf("outbound controls: origin=%q engine=llamacpp run=%q workload=%q submitted/terminal delivered, private input/output observed, projected injection and restart replay observed", fx.nodeUUID, runID, id)
 	return capture
 }
 

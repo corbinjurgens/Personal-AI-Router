@@ -12,11 +12,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/jsonrpc"
+	"nvpair-shared/testbin"
 )
 
 // writeDisabledBuiltinEngineOverrides fills missing built-in manifests without
@@ -143,6 +147,107 @@ func privateFixtureEngine(t *testing.T, name string) engines.Engine {
 	}
 	t.Fatalf("unknown fixture engine %q", name)
 	return engines.Engine{}
+}
+
+func privateFixtureManifest(t *testing.T, name, models, image string, rt map[string]any, protocols ...string) map[string]any {
+	t.Helper()
+	rt["bin"] = image
+	manifest := map[string]any{
+		"engine": name, "models_dir": models, "runtime": rt,
+		"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
+			"detect": []string{image}, "models_dir": models, "runtime": rt,
+		}},
+	}
+	engine := privateFixtureEngine(t, name)
+	if engines.IsDynamicServiceKey(engine.DiscoveryService) {
+		rt["mode"] = "process"
+		manifest["display_name"] = engine.DisplayName
+		manifest["manifest_version"] = 1
+		manifest["family"] = "llamacpp"
+		// Inert inventory descriptors must not cause the broker to create a
+		// facade. Serving fixtures explicitly declare the routes they own.
+		manifest["protocols"] = append([]string{}, protocols...)
+		manifest["model_naming"] = "exact"
+		manifest["actions"] = map[string]any{"list_models": map[string]any{
+			"http":   map[string]any{"method": "GET", "path": "/v1/models"},
+			"result": map[string]any{"array": "data", "field": "id"},
+		}}
+	}
+	return manifest
+}
+
+func privateFixtureEngineNames() []string {
+	return append(engines.Names(), "llamacpp-custom")
+}
+
+// Reuse the transparent registered proxy relay for fixture setup. Descriptor
+// facades expose inference, but have no broker component-control namespace.
+type fixtureProxyControl struct {
+	image  string
+	real   string
+	port   int
+	client *http.Client
+}
+
+func newFixtureProxyControl(t *testing.T) *fixtureProxyControl {
+	t.Helper()
+	image, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(testbin.Dir(t, "tests", "performance-observations", "observation-proxy"), testbin.Exe("observation-proxy"))
+	jointCopyExecutable(t, image, path)
+	p := &fixtureProxyControl{image: path, real: proxyBin, port: freePort(t), client: &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{Proxy: nil}}}
+	t.Cleanup(p.client.CloseIdleConnections)
+	return p
+}
+
+func (p *fixtureProxyControl) env() []string {
+	return []string{"NVPAIR_OBSERVATION_PROXY_FIXTURE=" + p.image, "NVPAIR_OBSERVATION_REAL_PROXY=" + p.real, "NVPAIR_OBSERVATION_PROXY_CONTROL=" + strconv.Itoa(p.port)}
+}
+
+func (p *fixtureProxyControl) call(t *testing.T, engine, method string, params any) jsonrpc.Message {
+	t.Helper()
+	var reply jsonrpc.Message
+	observationWorkerHTTP(t, p.client, fmt.Sprintf("http://127.0.0.1:%d", p.port), "/control", jsonrpc.Message{
+		JSONRPC: "2.0", Method: engines.AddressMethod(engine, method), Params: mustMarshal(t, params),
+	}, &reply)
+	return reply
+}
+
+func (p *fixtureProxyControl) componentCall(t *testing.T, method string, params any) (jsonrpc.Message, bool) {
+	t.Helper()
+	for _, engine := range privateFixtureEngineNames() {
+		if bare, ok := strings.CutPrefix(method, engine+"-proxy:"); ok {
+			return p.call(t, engine, bare, params), true
+		}
+	}
+	return jsonrpc.Message{}, false
+}
+
+func (p *fixtureProxyControl) ready(t *testing.T, engine string, wantPort int) {
+	t.Helper()
+	task1Eventually(t, "owned "+engine+" facade", 20*time.Second, func() bool {
+		var frames []jsonrpc.Message
+		observationWorkerHTTP(t, p.client, fmt.Sprintf("http://127.0.0.1:%d", p.port), "/frames", nil, &frames)
+		for _, frame := range frames {
+			addressed, method := engines.SplitAddressedMethod(frame.Method)
+			if addressed != engine || method != "ready" {
+				continue
+			}
+			var status struct {
+				Port int `json:"port"`
+			}
+			if err := json.Unmarshal(frame.Params, &status); err != nil {
+				t.Fatal(err)
+			}
+			if status.Port != wantPort {
+				t.Fatalf("%s facade port=%d, want owned port=%d", engine, status.Port, wantPort)
+			}
+			return true
+		}
+		return false
+	})
 }
 
 func TestPrivateBrokerEngineSettings(t *testing.T) {
