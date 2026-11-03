@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"testing"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -79,7 +80,7 @@ func TestNodeProjectionServedWithTheModelInventory(t *testing.T) {
 	first := nodepolicy.Advertisement{
 		Revision: "12",
 		Roles: map[string]nodepolicy.AdvertisedRole{
-			nodepolicy.TierStrong: {Engine: "ollama", Model: "qwen3:32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
+			nodepolicy.TierStrong: {Engine: engines.NameLlamaCPP, Model: "qwen3-32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
 		},
 	}
 	t.Run("served after a push", func(t *testing.T) {

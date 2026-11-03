@@ -1769,7 +1769,7 @@ func TestLlamaServingColdCommandLoadCancelledByStop(t *testing.T) {
 	bin := servingPipeCommand(t)
 	for _, operation := range []string{"user Stop", "StopAll", "caller cancel"} {
 		t.Run(operation, func(t *testing.T) {
-			ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+			ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 			st, err := ex.state("fake")
 			if err != nil {
 				t.Fatal(err)
@@ -1890,7 +1890,7 @@ func TestLlamaServingCommandExitedParentPipeBound(t *testing.T) {
 	bin := servingPipeCommand(t)
 	for _, operation := range []string{"user Stop", "StopAll", "caller cancel"} {
 		t.Run(operation, func(t *testing.T) {
-			ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+			ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 			st, err := ex.state("fake")
 			if err != nil {
 				t.Fatal(err)

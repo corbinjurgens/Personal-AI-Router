@@ -370,7 +370,7 @@ func TestRemoteReverseSafeStopAndSettingsPolicyOwners(t *testing.T) {
 		mu.Lock()
 		settingsCalls[method]++
 		mu.Unlock()
-		return json.RawMessage(`{"engine":"ollama","revision":8}`), nil
+		return json.RawMessage(`{"engine":"llamacpp","revision":8}`), nil
 	}
 	exec.policyParent = func(_ context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error) {
 		var body policyBody
@@ -401,7 +401,7 @@ func TestRemoteReverseSafeStopAndSettingsPolicyOwners(t *testing.T) {
 		t.Fatalf("safe stopped engine = %+v", status)
 	}
 	for _, method := range []string{"get", "preview", "apply"} {
-		if _, err := client.postJSON(ctx, settingsPath+method, "ollama", settings.Request{Engine: "ollama", ExpectedRevision: 7}); err != nil {
+		if _, err := client.postJSON(ctx, settingsPath+method, "llamacpp", settings.Request{Engine: "llamacpp", ExpectedRevision: 7}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -693,7 +693,7 @@ func remoteEventFixture(t *testing.T) (*remoteReverseFixture, <-chan settings.Sn
 		mutations.Add(1)
 		return nil, errors.New("event watcher must not invoke settings operations")
 	}
-	exec.settingsHub.Publish([]settings.Snapshot{{Engine: "ollama", Revision: 7, Epoch: "epoch-peer", Sequence: 9}})
+	exec.settingsHub.Publish([]settings.Snapshot{{Engine: "llamacpp", Revision: 7, Epoch: "epoch-peer", Sequence: 9}})
 	closed := make(chan struct{}, 8)
 	f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
 		handler := (&controlServer{exec: exec, mesh: mesh}).mux()
@@ -735,7 +735,7 @@ func remoteAwaitSnapshot(t *testing.T, events <-chan settings.Snapshot) {
 	t.Helper()
 	select {
 	case snapshot := <-events:
-		if snapshot.NodeID != "host-peer" || snapshot.Engine != "ollama" || snapshot.Revision != 7 || snapshot.Epoch != "epoch-peer" || snapshot.Sequence != 9 {
+		if snapshot.NodeID != "host-peer" || snapshot.Engine != "llamacpp" || snapshot.Revision != 7 || snapshot.Epoch != "epoch-peer" || snapshot.Sequence != 9 {
 			t.Fatalf("settings event = %+v", snapshot)
 		}
 	case <-time.After(7 * time.Second):

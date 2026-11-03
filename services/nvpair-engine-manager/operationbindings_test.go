@@ -11,7 +11,7 @@ import (
 
 // bindingManifest has one action of each kind an operation can bind.
 func bindingManifest() *Manifest {
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	m.Actions = map[string]Action{
 		"http_load":   {HTTP: &ActionHTTP{Method: "POST", Path: "/load"}},
 		"query_erase": {HTTP: &ActionHTTP{Method: "DELETE", Path: "/models", ParamsIn: "query"}},
@@ -95,7 +95,7 @@ func TestOperationsSharingAnActionAgreeOnItsBudget(t *testing.T) {
 // A manifest that declares no bindings keeps the conventional ones for the
 // actions it has, so user manifests written before bindings load unchanged.
 func TestConventionalOperationBindings(t *testing.T) {
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	m.Actions["load_model"] = Action{HTTP: &ActionHTTP{Method: "POST", Path: "/load"}}
 	m.Actions["delete_model"] = Action{Cmd: []string{"rm-model", "{model}"}}
 	if err := m.Validate(); err != nil {

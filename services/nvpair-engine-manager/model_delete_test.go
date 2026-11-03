@@ -58,7 +58,7 @@ func TestLMStudioDeleteModelRemovePath(t *testing.T) {
 // engine at a private copy of the fake binary it is free to break.
 func deleteModelRestartManifest(t *testing.T, root, bin string) *Manifest {
 	t.Helper()
-	m := testEngineManifest(bin)
+	m := llamaTestEngineManifest(bin)
 	m.Actions["delete_model"] = Action{
 		RemovePath: &ActionRemovePath{
 			Root: root,

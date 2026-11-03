@@ -17,9 +17,10 @@ import (
 	settings "nvpair-shared/enginesettings"
 )
 
-func watchReceipt() settings.SwitchReceipt {
+func watchReceipt(t *testing.T) settings.SwitchReceipt {
+	t.Helper()
 	now := time.Now().UTC()
-	request := settings.SwitchRequest{NodeID: "target", RequestID: "request", SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: "e3v1:" + strings.Repeat("a", 64)}
+	request := settings.SwitchRequest{NodeID: "target", RequestID: "request", SourceEngine: portFixtureCustomEngine(t).Name, TargetEngine: "llamacpp", ExpectedRevision: "e3v1:" + strings.Repeat("a", 64)}
 	return settings.SwitchReceipt{
 		Version: settings.SwitchVersion, NodeID: request.NodeID, RequestID: request.RequestID, Caller: "caller", Request: request,
 		PayloadHash: settings.SwitchPayloadHash("caller", request.NodeID, request), ExpectedRevision: request.ExpectedRevision, AcceptedRevision: request.ExpectedRevision,
@@ -67,7 +68,7 @@ func waitWatchEmpty(t *testing.T, watchers *switchWatchers) {
 func TestSwitchWatchNewSequencesAndTerminal(t *testing.T) {
 	var watchers switchWatchers
 	identity := watchIdentity()
-	receipt := watchReceipt()
+	receipt := watchReceipt(t)
 	responses := make(chan json.RawMessage, 4)
 	// Unchanged long-poll timeout, progress, duplicate, then terminal.
 	responses <- watchJSON(t, receipt)
@@ -151,7 +152,7 @@ func TestSwitchWatchDedupeBoundAndShutdown(t *testing.T) {
 		return nil, ctx.Err()
 	}
 	notify := func(string, any) error { t.Error("unexpected notification"); return nil }
-	r := watchReceipt()
+	r := watchReceipt(t)
 	raw := watchJSON(t, r)
 	if !watchers.observe(ctx, identity, raw, lookup, clientFor, notify) {
 		t.Fatal("first watcher refused")
@@ -206,7 +207,7 @@ func TestSwitchWatchIdentityChangeStops(t *testing.T) {
 				changed.Store(true)
 				return nil, errors.New("disconnected")
 			}
-			if !watchers.observe(context.Background(), identity, watchJSON(t, watchReceipt()), lookup, clientFor, func(string, any) error { t.Error("retired route emitted"); return nil }) {
+			if !watchers.observe(context.Background(), identity, watchJSON(t, watchReceipt(t)), lookup, clientFor, func(string, any) error { t.Error("retired route emitted"); return nil }) {
 				t.Fatal("not started")
 			}
 			waitWatchEmpty(t, &watchers)
@@ -222,7 +223,7 @@ func TestSwitchWatchDisconnectBackoffStops(t *testing.T) {
 	identity := watchIdentity()
 	var calls atomic.Int32
 	started := time.Now()
-	if !watchers.observe(context.Background(), identity, watchJSON(t, watchReceipt()),
+	if !watchers.observe(context.Background(), identity, watchJSON(t, watchReceipt(t)),
 		func(string) (switchWatchIdentity, bool) { return identity, true },
 		func(context.Context, ecPeer) (*remoteClient, error) {
 			calls.Add(1)
@@ -240,7 +241,7 @@ func TestSwitchWatchDisconnectBackoffStops(t *testing.T) {
 func TestSwitchWatchOperationDeadline(t *testing.T) {
 	var watchers switchWatchers
 	identity := watchIdentity()
-	r := watchReceipt()
+	r := watchReceipt(t)
 	r.AcceptedAt = time.Now().Add(-settings.SwitchOperationBudget + 40*time.Millisecond)
 	r.UpdatedAt = r.AcceptedAt
 	r.Deadline = r.AcceptedAt.Add(settings.SwitchOperationBudget)
@@ -268,7 +269,7 @@ func TestSwitchWatchDisconnectLeavesOtherWatcherActive(t *testing.T) {
 	identity := watchIdentity()
 	lookup := func(string) (switchWatchIdentity, bool) { return identity, true }
 	notify := func(string, any) error { t.Error("unexpected notification"); return nil }
-	r := watchReceipt()
+	r := watchReceipt(t)
 	blocked := make(chan struct{})
 	if !watchers.observe(ctx, identity, watchJSON(t, r), lookup,
 		func(ctx context.Context, _ ecPeer) (*remoteClient, error) {

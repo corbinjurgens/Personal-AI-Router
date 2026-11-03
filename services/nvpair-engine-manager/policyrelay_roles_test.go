@@ -20,15 +20,19 @@ import (
 
 // rolesPolicyDocument is a peer projection that declares roles and says who
 // paused the node.
-const rolesPolicyDocument = `{"version":2,"revision":"9007199254740993123","availability":"paused",` +
-	`"roles":{"weak":{"engine":"ollama","model":"qwen3:8b"},"strong":{"engine":"lmstudio","model":"big"}},` +
-	`"pausedBy":"local"}`
+func rolesPolicyDocument(t *testing.T) string {
+	t.Helper()
+	return `{"version":2,"revision":"9007199254740993123","availability":"paused",` +
+		`"roles":{"weak":{"engine":"llamacpp","model":"qwen3-8b"},"strong":{"engine":"` + portFixtureCustomEngine(t).Name + `","model":"big"}},` +
+		`"pausedBy":"local"}`
+}
 
 // TestRemotePolicyRelaysRolesUnchanged checks that the relay carries roles and
 // pausedBy byte for byte in both directions: a set reaches the peer's broker
 // with the document as sent, and a get returns the peer's document as its
 // broker answered.
 func TestRemotePolicyRelaysRolesUnchanged(t *testing.T) {
+	rolesPolicyDocument := rolesPolicyDocument(t)
 	selfDir, peerDir := pairedPolicyDirs(t)
 	grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
 

@@ -23,13 +23,13 @@ func TestParsePSComm(t *testing.T) {
 			}
 		})
 	}
-	test("paths and spaces stay intact", " /sbin/launchd\n/Applications/LM Studio.app/Contents/MacOS/LM Studio\n llmster \n", []string{
+	test("paths and spaces stay intact", " /sbin/launchd\n/Applications/llama.cpp Custom.app/Contents/MacOS/llama.cpp Custom\n llama-server \n", []string{
 		"/sbin/launchd",
-		"/Applications/LM Studio.app/Contents/MacOS/LM Studio",
-		"llmster",
+		"/Applications/llama.cpp Custom.app/Contents/MacOS/llama.cpp Custom",
+		"llama-server",
 	})
 	test("drops blank lines and trims whitespace", "\n \t\n\t/usr/bin/ps\r\n\n", []string{"/usr/bin/ps"})
-	test("no final newline", "lm-studio", []string{"lm-studio"})
+	test("no final newline", "llama-server", []string{"llama-server"})
 	test("empty output", "", nil)
 }
 

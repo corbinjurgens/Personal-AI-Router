@@ -163,7 +163,7 @@ func TestStrataReadinessIdentity(t *testing.T) {
 		want bool
 	}{
 		{"Strata", `{"service":"strata"}`, true},
-		{"foreign service", `{"service":"ollama"}`, false},
+		{"foreign service", `{"service":"llamacpp"}`, false},
 		{"missing identity", `{"status":"ok"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

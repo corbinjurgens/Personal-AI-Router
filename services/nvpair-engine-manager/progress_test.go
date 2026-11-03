@@ -19,21 +19,21 @@ import (
 // engine's events and that cancel closes the channel.
 func TestProgressHubFanOutAndFilter(t *testing.T) {
 	h := newProgressHub()
-	ch, cancel := h.subscribe("ollama")
+	ch, cancel := h.subscribe("llamacpp")
 
-	h.publish(ProgressEvent{Engine: "lmstudio", Op: "install", Stage: "downloading", Percent: 10})
-	h.publish(ProgressEvent{Engine: "ollama", Op: "install", Stage: "downloading", Percent: 25})
+	h.publish(ProgressEvent{Engine: portFixtureCustomEngine(t).Name, Op: "install", Stage: "downloading", Percent: 10})
+	h.publish(ProgressEvent{Engine: "llamacpp", Op: "install", Stage: "downloading", Percent: 25})
 
 	select {
 	case ev := <-ch:
-		if ev.Engine != "ollama" || ev.Percent != 25 {
-			t.Fatalf("expected ollama 25%%, got %+v", ev)
+		if ev.Engine != "llamacpp" || ev.Percent != 25 {
+			t.Fatalf("expected llamacpp 25%%, got %+v", ev)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for matching progress event")
 	}
 
-	// The non-matching (lmstudio) event must not have been delivered.
+	// The non-matching (custom engine) event must not have been delivered.
 	select {
 	case ev := <-ch:
 		t.Fatalf("unexpected extra event: %+v", ev)
@@ -51,13 +51,13 @@ func TestProgressHubFanOutAndFilter(t *testing.T) {
 // consumer).
 func TestProgressHubDropsWhenFull(t *testing.T) {
 	h := newProgressHub()
-	_, cancel := h.subscribe("ollama")
+	_, cancel := h.subscribe("llamacpp")
 	defer cancel()
 
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < 10_000; i++ {
-			h.publish(ProgressEvent{Engine: "ollama", Op: "install", Percent: i})
+			h.publish(ProgressEvent{Engine: "llamacpp", Op: "install", Percent: i})
 		}
 		close(done)
 	}()
@@ -79,10 +79,10 @@ func TestEmitInstallProgressPublishesToHub(t *testing.T) {
 			gotParams, _ = params.(map[string]any)
 		},
 	}
-	ch, cancel := e.progress.subscribe("ollama")
+	ch, cancel := e.progress.subscribe("llamacpp")
 	defer cancel()
 
-	e.emitInstallProgress("ollama", "downloading", 42)
+	e.emitInstallProgress("llamacpp", "downloading", 42)
 
 	if gotParams["stage"] != "downloading" || gotParams["percent"] != 42 {
 		t.Fatalf("unexpected notification params: %+v", gotParams)
@@ -108,12 +108,12 @@ func TestEmitInstallProgressOmitsIndeterminatePercent(t *testing.T) {
 			gotParams, _ = params.(map[string]any)
 		},
 	}
-	ch, cancel := e.progress.subscribe("ollama")
+	ch, cancel := e.progress.subscribe("llamacpp")
 	defer cancel()
 
-	e.emitInstallProgress("ollama", "installing", 0)
+	e.emitInstallProgress("llamacpp", "installing", 0)
 
-	if gotParams["engine"] != "ollama" || gotParams["stage"] != "installing" {
+	if gotParams["engine"] != "llamacpp" || gotParams["stage"] != "installing" {
 		t.Fatalf("unexpected notification params: %+v", gotParams)
 	}
 	if _, ok := gotParams["percent"]; ok {
@@ -223,15 +223,15 @@ func TestEmitPullProgressNotifiesAndPublishes(t *testing.T) {
 			gotParams, _ = params.(map[string]any)
 		},
 	}
-	ch, cancel := e.progress.subscribe("ollama")
+	ch, cancel := e.progress.subscribe("llamacpp")
 	defer cancel()
 
-	e.emitPullProgress(ProgressEvent{Engine: "ollama", Op: "pull", Stage: "pulling", Percent: 62, Message: "pulling"})
+	e.emitPullProgress(ProgressEvent{Engine: "llamacpp", Op: "pull", Stage: "pulling", Percent: 62, Message: "pulling"})
 
 	if gotMethod != "engine:pull-progress" {
 		t.Fatalf("expected engine:pull-progress notification, got %q", gotMethod)
 	}
-	if gotParams["engine"] != "ollama" || gotParams["op"] != "pull" || gotParams["percent"] != 62 || gotParams["message"] != "pulling" {
+	if gotParams["engine"] != "llamacpp" || gotParams["op"] != "pull" || gotParams["percent"] != 62 || gotParams["message"] != "pulling" {
 		t.Fatalf("unexpected notification params: %+v", gotParams)
 	}
 

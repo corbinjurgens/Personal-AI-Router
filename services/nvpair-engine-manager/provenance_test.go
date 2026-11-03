@@ -13,11 +13,11 @@ import (
 )
 
 func TestInstallMarkerRoundTrip(t *testing.T) {
-	installDir := filepath.Join(t.TempDir(), "lmstudio")
+	installDir := filepath.Join(t.TempDir(), "llamacpp")
 	if installedByPAIR(installDir) {
 		t.Fatal("an install directory that does not exist cannot be ours")
 	}
-	if err := writeInstallMarker(installDir, "lmstudio"); err != nil {
+	if err := writeInstallMarker(installDir, "llamacpp"); err != nil {
 		t.Fatalf("writeInstallMarker: %v", err)
 	}
 	if !installedByPAIR(installDir) {

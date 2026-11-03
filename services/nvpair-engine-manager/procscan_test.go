@@ -17,13 +17,13 @@ func TestNormalizeProcessName(t *testing.T) {
 			}
 		})
 	}
-	test("macOS app path with spaces", "/Applications/LM Studio.app/Contents/MacOS/LM Studio", "LM Studio")
-	test("Windows app path", `C:\Users\u\AppData\Local\Programs\LM Studio\LM Studio.exe`, "LM Studio")
-	test("bare daemon", "llmster", "llmster")
-	test("mixed case extension", " LM sTuDiO.ExE \t", "LM sTuDiO")
-	test("mixed path separators", `C:\apps/LM Studio.EXE`, "LM Studio")
-	test("extension only at end", "llmster.exe.helper", "llmster.exe.helper")
-	test("helper retains identity", "LM Studio Helper (Renderer)", "LM Studio Helper (Renderer)")
+	test("macOS app path with spaces", "/Applications/llama.cpp Custom.app/Contents/MacOS/llama.cpp Custom", "llama.cpp Custom")
+	test("Windows app path", `C:\Users\u\AppData\Local\Programs\llama.cpp Custom\llama.cpp Custom.exe`, "llama.cpp Custom")
+	test("bare daemon", "llama-server", "llama-server")
+	test("mixed case extension", " lLaMa.CpP cUsToM.ExE \t", "lLaMa.CpP cUsToM")
+	test("mixed path separators", `C:\apps/llama.cpp Custom.EXE`, "llama.cpp Custom")
+	test("extension only at end", "llama-server.exe.helper", "llama-server.exe.helper")
+	test("helper retains identity", "llama.cpp Custom Helper (Renderer)", "llama.cpp Custom Helper (Renderer)")
 	test("empty input", " \t", "")
 }
 
@@ -35,15 +35,15 @@ func TestAnyProcessMatches(t *testing.T) {
 			}
 		})
 	}
-	test("macOS app path with spaces", []string{"/Applications/LM Studio.app/Contents/MacOS/LM Studio"}, []string{"LM Studio"}, true)
-	test("Windows app path", []string{`C:\Users\u\AppData\Local\Programs\LM Studio\LM Studio.exe`}, []string{"LM Studio"}, true)
-	test("bare daemon", []string{"llmster"}, []string{"LM Studio", "llmster"}, true)
-	test("mixed case", []string{"LM sTuDiO.EXE"}, []string{"lm studio"}, true)
-	test("normalizes configured name", []string{"llmster"}, []string{` C:\tools\LLMSTER.ExE `}, true)
-	test("renderer helper is not app", []string{"LM Studio Helper (Renderer)"}, []string{"LM Studio"}, false)
-	test("CLI is not app", []string{"lms"}, []string{"LM Studio", "llmster"}, false)
-	test("empty names", []string{"llmster"}, nil, false)
-	test("empty images", nil, []string{"llmster"}, false)
+	test("macOS app path with spaces", []string{"/Applications/llama.cpp Custom.app/Contents/MacOS/llama.cpp Custom"}, []string{"llama.cpp Custom"}, true)
+	test("Windows app path", []string{`C:\Users\u\AppData\Local\Programs\llama.cpp Custom\llama.cpp Custom.exe`}, []string{"llama.cpp Custom"}, true)
+	test("bare daemon", []string{"llama-server"}, []string{"llama.cpp Custom", "llama-server"}, true)
+	test("mixed case", []string{"lLaMa.CpP cUsToM.EXE"}, []string{"llama.cpp custom"}, true)
+	test("normalizes configured name", []string{"llama-server"}, []string{` C:\tools\LLAMA-SERVER.ExE `}, true)
+	test("renderer helper is not app", []string{"llama.cpp Custom Helper (Renderer)"}, []string{"llama.cpp Custom"}, false)
+	test("CLI is not app", []string{"llama-cli"}, []string{"llama.cpp Custom", "llama-server"}, false)
+	test("empty names", []string{"llama-server"}, nil, false)
+	test("empty images", nil, []string{"llama-server"}, false)
 	test("blank names never match", []string{"", " "}, []string{" ", ".exe"}, false)
 }
 

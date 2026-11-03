@@ -88,11 +88,11 @@ func TestRemoteClientModelFilesUseOrdinaryHeaderBudget(t *testing.T) {
 		})
 	}
 	test("listing", func(ctx context.Context, client *remoteClient) error {
-		_, err := client.modelFiles(ctx, "ollama", "tiny", nil)
+		_, err := client.modelFiles(ctx, "llamacpp", "tiny", nil)
 		return err
 	})
 	test("download", func(ctx context.Context, client *remoteClient) error {
-		body, _, err := client.modelFile(ctx, "ollama", "tiny", "blobs/fixture", "", 0)
+		body, _, err := client.modelFile(ctx, "llamacpp", "tiny", "fixture.gguf", "", 0)
 		if body != nil {
 			err = errors.Join(err, body.Close())
 		}
@@ -121,7 +121,7 @@ func TestRemoteStartUsesReadinessHeaderBudget(t *testing.T) {
 	if _, err := c.postJSON(context.Background(), controlStartPath, "remote-only", startRequest{Engine: "remote-only"}); err != nil {
 		t.Fatalf("remote start was cut off by the ordinary response-header budget: %v", err)
 	}
-	if _, err := c.postJSON(context.Background(), controlStopPath, "ollama", stopRequest{Engine: "ollama"}); err == nil ||
+	if _, err := c.postJSON(context.Background(), controlStopPath, "llamacpp", stopRequest{Engine: "llamacpp"}); err == nil ||
 		!strings.Contains(err.Error(), "timeout awaiting response headers") {
 		t.Fatalf("ordinary remote call error = %v, want the ordinary bounded response-header timeout", err)
 	}
@@ -204,7 +204,7 @@ func TestRemoteStartHeaderWaitRemainsBounded(t *testing.T) {
 			return
 		}
 		<-release
-		_, _ = w.Write([]byte(`{"engine":"ollama"}`))
+		_, _ = w.Write([]byte(`{"engine":"llamacpp"}`))
 	}))
 	defer func() {
 		close(release)
@@ -218,7 +218,7 @@ func TestRemoteStartHeaderWaitRemainsBounded(t *testing.T) {
 		base:             srv.URL,
 	}
 	started := time.Now()
-	_, err := c.postJSON(context.Background(), controlStartPath, "ollama", startRequest{Engine: "ollama"})
+	_, err := c.postJSON(context.Background(), controlStartPath, "llamacpp", startRequest{Engine: "llamacpp"})
 	if err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
 		t.Fatalf("remote start error = %v, want bounded response-header timeout", err)
 	}

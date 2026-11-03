@@ -17,7 +17,7 @@ import (
 	settings "nvpair-shared/enginesettings"
 )
 
-const switchApplyFixture = `{"nodeId":"transport-alias","requestId":"switch-42","sourceEngine":"ollama","targetEngine":"llamacpp","expectedRevision":"e3v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+const switchApplyFixture = `{"nodeId":"transport-alias","requestId":"switch-42","sourceEngine":"llamacpp-custom","targetEngine":"llamacpp","expectedRevision":"e3v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
 
 func switchTestGate(h pinnedPeerHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) { h(w, r, "pinned-principal") }

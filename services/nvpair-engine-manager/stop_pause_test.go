@@ -75,7 +75,7 @@ func TestStopPauseOwnershipExternalEnginesHaveNoCleanupEffects(t *testing.T) {
 				t.Fatal(err)
 			}
 			marker := filepath.Join(t.TempDir(), "unscoped-stop")
-			m := testEngineManifest(fakeEngineBin)
+			m := llamaTestEngineManifest(fakeEngineBin)
 			platform := m.Platforms[hostKey()]
 			platform.Runtime.Mode = mode
 			platform.Runtime.Port = port
@@ -224,7 +224,7 @@ func TestStopPauseOwnershipUnknownListenerRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	p := m.Platforms[hostKey()]
 	p.Runtime.Port = port
 	p.Runtime.Ready = &Probe{HTTP: server.URL, Status: http.StatusOK}
@@ -369,7 +369,7 @@ func TestStopPauseOwnershipReclaimsExactManagedOrphan(t *testing.T) {
 		t.Fatal(err)
 	}
 	orphan := spawnFakeListener(t, bin, port)
-	m := testEngineManifest(bin)
+	m := llamaTestEngineManifest(bin)
 	ex := managedFixtureExecutor(t, m, dir)
 	if err := ex.desired.setProcessStop(m.Engine, processStopEvidence{Bin: bin, Port: port, Address: "127.0.0.1:" + strconv.Itoa(port), PID: orphan.Process.Pid}); err != nil {
 		t.Fatal(err)
@@ -689,7 +689,7 @@ func TestStopPauseOwnershipStoppedCommandRequiresPositiveResidency(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			m := testEngineManifest(fakeEngineBin)
+			m := llamaTestEngineManifest(fakeEngineBin)
 			p := m.Platforms[hostKey()]
 			p.Runtime.Mode, p.Runtime.Port = "command", port
 			p.Runtime.Ready = &Probe{HTTP: "http://127.0.0.1:" + strconv.Itoa(port), Status: http.StatusOK}
@@ -777,7 +777,7 @@ func TestStopPauseOwnershipExternalListenerClosureNeedsPIDExit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			m := testEngineManifest(fakeEngineBin)
+			m := llamaTestEngineManifest(fakeEngineBin)
 			p := m.Platforms[hostKey()]
 			p.Runtime.Port, p.Runtime.Ready = port, &Probe{HTTP: server.URL, Status: http.StatusOK}
 			m.Platforms[hostKey()] = p
