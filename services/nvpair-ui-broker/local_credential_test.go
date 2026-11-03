@@ -39,9 +39,9 @@ func TestLocalCredentialMethodIsRefusedToClients(t *testing.T) {
 	}
 	test("omitted engine", nil)
 	test("owned Strata", map[string]string{"engine": "strata"})
-	test("local LM Studio without node selector", map[string]string{"engine": "lmstudio"})
-	test("self node selector", map[string]string{"engine": "lmstudio", "nodeId": "self-node"})
-	test("remote node selector", map[string]string{"engine": "lmstudio", "nodeId": "remote"})
+	test("local llamacpp without node selector", map[string]string{"engine": "llamacpp"})
+	test("self node selector", map[string]string{"engine": "llamacpp", "nodeId": "self-node"})
+	test("remote node selector", map[string]string{"engine": "llamacpp", "nodeId": "remote"})
 	test("malformed params", json.RawMessage(`[]`))
 }
 
@@ -79,32 +79,6 @@ func TestLocalEngineCredentialPairsWithPort(t *testing.T) {
 			t.Fatal("credential returned without engine-manager")
 		}
 	})
-	// The broker consumes the manager's running, port-bound snapshot for
-	// either command-started or adopted LM Studio; it owns no process test.
-	for _, tc := range []struct {
-		name   string
-		answer engines.LocalCredential
-		want   string
-	}{
-		{"running command-mode LM Studio", engines.LocalCredential{Credential: brokerTestKey, Port: 4321}, brokerTestKey},
-		{"running adopted LM Studio", engines.LocalCredential{Credential: brokerTestKey, Port: 4321}, brokerTestKey},
-		{"LM Studio wrong returned port", engines.LocalCredential{Credential: brokerTestKey, Port: 4322}, ""},
-		{"LM Studio has no running key", engines.LocalCredential{}, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			b, _ := newPolicyBroker(t)
-			engine := attachFakeEngine(t, b)
-			engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
-				if method != engines.LocalCredentialMethod || string(raw) != `{"engine":"lmstudio"}` {
-					t.Error("unexpected LM Studio credential request")
-				}
-				return tc.answer, ""
-			})
-			if b.localEngineCredential("lmstudio", 4321) != tc.want || len(engine.snapshot()) != 1 {
-				t.Fatal("LM Studio credential was not bound to its running port")
-			}
-		})
-	}
 }
 
 // An authenticated engine is healthy only with the key, and the probe does

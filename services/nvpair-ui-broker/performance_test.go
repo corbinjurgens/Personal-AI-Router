@@ -771,7 +771,7 @@ func TestPerformanceGetReturnsOutputTokensIndependentlyOfDecodeTiming(t *testing
 		},
 		{name: "llama.cpp usage without timings", engine: "llamacpp"},
 		{
-			name: "Ollama legacy decode timing counts output once", engine: "ollama",
+			name: "decode timing without engine-native timings counts output once", engine: "llamacpp-custom",
 			decodeNs:   &duration,
 			wantDecode: &performancewire.Rate{Samples: 2, Tokens: 40, DurationNs: 800_000_000, TokensPerSecond: 50},
 		},

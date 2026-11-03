@@ -59,19 +59,19 @@ func TestNextAvailablePortExcludingCustomBackend(t *testing.T) {
 }
 
 func TestEnginePortAssignmentRequest(t *testing.T) {
-	engine, port, ok := enginePortAssignmentRequest("engine:set-port", []byte(`{"engine":"ollama","port":11434}`))
-	if !ok || engine != "ollama" || port != 11434 {
-		t.Fatalf("valid request = (%q, %d, %v), want (ollama, 11434, true)", engine, port, ok)
+	engine, port, ok := enginePortAssignmentRequest("engine:set-port", []byte(`{"engine":"llamacpp","port":8081}`))
+	if !ok || engine != "llamacpp" || port != 8081 {
+		t.Fatalf("valid request = (%q, %d, %v), want (llamacpp, 8081, true)", engine, port, ok)
 	}
 	for _, tc := range []struct {
 		method string
 		params string
 	}{
-		{"engine:status", `{"engine":"ollama","port":11434}`},
+		{"engine:status", `{"engine":"llamacpp","port":8081}`},
 		{"engine:set-port", `{"engine":"","port":11434}`},
-		{"engine:set-port", `{"engine":"ollama","port":0}`},
-		{"engine:install", `{"engine":"ollama","port":11433}`},
-		{"engine:restart", `{"engine":"ollama","port":11433}`},
+		{"engine:set-port", `{"engine":"llamacpp","port":0}`},
+		{"engine:install", `{"engine":"llamacpp","port":8082}`},
+		{"engine:restart", `{"engine":"llamacpp","port":8082}`},
 		{"engine:set-port", `{`},
 	} {
 		if _, _, ok := enginePortAssignmentRequest(tc.method, []byte(tc.params)); ok {

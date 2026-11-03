@@ -6,7 +6,7 @@ package main
 // Fixtures shared by more than one test file in this package. Go test files
 // share a package, so a helper defined next to the tests that first needed it
 // is reachable from every other file — which is how newTestRPCWorkerPipe came
-// to live in lmstudioport_test.go while ollamahost_test.go depends on it. That
+// to live in one engine test file while another depended on it. That
 // works until the defining file moves or is consolidated, at which point the
 // whole test binary stops compiling and the cause is invisible in the diff.
 // Anything used across files belongs here instead.
@@ -213,7 +213,7 @@ func brokerWithEngineInventory(t *testing.T, ports map[string]int) *Broker {
 // All four variables are required. appdir consults LOCALAPPDATA only on
 // Windows and otherwise falls through to os.UserConfigDir, which reads HOME on
 // macOS and XDG_CONFIG_HOME (then HOME) on Linux. Setting only the first two
-// left macOS unisolated, so TestConfiguredLMStudioProxyPort wrote its fixture
+// left macOS unisolated, so a proxy-port test wrote its fixture
 // into the developer's real config dir and then failed on every subsequent run
 // against the value it had planted. CI never saw it because its config dir
 // starts empty.

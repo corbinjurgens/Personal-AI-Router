@@ -89,7 +89,8 @@ func (m *Message) IsResponse() bool {
 // check every hop on that worker's path, not just the one that overflowed.
 //
 // 8 MiB is far above any real frame. The largest today is engine:catalog's
-// Ollama list at roughly 1.9 MiB; the previous 1 MiB default could not carry it.
+// llama.cpp browse list (three publishers of fifty wide rows, which
+// TestLlamaCPPCatalogFitsInAFrame holds under this cap).
 const WorkerFrameBytes = 8 << 20
 
 // Codec handles newline-delimited JSON-RPC 2.0 over an io.ReadWriter.

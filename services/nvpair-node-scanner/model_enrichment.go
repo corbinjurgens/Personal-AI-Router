@@ -139,7 +139,7 @@ func (d *daemon) cacheInventoryLocked(hostUUID string, inventory modelInventory)
 // flat model-name union, the per-engine attribution (engine name -> models),
 // the per-engine loaded (in-memory) set, the node's policy advertisement, and
 // whether it succeeded. Shape:
-// {"models":["name",...],"modelsByEngine":{"ollama":[...]},"loadedByEngine":{"ollama":[...]},"policy":{...}}.
+// {"models":["name",...],"modelsByEngine":{"llamacpp":[...]},"loadedByEngine":{"llamacpp":[...]},"policy":{...}}.
 // modelsByEngine, loadedByEngine and policy are additive (omitempty on the
 // wire); a peer that doesn't send them yields nil, and the flat union still
 // enriches the node. A present engine key with [] is a successful empty

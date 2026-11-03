@@ -614,16 +614,17 @@ func buildApplyProtectedRoots() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Model stores outside appdir. Configured paths still require the manager
-	// owner evidence and keep impact incomplete until that owner supplies it.
+	// Model stores outside appdir, including the Ollama and LM Studio folders
+	// engine-manager reads as model sources (nvpair-engine-manager/modelsources.go).
+	// A configured OLLAMA_MODELS replaces Ollama's default there. Configured
+	// paths still require the manager owner evidence and keep impact incomplete
+	// until that owner supplies it.
 	roots := []string{data, filepath.Join(home, ".ollama"), filepath.Join(home, ".lmstudio"), filepath.Join(home, ".cache", "lm-studio")}
-	for _, key := range []string{"OLLAMA_MODELS", "LMSTUDIO_MODELS"} {
-		if path := os.Getenv(key); path != "" {
-			if !filepath.IsAbs(path) {
-				return nil, errors.New("model root is unresolved")
-			}
-			roots = append(roots, path)
+	if path := os.Getenv("OLLAMA_MODELS"); path != "" {
+		if !filepath.IsAbs(path) {
+			return nil, errors.New("model root is unresolved")
 		}
+		roots = append(roots, path)
 	}
 	return roots, nil
 }

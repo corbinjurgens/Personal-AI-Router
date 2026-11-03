@@ -44,7 +44,7 @@ type ReadyParams struct {
 }
 
 // errKey is the composite map key. Error ids are only unique WITHIN a node
-// (two nodes both emit "engine-manager:start-failed:ollama"), so a store that
+// (two nodes both emit "engine-manager:start-failed:llamacpp"), so a store that
 // holds peers' errors alongside its own would collide on the id alone. We key
 // by (NodeID, ID) so every node's entries coexist; the on-wire list shapes
 // (errors:update / errors:get-initial) are a flat []ServiceError, sorted
