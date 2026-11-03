@@ -326,7 +326,7 @@ func TestSettingsPairedMutationPushObserversAndRevocation(t *testing.T) {
 	mesh := clustertrust.Open(a)
 	exec := settingsExecutor(t, false)
 	exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
-	snapshot := settings.Snapshot{NodeID: "a-host", Engine: "ollama", Revision: 1, Epoch: "epoch-a", Sequence: 1, Phase: "idle", Settings: settings.Config{ServerPort: 12000, ProxyPort: 12001, LaunchText: "managed serve"}}
+	snapshot := settings.Snapshot{NodeID: "a-host", Engine: "llamacpp", Revision: 1, Epoch: "epoch-a", Sequence: 1, Phase: "idle", Settings: settings.Config{ServerPort: 12000, ProxyPort: 12001, LaunchText: "managed serve"}}
 	exec.settingsHub.Publish([]settings.Snapshot{snapshot})
 	var mu sync.Mutex
 	callerSeen := ""
@@ -393,7 +393,7 @@ func TestSettingsPairedMutationPushObserversAndRevocation(t *testing.T) {
 	read(scanB, 1)
 	read(scanC, 1)
 	config := settings.Config{ServerPort: 12002, ProxyPort: 12003, LaunchText: "managed serve --parallel 2"}
-	body, _ := json.Marshal(settings.Request{NodeID: "forwarding-forbidden", Engine: "ollama", Settings: config})
+	body, _ := json.Marshal(settings.Request{NodeID: "forwarding-forbidden", Engine: "llamacpp", Settings: config})
 	response, err := clientB.Post(server.URL+settingsPath+"apply", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -487,7 +487,7 @@ func TestSettingsRemoteOnlyCORSIsLocalOnly(t *testing.T) {
 		t.Fatalf("peer opaque environment change refused: %d", code)
 	}
 	environment = settingsRequest(t, exec)
-	environment.Settings.LaunchText = `OLLAMA_ORIGINS="http://localhost" ` + environment.Settings.LaunchText
+	environment.Settings.LaunchText = `BROWSER_ORIGINS="http://localhost" ` + environment.Settings.LaunchText
 	if code := post(environment); code != 403 {
 		t.Fatalf("peer CORS environment change accepted: %d", code)
 	}
@@ -593,7 +593,7 @@ func TestSettingsRelayErrorCodesReachThePairedOrigin(t *testing.T) {
 			f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler { return (&controlServer{exec: exec, mesh: mesh}).mux() })
 			grantRemoteManagement(t, f.peerDir, "1", map[string]bool{"uuid-self": true})
 			ctx := remoteFixtureContext(t)
-			_, err := f.client(t, ctx).postJSON(ctx, settingsPath+"apply", "ollama", settings.Request{Engine: "ollama", ExpectedRevision: 7, RequestID: "request"})
+			_, err := f.client(t, ctx).postJSON(ctx, settingsPath+"apply", "llamacpp", settings.Request{Engine: "llamacpp", ExpectedRevision: 7, RequestID: "request"})
 			if err == nil {
 				t.Fatal("a refused remote apply succeeded")
 			}

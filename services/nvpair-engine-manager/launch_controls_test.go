@@ -83,7 +83,7 @@ func TestSavedControlsCannotBypassLaunchValidation(t *testing.T) {
 		if command {
 			launch.Args = append(launch.Args, "-p0")
 		} else {
-			launch.Env["OLLAMA_ORIGINS"] = `"*"`
+			launch.Env["BROWSER_ORIGINS"] = `"*"`
 		}
 		if err := validateEffectiveLaunch(rt, launch, "127.0.0.1", fmt.Sprint(request.Settings.ServerPort)); err == nil {
 			t.Fatal("unsafe saved launch accepted")
@@ -92,7 +92,7 @@ func TestSavedControlsCannotBypassLaunchValidation(t *testing.T) {
 			args := []string{"-p0"}
 			rt.LaunchArgs = &args
 		} else {
-			env := []string{`OLLAMA_ORIGINS="*"`}
+			env := []string{`BROWSER_ORIGINS="*"`}
 			rt.LaunchEnv = &env
 		}
 		settingsState(t, e).plat.Runtime = rt
@@ -256,7 +256,7 @@ func TestRemoteCORSUsesCanonicalPolicyAndAuthoritativePreview(t *testing.T) {
 		t.Run(fmt.Sprint(command), func(t *testing.T) {
 			e := settingsExecutor(t, command)
 			request := settingsRequest(t, e)
-			changed := "OLLAMA_ORIGINS=https://example.test"
+			changed := "BROWSER_ORIGINS=https://example.test"
 			if command {
 				changed = "--cors"
 			}
@@ -273,7 +273,7 @@ func TestRemoteCORSUsesCanonicalPolicyAndAuthoritativePreview(t *testing.T) {
 			if command {
 				request.Settings.LaunchText = "--cors --cors"
 			} else {
-				request.Settings.LaunchText = `OLLAMA_ORIGINS='"https://EXAMPLE.test/"'`
+				request.Settings.LaunchText = `BROWSER_ORIGINS='"https://EXAMPLE.test/"'`
 			}
 			request.PreserveCORS = true
 			if _, err := e.PreviewLaunch(request); err != nil {

@@ -176,23 +176,23 @@ func TestDurableCacheRefCreatesParent(t *testing.T) {
 
 func TestDurableSetPortAdoptsUncertainReplacement(t *testing.T) {
 	dir := t.TempDir()
-	ex := newPortFixtureExecutor(t, dir)
-	port := privateTestPorts(t, 1, hostPort(t, ex.reg, "ollama"))[0]
+	ex := newLlamaPortFixtureExecutor(t, dir)
+	port := privateTestPorts(t, 1, hostPort(t, ex.reg, "llamacpp"))[0]
 	useEngineFileReplacer(t, durablefile.Replacer{
 		SyncDir: func(string) error { return errors.New("injected directory sync failure") },
 	})
-	status, err := ex.SetPort(context.Background(), "ollama", port)
+	status, err := ex.SetPort(context.Background(), "llamacpp", port)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := ex.state("ollama")
+	st, err := ex.state("llamacpp")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if status.Port != port || st.port != port || st.plat.Runtime.Port != port {
 		t.Fatalf("port status=%d cached=%d runtime=%d, want %d", status.Port, st.port, st.plat.Runtime.Port, port)
 	}
-	if got := hostPort(t, reloadPortFixture(t, ex.reg, dir), "ollama"); got != port {
+	if got := hostPort(t, reloadPortFixture(t, ex.reg, dir), "llamacpp"); got != port {
 		t.Fatalf("reloaded port = %d, want %d", got, port)
 	}
 }

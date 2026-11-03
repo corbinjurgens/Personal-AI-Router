@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/engines"
 )
 
 // validManifest is a minimal well-formed manifest used as the base for
@@ -19,30 +21,29 @@ import (
 // fault at a time.
 func validManifest() Manifest {
 	return Manifest{
-		Engine:          "ollama",
-		DisplayName:     "Ollama",
+		Engine:          engines.NameLlamaCPP,
+		DisplayName:     "llama.cpp",
 		ManifestVersion: 1,
 		Platforms: map[string]Platform{
 			"linux/amd64": {
-				Detect: []string{"$HOME/.local/bin/ollama"},
+				Detect: []string{"$HOME/.local/bin/llama-server"},
 				Install: &Install{
-					Fetch: &Fetch{URL: "https://example/ollama.tgz", SHA256: "abc123"},
+					Fetch: &Fetch{URL: "https://example/llamacpp.tgz", SHA256: "abc123"},
 					Run:   []string{"tar", "xzf", "{download}", "-C", "{install_dir}"},
 					Mode:  "user",
 				},
 				Runtime: Runtime{
-					Bin:    "{install_dir}/ollama",
-					Args:   []string{"serve"},
-					Env:    map[string]string{"OLLAMA_HOST": "127.0.0.1:{port}"},
-					Port:   11434,
-					Ready:  &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, TimeoutS: 20},
+					Bin:    "{install_dir}/llama-server",
+					Args:   []string{"--host", "{host}", "--port", "{port}"},
+					Port:   8081,
+					Ready:  &Probe{HTTP: "http://127.0.0.1:{port}/props", Status: 200, TimeoutS: 20},
 					Stop:   &StopSpec{Signal: "term", GraceS: 5},
-					Health: &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, IntervalS: 5},
+					Health: &Probe{HTTP: "http://127.0.0.1:{port}/health", Status: 200, IntervalS: 5},
 				},
 			},
 		},
 		Actions: map[string]Action{
-			"list_models": {Description: "list", HTTP: &ActionHTTP{Method: "GET", Path: "/api/tags"}},
+			"list_models": {Description: "list", HTTP: &ActionHTTP{Method: "GET", Path: "/models"}},
 		},
 	}
 }
@@ -232,12 +233,12 @@ func TestValidateAcceptsCommandModeAndCmdAction(t *testing.T) {
 	p := m.Platforms["linux/amd64"]
 	p.Runtime.Mode = "command"
 	p.Runtime.Bin = "" // not required in command mode
-	p.Runtime.Start = [][]string{{"lms", "daemon", "up"}, {"lms", "server", "start", "--port", "{port}"}}
-	p.Runtime.Stop = &StopSpec{Cmd: []string{"lms", "server", "stop"}}
+	p.Runtime.Start = [][]string{{"llama-server-control", "daemon", "up"}, {"llama-server-control", "server", "start", "--port", "{port}"}}
+	p.Runtime.Stop = &StopSpec{Cmd: []string{"llama-server-control", "server", "stop"}}
 	m.Platforms["linux/amd64"] = p
 	// A CLI action with a param placeholder ({model}) must validate —
 	// action templates are resolved from params at call time, not here.
-	m.Actions["pull"] = Action{Cmd: []string{"lms", "get", "{model}", "--yes"}}
+	m.Actions["pull"] = Action{Cmd: []string{"llama-server-control", "download", "{model}", "--yes"}}
 	if err := m.Validate(); err != nil {
 		t.Fatalf("command-mode/cmd-action manifest rejected: %v", err)
 	}
@@ -575,12 +576,12 @@ func TestPlatformFor(t *testing.T) {
 }
 
 func TestResolvePlaceholders(t *testing.T) {
-	vars := map[string]string{"port": "11434", "install_dir": "/opt/x", "bin": "/opt/x/ollama"}
+	vars := map[string]string{"port": "8081", "install_dir": "/opt/x", "bin": "/opt/x/llama-server"}
 	got, err := resolvePlaceholders("http://127.0.0.1:{port}/", vars)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if got != "http://127.0.0.1:11434/" {
+	if got != "http://127.0.0.1:8081/" {
 		t.Fatalf("got %q", got)
 	}
 	if _, err := resolvePlaceholders("{download}", vars); err == nil {
@@ -607,30 +608,30 @@ func TestLoadRegistryOverride(t *testing.T) {
 	userDir := t.TempDir()
 
 	base := validManifest()
-	base.DisplayName = "Ollama (bundled)"
-	writeManifest(t, bundled, "ollama.json", base)
+	base.DisplayName = "llama.cpp (bundled)"
+	writeManifest(t, bundled, "llamacpp.json", base)
 
 	// A second bundled engine.
 	other := validManifest()
-	other.Engine = "vllm"
-	other.DisplayName = "vLLM"
-	writeManifest(t, bundled, "vllm.json", other)
+	other.Engine = portFixtureCustomEngine(t).Name
+	other.DisplayName = "llama.cpp custom"
+	writeManifest(t, bundled, "llamacpp-custom.json", other)
 
-	// User override of ollama wins over bundled.
+	// User override of llamacpp wins over bundled.
 	override := validManifest()
-	override.DisplayName = "Ollama (user)"
-	writeManifest(t, userDir, "ollama.json", override)
+	override.DisplayName = "llama.cpp (user)"
+	writeManifest(t, userDir, "llamacpp.json", override)
 
 	reg, err := LoadRegistry(bundled, userDir)
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
 	names := reg.Names()
-	if len(names) != 2 || names[0] != "ollama" || names[1] != "vllm" {
+	if len(names) != 2 || names[0] != "llamacpp" || names[1] != "llamacpp-custom" {
 		t.Fatalf("unexpected names: %v", names)
 	}
-	m, ok := reg.Get("ollama")
-	if !ok || m.DisplayName != "Ollama (user)" {
+	m, ok := reg.Get("llamacpp")
+	if !ok || m.DisplayName != "llama.cpp (user)" {
 		t.Fatalf("user override did not win: %+v", m)
 	}
 }
@@ -640,27 +641,27 @@ func TestLoadOverrideDirRejectsEmptyInstallRun(t *testing.T) {
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 		t.Fatalf("load bundled manifests: %v", err)
 	}
-	base, ok := reg.Get("ollama")
+	base, ok := reg.Get("llamacpp")
 	if !ok {
-		t.Fatal("bundled ollama manifest missing")
+		t.Fatal("bundled llamacpp manifest missing")
 	}
 	if len(base.Platforms["linux/amd64"].Install.Run) == 0 {
-		t.Fatal("bundled ollama install.run is empty")
+		t.Fatal("bundled llamacpp install.run is empty")
 	}
 	dir := t.TempDir()
 	const override = `{
-  "engine": "ollama",
+  "engine": "llamacpp",
   "display_name": "Invalid override",
   "platforms": {"linux/amd64": {"install": {"run": []}}}
 }`
-	if err := os.WriteFile(filepath.Join(dir, "ollama.json"), []byte(override), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "llamacpp.json"), []byte(override), 0o644); err != nil {
 		t.Fatalf("write override: %v", err)
 	}
 	if err := reg.LoadOverrideDir(dir); err != nil {
 		t.Fatalf("load override directory: %v", err)
 	}
-	if got, ok := reg.Get("ollama"); ok || got != nil || reg.invalid["ollama"] == nil {
-		t.Fatalf("invalid override must make ollama unavailable: manifest=%+v error=%v", got, reg.invalid["ollama"])
+	if got, ok := reg.Get("llamacpp"); ok || got != nil || reg.invalid["llamacpp"] == nil {
+		t.Fatalf("invalid override must make llamacpp unavailable: manifest=%+v error=%v", got, reg.invalid["llamacpp"])
 	}
 }
 

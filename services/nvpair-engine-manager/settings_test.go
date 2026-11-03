@@ -79,7 +79,7 @@ func TestWorkingSetLimitRefusedApplyHasNoEffects(t *testing.T) {
 	test("below minimum", false, "llamacpp", 255)
 	test("above maximum", false, "llamacpp", 1048577)
 	test("zero is not absence", false, "llamacpp", 0)
-	test("other engine family", false, "ollama", 256)
+	test("other engine family", false, "other-family", 256)
 	test("command mode", true, "llamacpp", 256)
 }
 
@@ -252,7 +252,7 @@ func graftPlatform(t *testing.T, e *Executor, platform Platform) {
 
 func settingsExecutor(t *testing.T, command bool) *Executor {
 	t.Helper()
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	port, err := freePort()
@@ -261,12 +261,12 @@ func settingsExecutor(t *testing.T, command bool) *Executor {
 	}
 	p.Runtime.Port = port
 	p.Runtime.Args = []string{"serve"}
-	p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"serve"}, Controls: []LaunchControl{{Value: "{server.host}:{server.port}", Env: []string{"OLLAMA_HOST"}}, {Value: "{cors.origins}", Env: []string{"OLLAMA_ORIGINS"}}}}
+	p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"serve"}, Controls: []LaunchControl{{Value: "{server.host}:{server.port}", Env: []string{"FAKE_ADDR"}}, {Value: "{cors.origins}", Env: []string{"BROWSER_ORIGINS"}}}}
 	if command {
 		p.Runtime.Mode = "command"
 		p.Runtime.CLI = fakeEngineBin
 		p.Runtime.Start = [][]string{{"{cli}", "server", "start", "--port", "{port}", "--bind", "{host}"}}
-		p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"server", "start"}, Controls: []LaunchControl{{Value: "{server.port}", Flags: []string{"--port", "-p"}}, {Value: "{server.host}", Flags: []string{"--bind"}, Env: []string{"LMS_SERVER_HOST"}}, {Value: "{cors.enabled}", Implicit: implicitLaunchValue("true"), Flags: []string{"--cors"}}}}
+		p.Runtime.EditableLaunch = &EditableLaunch{FixedArgs: []string{"server", "start"}, Controls: []LaunchControl{{Value: "{server.port}", Flags: []string{"--port", "-p"}}, {Value: "{server.host}", Flags: []string{"--bind"}, Env: []string{"SERVER_HOST"}}, {Value: "{cors.enabled}", Implicit: implicitLaunchValue("true"), Flags: []string{"--cors"}}}}
 	}
 	m.Platforms[key] = p
 	e := newTestExecutor(t, m)
@@ -296,7 +296,7 @@ func TestServingOverridesRejectInvalidDeclarations(t *testing.T) {
 	test := func(name, field string, mutate func(*engines.ServingConfig)) {
 		t.Run(name, func(t *testing.T) {
 			reg := NewRegistry()
-			base, err := json.Marshal(testEngineManifest(fakeEngineBin))
+			base, err := json.Marshal(llamaTestEngineManifest(fakeEngineBin))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -599,7 +599,7 @@ func TestSettingsPreviewChecksOnlyDeclaredControls(t *testing.T) {
 			}
 		} else {
 			p := settingsRequest(t, e)
-			p.Settings.LaunchText = "OLLAMA_HOST=0.0.0.0:12345"
+			p.Settings.LaunchText = "FAKE_ADDR=0.0.0.0:12345"
 			if result := previewSettings(t, e, p); result.Errors["launchText"] == "" {
 				t.Fatal("accepted invalid managed host")
 			}
@@ -903,7 +903,7 @@ func TestSettingsCORSOriginsValidationAndNormalization(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			e := settingsExecutor(t, false)
 			request := settingsRequest(t, e)
-			request.Settings.LaunchText = `OLLAMA_ORIGINS="` + origins + `" ` + request.Settings.LaunchText
+			request.Settings.LaunchText = `BROWSER_ORIGINS="` + origins + `" ` + request.Settings.LaunchText
 			result := previewSettings(t, e, request)
 			if wantError != "" {
 				if !strings.Contains(result.Errors["launchText"], wantError) {
@@ -917,7 +917,7 @@ func TestSettingsCORSOriginsValidationAndNormalization(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if value, ok := env["OLLAMA_ORIGINS"]; !ok || value != origins {
+				if value, ok := env["BROWSER_ORIGINS"]; !ok || value != origins {
 					t.Fatalf("origins = %q (present %v), want %q", value, ok, origins)
 				}
 			}
@@ -976,8 +976,8 @@ func TestSettingsCORSIsOptionalAndIndependentOfEngine(t *testing.T) {
 func TestSettingsPassesUnknownEnvironmentNamesAndValues(t *testing.T) {
 	eachEngineMode(t, func(t *testing.T, e *Executor) {
 		request := settingsRequest(t, e)
-		want := []string{"FUTURE_ENGINE_SETTING=unknown-value", "OLLAMA_CONTEXT_LENGTH=not-a-number",
-			"OLLAMA_HOSTNAME=example.test", "PATH=/custom", "LD_LIBRARY_PATH=/custom/lib"}
+		want := []string{"FUTURE_ENGINE_SETTING=unknown-value", "LLAMA_CONTEXT_LENGTH=not-a-number",
+			"LLAMA_HOSTNAME=example.test", "PATH=/custom", "LD_LIBRARY_PATH=/custom/lib"}
 		text, err := formatLaunchText(want)
 		if err != nil {
 			t.Fatal(err)
@@ -997,9 +997,9 @@ func TestSettingsPassesUnknownEnvironmentNamesAndValues(t *testing.T) {
 func manifestSettingsRequest(t *testing.T, platform string) (*Executor, settings.Request, []string) {
 	t.Helper()
 	reg := loadWithOverrides(t, t.TempDir())
-	manifest, ok := reg.Get("ollama")
+	manifest, ok := reg.Get(engines.NameLlamaCPP)
 	if !ok {
-		t.Fatal("Ollama manifest missing")
+		t.Fatal("llama.cpp manifest missing")
 	}
 	config, ok := manifest.Platforms[platform]
 	if !ok {
@@ -1060,7 +1060,7 @@ func TestSettingsSafeEditPreservesManifestEnvironment(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			request.Settings.LaunchText = "OLLAMA_NUM_PARALLEL=3 " + request.Settings.LaunchText
+			request.Settings.LaunchText = "LLAMA_NUM_PARALLEL=3 " + request.Settings.LaunchText
 			preview := previewSettings(t, e, request)
 			if len(preview.Errors) != 0 {
 				t.Fatalf("safe edit rejected: %+v", preview)
@@ -1078,7 +1078,7 @@ func TestSettingsSafeEditPreservesManifestEnvironment(t *testing.T) {
 			state := settingsState(t, e)
 			state.installDir = "/updated-install"
 			launch, err := launchForState(state, request.Settings.ServerPort)
-			if err != nil || launch.Env["LD_LIBRARY_PATH"] != "/updated-install/lib/ollama" {
+			if err != nil || launch.Env["LD_LIBRARY_PATH"] != "/updated-install" {
 				t.Fatalf("default environment stopped following the manifest: %v, %v", launch.Env, err)
 			}
 		})
@@ -1227,7 +1227,7 @@ func TestSettingsEnvironmentReachesEngineAndCanBeEditedAndRemoved(t *testing.T) 
 				rt.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", filepath.Join(t.TempDir(), "stopped")}}
 			}
 			captureEnv := filepath.Join(t.TempDir(), "env.json")
-			prefix, err := formatLaunchText([]string{"PAIR_TEST_ENV_FILE=" + captureEnv, "OLLAMA_ORIGINS=http://localhost", `PAIR_TEST_LITERAL=$HOME {port} C:\new\tools`, "PAIR_TEST_EMPTY="})
+			prefix, err := formatLaunchText([]string{"PAIR_TEST_ENV_FILE=" + captureEnv, `PAIR_TEST_LITERAL=$HOME {port} C:\new\tools`, "PAIR_TEST_EMPTY="})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1257,18 +1257,18 @@ func TestSettingsEnvironmentReachesEngineAndCanBeEditedAndRemoved(t *testing.T) 
 				}
 				return env
 			}
-			if env := readEnv(); env["OLLAMA_ORIGINS"] != "http://localhost" || env["PAIR_TEST_LITERAL"] != `$HOME {port} C:\new\tools` || env["PAIR_TEST_EMPTY"] != "" {
+			if env := readEnv(); env["PAIR_TEST_LITERAL"] != `$HOME {port} C:\new\tools` || env["PAIR_TEST_EMPTY"] != "" {
 				t.Fatalf("environment not passed literally: %#v", env)
 			}
 			p = settingsRequest(t, e)
-			p.Settings.LaunchText = strings.Replace(p.Settings.LaunchText, `OLLAMA_ORIGINS="http://localhost"`, `OLLAMA_ORIGINS="http://example.test"`, 1)
-			if !configure().Running || readEnv()["OLLAMA_ORIGINS"] != "http://example.test" {
+			p.Settings.LaunchText = strings.Replace(p.Settings.LaunchText, `PAIR_TEST_EMPTY=""`, `PAIR_TEST_EMPTY="http://example.test"`, 1)
+			if !configure().Running || readEnv()["PAIR_TEST_EMPTY"] != "http://example.test" {
 				t.Fatal("environment-only edit did not restart with new value")
 			}
 			p = settingsRequest(t, e)
-			p.Settings.LaunchText = strings.Replace(p.Settings.LaunchText, `OLLAMA_ORIGINS="http://example.test" `, "", 1)
+			p.Settings.LaunchText = strings.Replace(p.Settings.LaunchText, `PAIR_TEST_EMPTY="http://example.test" `, "", 1)
 			configure()
-			if readEnv()["OLLAMA_ORIGINS"] != "" {
+			if readEnv()["PAIR_TEST_EMPTY"] != "" {
 				t.Fatal("removed environment variable survived")
 			}
 			override := readSettingsOverride(t, e)
@@ -1279,7 +1279,7 @@ func TestSettingsEnvironmentReachesEngineAndCanBeEditedAndRemoved(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, exists := env["OLLAMA_ORIGINS"]; exists {
+			if _, exists := env["PAIR_TEST_EMPTY"]; exists {
 				t.Fatal("removed environment variable remains in override")
 			}
 			if env["PAIR_TEST_ENV_FILE"] != captureEnv || env["PAIR_TEST_LITERAL"] != `$HOME {port} C:\new\tools` {

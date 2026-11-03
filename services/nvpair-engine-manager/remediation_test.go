@@ -59,14 +59,14 @@ func capturingExecutor(t *testing.T, m *Manifest) (*Executor, *captured) {
 }
 
 // TestDownloadUnpinned verifies a fetch with no sha256 succeeds (over
-// loopback http) — the unpinned path the bundled Ollama manifest now uses.
+// loopback http), allowing an unpinned HTTPS artifact source.
 func TestDownloadUnpinned(t *testing.T) {
 	payload := []byte("unpinned engine bytes")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(payload)
 	}))
 	defer srv.Close()
-	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+	ex := newTestExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	p, err := ex.download(context.Background(), "fake", &Fetch{URL: srv.URL}) // no SHA256
 	if err != nil {
 		t.Fatalf("unpinned download should succeed, got %v", err)
@@ -81,7 +81,7 @@ func TestDownloadUnpinned(t *testing.T) {
 // only plaintext exception — used by the live tests and a LAN mirror).
 func TestValidateDownloadURL(t *testing.T) {
 	for _, u := range []string{
-		"https://ollama.com/x.zip", "https://example.com/y",
+		"https://example.com/x.zip", "https://example.com/y",
 		"http://127.0.0.1:8080/x", "http://localhost/x", "http://[::1]:9/x",
 	} {
 		if err := validateDownloadURL(u); err != nil {
@@ -109,7 +109,7 @@ func TestUninstallRetries(t *testing.T) {
 	copyFile(t, fakeEngineBin, binCopy)
 	marker := filepath.Join(dir, "attempts")
 
-	m := testEngineManifest(binCopy)
+	m := llamaTestEngineManifest(binCopy)
 	key := runtime.GOOS + "/" + runtime.GOARCH
 	p := m.Platforms[key]
 	p.Runtime.Mode = "command"                                           // command-mode installs may legitimately live outside installDir
@@ -237,7 +237,7 @@ func TestReadinessTimeoutNoSpuriousExit(t *testing.T) {
 // for engines whose initialization finishes after several failed probes. Start
 // must keep the owned process alive until the configured finite budget expires.
 func TestStartWaitsForDelayedReadinessWithinBudget(t *testing.T) {
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	p := m.Platforms[hostKey()]
 	p.Runtime.Env["FAKE_START_DELAY"] = "750ms"
 	p.Runtime.Ready.TimeoutS = 5
@@ -266,7 +266,7 @@ func TestStartWaitsForDelayedReadinessWithinBudget(t *testing.T) {
 // TestConcurrentStartIsSerialized guards the per-engine op lock: many
 // concurrent Starts must not race or double-spawn. Run under -race.
 func TestConcurrentStartIsSerialized(t *testing.T) {
-	ex, _ := capturingExecutor(t, testEngineManifest(fakeEngineBin))
+	ex, _ := capturingExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	t.Cleanup(func() { _ = ex.Stop("fake") })
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -345,7 +345,7 @@ func TestHealthFlipReportsAndClears(t *testing.T) {
 }
 
 func TestUnexpectedExitReported(t *testing.T) {
-	ex, _ := capturingExecutor(t, testEngineManifest(fakeEngineBin))
+	ex, _ := capturingExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	if err := ex.Start(context.Background(), "fake"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestUnexpectedExitReported(t *testing.T) {
 }
 
 func TestNormalStopIsSilent(t *testing.T) {
-	ex, _ := capturingExecutor(t, testEngineManifest(fakeEngineBin))
+	ex, _ := capturingExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	if err := ex.Start(context.Background(), "fake"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestNormalStopIsSilent(t *testing.T) {
 }
 
 func TestRestartProcess(t *testing.T) {
-	ex, _ := capturingExecutor(t, testEngineManifest(fakeEngineBin))
+	ex, _ := capturingExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	t.Cleanup(func() { _ = ex.Stop("fake") })
 	if err := ex.Start(context.Background(), "fake"); err != nil {
 		t.Fatalf("start: %v", err)
@@ -386,7 +386,7 @@ func TestRestartProcess(t *testing.T) {
 }
 
 func TestActionUnknownAndHTTPError(t *testing.T) {
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	m.Actions["err"] = Action{HTTP: &ActionHTTP{Method: "GET", Path: "/api/error"}}
 	ex, _ := capturingExecutor(t, m)
 	t.Cleanup(func() { _ = ex.Stop("fake") })
@@ -483,7 +483,7 @@ func TestDownloadSizeCap(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ex, _ := capturingExecutor(t, testEngineManifest(fakeEngineBin))
+	ex, _ := capturingExecutor(t, llamaTestEngineManifest(fakeEngineBin))
 	if _, err := ex.download(context.Background(), "x", &Fetch{URL: srv.URL, SHA256: "abc"}); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("expected size-cap error, got %v", err)
 	}

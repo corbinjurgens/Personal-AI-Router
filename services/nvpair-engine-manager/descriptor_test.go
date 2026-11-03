@@ -331,7 +331,7 @@ func TestDescriptorsExcludeSecretsAndPaths(t *testing.T) {
 // engine:descriptors answers with every registered engine's descriptor.
 func TestDescriptorsRPC(t *testing.T) {
 	var out bytes.Buffer
-	m := NewManager(NewCodec(&out), bundledTestExecutor(t), nil, "")
+	m := NewManager(NewCodec(&out), newLlamaPortFixtureExecutor(t, t.TempDir()), nil, "")
 	id := json.RawMessage("3")
 	m.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: descriptorsMethod})
 	var resp struct {
@@ -346,7 +346,7 @@ func TestDescriptorsRPC(t *testing.T) {
 	for _, d := range resp.Result.Engines {
 		names = append(names, d.Engine)
 	}
-	if strings.Join(names, ",") != "llamacpp,lmstudio,ollama" {
+	if strings.Join(names, ",") != "llamacpp,llamacpp-custom" {
 		t.Fatalf("descriptors for %v", names)
 	}
 }
@@ -354,7 +354,7 @@ func TestDescriptorsRPC(t *testing.T) {
 // A family the manifest does not name is the engine's own ID, which selects
 // no shared adapter unless the ID is itself an adapter family.
 func TestFamilyDefaultsToEngineID(t *testing.T) {
-	m := testEngineManifest(fakeEngineBin)
+	m := llamaTestEngineManifest(fakeEngineBin)
 	m.Engine = "strata"
 	d := m.descriptor(runtime.GOOS, runtime.GOARCH)
 	if d.Family != "strata" || d.ModelStore != "" || d.Catalog != "" || d.ModelNaming != engines.ModelNamingExact {
@@ -386,7 +386,7 @@ func TestManifestFieldValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := testEngineManifest(fakeEngineBin)
+			m := llamaTestEngineManifest(fakeEngineBin)
 			tc.mutate(m)
 			if err := m.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Validate error = %v, want %q", err, tc.want)
