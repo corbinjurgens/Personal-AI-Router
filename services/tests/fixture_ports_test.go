@@ -22,8 +22,9 @@ import (
 // installed service instead of its own workers.
 
 // installedServicePorts are the default listeners of an installed PAIR: the
-// broker's local services (ni, er, wl, cl, em, ec) and the engine
-// compatibility facades. No fixture is ever assigned one of them.
+// broker's local services (ni, er, wl, cl, em, ec) and the llama.cpp facade,
+// plus 11434 and 1234, which stay off-limits to fixtures because users run their
+// own engines there. No fixture is ever assigned one of them.
 var installedServicePorts = map[int]string{
 	14318: "node-info",
 	14319: "errors",
@@ -31,8 +32,8 @@ var installedServicePorts = map[int]string{
 	14321: "cluster-manager",
 	14322: "engine-manager model service",
 	14323: "engine-manager control service",
-	11434: "Ollama facade",
-	1234:  "LM Studio facade",
+	11434: "reserved engine port",
+	1234:  "reserved engine port",
 	8080:  "llama.cpp facade",
 }
 

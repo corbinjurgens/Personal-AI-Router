@@ -854,7 +854,7 @@ func ownerEvidencePrivateEnv(env []string) []string {
 			strings.Contains(upper, "PASSWORD") || strings.Contains(upper, "KEY") || strings.Contains(upper, "CREDENTIAL") || strings.Contains(upper, "AUTH") ||
 			(strings.HasPrefix(upper, "NVPAIR_") && strings.Contains(upper, "TEST")) || strings.HasPrefix(upper, "NVPAIR_OWNER_") || strings.HasPrefix(upper, "FAKE_") ||
 			strings.HasPrefix(upper, "LLAMA") || strings.HasPrefix(upper, "OLLAMA") || strings.HasPrefix(upper, "STRATA") ||
-			strings.HasPrefix(upper, "LMSTUDIO") || strings.HasPrefix(upper, "PAIR_BUILD_APPLY") || strings.HasPrefix(upper, "NVPAIR_BUILD_APPLY_") ||
+			strings.HasPrefix(upper, "PAIR_BUILD_APPLY") || strings.HasPrefix(upper, "NVPAIR_BUILD_APPLY_") ||
 			strings.HasPrefix(upper, "AWS_") || strings.HasPrefix(upper, "AZURE_") || strings.HasPrefix(upper, "GOOGLE_") || strings.HasPrefix(upper, "HF_") {
 			continue
 		}

@@ -143,9 +143,8 @@ func snapshotInstalledServiceProcesses() (installedServiceSnapshot, error) {
 			continue
 		} // Protected unrelated system processes are not owners.
 		name = strings.TrimSuffix(strings.ToLower(name), ".exe")
-		// LM Studio's app_processes are separate from its lms CLI (see the
-		// engine-manager lmstudio manifest). Observe identities without contact.
-		if !strings.HasPrefix(name, "nvpair-") && !slices.Contains([]string{"pair", "ollama", "llama-server", "lms", "lm studio", "lm-studio", "llmster", "strata"}, name) {
+		// Observe PAIR and engine process identities without contact.
+		if !strings.HasPrefix(name, "nvpair-") && !slices.Contains([]string{"pair", "llama-server", "strata"}, name) {
 			continue
 		}
 		identity, err := serviceProcessIdentityAt(ctx, pid)

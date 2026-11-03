@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -44,27 +43,6 @@ func init() {
 	if err != nil || image != selected {
 		fmt.Fprintln(os.Stderr, "stop/Pause fixture self image mismatch", err)
 		os.Exit(1)
-	}
-	if len(os.Args) == 3 && os.Args[1] == "--stop-pause-stop-sentinel" {
-		if err := os.WriteFile(os.Args[2], []byte("unowned stop invoked\n"), 0o600); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
-	if len(os.Args) == 3 && os.Args[1] == "ps" && os.Args[2] == "--json" && os.Getenv("NVPAIR_TEST_STOP_PAUSE_CLI_CONTROL") != "" {
-		client := &http.Client{Timeout: 5 * time.Second}
-		response, err := client.Get(os.Getenv("NVPAIR_TEST_STOP_PAUSE_CLI_CONTROL") + "/native-residency")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		_, copyErr := io.Copy(os.Stdout, response.Body)
-		closeErr := response.Body.Close()
-		if response.StatusCode != http.StatusOK || copyErr != nil || closeErr != nil {
-			os.Exit(1)
-		}
-		os.Exit(0)
 	}
 	if os.Getenv("NVPAIR_TEST_STOP_PAUSE_PORT") == "" {
 		// A selected helper must never fall through into TestMain and stage
@@ -209,10 +187,9 @@ type stopPauseNative struct {
 	requests       []*stopPauseGate
 	loads, unloads int
 	resident       bool
-	nativeReads    int
 }
 
-func newStopPauseNative(t *testing.T, e *switchProcessFixture, adopted bool) *stopPauseNative {
+func newStopPauseNative(t *testing.T, e *switchProcessFixture) *stopPauseNative {
 	t.Helper()
 	n := &stopPauseNative{resident: true}
 	n.server = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -249,17 +226,6 @@ func newStopPauseNative(t *testing.T, e *switchProcessFixture, adopted bool) *st
 			n.unloads++
 			n.resident = false
 			n.mu.Unlock()
-		case "/native-residency":
-			n.nativeReads++
-			resident := n.resident
-			n.mu.Unlock()
-			rows := []map[string]string{}
-			if resident {
-				rows = append(rows, map[string]string{"model": "switch-model"})
-			}
-			if err := json.NewEncoder(w).Encode(rows); err != nil {
-				t.Errorf("native residency: %v", err)
-			}
 		default:
 			n.mu.Unlock()
 			http.Error(w, "unknown native fixture event", http.StatusNotFound)
@@ -286,15 +252,6 @@ func newStopPauseNative(t *testing.T, e *switchProcessFixture, adopted bool) *st
 		"NVPAIR_TEST_SWITCH_ENGINE": "", "NVPAIR_TEST_SWITCH_CONTROL": e.control.URL,
 		"NVPAIR_TEST_STOP_PAUSE_HELPER": image, "NVPAIR_TEST_STOP_PAUSE_PORT": "{port}",
 		"NVPAIR_TEST_STOP_PAUSE_CONTROL": n.server.URL,
-	}
-	if adopted {
-		// The fake command engine has LM Studio's separate native residency
-		// owner, so retry after external shutdown can require positive CLI proof.
-		manifest["family"] = mustMarshal(t, "lmstudio")
-		rt["mode"] = "command"
-		rt["cli"] = image
-		rt["start"] = [][]string{{image, "--stop-pause-stop-sentinel", filepath.Join(e.base, "unowned-start")}}
-		rt["stop"] = map[string]any{"cmd": []string{image, "--stop-pause-stop-sentinel", filepath.Join(e.base, "unowned-stop")}, "grace_s": 1}
 	}
 	manifest["runtime"] = mustMarshal(t, rt)
 	var platforms map[string]map[string]json.RawMessage
@@ -380,7 +337,7 @@ func newStopPauseFixture(t *testing.T) *stopPauseFixture {
 	release := holdStopPauseServicePorts(t, s.ports)
 	var native *stopPauseNative
 	f := newEngineBindingServiceFixture(t, s, func(e *switchProcessFixture) {
-		native = newStopPauseNative(t, e, false)
+		native = newStopPauseNative(t, e)
 		release()
 	})
 	return &stopPauseFixture{engineBindingFixture: f, native: native}
@@ -528,7 +485,6 @@ func TestStopPauseControlsProcess(t *testing.T) {
 	t.Run("immediate escalation bypasses the held configured drain", func(t *testing.T) { testStopPauseDrain(t, true) })
 	t.Run("paused restart preserves saved Off and resumes only saved On", func(t *testing.T) { testStopPauseRestart(t, false) })
 	t.Run("paused restart preserves lock and resident declarations", func(t *testing.T) { testStopPauseRestart(t, true) })
-	t.Run("adopted command pause cannot unload or invoke unowned stop", testStopPauseAdopted)
 	t.Run("precommit local pause falls back at the origin", testStopPauseFallback)
 	t.Run("committed local stream fails and only a new client request retries", func(t *testing.T) { testStopPauseCommitted(t, false) })
 	t.Run("committed peer stream fails at origin without replay", func(t *testing.T) { testStopPauseCommitted(t, true) })
@@ -1101,148 +1057,6 @@ func testStopPauseRestart(t *testing.T, locked bool) {
 	f.native.assertCounts(t, 0, 0, 0)
 }
 
-func testStopPauseAdopted(t *testing.T) {
-	s := newRemoteServiceFixture(t)
-	release := holdStopPauseServicePorts(t, s.ports)
-	image, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Stop commands inherit the manager environment, rather than runtime.env.
-	s.env = append(s.env, "NVPAIR_TEST_STOP_PAUSE_HELPER="+image)
-	var native *stopPauseNative
-	var stopOwner func()
-	binding := newEngineBindingServiceFixture(t, s, func(e *switchProcessFixture) {
-		native = newStopPauseNative(t, e, true)
-		s.env = append(s.env, "NVPAIR_TEST_STOP_PAUSE_CLI_CONTROL="+native.server.URL)
-		cmd := exec.Command(image)
-		cmd.Env = append(append([]string(nil), s.env...), "NVPAIR_TEST_SWITCH_ENGINE=", "NVPAIR_TEST_SWITCH_CONTROL="+e.control.URL,
-			"NVPAIR_TEST_STOP_PAUSE_PORT="+strconv.Itoa(e.targetPort), "NVPAIR_TEST_STOP_PAUSE_CONTROL="+native.server.URL)
-		var output serviceOutput
-		cmd.Stdout, cmd.Stderr = &output, &output
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		identity, identityErr := serviceProcessIdentityAt(context.Background(), int32(cmd.Process.Pid))
-		canonical, pathErr := canonicalServicePath(image)
-		if identityErr != nil || pathErr != nil || identity.Path != canonical {
-			// The direct os.Process handle still belongs to this Start. Do not
-			// reconstruct a signal target from a later PID lookup on failure.
-			killErr := cmd.Process.Kill()
-			waitErr := cmd.Wait()
-			t.Fatalf("record external lifetime: identity=%+v inspect=%v path=%v kill=%v wait=%v", identity, identityErr, pathErr, killErr, waitErr)
-		}
-		proof, err := retainFixtureProcessLifetime(identity)
-		if err != nil {
-			killErr := cmd.Process.Kill()
-			waitErr := cmd.Wait()
-			t.Fatalf("retain external lifetime: %v kill=%v wait=%v", err, killErr, waitErr)
-		}
-		t.Cleanup(func() {
-			if err := proof.close(); err != nil {
-				t.Errorf("close external lifetime: %v", err)
-			}
-		})
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		var once sync.Once
-		stopOwner = func() {
-			once.Do(func() {
-				// kill revalidates the recorded PID/path/creation tuple. A later
-				// process using this shared image or PID is never our authority.
-				inventory := &serviceProcessInventory{paths: []string{identity.Path}}
-				if err := inventory.kill(identity); err != nil && !errors.Is(err, errServiceProcessDeparted) {
-					t.Errorf("fixture-owner stop: %v", err)
-					return
-				}
-				select {
-				case err := <-done:
-					var exit *exec.ExitError
-					if err != nil && !errors.As(err, &exit) {
-						t.Errorf("fixture-owner reap: %v", err)
-					}
-				case <-time.After(10 * time.Second):
-					t.Error("fixture-owner child did not reap")
-				}
-				if stopped, err := proof.wait(10 * time.Second); err != nil || !stopped {
-					t.Fatalf("external lifetime stopped=%t error=%v", stopped, err)
-				}
-			})
-		}
-		t.Cleanup(stopOwner)
-		task1Eventually(t, "external owner registered exact native lifetime", 15*time.Second, func() bool {
-			e.mu.Lock()
-			defer e.mu.Unlock()
-			return len(e.engineIdentities["llamacpp"]) == 1
-		})
-		release()
-	})
-	f := &stopPauseFixture{engineBindingFixture: binding, native: native}
-	t.Cleanup(stopOwner)
-	var status struct {
-		Running             bool `json:"running"`
-		TerminationVerified bool `json:"terminationVerified"`
-	}
-	task1Eventually(t, "real manager adopts external command listener", 15*time.Second, func() bool {
-		task2Decode(t, f.call(t, "engine:status", map[string]string{"engine": "llamacpp"}), &status)
-		return status.Running
-	})
-	// A direct native read establishes actual residency independently of the
-	// manager's adoption flag. This is a fixture-owned endpoint, never a default.
-	client := &http.Client{Timeout: 5 * time.Second}
-	t.Cleanup(client.CloseIdleConnections)
-	response, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/models", f.engine.targetPort))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var models struct {
-		Data []struct {
-			ID     string `json:"id"`
-			Status struct {
-				Value string `json:"value"`
-			} `json:"status"`
-		} `json:"data"`
-	}
-	decodeErr := json.NewDecoder(response.Body).Decode(&models)
-	closeErr := response.Body.Close()
-	if decodeErr != nil || closeErr != nil || len(models.Data) != 1 || models.Data[0].Status.Value != "loaded" {
-		t.Fatalf("external residency read=%+v decode=%v close=%v", models, decodeErr, closeErr)
-	}
-	result, err := f.client.call(strconv.FormatInt(newRPCID(), 10), "node:set-availability", mustMarshal(t, map[string]string{"state": "paused", "pauseMode": "immediate"}), 40*time.Second)
-	if err != nil || result.Error == nil || !strings.Contains(result.Error.Message, "Pause could not stop every engine") {
-		t.Fatalf("external Pause should be incomplete: result=%+v transport=%v", result, err)
-	}
-	if got := fetchServicePolicy(t, f.client); got.Availability != nodepolicy.Draining || got.Policy.Availability != nodepolicy.Paused {
-		t.Fatalf("incomplete Pause lost its durable fence: %+v", got)
-	}
-	for _, path := range []string{filepath.Join(f.engine.base, "unowned-stop"), filepath.Join(f.engine.base, "unowned-start")} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("external command sentinel %s: %v", path, err)
-		}
-	}
-	f.native.assertCounts(t, 0, 0, 0)
-	task2Decode(t, f.call(t, "engine:status", map[string]string{"engine": "llamacpp"}), &status)
-	if !status.Running || status.TerminationVerified {
-		t.Fatalf("manager invented external stop proof: %+v", status)
-	}
-	f.grant(t, "management-service-peer", true)
-	stopPauseRefusal(t, f.peerHTTP(t, s.peer, "/v1/node-availability/set", map[string]string{"state": "available"}, http.StatusConflict), "local_veto")
-	// Explicit owner-requested unload is still available through the same local
-	// service while Pause is incomplete, and does not authorize server stop.
-	f.call(t, "engine:unload-model", map[string]string{"engine": "llamacpp", "model": "switch-model"})
-	f.native.assertCounts(t, 0, 0, 1)
-	stopOwner()
-	f.availability(t, nodepolicy.Paused, "immediate")
-	f.assertPaused(t, nodepolicy.PausedLocally)
-	f.native.assertCounts(t, 0, 0, 1)
-	native.mu.Lock()
-	reads := native.nativeReads
-	native.mu.Unlock()
-	if reads == 0 {
-		t.Fatal("local retry omitted native independent residency proof")
-	}
-}
-
 type stopPausePeer struct {
 	engine *switchProcessFixture
 	native *stopPauseNative
@@ -1313,7 +1127,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	writeMembers(t, s.clusterDir, "management-service-target", "management-service-peer", "management-service-allowed", peerID)
 	var native *stopPauseNative
 	binding := newEngineBindingServiceFixture(t, s, func(e *switchProcessFixture) {
-		native = newStopPauseNative(t, e, false)
+		native = newStopPauseNative(t, e)
 		release()
 	})
 	f := &stopPauseFixture{engineBindingFixture: binding, native: native}
@@ -1321,7 +1135,7 @@ func newStopPausePair(t *testing.T) (*stopPauseFixture, *stopPausePeer) {
 	ports := reserveFixtureServicePorts(t)
 	releasePeer := holdStopPauseServicePorts(t, ports)
 	e := prepareSwitchProcessFixture(t, base, ports, "")
-	peerNative := newStopPauseNative(t, e, false)
+	peerNative := newStopPauseNative(t, e)
 	facades := map[string]int{"llamacpp-custom": e.facadePort, "llamacpp": e.targetFacadePort}
 	for _, name := range engines.Names() {
 		if _, exists := facades[name]; !exists {

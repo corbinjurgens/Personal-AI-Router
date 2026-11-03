@@ -929,10 +929,10 @@ func TestRemoteManagementDeniedPeerCanReadModelExports(t *testing.T) {
 	managementSet(t, a.cm, b.uuid, false)
 	test := func(name, model string, source, destination *task1Node) {
 		t.Run(name, func(t *testing.T) {
-			scenario := phase04SeedModel(t, f.stores[source.uuid], f.stores[destination.uuid], model, 37)
+			scenario := phase04SeedModel(t, f, source, destination, model, 37)
 			// Copy is a local destination action. The denied peer only reads
 			// the source's real ec file list and file export handlers.
-			response := f.control.engines[destination.uuid].call(t, "engine:remote-copy-model", map[string]string{"node": source.uuid, "engine": "ollama", "model": model + ":latest"})
+			response := f.control.engines[destination.uuid].call(t, "engine:remote-copy-model", map[string]string{"node": source.uuid, "engine": "llamacpp", "model": scenario.model})
 			var result struct {
 				Result struct {
 					Files       int   `json:"files"`
@@ -945,7 +945,7 @@ func TestRemoteManagementDeniedPeerCanReadModelExports(t *testing.T) {
 			}
 			for path, want := range scenario.data {
 				for _, root := range []string{f.stores[source.uuid], f.stores[destination.uuid]} {
-					got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(path)))
+					got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(scenario.snapshot), filepath.FromSlash(path)))
 					if err != nil {
 						t.Fatal(err)
 					}

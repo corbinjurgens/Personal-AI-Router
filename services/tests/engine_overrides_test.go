@@ -46,11 +46,6 @@ func writeDisabledBuiltinEngineOverrides(t *testing.T, root, appDir string) {
 				"port": 0, "bin": absent, "cli": absent, "ready": nil, "health": nil, "auth_statuses": []int{},
 			},
 		}}}
-		if engine.Name == "lmstudio" {
-			// Its dormant delete action also requires readiness when restart_after
-			// is true. Disable that flag to keep the null-probe override valid.
-			override["actions"] = map[string]any{"delete_model": map[string]bool{"restart_after": false}}
-		}
 		data, err := json.Marshal(override)
 		if err != nil {
 			t.Fatal(err)

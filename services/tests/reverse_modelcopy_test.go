@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,10 +32,24 @@ const phase04CutAt = 256 << 10
 
 type phase04FileRequest struct{ path, offset string }
 
+// phase04CopyScenario is one llama.cpp HF-cache model on the source: the main
+// GGUF (weights) and its multimodal companion are fetched by their path in the
+// snapshot, and the destination publishes refs/main only after both are in place.
 type phase04CopyScenario struct {
-	root, manifest, weights string
-	data                    map[string][]byte
-	exposed, release        chan struct{}
+	model            string
+	root             string // destination store root
+	snapshot         string // destination snapshot directory, relative to root
+	refs             string // destination refs/main, relative to root
+	revision         string
+	weights          string // source request path of the main GGUF (fetched last)
+	companion        string // source request path of the multimodal companion (fetched first)
+	data             map[string][]byte
+	exposed, release chan struct{}
+}
+
+// destination is the path of a snapshot file in the destination store.
+func (c *phase04CopyScenario) destination(rel string) string {
+	return filepath.Join(c.root, filepath.FromSlash(c.snapshot), filepath.FromSlash(rel))
 }
 
 // This observer forwards authenticated requests to the real engine-manager.
@@ -128,25 +143,20 @@ func newPhase04FileObserver(t *testing.T, target, caller *task1Node) *phase04Fil
 		o.mu.Unlock()
 		if scenario != nil && r.URL.Path == "/v1/models/file" {
 			path := r.URL.Query().Get("path")
-			if _, err := os.Stat(filepath.Join(scenario.root, filepath.FromSlash(scenario.manifest))); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("manifest visible before file publication: %v", err)
+			if _, err := os.Stat(filepath.Join(scenario.root, filepath.FromSlash(scenario.refs))); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("refs/main visible before file publication: %v", err)
 			}
-			if path == scenario.manifest {
-				for rel, want := range scenario.data {
-					if rel == scenario.manifest {
-						continue
-					}
-					got, err := os.ReadFile(filepath.Join(scenario.root, filepath.FromSlash(rel)))
-					if err != nil || phase04SHA(got) != phase04SHA(want) {
-						t.Errorf("visibility requested before verified %s: %v", rel, err)
-					}
+			if path == scenario.weights && r.Header.Get("Range") == "" {
+				got, err := os.ReadFile(scenario.destination(scenario.companion))
+				if err != nil || phase04SHA(got) != phase04SHA(scenario.data[scenario.companion]) {
+					t.Errorf("weights requested before verified %s: %v", scenario.companion, err)
 				}
 			}
 			if path == scenario.weights && r.Header.Get("Range") != "" {
 				if r.Header.Get("Range") != "bytes=262144-" {
 					t.Errorf("resume Range=%q, want bytes=262144-", r.Header.Get("Range"))
 				}
-				part, err := os.ReadFile(filepath.Join(scenario.root, filepath.FromSlash(path)) + ".part")
+				part, err := os.ReadFile(scenario.destination(path) + ".part")
 				if err != nil || !bytes.Equal(part, scenario.data[path][:phase04CutAt]) {
 					t.Errorf("resume partial bytes=%d err=%v", len(part), err)
 				}
@@ -172,31 +182,28 @@ func phase04SHA(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func phase04SeedModel(t *testing.T, sourceRoot, destinationRoot, name string, seed byte) *phase04CopyScenario {
+// phase04SeedModel writes a llama.cpp HF-cache model into the source store and
+// lists it in the source engine's native inventory.
+func phase04SeedModel(t *testing.T, f *phase04Fixture, source, destination *task1Node, name string, seed byte) *phase04CopyScenario {
 	t.Helper()
-	weights := make([]byte, 8<<20)
-	for i := range weights {
-		weights[i] = byte(i*17) + seed
+	sourceRoot, destinationRoot := f.stores[source.uuid], f.stores[destination.uuid]
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+	repo := "fixture/" + name + "-GGUF"
+	payload := make([]byte, 8<<20)
+	for i := range payload {
+		payload[i] = byte(i*17) + seed
 	}
-	config := []byte(fmt.Sprintf("{\"model_format\":\"gguf\",\"seed\":%d}", seed))
-	manifest := "manifests/registry.ollama.ai/library/" + name + "/latest"
+	weights := append(modelSettingsGGUF("blk.0.weight"), payload...)
+	companion := []byte(fmt.Sprintf("multimodal projector %d", seed))
+	repoDir := "models--" + strings.ReplaceAll(repo, "/", "--")
 	scenario := &phase04CopyScenario{
-		root: destinationRoot, manifest: manifest, weights: "blobs/sha256-" + phase04SHA(weights),
-		data:    map[string][]byte{"blobs/sha256-" + phase04SHA(weights): weights, "blobs/sha256-" + phase04SHA(config): config},
+		model: repo + ":Q4_K_M", root: destinationRoot, snapshot: repoDir + "/snapshots/" + revision, refs: repoDir + "/refs/main", revision: revision,
+		weights: "model-Q4_K_M.gguf", companion: "mmproj-model-Q8_0.gguf",
 		exposed: make(chan struct{}), release: make(chan struct{}),
 	}
-	body := map[string]any{
-		"schemaVersion": 2,
-		"config":        map[string]any{"digest": "sha256:" + phase04SHA(config), "size": len(config)},
-		"layers":        []map[string]any{{"digest": "sha256:" + phase04SHA(weights), "size": len(weights)}},
-	}
-	manifestData, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scenario.data[manifest] = manifestData
+	scenario.data = map[string][]byte{scenario.weights: weights, scenario.companion: companion}
 	for rel, data := range scenario.data {
-		path := filepath.Join(sourceRoot, filepath.FromSlash(rel))
+		path := filepath.Join(sourceRoot, filepath.FromSlash(scenario.snapshot), filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -204,6 +211,17 @@ func phase04SeedModel(t *testing.T, sourceRoot, destinationRoot, name string, se
 			t.Fatal(err)
 		}
 	}
+	refs := filepath.Join(sourceRoot, filepath.FromSlash(scenario.refs))
+	if err := os.MkdirAll(filepath.Dir(refs), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(refs, []byte(revision), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.engines[source.uuid].addModel(scenario.model)
+	// The manager records the engine's inventory observation that a copy export
+	// is bound to when it is asked for the models.
+	f.control.engines[source.uuid].call(t, "engine:models", nil)
 	return scenario
 }
 
@@ -285,7 +303,7 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 	f := newPhase04FixtureWithOptions(t, phase04FixtureOptions{isolateCopyAuthority: true})
 	test := func(name, model string, source, destination *task1Node, seed byte) {
 		t.Run(name, func(t *testing.T) {
-			scenario := phase04SeedModel(t, f.stores[source.uuid], f.stores[destination.uuid], model, seed)
+			scenario := phase04SeedModel(t, f, source, destination, model, seed)
 			observer := f.files[source.uuid]
 			observer.mu.Lock()
 			observer.scenario = scenario
@@ -294,21 +312,30 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 			release := func() { releaseOnce.Do(func() { close(scenario.release) }) }
 			defer release()
 			manager := f.control.engines[destination.uuid]
-			id := manager.send(t, "engine:remote-copy-model", map[string]string{"node": source.uuid, "engine": "ollama", "model": model + ":latest"}, true)
+			id := manager.send(t, "engine:remote-copy-model", map[string]string{"node": source.uuid, "engine": "llamacpp", "model": scenario.model}, true)
 			select {
 			case <-scenario.exposed:
 			case <-time.After(15 * time.Second):
-				t.Fatalf("large file did not stream; manager: %s", manager.output.String())
+				manager.mu.Lock()
+				var frames []string
+				for _, frame := range manager.frames {
+					if idEquals(frame.ID, id) {
+						raw, _ := json.Marshal(frame)
+						frames = append(frames, string(raw))
+					}
+				}
+				manager.mu.Unlock()
+				t.Fatalf("large file did not stream; frames %v; manager: %s", frames, manager.output.String())
 			}
 			task1Eventually(t, "resumable partial before visibility", 5*time.Second, func() bool {
-				info, err := os.Stat(filepath.Join(scenario.root, filepath.FromSlash(scenario.weights)) + ".part")
+				info, err := os.Stat(scenario.destination(scenario.weights) + ".part")
 				return err == nil && info.Size() == phase04CutAt
 			})
-			if _, err := os.Stat(filepath.Join(scenario.root, filepath.FromSlash(scenario.weights))); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(scenario.destination(scenario.weights)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("unverified weights published: %v", err)
 			}
-			if _, err := os.Stat(filepath.Join(scenario.root, filepath.FromSlash(scenario.manifest))); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("manifest published with partial: %v", err)
+			if _, err := os.Stat(filepath.Join(scenario.root, filepath.FromSlash(scenario.refs))); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("refs/main published with partial: %v", err)
 			}
 			// Hold the copy response open while inference and control execute on
 			// the same peer pair. The stream's first chunk precedes control.
@@ -328,7 +355,7 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 			task2Decode(t, control.Result, &installed)
 			found := false
 			for _, engine := range installed.Engines {
-				if engine.Engine == "ollama" && engine.Installed {
+				if engine.Engine == "llamacpp" && engine.Installed {
 					found = true
 				}
 			}
@@ -386,16 +413,19 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 			var total int64
 			for rel, want := range scenario.data {
 				total += int64(len(want))
-				got, err := os.ReadFile(filepath.Join(scenario.root, filepath.FromSlash(rel)))
+				got, err := os.ReadFile(scenario.destination(rel))
 				if err != nil || phase04SHA(got) != phase04SHA(want) {
 					t.Fatalf("published %s hash/bytes failed: %v", rel, err)
 				}
-				if _, err := os.Stat(filepath.Join(scenario.root, filepath.FromSlash(rel)) + ".part"); !errors.Is(err, os.ErrNotExist) {
+				if _, err := os.Stat(scenario.destination(rel) + ".part"); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("partial remains after publication: %v", err)
 				}
 			}
-			if result.Result.Files != 3 || result.Result.FilesSkipped != 0 || result.Result.BytesTotal != total || result.Result.BytesCopied != total {
-				t.Fatalf("copy result=%+v, want three new files totaling %d", result.Result, total)
+			if ref, err := os.ReadFile(filepath.Join(scenario.root, filepath.FromSlash(scenario.refs))); err != nil || string(ref) != scenario.revision {
+				t.Fatalf("refs/main = %q, %v; want %q", ref, err, scenario.revision)
+			}
+			if result.Result.Files != len(scenario.data) || result.Result.FilesSkipped != 0 || result.Result.BytesTotal != total || result.Result.BytesCopied != total {
+				t.Fatalf("copy result=%+v, want %d new files totaling %d", result.Result, len(scenario.data), total)
 			}
 			observer.mu.Lock()
 			requests := append([]phase04FileRequest(nil), observer.requests...)
@@ -407,8 +437,8 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 					ranges = append(ranges, request.offset)
 				}
 			}
-			if len(requests) != 4 || requests[3].path != scenario.manifest || len(ranges) != 2 || ranges[0] != "" || ranges[1] != "bytes=262144-" {
-				t.Fatalf("file requests=%+v; want each blob once plus one distinct Range, visibility last", requests)
+			if len(requests) != 3 || requests[0].path != scenario.companion || len(ranges) != 2 || ranges[0] != "" || ranges[1] != "bytes=262144-" {
+				t.Fatalf("file requests=%+v; want the companion once, then the weights plus one distinct Range", requests)
 			}
 			if got := f.engines[source.uuid].count("concurrent-" + model); got != 1 {
 				t.Fatalf("concurrent inference dispatches=%d, want 1", got)
@@ -473,7 +503,7 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 			listed, fetched := observer.listed, len(observer.requests)
 			observer.mu.Unlock()
 			assertRejected := func() {
-				id := f.control.engines[destination.uuid].send(t, "engine:remote-copy-model", map[string]string{"node": source.uuid, "engine": "ollama", "model": model}, true)
+				id := f.control.engines[destination.uuid].send(t, "engine:remote-copy-model", map[string]string{"node": source.uuid, "engine": "llamacpp", "model": model}, true)
 				response := task2Response(t, f.control.engines[destination.uuid], id)
 				if response.Error == nil {
 					t.Fatal("invalid pin accepted copy")
@@ -520,6 +550,6 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 			assertRejected()
 		})
 	}
-	testAuthority("wrong and removed reverse pins fail before listing or bytes handlers", "from-restricted:latest", f.control.a, f.control.b)
-	testAuthority("wrong and removed direct pins fail before listing or bytes handlers", "from-reachable:latest", f.control.b, f.control.a)
+	testAuthority("wrong and removed reverse pins fail before listing or bytes handlers", "fixture/from-restricted-GGUF:Q4_K_M", f.control.a, f.control.b)
+	testAuthority("wrong and removed direct pins fail before listing or bytes handlers", "fixture/from-reachable-GGUF:Q4_K_M", f.control.b, f.control.a)
 }

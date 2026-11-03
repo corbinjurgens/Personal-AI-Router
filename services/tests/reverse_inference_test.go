@@ -52,8 +52,29 @@ type phase04Engine struct {
 	port     int
 	mu       sync.Mutex
 	calls    map[string]int
+	models   []string
 	canceled chan string
 	release  chan struct{}
+}
+
+// addModel makes the engine's native inventory list one more unloaded model,
+// as a router that has the model in its cache does.
+func (e *phase04Engine) addModel(id string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.models = append(e.models, id)
+}
+
+// inventory is the router's /models body: the resident inference model, then
+// every cached model that is not loaded.
+func (e *phase04Engine) inventory() map[string]any {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	rows := []map[string]any{{"id": phase04Model, "status": map[string]string{"value": "loaded"}}}
+	for _, id := range e.models {
+		rows = append(rows, map[string]any{"id": id, "status": map[string]string{"value": "unloaded"}})
+	}
+	return map[string]any{"data": rows}
 }
 
 func (e *phase04Engine) count(mode string) int {
@@ -67,13 +88,8 @@ func newPhase04Engine(t *testing.T) *phase04Engine {
 	e := &phase04Engine{calls: map[string]int{}, canceled: make(chan string, 16), release: make(chan struct{})}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/tags", "/api/ps":
-			// Preserve the native store-copy fixture's original inventory surface.
-			if err := json.NewEncoder(w).Encode(map[string]any{"models": []map[string]string{{"name": phase04Model + ":latest"}}}); err != nil {
-				t.Error(err)
-			}
 		case "/v1/models", "/models":
-			if err := json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": phase04Model, "status": map[string]string{"value": "loaded"}}}}); err != nil {
+			if err := json.NewEncoder(w).Encode(e.inventory()); err != nil {
 				t.Error(err)
 			}
 		case "/v1/chat/completions":
@@ -237,19 +253,20 @@ func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *
 		}
 		writeDisabledBuiltinEngineOverrides(t, n.base, filepath.Dir(manifestDir))
 		port := f.engines[n.uuid].port
-		// Native store-copy cases retain their separate Ollama store adapter.
-		task1WriteJSON(t, filepath.Join(manifestDir, "ollama.json"), map[string]any{
-			"engine":  "ollama",
-			"runtime": map[string]any{"port": port, "env": map[string]string{"OLLAMA_MODELS": f.stores[n.uuid]}, "ready": map[string]any{"http": "http://127.0.0.1:{port}/api/version", "status": 200}},
-			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
-				"detect": []string{nodeInfoBin}, "models_dir": filepath.Join(n.base, "ollama-models"), "runtime": map[string]any{"bin": nodeInfoBin, "port": port},
-			}},
-		})
+		// An empty preset marks the launch as a router whose models come from
+		// the HF cache, so the node can export its cached models for copy.
+		preset := filepath.Join(n.base, "external", "models.ini")
+		if err := os.MkdirAll(filepath.Dir(preset), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(preset, []byte("# synthetic router preset"+string(rune(10))), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		task1WriteJSON(t, filepath.Join(manifestDir, "llamacpp.json"), map[string]any{
 			"engine":  "llamacpp",
-			"runtime": map[string]any{"port": port, "env": map[string]string{"LLAMA_CACHE": f.stores[n.uuid]}, "ready": map[string]any{"http": "http://127.0.0.1:{port}/v1/models", "status": 200, "json_match": nil}},
+			"runtime": map[string]any{"port": port, "args": []string{"--models-preset", preset}, "env": map[string]string{"LLAMA_CACHE": f.stores[n.uuid]}, "ready": map[string]any{"http": "http://127.0.0.1:{port}/v1/models", "status": 200, "json_match": nil}},
 			"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
-				"detect": []string{nodeInfoBin}, "models_dir": filepath.Join(n.base, "llamacpp-models"), "runtime": map[string]any{"bin": nodeInfoBin, "port": port},
+				"detect": []string{nodeInfoBin}, "models_dir": f.stores[n.uuid], "runtime": map[string]any{"bin": nodeInfoBin, "port": port, "args": []string{"--models-preset", preset}},
 			}},
 		})
 		var members []task1Member
