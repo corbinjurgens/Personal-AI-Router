@@ -11,7 +11,7 @@
  *
  * Examples:
  *   tsx scripts/coverage-summary.ts inference/runner
- *   tsx scripts/coverage-summary.ts inference/engines/ollama inference/engines/lm-studio
+ *   tsx scripts/coverage-summary.ts inference/runner inference/engines/llama-cpp
  *
  * Why this exists:
  *   Vitest's V8 coverage provider emits the same source path twice in

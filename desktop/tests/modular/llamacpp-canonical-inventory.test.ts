@@ -6,7 +6,7 @@ import type { createOverviewWindow } from '@/electron/window'
 import type { JsonObject } from '@/electron/service-bridge/json-rpc-client'
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
 import { parseModelsResult } from '@/electron/service-bridge/model-download'
-import { getModularSupervisor, pullModelParams } from '@/electron/service-bridge/modular-supervisor'
+import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 
 vi.mock('electron', () => ({
     app: { isPackaged: false, getAppPath: () => process.cwd() },
@@ -107,12 +107,6 @@ describe('canonical engine model wire formats', () => {
         expect(() =>
             parseModelsResult({ models: [], modelsByEngine: { llamacpp: [null] } })
         ).toThrow('malformed inventory')
-    })
-
-    it('uses the manifest model field for pulls', () => {
-        expect(pullModelParams('ollama', 'demo')).toEqual({ name: 'demo' })
-        expect(pullModelParams('lmstudio', 'demo')).toEqual({ model: 'demo' })
-        expect(pullModelParams('llamacpp', 'demo')).toEqual({ model: 'demo' })
     })
 })
 

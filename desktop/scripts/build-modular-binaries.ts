@@ -232,11 +232,10 @@ function listFingerprintFiles(repo: string): string[] {
                 continue
             } else if (EMBEDDED_ASSET_EXTENSIONS.some(ext => entry.endsWith(ext))) {
                 // Assets compiled in with go:embed are as much a part of the
-                // binary as the source that reads them. The engine manager
-                // embeds its Ollama catalogue, so regenerating that file changes
-                // what ships — but with only .go files fingerprinted the build
-                // saw no change and reused the previous binary, leaving a stale
-                // catalogue in the app with nothing to indicate it.
+                // binary as the source that reads them. Regenerating an embedded
+                // file changes what ships — but with only .go files fingerprinted
+                // the build saw no change and reused the previous binary, leaving
+                // a stale asset in the app with nothing to indicate it.
                 out.push(full)
             }
         }

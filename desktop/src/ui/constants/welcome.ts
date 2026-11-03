@@ -12,8 +12,6 @@ export const WELCOME_STEP_HEADINGS = ["Welcome, let's get you set up", 'Install 
 export const WELCOME_STEP_SUB_HEADINGS = ['', 'You can update later by clicking on a node'] as const
 
 export const WELCOME_ENGINE_DEFAULT_SELECTED: Record<BuiltinEngineType, boolean> = {
-    ollama: true,
-    'lm-studio': true,
     'llama-cpp': true
 }
 

@@ -15,15 +15,10 @@ import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { engineProgressKey } from '@/shared/utils/engine-progress'
 
 /**
- * Two ways the "Deleting…" spinner used to outlive the operation:
- *
- * 1. The delete failed. The main process reported the error but stamped no
- *    `engineType`/`modelName`, so the store could not attribute it and the row
- *    stayed disabled until the safety-net timeout — up to a minute after the
- *    user had already been told it failed.
- * 2. The delete succeeded, slowly. On LM Studio the backend does not reply until
- *    it has bounced the server and passed its readiness probe (`ready.timeout_s`
- *    is 60s on its own), which the 60s net could expire underneath.
+ * The "Deleting…" spinner used to outlive a failed delete: the main process
+ * reported the error but stamped no `engineType`/`modelName`, so the store could
+ * not attribute it and the row stayed disabled until the safety-net timeout —
+ * up to a minute after the user had already been told it failed.
  *
  * Slow llama.cpp loads have the same guarantee: a safety net must not re-enable
  * conflicting controls while the backend request is still valid.
@@ -161,31 +156,7 @@ describe('pending-actions store: model actions', () => {
         ).toBe('deleteModel')
     })
 
-    it('keeps an LM Studio delete pending past the default net, since it awaits a restart', () => {
-        usePendingActionsStore.getState().begin({
-            command: 'deleteModel',
-            engineType: 'lm-studio',
-            nodeId: 'node-1',
-            model: 'publisher/demo'
-        })
-
-        // Past the 60s default and past the main process's 120s RPC timeout.
-        vi.advanceTimersByTime(130_000)
-        expect(
-            usePendingActionsStore
-                .getState()
-                .getModelPending('node-1', 'lm-studio', 'publisher/demo')
-        ).toBe('deleteModel')
-
-        vi.advanceTimersByTime(60_000)
-        expect(
-            usePendingActionsStore
-                .getState()
-                .getModelPending('node-1', 'lm-studio', 'publisher/demo')
-        ).toBeUndefined()
-    })
-
-    it('leaves the default net in place for a llama.cpp delete, which never bounces', () => {
+    it('leaves the default net in place for a llama.cpp delete', () => {
         usePendingActionsStore.getState().begin({
             command: 'deleteModel',
             engineType: 'llama-cpp',

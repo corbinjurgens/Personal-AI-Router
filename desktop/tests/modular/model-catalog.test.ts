@@ -123,18 +123,14 @@ describe('model catalog relay', () => {
         await expect(getEngineHubModels('llama-cpp')).resolves.toEqual({ models: [] })
     })
 
-    // Ollama's list is compiled into the engine manager, so warming it would
-    // cost a multi-megabyte reply for nothing.
-    it('warms only the live-fetched catalogs', () => {
+    it('warms the llama.cpp catalog', () => {
         warmEngineHubs()
-        expect(mocks.supervisor.callProcess).toHaveBeenCalledTimes(2)
-        for (const engine of ['lmstudio', 'llamacpp']) {
-            expect(mocks.supervisor.callProcess).toHaveBeenCalledWith(
-                'broker',
-                'engine:catalog',
-                { engine },
-                MODULAR_CATALOG_CALL_TIMEOUT_MS
-            )
-        }
+        expect(mocks.supervisor.callProcess).toHaveBeenCalledTimes(1)
+        expect(mocks.supervisor.callProcess).toHaveBeenCalledWith(
+            'broker',
+            'engine:catalog',
+            { engine: 'llamacpp' },
+            MODULAR_CATALOG_CALL_TIMEOUT_MS
+        )
     })
 })

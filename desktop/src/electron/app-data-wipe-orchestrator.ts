@@ -34,10 +34,9 @@ export function getAppDataWipePlan(): { willRelaunch: boolean } {
  * Remove the engines PAIR installed, before the wipe script deletes the app
  * data folder.
  *
- * Deleting that folder only reaches the engines that install inside it. A
- * vendor installer picks its own location — LM Studio lands in the user's home
- * — so without this, resetting app data removed Ollama and llama.cpp and left
- * LM Studio behind.
+ * Deleting that folder only reaches the engines that install inside it. An
+ * installer that picks its own location would otherwise be left behind by a
+ * reset of app data.
  *
  * One backend call, not a loop over engines: engine-manager owns which installs
  * are PAIR's and what removing one safely involves, including preserving each

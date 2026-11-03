@@ -269,9 +269,6 @@ function submit(executable: string, request: ScheduledRequest, currentGeneration
         '--temperature',
         String(stage.temperature)
     ]
-    // Ollama's separate reasoning channel would inflate latency and token counts
-    // without changing what the demo is showing, so switch it off where supported.
-    if (target.backend === 'ollama') args.push('--ollama-think', 'false')
 
     const child = spawn(executable, args, {
         windowsHide: true,
@@ -364,7 +361,7 @@ export async function startInferenceDemo(): Promise<DemoState> {
         // Deliberately names no port: the proxies own their listeners, and
         // quoting a number here would be the same mistake as hardcoding one.
         throw new Error(
-            'No local inference engine exposed a text-generation model. Start Ollama, LM Studio, or llama.cpp, wait for it to appear in Settings, and try again.'
+            'No local inference engine exposed a text-generation model. Start llama.cpp, wait for it to appear in Settings, and try again.'
         )
     }
 

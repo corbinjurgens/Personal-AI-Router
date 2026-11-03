@@ -27,9 +27,9 @@ function parseWorkload(value: JsonValue | undefined): Workload | null {
     if (!obj) return null
     const id = stringValue(obj.id)
     if (!id) return null
-    // The workload-manager stamps the engine-manager id (`lmstudio`); map it onto
-    // our closed `EngineType` union (`lm-studio`) before narrowing so LM Studio
-    // jobs are not silently dropped.
+    // The workload-manager stamps the engine-manager id (`llamacpp`); map it onto
+    // our `EngineType` spelling (`llama-cpp`) before narrowing so those jobs are
+    // not silently dropped.
     const engine = engineTypeFromManagerName(stringValue(obj.engine))
     if (!engine) return null
     const stateValue = stringValue(obj.state)

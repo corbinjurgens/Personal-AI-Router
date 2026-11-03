@@ -99,7 +99,6 @@ export default function ModelSettingsEditor({
             {draft.ok && profiles.length === 0 && (
                 <Text kind="body/regular/sm" role="status">
                     No supported profiles in this policy. Create a generation profile to begin.
-                    Ollama options stay in Advanced policy JSON.
                 </Text>
             )}
             {profile && (

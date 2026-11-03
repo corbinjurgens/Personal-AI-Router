@@ -416,7 +416,7 @@ the desktop; the destination's Go service fetches the source artifacts.
   errors, any port conflict, and whether applying restarts or rebinds.
 - `applySettings(request)` commits a draft and waits for the owner's stop,
   rebind, and restart/readiness operation before returning its receipt. This
-  can take minutes (Ollama permits ten minutes for readiness; the desktop call
+  can take minutes (a manifest may permit ten minutes for readiness; the desktop call
   allows fourteen minutes). The receipt identifies the accepted operation;
   use `onSettingsChanged` for its authoritative applied or failed state. Once
   durably accepted, the owner continues even if the caller disconnects or
@@ -468,9 +468,9 @@ Clearing client state, reconnecting or seeing an idle baseline does not resolve
 uncertainty. TUI correlation remains visit-scoped: leaving without an
 acknowledgement can forget an unresolved ID and does not prevent late acceptance.
 
-`EngineType` currently includes `ollama`, `lm-studio`, and `llama-cpp`.
-`searchHub(engineType, query?)` serves Ollama's locked local catalog and cached
-live Hugging Face catalogs for LM Studio and llama.cpp. A non-empty llama.cpp
+The only built-in `EngineType` is `llama-cpp`; any other engine arrives as a
+descriptor. `searchHub(engineType, query?)` serves the cached live Hugging Face
+catalog for llama.cpp. A non-empty llama.cpp
 query performs an explicit bounded search across public Hugging Face GGUF
 repositories; other calls return the populated engine catalog. llama.cpp pull
 IDs are exact `owner/repository:quantization` values; load, unload, and delete
@@ -586,7 +586,7 @@ Commands return no state. Renderer stores update from
 - update check, download, install, and status;
 - the node-local Inference Demo (`inferenceDemo.getState()` / `start()` / `stop()`
   and the `demo:state` push). `start()` rejects if a demo is already running on
-  this node or if no Ollama, LM Studio, or llama.cpp proxy exposed a
+  this node or if no llama.cpp proxy exposed a
   text-generation model; callers show that as an ordinary error banner. Demo
   state is not synchronized across nodes.
 
@@ -594,7 +594,7 @@ Commands return no state. Renderer stores update from
 typed in `IpcPushChannelMap` (`shared/types/ipc-channels.ts`) instead of the
 logical push table above.
 
-Service status remains `connecting` until both the broker and required Ollama
+Service status remains `connecting` until both the broker and the required
 proxy report ready. `ServiceStatus.error` carries the latest startup or runtime
 failure; successful readiness and deliberate stops clear it, which is how a
 crash is told apart from a stop the user asked for.

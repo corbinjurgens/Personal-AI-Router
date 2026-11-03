@@ -180,7 +180,7 @@ export function parseModelSettings(text: string): Result<ModelSettingsProfile[]>
     if (!draft.ok) return draft
     const profiles: ModelSettingsProfile[] = []
     for (const profile of draft.value.profiles) {
-        if (profile.engine !== 'llamacpp' && profile.engine !== 'lmstudio') continue
+        if (profile.engine !== 'llamacpp') continue
         if (typeof profile.model !== 'string') continue
         profiles.push({
             name: typeof profile.name === 'string' ? profile.name : '',
@@ -455,7 +455,7 @@ export function applyModelSettings(
     const profile = draft.value.profiles.find(
         item => item.engine === identity.engine && item.model === identity.model
     )
-    if (!profile || (identity.engine !== 'llamacpp' && identity.engine !== 'lmstudio'))
+    if (!profile || identity.engine !== 'llamacpp')
         return {
             ok: false,
             error: { code: 'profile', message: 'Select a supported profile in this policy.' }

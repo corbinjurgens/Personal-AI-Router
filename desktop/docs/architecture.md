@@ -521,7 +521,7 @@ Backend-owned ports are reported at runtime where available. Constants that
 cannot yet be reported are centralized in
 `src/shared/constants/modular-runtime.ts`.
 
-- Ollama-compatible clients use the proxy port reported by the broker.
+- OpenAI-compatible clients use the proxy port reported by the broker.
 - Cluster pairing currently uses port `14321`.
 - Paired node telemetry is resolved by the backend from the admitted node's
   advertised `/v1/node-info` service and may use its reverse session. Self and
@@ -607,11 +607,11 @@ deletes finish. Unpackaged (`electron-vite dev`) builds omit relaunch and the UI
 tells the developer to run `npm start` again — quitting Electron tears down the Vite
 renderer server, so auto-relaunch would come up with nothing to load.
 
-The engines' model stores (`~/.ollama`, `~/.llamacpp`, `~/.lmstudio/models`) and
+The engines' model stores (for example `~/.llamacpp`) and
 the application install tree are never removed. The reset does uninstall the
 engines PAIR installed, through `engine:uninstall-managed` while the broker is
-still running, so an engine a vendor installer placed in the user's home is
-removed too rather than only those inside the app data folder.
+still running, so an engine an installer placed outside the app data folder is
+removed too.
 
 ## Sources of truth
 

@@ -66,10 +66,10 @@ function toHubModel(raw: JsonValue): EngineHubModel | null {
 /**
  * Serve an engine's model hub from the backend's `engine:catalog`.
  *
- * The catalog used to be assembled here in the main process: a committed Ollama
- * list bundled into this bundle, plus a live Hugging Face fetch. Both moved into
- * `nvpair-engine-manager` so the desktop app and the terminal interface serve
- * the same models from one implementation rather than each maintaining its own.
+ * The catalog used to be assembled here in the main process, with a live
+ * Hugging Face fetch. It moved into `nvpair-engine-manager` so the desktop app
+ * and the terminal interface serve the same models from one implementation
+ * rather than each maintaining its own.
  *
  * An engine with no curated source is an error at the backend, reported here as
  * an empty hub so the modal shows its empty state rather than a failure the user
@@ -112,9 +112,8 @@ export async function getEngineHubModels(
 }
 
 /**
- * Warm the backend's catalog cache so the first modal open is instant. Only the
- * live-fetched sources benefit; the committed one is compiled in and costs
- * nothing. Fire-and-forget: failures are logged by the call itself and the modal
+ * Warm the backend's catalog cache so the first modal open is instant.
+ * Fire-and-forget: failures are logged by the call itself and the modal
  * will simply fetch again.
  *
  * Called once the Overview renderer reports ready, deliberately not on service
@@ -122,6 +121,5 @@ export async function getEngineHubModels(
  * the renderer's own load, and a hanging one leaves an unpainted window behind.
  */
 export function warmEngineHubs(): void {
-    void getEngineHubModels('lm-studio')
     void getEngineHubModels('llama-cpp')
 }

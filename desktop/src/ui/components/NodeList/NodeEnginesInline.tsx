@@ -110,11 +110,10 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
             const backend = selfEngines.find(b => b.engineType === type)
 
             // Show every engine the node has actually reported — not just ones
-            // with a proxy port. The broker fronts only Ollama with a proxy, so
-            // gating on `proxyPort` hid LM Studio (managed by nvpair-engine-manager,
-            // loopback-only, no proxy). Skip the padded `initializing`
-            // placeholder so engines a node never reports (e.g. LM Studio on a
-            // remote, undiscovered node) don't show a perpetual spinner.
+            // with a proxy port. Gating on `proxyPort` would hide an engine
+            // managed by nvpair-engine-manager that has no proxy. Skip the padded
+            // `initializing` placeholder so engines a node never reports (e.g. on
+            // a remote, undiscovered node) don't show a perpetual spinner.
             if (!backend || backend.processStatus === 'initializing') {
                 return []
             }

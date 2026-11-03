@@ -88,7 +88,7 @@ export interface EngineStatusData {
      * Null when not installed, or for an engine with no server port.
      */
     enginePort: number | null
-    /** PAIR's proxy port for this engine (e.g. Ollama 54301). Always set when the engine is installed. */
+    /** PAIR's proxy port for this engine (e.g. 54301). Always set when the engine is installed. */
     proxyPort: number | null
     /**
      * Installed engine binary version reported by the owning node, when the
@@ -193,7 +193,7 @@ export interface ModelItem {
     /**
      * Original key used to pull/download this model (e.g. HuggingFace `author/repo/file.gguf`).
      * Stored alongside the model so sync can reproduce the pull on other nodes.
-     * Absent for models whose `name` is already a valid pull key (e.g. Ollama tags).
+     * Absent for models whose `name` is already a valid pull key (e.g. a bare model name).
      */
     pullKey?: string
     /**

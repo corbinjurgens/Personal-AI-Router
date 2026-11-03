@@ -24,7 +24,7 @@ import {
 } from '@/shared/utils/engines'
 import { parseEngineDescriptors } from '@/electron/service-bridge/engine-descriptors'
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
-import { getModularSupervisor, pullModelParams } from '@/electron/service-bridge/modular-supervisor'
+import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 import { handleServiceBridgeInvoke } from '@/electron/service-bridge/empty-handlers'
 import {
     EngineCapabilities,
@@ -196,18 +196,14 @@ describe('engine descriptor parsing', () => {
 describe('built-in engines keep their presentation', () => {
     it('uses the curated label, capabilities and icon whatever the descriptor says', () => {
         const restrictive = descriptorsFrom(
-            wireDescriptor('ollama', 'ollama', 'Something else', {})
-        ).get('ollama')
+            wireDescriptor('llamacpp', 'llamacpp', 'Something else', {})
+        ).get('llama-cpp')
         for (const engineType of EngineTypes) {
             expect(engineCapabilities(engineType, restrictive)).toBe(EngineCapabilities[engineType])
             expect(engineLabel(engineType, restrictive)).toBe(EngineDisplayNames[engineType])
             expect(engineAdapterType(engineType, undefined)).toBe(engineType)
         }
 
-        render(createElement(EngineIcon, { type: 'ollama' }))
-        expect(container.querySelector('img')?.getAttribute('alt')).toBe('Ollama')
-        render(createElement(EngineIcon, { type: 'lm-studio' }))
-        expect(container.querySelector('img')?.getAttribute('alt')).toBe('LM Studio')
         render(createElement(EngineIcon, { type: 'llama-cpp' }))
         expect(container.querySelector('img')?.getAttribute('alt')).toBe('llama.cpp')
     })
@@ -238,12 +234,8 @@ describe('built-in engines keep their presentation', () => {
 
         expect(
             engineTypesForNode('node', statusByNode, descriptorsFrom(FORK_WIRE, STRATA_WIRE))
-        ).toEqual(['ollama', 'lm-studio', 'llama-cpp', 'llamacpp-custom', 'strata'])
-        expect(engineTypesForNode('other', statusByNode, new Map())).toEqual([
-            'ollama',
-            'lm-studio',
-            'llama-cpp'
-        ])
+        ).toEqual(['llama-cpp', 'llamacpp-custom', 'strata'])
+        expect(engineTypesForNode('other', statusByNode, new Map())).toEqual(['llama-cpp'])
     })
 })
 
@@ -436,22 +428,6 @@ describe('model operations use the typed engine-manager methods', () => {
             { engine: 'llamacpp-custom', model: 'org/model:Q4' }
         ])
         expect(call).toHaveBeenNthCalledWith(2, 'broker', 'engine:models')
-    })
-
-    it('spells a pull by the engine family, which has no typed method yet', () => {
-        const state = getModularBridgeState()
-        state.setEngineDescriptors(
-            parseEngineDescriptors({
-                engines: [
-                    FORK_WIRE,
-                    wireDescriptor('ollama-nightly', 'ollama', 'Ollama nightly', { pull: {} })
-                ]
-            })
-        )
-
-        expect(pullModelParams(state.engineFamily('ollama-nightly'), 'm')).toEqual({ name: 'm' })
-        expect(pullModelParams(state.engineFamily('llamacpp-custom'), 'm')).toEqual({ model: 'm' })
-        expect(pullModelParams(state.engineFamily('unknown-engine'), 'm')).toEqual({ model: 'm' })
     })
 })
 

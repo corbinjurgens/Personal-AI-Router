@@ -118,7 +118,6 @@ describe('model settings policy helpers', () => {
     })
 
     it('identifies profiles by engine and model regardless of display name or order', () => {
-        const other = { engine: 'lmstudio', model: identity.model }
         const text = JSON.stringify({
             profiles: [
                 { ...other, name: 'same' },
@@ -264,16 +263,15 @@ describe('model settings policy helpers', () => {
         )
     })
 
-    it('preserves unsupported engines and LM Studio min_p through supported edits', () => {
-        const other = { engine: 'lmstudio', model: identity.model }
-        const ollama = {
-            engine: 'ollama',
+    it('preserves unsupported engines and unknown options through supported edits', () => {
+        const unsupported = {
+            engine: 'strata',
             model: 'native',
             requestOptions: { options: { temperature: 2 } }
         }
-        const lm = { ...other, requestOptions: { min_p: 0.2, uncommon: [1, 2] } }
-        const text = JSON.stringify({ profiles: [ollama, lm] })
-        const result = applyModelSettings(text, other, {
+        const supported = { ...identity, requestOptions: { min_p: 0.2, uncommon: [1, 2] } }
+        const text = JSON.stringify({ profiles: [unsupported, supported] })
+        const result = applyModelSettings(text, identity, {
             kind: 'option',
             key: 'temperature',
             value: '0.7'
@@ -281,16 +279,19 @@ describe('model settings policy helpers', () => {
         if (!result.ok) throw new Error(result.error.message)
         expect(JSON.parse(result.value)).toEqual({
             profiles: [
-                ollama,
-                { ...lm, requestOptions: { ...lm.requestOptions, temperature: 0.7 } }
+                unsupported,
+                {
+                    ...supported,
+                    requestOptions: { ...supported.requestOptions, temperature: 0.7 }
+                }
             ]
         })
         expect(
-            applyModelSettings(text, other, { kind: 'option', key: 'min_p', value: '0.4' }).ok
-        ).toBe(false)
-        expect(
-            applyModelSettings(text, ollama, { kind: 'option', key: 'temperature', value: '0.4' })
-                .ok
+            applyModelSettings(text, unsupported, {
+                kind: 'option',
+                key: 'temperature',
+                value: '0.4'
+            }).ok
         ).toBe(false)
     })
 })
@@ -539,11 +540,9 @@ describe('model settings form controls', () => {
         await act(async () => option.click())
     }
 
-    it('edits the bound engine/model profile and hides min_p for LM Studio', async () => {
-        const other = { engine: 'lmstudio', model: identity.model }
+    it('edits the bound engine/model profile', async () => {
         const initial = policy({}, other)
         await render(initial, initial, false, false, other)
-        expect(container.querySelector('input[aria-label="Min P"]')).toBeNull()
         await type('Temperature', '0.4')
         const text = changed.mock.lastCall?.[0]
         if (!text) throw new Error('Missing selected-profile edit')

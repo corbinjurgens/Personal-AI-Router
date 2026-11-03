@@ -8,7 +8,7 @@ import { ModelEntry } from '@/ui/types/model-hub'
 import { formatModelName } from '@/ui/utils/format-model-name'
 import { formatBytes, formatRelativeTime } from '@/ui/utils/formatters'
 
-/** List row when browsing an engine-native public catalog (e.g. Ollama library). */
+/** List row when browsing an engine-native public catalog (e.g. the llama.cpp GGUF catalog). */
 const EngineHubListRow = memo(function EngineHubListRow({
     disabled,
     model,

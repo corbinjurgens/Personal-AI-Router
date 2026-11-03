@@ -349,8 +349,6 @@ describe('proxy engine identity', () => {
     it('declares the complete proxy set in stable order', () => {
         expect(PROXY_ENGINES).toEqual(['llama-cpp'])
         expect(PROXY_NODE_SOURCES).toEqual(['llamacpp-proxy'])
-        expect(isProxyEngine('ollama')).toBe(false)
-        expect(isProxyEngine('lm-studio')).toBe(false)
         expect(isProxyEngine('llama-cpp')).toBe(true)
     })
 

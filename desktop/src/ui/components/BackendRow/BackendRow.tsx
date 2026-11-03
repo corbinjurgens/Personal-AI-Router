@@ -118,7 +118,7 @@ export function BackendRow({
     const isLocalNode = nodeId === selfId
 
     // Remote peers may not have polled engine facts yet; refresh status when the
-    // accordion opens so LM Studio and other engines are not stuck as Unavailable.
+    // accordion opens so engines are not stuck as Unavailable.
     useEffect(() => {
         if (!isLocalNode && nodeId) {
             void useEngineStatusStore.getState().initialize()
@@ -128,7 +128,7 @@ export function BackendRow({
 
     // The modular backend reports engine status via remote-get-installed and
     // proxy discovery; refresh engine stores when viewing a remote node so
-    // LM Studio and other engines are not stuck as Unavailable before facts arrive.
+    // engines are not stuck as Unavailable before facts arrive.
     const isUnavailable = !statusKnown && !isLocalNode
 
     const isTransitioning = useMemo(() => {

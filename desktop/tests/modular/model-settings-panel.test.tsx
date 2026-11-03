@@ -302,12 +302,12 @@ describe('composed model settings', () => {
         expect(window.pairApi.engines.loadModel).not.toHaveBeenCalled()
     })
 
-    it('selects an existing profile by engine and exact model in Routing', async () => {
+    it('selects an existing profile by exact model in Routing', async () => {
         getPolicy.mockResolvedValue(
             saved({
                 profiles: [
                     { name: 'llama-profile', ...identity },
-                    { name: 'studio-profile', engine: 'lmstudio', model: identity.model }
+                    { name: 'second-profile', engine: 'llamacpp', model: 'owner/second:Q8_0' }
                 ]
             })
         )
@@ -320,19 +320,18 @@ describe('composed model settings', () => {
         if (!(trigger instanceof HTMLButtonElement)) throw new Error('Missing profile selector')
         await act(async () => trigger.click())
         const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
-            item => item.textContent?.trim() === 'studio-profile (lmstudio)'
+            item => item.textContent?.trim() === 'second-profile (llamacpp)'
         )
-        if (!option) throw new Error('Missing LM Studio profile option')
+        if (!option) throw new Error('Missing second profile option')
         await act(async () => option.click())
         await type('Temperature', '0.4')
-        expect(panel().querySelector('input[aria-label="Min P"]')).toBeNull()
         const parsed = parseModelSettings(draft().text)
         if (!parsed.ok) throw new Error(parsed.error.message)
         expect(
             parsed.value.map(profile => ({ engine: profile.engine, options: profile.options }))
         ).toEqual([
             { engine: 'llamacpp', options: {} },
-            { engine: 'lmstudio', options: { temperature: 0.4 } }
+            { engine: 'llamacpp', options: { temperature: 0.4 } }
         ])
     })
 

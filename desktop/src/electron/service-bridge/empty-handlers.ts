@@ -296,8 +296,8 @@ function routeEngineManagerCommand(payload: WsInvokeRequest<'engine:command'>): 
         case 'loadModel':
             // "Load" warms a model into the engine's memory/VRAM through
             // engine-manager's typed operation, which applies the engine's own
-            // `load` binding (Ollama's is `run_model` with streaming off and a
-            // 10-minute budget). The reply can take that long, so it is observed
+            // `load` binding, whose budget its descriptor declares. The reply
+            // can take that long, so it is observed
             // rather than timed: a rejection clears the row's pending entry.
             // All require the engine running, matching the disabled rule in
             // ModelRow.tsx. See docs/services-parity.md#models.

@@ -105,7 +105,7 @@ interface ModularNode {
     // fallback path (a peer that sends no per-engine attribution).
     models: string[]
     // Per-engine attribution of the enriched model list, keyed by engine-manager
-    // engine name ("ollama", "lmstudio", "llamacpp"), carried on
+    // engine name ("llamacpp"), carried on
     // `AvailableNode.modelsByEngine`.
     // When present it is authoritative — {@link toEngineModels} attributes each
     // model to the engine that actually serves it, so a dual-engine node no
@@ -115,7 +115,7 @@ interface ModularNode {
     // noderec.DirectoryNode.EngineModels.
     modelsByEngine: Record<string, string[]> | undefined
     // Per-engine set of models currently loaded in memory, keyed by
-    // engine-manager engine name ("ollama", "lmstudio", "llamacpp"), carried on
+    // engine-manager engine name ("llamacpp"), carried on
     // `AvailableNode.loadedByEngine`. Normally a subset of
     // {@link modelsByEngine}. An engine key with an empty list means
     // "running, nothing loaded"; a missing key means loaded state wasn't
@@ -616,10 +616,9 @@ function toEngineStatus(
 }
 
 /**
- * Parse a proxy `node/*` payload for a given engine. The `ollama-proxy` and
- * `lmstudio-proxy` both emit the same `Node` shape (id/host/port/addresses/txt);
- * the engine is determined by which relay namespace it arrived on. The presence
- * is stamped onto that engine only; the other engine stays empty.
+ * Parse a proxy `node/*` payload for a given engine. The proxies emit a
+ * `Node` shape (id/host/port/addresses/txt); the engine is determined by which
+ * relay namespace it arrived on. The presence is stamped onto that engine only.
  */
 function parseProxyNode(params: JsonValue | undefined, engine: ProxyEngine): ModularNode | null {
     const obj = objectValue(params)
