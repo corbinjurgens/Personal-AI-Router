@@ -163,10 +163,11 @@ func scanOllamaSource(ctx context.Context, source modelSource) []sourceModel {
 				continue
 			}
 			blob := filepath.Join(source.root, "blobs", "sha256-"+hex)
-			switch layer.MediaType {
-			case ollamaModelLayer:
+			// An if chain, not a switch: the service-contract scan reads
+			// quoted case values as JSON-RPC methods.
+			if layer.MediaType == ollamaModelLayer {
 				model.path = blob
-			case ollamaProjectorLayer:
+			} else if layer.MediaType == ollamaProjectorLayer {
 				model.mmproj = blob
 			}
 		}
