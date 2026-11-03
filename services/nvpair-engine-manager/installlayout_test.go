@@ -54,8 +54,8 @@ func bundledManifestSet(t *testing.T) map[string]*Manifest {
 //
 // There is deliberately no rule about how deep a detect path may be. Archive
 // shapes are the vendor's choice and they differ — llama.cpp wraps everything
-// in a build-tagged directory the install has to strip, while Ollama's Linux
-// archive is already bin/ and lib/ and must not be stripped. A convention
+// in a build-tagged directory the install has to strip, while another
+// vendor's archive may already be bin/ and lib/ and must not be stripped. A convention
 // asserted here would only encode one vendor's habit as if it were a contract.
 func TestBundledRuntimeBinIsDetected(t *testing.T) {
 	for name, manifest := range bundledManifestSet(t) {

@@ -283,7 +283,7 @@ func TestDescriptorsExcludeSecretsAndPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, leaked := range []string{"SECRET", "/opt/", "/home/", "~", "{port}", "{model}", "{host}", "http:", "https:", "example.invalid", ".exe", "install_dir", "models_dir", "LLAMA_CACHE", "OLLAMA_", "llama-server", "/bin/", "serve"} {
+	for _, leaked := range []string{"SECRET", "/opt/", "/home/", "~", "{port}", "{model}", "{host}", "http:", "https:", "example.invalid", ".exe", "install_dir", "models_dir", "LLAMA_CACHE", "llama-server", "/bin/", "serve"} {
 		if bytes.Contains(published, []byte(leaked)) {
 			t.Errorf("published descriptors contain %q: %s", leaked, published)
 		}

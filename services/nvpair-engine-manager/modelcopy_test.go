@@ -110,18 +110,23 @@ func assertNoPartFiles(t *testing.T, root string) {
 	})
 }
 
-func TestCopyModelOllamaOverControlRoutes(t *testing.T) {
+func TestCopyModelOverControlRoutes(t *testing.T) {
 	plentyOfDisk(t)
 	srcDir, dstDir := t.TempDir(), t.TempDir()
-	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
-	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny:1b", 300_000, 4)
-	copyTestNativeModels(t, srcExec, "ollama", "tiny:1b")
+	const repo, commit = "owner/tiny-GGUF", "0123456789abcdef0123456789abcdef01234567"
+	files := map[string][]byte{
+		"tiny-Q4_K_M.gguf":      testBytes(300_000, 4),
+		"mmproj-tiny-Q8_0.gguf": testBytes(5_000, 3),
+	}
+	writeLlamaCache(t, srcDir, repo, commit, files)
+	srcExec := copyTestExecutor(t, "llamacpp", srcDir, true)
+	copyTestNativeModels(t, srcExec, "llamacpp", repo+":Q4_K_M")
 	_, client := modelFileServer(t, srcExec, nil)
-	dst := copyTestExecutor(t, "ollama", dstDir, true)
+	dst := copyTestExecutor(t, "llamacpp", dstDir, true)
 
 	var mu sync.Mutex
 	var frames []copyProgress
-	res, err := dst.CopyModelFrom(context.Background(), client, "ollama", "tiny:1b", func(p copyProgress) {
+	res, err := dst.CopyModelFrom(context.Background(), client, "llamacpp", repo+":Q4_K_M", func(p copyProgress) {
 		mu.Lock()
 		frames = append(frames, p)
 		mu.Unlock()
@@ -129,18 +134,15 @@ func TestCopyModelOllamaOverControlRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(dstDir, "models")
-	for rel, want := range fx.blobs {
-		got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	root := dstDir
+	for rel, want := range files {
+		got, err := os.ReadFile(filepath.Join(llamaRepoDir(root, repo), "snapshots", commit, rel))
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("%s not copied intact: %v", rel, err)
 		}
 	}
-	if got, _ := os.ReadFile(filepath.Join(root, filepath.FromSlash(fx.manifestRel))); !bytes.Equal(got, fx.manifest) {
-		t.Fatal("manifest not copied intact")
-	}
 	assertNoPartFiles(t, root)
-	if res.Files != 3 || res.FilesSkipped != 0 || res.BytesCopied != res.BytesTotal {
+	if res.Files != 2 || res.FilesSkipped != 0 || res.BytesCopied != res.BytesTotal {
 		t.Fatalf("result = %+v", res)
 	}
 	last := frames[len(frames)-1]
@@ -201,16 +203,13 @@ func TestLinkedModelNativeTransferToken(t *testing.T) {
 	plentyOfDisk(t)
 	fastRetries(t, 1)
 	srcDir, dstDir := t.TempDir(), t.TempDir()
-	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
-	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 500_000, 5)
-	copyTestNativeModels(t, srcExec, "ollama", "tiny")
-	copyTestSourceListing(t, srcExec, "ollama", "tiny")
-	var weightsRel string
-	for rel, b := range fx.blobs {
-		if len(b) == 500_000 {
-			weightsRel = rel
-		}
-	}
+	const repo, commit, model = "owner/tiny-GGUF", "0123456789abcdef0123456789abcdef01234567", "owner/tiny-GGUF:Q4_K_M"
+	const weightsRel = "tiny-Q4_K_M.gguf"
+	weights := testBytes(500_000, 5)
+	writeLlamaCache(t, srcDir, repo, commit, map[string][]byte{weightsRel: weights, "mmproj-tiny-Q8_0.gguf": testBytes(5_000, 6)})
+	srcExec := copyTestExecutor(t, "llamacpp", srcDir, true)
+	copyTestNativeModels(t, srcExec, "llamacpp", model)
+	copyTestSourceListing(t, srcExec, "llamacpp", model)
 	var mu sync.Mutex
 	var ranges []string
 	var tokens []string
@@ -229,25 +228,26 @@ func TestLinkedModelNativeTransferToken(t *testing.T) {
 	server, client := modelFileServer(t, srcExec, func(h http.Handler) http.Handler { return record(cut(h)) })
 	assertFixtureRejectsProbe(t, server.URL)
 	assertFixtureRejectsRequest(t, server.URL, http.MethodPost, controlModelFilePath+"?path="+url.QueryEscape(weightsRel))
-	dst := copyTestExecutor(t, "ollama", dstDir, true)
-	root := filepath.Join(dstDir, "models")
-	part := filepath.Join(root, filepath.FromSlash(weightsRel)) + ".part"
+	dst := copyTestExecutor(t, "llamacpp", dstDir, true)
+	root := dstDir
+	snapshot := filepath.Join(llamaRepoDir(root, repo), "snapshots", commit)
+	part := filepath.Join(snapshot, weightsRel) + ".part"
 
 	// First run: the only attempt is cut off, and the partial is kept.
-	if _, err := dst.CopyModelFrom(context.Background(), client, "ollama", "tiny", nil); err == nil {
+	if _, err := dst.CopyModelFrom(context.Background(), client, "llamacpp", model, nil); err == nil {
 		t.Fatal("interrupted copy reported success")
 	}
 	info, err := os.Stat(part)
 	if err != nil || info.Size() == 0 || info.Size() >= 500_000 {
 		t.Fatalf("partial after interruption: %v, %v", info, err)
 	}
-	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(fx.manifestRel))); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("manifest exists after a failed copy: %v", err)
+	if _, err := os.Stat(filepath.Join(llamaRepoDir(root, repo), "refs", "main")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache ref exists after a failed copy: %v", err)
 	}
 
 	// Second run (a retry or a restart) resumes from the partial.
 	var progress []copyProgress
-	result, err := dst.CopyModelFrom(context.Background(), client, "ollama", "tiny", func(p copyProgress) { progress = append(progress, p) })
+	result, err := dst.CopyModelFrom(context.Background(), client, "llamacpp", model, func(p copyProgress) { progress = append(progress, p) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,12 +259,12 @@ func TestLinkedModelNativeTransferToken(t *testing.T) {
 			t.Fatalf("native progress contains export identity: %+v", p)
 		}
 	}
-	got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(weightsRel)))
+	got, err := os.ReadFile(filepath.Join(snapshot, weightsRel))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, fx.blobs[weightsRel]) {
-		t.Fatal("resumed blob does not match the source")
+	if !bytes.Equal(got, weights) {
+		t.Fatal("resumed file does not match the source")
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -322,53 +322,6 @@ func TestCopyModelSkipsFilesAlreadyPresent(t *testing.T) {
 	}
 	if res.FilesSkipped != 1 || res.BytesCopied != res.BytesTotal-80_000 {
 		t.Fatalf("result = %+v", res)
-	}
-}
-
-func TestCopyModelOllamaWritesManifestLast(t *testing.T) {
-	plentyOfDisk(t)
-	srcDir, dstDir := t.TempDir(), t.TempDir()
-	srcExec := copyTestExecutor(t, "ollama", srcDir, true)
-	fx := writeOllamaModel(t, filepath.Join(srcDir, "models"), "tiny", 20_000, 8)
-	copyTestNativeModels(t, srcExec, "ollama", "tiny")
-	src := sourceFromExecutor(t, srcExec, "ollama", "tiny")
-	dst := copyTestExecutor(t, "ollama", dstDir, true)
-	root := filepath.Join(dstDir, "models")
-	manifest := filepath.Join(root, filepath.FromSlash(fx.manifestRel))
-	src.onFetch = func(path string) {
-		if path == fx.manifestRel {
-			// Every blob is in place before the manifest is fetched.
-			for rel := range fx.blobs {
-				if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
-					t.Errorf("manifest fetched before blob %s was in place", rel)
-				}
-			}
-		} else if _, err := os.Stat(manifest); err == nil {
-			t.Errorf("manifest present while blob %s was still downloading", path)
-		}
-	}
-	if _, err := dst.CopyModelFrom(context.Background(), src, "ollama", "tiny", nil); err != nil {
-		t.Fatal(err)
-	}
-	fetched := src.fetchedPaths()
-	if fetched[len(fetched)-1] != fx.manifestRel {
-		t.Fatalf("fetch order %v, want the manifest last", fetched)
-	}
-
-	// A copy that fails on a blob never writes the manifest.
-	dst2Dir := t.TempDir()
-	dst2 := copyTestExecutor(t, "ollama", dst2Dir, true)
-	src2 := sourceFromExecutor(t, srcExec, "ollama", "tiny")
-	for rel, b := range fx.blobs {
-		if len(b) == 20_000 {
-			src2.failPath = rel
-		}
-	}
-	if _, err := dst2.CopyModelFrom(context.Background(), src2, "ollama", "tiny", nil); err == nil {
-		t.Fatal("copy with a failing blob reported success")
-	}
-	if _, err := os.Stat(filepath.Join(dst2Dir, "models", filepath.FromSlash(fx.manifestRel))); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("manifest written although a blob failed: %v", err)
 	}
 }
 
@@ -569,68 +522,6 @@ func TestModelPublisherAgreementCannotBypassFullTransferMismatch(t *testing.T) {
 		t.Fatalf("failed full hash published native visibility: %v", err)
 	}
 	assertNoPartFiles(t, store.root)
-}
-
-func TestCopyModelLMStudio(t *testing.T) {
-	plentyOfDisk(t)
-	srcDir, dstDir := t.TempDir(), t.TempDir()
-	files := map[string][]byte{
-		"lmstudio-community/tiny-GGUF/tiny-Q4_K_M.gguf":   testBytes(30_000, 1),
-		"lmstudio-community/tiny-GGUF/mmproj-tiny.gguf":   testBytes(3_000, 2),
-		"lmstudio-community/tiny-GGUF/tiny-Q8_0.gguf":     testBytes(50_000, 3),
-		"mlx-community/tiny-4bit/model.safetensors":       testBytes(20_000, 4),
-		"mlx-community/tiny-4bit/config.json":             []byte(`{}`),
-		"mlx-community/tiny-4bit/tokenizer/vocab.json":    []byte(`{"a":1}`),
-		"mlx-community/other-4bit/model.safetensors":      testBytes(1_000, 5),
-		"lmstudio-community/tiny-GGUF/unrelated-readme":   []byte("x"),
-		"lmstudio-community/other-GGUF/other-Q4_K_M.gguf": testBytes(1_000, 6),
-	}
-	for rel, b := range files {
-		writeTestFile(t, filepath.Join(srcDir, filepath.FromSlash(rel)), b)
-	}
-	prev := lmsListModels
-	lmsListModels = func(context.Context, *Executor, string) ([]lmsListEntry, error) {
-		return []lmsListEntry{
-			{ModelKey: "tiny", Path: "lmstudio-community/tiny-GGUF/tiny-Q4_K_M.gguf"},
-			{ModelKey: "tiny-q8", Path: "lmstudio-community/tiny-GGUF/tiny-Q8_0.gguf"},
-			{ModelKey: "tiny-mlx", Path: "mlx-community/tiny-4bit"},
-			{ModelKey: "other", Path: "lmstudio-community/other-GGUF/other-Q4_K_M.gguf"},
-		}, nil
-	}
-	t.Cleanup(func() { lmsListModels = prev })
-	srcExec := copyTestExecutor(t, "lmstudio", srcDir, true)
-
-	gguf := sourceFromExecutor(t, srcExec, "lmstudio", "tiny")
-	var paths []string
-	for _, f := range gguf.list.Files {
-		paths = append(paths, f.Path)
-	}
-	if strings.Join(paths, ",") != "lmstudio-community/tiny-GGUF/tiny-Q4_K_M.gguf,lmstudio-community/tiny-GGUF/mmproj-tiny.gguf" {
-		t.Fatalf("GGUF listing = %v", paths)
-	}
-	mlx := sourceFromExecutor(t, srcExec, "lmstudio", "tiny-mlx")
-	if len(mlx.list.Files) != 3 {
-		t.Fatalf("MLX listing = %+v", mlx.list.Files)
-	}
-	if _, err := srcExec.modelSourceFiles(context.Background(), "lmstudio", "lmstudio-community"); err == nil {
-		t.Fatal("a publisher prefix matching several models was accepted")
-	}
-
-	dst := copyTestExecutor(t, "lmstudio", dstDir, true)
-	for _, src := range []*fakeModelSource{gguf, mlx} {
-		if _, err := dst.CopyModelFrom(context.Background(), src, "lmstudio", src.list.Model, nil); err != nil {
-			t.Fatal(err)
-		}
-		for _, f := range src.list.Files {
-			got, err := os.ReadFile(filepath.Join(dstDir, filepath.FromSlash(f.Path)))
-			if err != nil || !bytes.Equal(got, files[f.Path]) {
-				t.Fatalf("%s not copied intact: %v", f.Path, err)
-			}
-		}
-	}
-	if fetched := gguf.fetchedPaths(); fetched[len(fetched)-1] != "lmstudio-community/tiny-GGUF/tiny-Q4_K_M.gguf" {
-		t.Fatalf("fetch order %v, want the model GGUF last", fetched)
-	}
 }
 
 type lockedBuffer struct {

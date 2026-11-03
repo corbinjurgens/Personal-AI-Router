@@ -117,9 +117,7 @@ func portFixtureManifest(engine string, port int) map[string]any {
 	p := m.Platforms[hostKey()]
 	p.Runtime.Port = port
 	p.Runtime.Args = []string{"serve"}
-	p.Runtime.Env = map[string]string{
-		"OLLAMA_HOST": "{host}:{port}", "FAKE_ADDR": "{host}:{port}",
-	}
+	p.Runtime.Env = map[string]string{"FAKE_ADDR": "{host}:{port}"}
 	return map[string]any{
 		"engine": engine, "display_name": engine, "manifest_version": 1,
 		"runtime": p.Runtime, "actions": m.Actions,
@@ -302,11 +300,6 @@ func reloadPortFixture(t *testing.T, base *Registry, overrideDir string) *Regist
 		t.Fatal(err)
 	}
 	return reg
-}
-
-func newPortFixtureExecutor(t *testing.T, overrideDir string) *Executor {
-	t.Helper()
-	return portFixtureExecutorFor(t, overrideDir, []string{"ollama", "lmstudio"}, portFixtureManifest)
 }
 
 func newLlamaPortFixtureExecutor(t *testing.T, overrideDir string) *Executor {

@@ -83,9 +83,9 @@ func modelsMemoryEntry(t *testing.T, result ModelsResult) performancewire.Memory
 
 // This fixture has no process, listener or installed engine. Its transport
 // accepts inventory reads only and its profile is private to the test.
-func ollamaDownloadInventoryExecutor(t *testing.T) *Executor {
+func taggedDownloadInventoryExecutor(t *testing.T) *Executor {
 	t.Helper()
-	manifest := &Manifest{Engine: "ollama", DisplayName: "Fixture", ModelNaming: engines.ModelNamingImpliedLatestTag,
+	manifest := &Manifest{Engine: "tagged", DisplayName: "Fixture", ModelNaming: engines.ModelNamingImpliedLatestTag,
 		Actions: map[string]Action{
 			"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/api/tags"},
 				Result: &ActionResult{Array: "models", Field: "name", Digest: "digest"}},
@@ -175,8 +175,8 @@ func TestLinkedModelInventory(t *testing.T) {
 			ex := modelDownloadInventoryExecutor(t)
 			engine, path := "llamacpp", "/models"
 			if impliedLatest {
-				ex = ollamaDownloadInventoryExecutor(t)
-				engine, path = "ollama", "/api/tags"
+				ex = taggedDownloadInventoryExecutor(t)
+				engine, path = "tagged", "/api/tags"
 			}
 			calls := 0
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
@@ -280,7 +280,7 @@ func TestLinkedModelInventory(t *testing.T) {
 func TestModelDownloadInventoryMasksEquivalentKeys(t *testing.T) {
 	test := func(name, requestModel, listedModel, terminalPhase, reason string) {
 		t.Run(name, func(t *testing.T) {
-			ex := ollamaDownloadInventoryExecutor(t)
+			ex := taggedDownloadInventoryExecutor(t)
 			original := ex.client.Transport
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 				response, err := original.RoundTrip(request)
@@ -293,16 +293,16 @@ func TestModelDownloadInventoryMasksEquivalentKeys(t *testing.T) {
 				}
 				return response, err
 			})
-			attempt := reserveModelDownload(t, ex.downloads, "ollama", requestModel, engines.ModelNamingImpliedLatestTag)
+			attempt := reserveModelDownload(t, ex.downloads, "tagged", requestModel, engines.ModelNamingImpliedLatestTag)
 			assertMasked := func(wantPhase string) {
 				t.Helper()
 				result := ex.ModelsResult(context.Background())
 				want := []string{"ready:latest"}
-				if !reflect.DeepEqual(result.Models, want) || !reflect.DeepEqual(result.ByEngine["ollama"], want) ||
-					!reflect.DeepEqual(ex.cachedInventory()["ollama"], want) {
+				if !reflect.DeepEqual(result.Models, want) || !reflect.DeepEqual(result.ByEngine["tagged"], want) ||
+					!reflect.DeepEqual(ex.cachedInventory()["tagged"], want) {
 					t.Fatalf("unsafe alias escaped ready inventory/cache: %+v", result)
 				}
-				if !reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"demo:latest"}) {
+				if !reflect.DeepEqual(result.LoadedByEngine["tagged"], []string{"demo:latest"}) {
 					t.Fatalf("mask changed actual loaded observation: %+v", result.LoadedByEngine)
 				}
 				if result.DownloadState == nil || len(result.DownloadState.Entries) != 1 {
@@ -1152,19 +1152,19 @@ func TestExtractStrings(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "ollama tags shape",
+			name: "models array with a name field",
 			raw:  `{"models":[{"name":"llama3:8b","model":"llama3:8b"},{"name":"qwen:0.5b"}]}`,
 			spec: &ActionResult{Array: "models", Field: "name"},
 			want: []string{"llama3:8b", "qwen:0.5b"},
 		},
 		{
-			name: "lmstudio v1/models shape",
+			name: "data array with an id field",
 			raw:  `{"object":"list","data":[{"id":"phi-3"},{"id":"gemma-2b"}]}`,
 			spec: &ActionResult{Array: "data", Field: "id"},
 			want: []string{"phi-3", "gemma-2b"},
 		},
 		{
-			name: "lmstudio native models shape",
+			name: "models array with a key field",
 			raw:  `{"models":[{"key":"phi-3","loaded_instances":[]},{"key":"gemma-2b","loaded_instances":[]}]}`,
 			spec: &ActionResult{Array: "models", Field: "key"},
 			want: []string{"phi-3", "gemma-2b"},
@@ -1212,7 +1212,7 @@ func TestExtractStrings(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "lmstudio v1 nonempty loaded_instances keeps only loaded rows",
+			name: "nonempty loaded_instances keeps only loaded rows",
 			raw:  `{"models":[{"key":"a","loaded_instances":[{"id":"a"}]},{"key":"b","loaded_instances":[]},{"key":"c","loaded_instances":[{"id":"c"}]}]}`,
 			spec: &ActionResult{Array: "models", Field: "key", Match: &ResultMatch{Field: "loaded_instances", Nonempty: true}},
 			want: []string{"a", "c"},

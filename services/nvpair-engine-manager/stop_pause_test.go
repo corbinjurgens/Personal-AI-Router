@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"nvpair-shared/engines"
 	"nvpair-shared/testbin"
 )
 
@@ -560,14 +559,13 @@ func TestStopPauseOwnershipSpawnChecksFenceAfterPreparation(t *testing.T) {
 	if rpcCode(err) != codeLocalVeto {
 		t.Fatalf("pre-spawn pause: %v", err)
 	}
-	assertNoLlamaSpawn(t, f)
+	assertNoSpawn(t, f)
 }
 
-func stopPauseOwnershipChatExecutor(t *testing.T) (*Executor, *engineState) {
+func stopPauseOwnershipExternalExecutor(t *testing.T) (*Executor, *engineState) {
 	t.Helper()
 	m := testEngineManifest(fakeEngineBin)
-	m.Family = "lmstudio"
-	m.Actions["chat"] = Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/v1/chat/completions"}}
+	m.Actions["load_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/load"}}
 	m.Actions["unload_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/unload"}}
 	ex := newTestExecutor(t, m)
 	st, err := ex.state("fake")
@@ -578,108 +576,6 @@ func stopPauseOwnershipChatExecutor(t *testing.T) (*Executor, *engineState) {
 	// is intercepted before dial; this fixture starts no process or listener.
 	st.running, st.adopted, st.port = true, true, 12345
 	return ex, st
-}
-
-func TestStopPauseOwnershipChatRefusesExecutionAfterFence(t *testing.T) {
-	ex, _ := stopPauseOwnershipChatExecutor(t)
-	var effects atomic.Int32
-	ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
-		effects.Add(1)
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
-	})
-	ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-	_, err := ex.Action(context.Background(), "fake", "chat", json.RawMessage(`{"model":"tiny","messages":[]}`))
-	if rpcCode(err) != codeLocalVeto || effects.Load() != 0 {
-		t.Fatalf("post-fence native chat: err=%v effects=%d", err, effects.Load())
-	}
-	// The same external listener remains available for metadata reads.
-	raw, err := ex.Action(context.Background(), "fake", "list_models", nil)
-	if err != nil {
-		t.Fatalf("paused metadata read: %v", err)
-	}
-	var reply struct {
-		OK bool `json:"ok"`
-	}
-	if err := json.Unmarshal(raw, &reply); err != nil {
-		t.Fatal(err)
-	}
-	if !reply.OK || effects.Load() != 1 {
-		t.Fatalf("metadata reply=%+v calls=%d", reply, effects.Load())
-	}
-	raw, err = ex.ModelUnload(context.Background(), "fake", "tiny")
-	if err != nil {
-		t.Fatalf("explicit local unload while paused: %v", err)
-	}
-	if err := json.Unmarshal(raw, &reply); err != nil {
-		t.Fatal(err)
-	}
-	if !reply.OK || effects.Load() != 2 {
-		t.Fatalf("local unload reply=%+v calls=%d", reply, effects.Load())
-	}
-}
-
-func TestStopPauseOwnershipChatCancellationUsesExistingLoadRegistry(t *testing.T) {
-	ex, st := stopPauseOwnershipChatExecutor(t)
-	entered := make(chan context.Context, 1)
-	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
-		entered <- r.Context()
-		<-r.Context().Done()
-		return nil, r.Context().Err()
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, err := ex.Action(ctx, "fake", "chat", json.RawMessage(`{"model":"tiny","messages":[]}`))
-		done <- err
-	}()
-	var native context.Context
-	select {
-	case native = <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("native chat did not reach the execution barrier")
-	}
-	ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-	ex.cancelBlockedActivations()
-	if rpcCode(context.Cause(native)) != codeLocalVeto {
-		cancel()
-		t.Errorf("native chat cancellation cause=%v", context.Cause(native))
-	}
-	if err := awaitLockCommand(t, done); rpcCode(err) != codeLocalVeto {
-		t.Fatalf("cancelled native chat=%v", err)
-	}
-	st.mu.Lock()
-	active := len(st.loads.active)
-	st.mu.Unlock()
-	if active != 0 {
-		t.Fatalf("native chat leaked load registrations: %d", active)
-	}
-}
-
-func TestStopPauseOwnershipQueuedChatRechecksFence(t *testing.T) {
-	ex, st := stopPauseOwnershipChatExecutor(t)
-	var effects atomic.Int32
-	ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
-		effects.Add(1)
-		return nil, errors.New("queued chat must not execute")
-	})
-	st.opMu.Lock()
-	unlock := sync.OnceFunc(st.opMu.Unlock)
-	defer unlock()
-	done := make(chan error, 1)
-	go func() {
-		_, err := ex.Action(context.Background(), "fake", "chat", json.RawMessage(`{"model":"tiny","messages":[]}`))
-		done <- err
-	}()
-	awaitLockCondition(t, "queued native chat registration", func() bool { st.mu.Lock(); defer st.mu.Unlock(); return len(st.loads.active) == 1 })
-	ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-	ex.cancelBlockedActivations()
-	if err := awaitLockCommand(t, done); rpcCode(err) != codeLocalVeto {
-		t.Fatalf("queued chat cancellation: %v", err)
-	}
-	if effects.Load() != 0 {
-		t.Fatal("queued chat executed after the pause fence")
-	}
 }
 
 func TestStopPauseOwnershipStoppedCommandRequiresPositiveResidency(t *testing.T) {
@@ -729,33 +625,6 @@ func TestStopPauseOwnershipStoppedCommandRequiresPositiveResidency(t *testing.T)
 	test("positive empty native inventory", `{"models":[]}`, true)
 	test("stopped server with resident model", `{"models":[{"name":"tiny"}]}`, false)
 	test("unknown residency", `{"models":null}`, false)
-}
-
-func TestStopPauseOwnershipStoppedLMStudioNativeReadback(t *testing.T) {
-	test := func(name, body string, readErr error, wantStopped bool) {
-		t.Run(name, func(t *testing.T) {
-			_, st := stopPauseOwnershipChatExecutor(t)
-			st.plat.Runtime.CLI = filepath.Join(t.TempDir(), "private-lms")
-			st.running, st.adopted = false, false
-			var calls int
-			err := stoppedLMStudioResidency(context.Background(), st, func(_ context.Context, argv []string) (string, error) {
-				calls++
-				want := []string{st.plat.Runtime.CLI, "ps", "--json"}
-				if !reflect.DeepEqual(argv, want) {
-					t.Fatalf("native residency argv=%v want=%v", argv, want)
-				}
-				return body, readErr
-			})
-			if calls != 1 || (err == nil) != wantStopped {
-				t.Fatalf("native readback: calls=%d err=%v", calls, err)
-			}
-		})
-	}
-	test("empty model processes", `[]`, nil, true)
-	test("surviving model process", `[{"identifier":"tiny"}]`, nil, false)
-	test("unknown native schema", `{}`, nil, false)
-	test("null is unknown", `null`, nil, false)
-	test("lost native reply", `[]`, errors.New("lost readback"), false)
 }
 
 func TestStopPauseOwnershipExternalListenerClosureNeedsPIDExit(t *testing.T) {
@@ -812,49 +681,6 @@ func TestStopPauseOwnershipExternalListenerClosureNeedsPIDExit(t *testing.T) {
 	test("unknown external PID stays fenced", false, false)
 	test("observed external PID remains alive", true, false)
 	test("positive observed PID exit permits completion", true, true)
-}
-
-func TestStopPauseOwnershipRawOllamaUnloadUsesCanonicalBinding(t *testing.T) {
-	ex, st := stopPauseOwnershipChatExecutor(t)
-	st.manifest.Family = "ollama"
-	st.manifest.Actions["unload_model"] = Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/generate"}}
-	st.manifest.Operations = map[string]OperationBinding{engines.OperationUnload: {Action: "unload_model", Params: map[string]json.RawMessage{"keep_alive": json.RawMessage(`0`)}}}
-	var calls int
-	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
-		calls++
-		var body map[string]json.RawMessage
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-		var model string
-		var keepAlive int
-		if err := json.Unmarshal(body["model"], &model); err != nil {
-			t.Fatal(err)
-		}
-		if err := json.Unmarshal(body["keep_alive"], &keepAlive); err != nil {
-			t.Fatal(err)
-		}
-		if len(body) != 2 || model != "tiny" || keepAlive != 0 || r.URL.Path != "/api/generate" {
-			t.Fatalf("raw unload could execute generation: %s %v", r.URL.Path, body)
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"done":true}`))}, nil
-	})
-	ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-	for _, params := range []string{`{"model":"tiny"}`, `{"model":"tiny","keep_alive":-1,"prompt":"must not execute"}`} {
-		if _, err := ex.Action(context.Background(), "fake", "unload_model", json.RawMessage(params)); err != nil {
-			t.Fatalf("safe paused unload: %v", err)
-		}
-	}
-	if _, err := ex.ModelUnload(context.Background(), "fake", "tiny"); err != nil {
-		t.Fatalf("explicit local unload: %v", err)
-	}
-	st.manifest.Operations[engines.OperationUnload] = OperationBinding{Action: "unload_model"}
-	if _, err := ex.Action(context.Background(), "fake", "unload_model", json.RawMessage(`{"model":"tiny"}`)); err == nil {
-		t.Fatal("unproven unload binding reached generate while paused")
-	}
-	if calls != 3 || !st.running || !st.adopted {
-		t.Fatalf("unload effects=%d external running=%v adopted=%v", calls, st.running, st.adopted)
-	}
 }
 
 func TestStopPauseOwnershipCommandSpawnOrdersAgainstProjection(t *testing.T) {
@@ -958,7 +784,7 @@ func TestStopPauseOwnershipCommandWaitDoesNotHoldProjectionGate(t *testing.T) {
 func TestStopPauseOwnershipNativeDispatchRechecksFinalFence(t *testing.T) {
 	test := func(name, action string, cli bool) {
 		t.Run(name, func(t *testing.T) {
-			ex, st := stopPauseOwnershipChatExecutor(t)
+			ex, st := stopPauseOwnershipExternalExecutor(t)
 			marker := filepath.Join(t.TempDir(), "late-native-load")
 			if action == "load_model" {
 				if cli {
@@ -972,8 +798,8 @@ func TestStopPauseOwnershipNativeDispatchRechecksFinalFence(t *testing.T) {
 				effects.Add(1)
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
 			})
-			params := json.RawMessage(`{"model":"tiny","messages":[]}`)
-			ctx, release, err := ex.guardActionExecution(context.Background(), st, action, params)
+			params := json.RawMessage(`{"model":"tiny"}`)
+			ctx, release, err := ex.guardServingLoad(context.Background(), st, action, params)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1032,80 +858,10 @@ func TestStopPauseOwnershipNativeDispatchRechecksFinalFence(t *testing.T) {
 	}
 	test("native CLI load", "load_model", true)
 	test("native HTTP load", "load_model", false)
-	test("native chat", "chat", false)
-}
-
-func TestStopPauseOwnershipExternalLMStudioOwnerShutdownAllowsRetry(t *testing.T) {
-	test := func(name, readback string, readErr error, wantStopped bool) {
-		t.Run(name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet || r.URL.Path != "/" {
-					http.NotFound(w, r)
-					return
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-			t.Cleanup(server.Close)
-			unloadMarker, stopMarker := filepath.Join(t.TempDir(), "external-unload"), filepath.Join(t.TempDir(), "external-stop")
-			ex := commandStopTestExecutor(t, server.URL, []string{fakeEngineBin, "touch", stopMarker}, 1, true)
-			st, err := ex.state("command")
-			if err != nil {
-				t.Fatal(err)
-			}
-			st.manifest.Family = "lmstudio"
-			st.plat.Runtime.CLI = filepath.Join(t.TempDir(), "private-native-owner")
-			st.manifest.Actions = map[string]Action{"unload_model": {Cmd: []string{fakeEngineBin, "touch", unloadMarker}}}
-			if err := ex.setDesiredEnabled("command", true, intentLocal); err != nil {
-				t.Fatal(err)
-			}
-			ex.nodeProjection.set(nodeProjection{ManagementBlocked: true})
-			var reads int
-			read := func(_ context.Context, argv []string) (string, error) {
-				reads++
-				if !reflect.DeepEqual(argv, []string{st.plat.Runtime.CLI, "ps", "--json"}) {
-					t.Fatalf("external owner readback argv=%v", argv)
-				}
-				return readback, readErr
-			}
-			if err := ex.sleepWithNativeReadback("command", read); err == nil || reads != 0 {
-				t.Fatalf("live external owner was not protected: err=%v nativeReads=%d", err, reads)
-			}
-			server.Close()
-			status, err := ex.Status("command")
-			if err != nil || !status.Running || status.Healthy {
-				t.Fatalf("listener refusal alone claimed termination: %+v, %v", status, err)
-			}
-			err = ex.sleepWithNativeReadback("command", read)
-			if (err == nil) != wantStopped || reads != 1 {
-				t.Fatalf("owner shutdown retry: err=%v nativeReads=%d wantStopped=%v", err, reads, wantStopped)
-			}
-			st.mu.Lock()
-			running, adopted := st.running, st.adopted
-			st.mu.Unlock()
-			if running == wantStopped || adopted == wantStopped {
-				t.Fatalf("retry ownership: running=%v adopted=%v wantStopped=%v", running, adopted, wantStopped)
-			}
-			for _, marker := range []string{unloadMarker, stopMarker} {
-				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("Pause modified external ownership via %s: %v", filepath.Base(marker), err)
-				}
-			}
-			enabled, known, err := ex.desired.get("command")
-			if err != nil || !known || !enabled {
-				t.Fatalf("retry changed saved On: enabled=%v known=%v err=%v", enabled, known, err)
-			}
-			if blocked, _ := ex.nodeProjection.managementBlocked(); !blocked {
-				t.Fatal("physical proof implicitly resumed the node")
-			}
-		})
-	}
-	test("owner stopped server and unloaded models", `[]`, nil, true)
-	test("model residency survives server shutdown", `[{"identifier":"tiny"}]`, nil, false)
-	test("native readback unavailable", `[]`, errors.New("private owner readback failed"), false)
 }
 
 func TestStopPauseOwnershipNativeHTTPResponseDoesNotHoldProjection(t *testing.T) {
-	ex, _ := stopPauseOwnershipChatExecutor(t)
+	ex, _ := stopPauseOwnershipExternalExecutor(t)
 	entered := make(chan struct{})
 	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
 		close(entered)
@@ -1116,7 +872,7 @@ func TestStopPauseOwnershipNativeHTTPResponseDoesNotHoldProjection(t *testing.T)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := ex.Action(ctx, "fake", "chat", json.RawMessage(`{"model":"tiny","messages":[]}`))
+		_, err := ex.Action(ctx, "fake", "load_model", json.RawMessage(`{"model":"tiny"}`))
 		done <- err
 	}()
 	select {

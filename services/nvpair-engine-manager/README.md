@@ -387,7 +387,7 @@ not model inventory. The broker owns bounded automatic receipt retention after
 manager release; unresolved checkpoints remain fenced through recovery.
 
 A config-driven control plane for local inference engines. The bundled
-manifests support Ollama, LM Studio, and llama.cpp. It manages everything about
+manifest supports llama.cpp. It manages everything about
 an engine **except serving inference**: detect, user-mode install,
 start/stop/restart, health, and config-declared actions. Adding an engine
 is a JSON manifest, not code.
@@ -551,7 +551,7 @@ Requests (caller → service):
 | `engine:restart` | `{ engine }` | `EngineStatus` |
 | `engine:set-port` | `{ engine, port }` | `EngineStatus` (after rebind) |
 | `engine:set-lock` | `{ engine, locked }` | `null` acknowledgement after durable lock+Off and verified stop, or unlock without start. Local only: see [Engine lock](#engine-lock) |
-| `engine:action` | `{ engine, action, params }` | the engine's raw response. `action:"pull_model"` is streamed: it emits live `engine:pull-progress` notifications and returns the pull's terminal result (see below). An action whose manifest declares `restart_after` (LM Studio's `delete_model`) restarts a running engine before replying, so the response also means the engine is back and healthy |
+| `engine:action` | `{ engine, action, params }` | the engine's raw response. `action:"pull_model"` is streamed: it emits live `engine:pull-progress` notifications and returns the pull's terminal result (see below). An action whose manifest declares `restart_after` restarts a running engine before replying, so the response also means the engine is back and healthy |
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
 | `engine:catalog` | `{ engine, platform?, arch?, query? }` | `{ models: [{ id, name, author, url, size?, downloads, likes, updatedAt, tags, family?, parameterSize?, appleOnly? }], source, platform?, arch?, fetchedAt?, searchable?, query? }` — the models an engine can **download**, as opposed to `engine:models`, which reports what is already installed. Each engine family has one curated source, selected by the manifest's `family` (a fork with `family: "llamacpp"` gets llama.cpp's); the client spellings `lm-studio`, `llama-cpp` and `llama.cpp` are accepted. Ollama's has no public API, so it is a locked list compiled into this binary from `catalog/ollama-models.json`, regenerated on demand by a developer (`npm run scrape:ollama-models` in `desktop/`) who reviews the diff; serving it needs no network. LM Studio's catalog *is* the `lmstudio-community` Hugging Face org, whose repo ids are exactly what `lms get` accepts, so it is fetched live and cached for six hours, with concurrent callers coalesced onto one request, a failed attempt — with or without a list to fall back on — followed by a backoff before the next. llama.cpp downloads any GGUF repo as `repo:quantization`; its browse list is the GGUF repos of `ggml-org`, `bartowski`, and `unsloth`, fetched and cached the same way, keeping only open, text-generating repos that ship a `Q4_K_M` file, each offered as `repo:Q4_K_M`. It is the one `searchable` source: a `query` searches all of Hugging Face under the same rules, each query cached on its own (the 20 most recently used are kept), and the reply echoes it. A query longer than 100 characters is refused rather than shortened, since a shortened one searches for something the operator did not type. Other sources ignore a query and return their whole list for the client to filter. `platform` and `arch` are the GOOS and GOARCH the models will be **installed on**, which is not always this host — a client driving a peer should name that peer. Omitting both means this host; naming a platform without an arch leaves the arch unknown rather than borrowing this host's. MLX quantizations only install on Apple Silicon, so they are marked `appleOnly` and kept only for a `darwin`/`arm64` target — an Intel Mac does not get them; the reply echoes the `platform` and `arch` it filtered for. `name` is pull-ready: it can be handed to `pull_model` verbatim. An engine with no curated source is an error, not an empty list. The Ollama reply is a single multi-megabyte frame, so every hop on its path must allow `jsonrpc.WorkerFrameBytes`. |
@@ -569,9 +569,9 @@ Requests (caller → service):
 | `engine:wake` | `{ engine }` | `EngineStatus` — starts the engine only if its saved intent is On (an engine with no saved intent counts as Off and is refused). Never changes the saved intent. Refused once shutdown has begun |
 | `engine:sleep` | `{ engine }` | `EngineStatus` — stops the engine the way `engine:restart` and shutdown do, without recording Off intent, so `engine:wake` or the next launch's restore can start it again |
 | `engine:intent` | — | `{ enabledByEngine: { <engine>: bool }, offByEngine: { <engine>: "local" \| "peer" } }` — one saved-intent snapshot for registered engines, without taking any engine's lifecycle lock |
-| `engine:load-model` | `{ engine, model }` | the engine's raw response — loads one model through the manifest's `load` binding, the same one the remote load uses (Ollama: `run_model` with `stream:false` and a 10-minute response budget) |
-| `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the manifest's `unload` binding, the same one the remote unload uses (Ollama: `keep_alive:0`) |
-| `engine:delete-model` | `{ engine, model }` | the engine's raw response — deletes one model through the manifest's `delete` binding, the same one the remote delete uses. LM Studio's restarts a running server before replying |
+| `engine:load-model` | `{ engine, model }` | the engine's raw response — loads one model through the manifest's `load` binding, the same one the remote load uses |
+| `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the manifest's `unload` binding, the same one the remote unload uses |
+| `engine:delete-model` | `{ engine, model }` | the engine's raw response — deletes one model through the manifest's `delete` binding, the same one the remote delete uses. A binding whose action declares `restart_after` restarts a running server before replying |
 | `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability, pausedBy? }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
 | `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
 | `engine:remote-availability-set` | `{ nodeId, state, pauseMode? }` | the target broker's `{ availability, pausedBy? }` result (configured pause waits for the target's drain, on the readiness-sized response budget); immediate is refused by the target |
@@ -695,7 +695,7 @@ provenance. `managementBlocked` fences all peer mutations and local activation,
 and either-origin pause cancels accepted starts, loads and crash relaunch.
 
 Streaming HTTP pulls have a 30-minute **inactivity** watchdog. Each increase in
-an Ollama layer's or llama.cpp file's completed byte count refreshes that
+a llama.cpp file's completed byte count refreshes that
 watchdog, so an active download may run longer than 30 minutes; duplicate
 progress frames and heartbeats do not extend a stalled pull. CLI-driven pulls
 without structured byte progress retain the fixed 30-minute action timeout.
@@ -810,11 +810,9 @@ Detect uses the manifest's `detect` paths. Install is one-shot and
 user-mode — an HTTPS download, verified against the manifest's `sha256`
 when one is pinned (an unpinned fetch runs with a loud warning). Start
 waits for the readiness probe, then runs a periodic health probe; an
-unexpected exit is reported. The bundled Ollama manifest allows up to ten
-minutes for startup because GPU discovery can exceed the previous 30-second
-allowance on supported Windows systems. The deadline remains finite: if Ollama
-never serves its readiness endpoint, engine-manager stops the owned process and
-reports the failed start. On Unix, stopping an owned process sends SIGTERM to
+unexpected exit is reported. The deadline is finite: if an engine never serves
+its readiness endpoint, engine-manager stops the owned process and reports the
+failed start. On Unix, stopping an owned process sends SIGTERM to
 its process group, waits the manifest's `stop.grace_s` (five seconds by
 default), then escalates to SIGKILL; `signal:"kill"` skips the grace. Failed
 startup cleanup uses the same policy. On Windows, the windowless engines we
@@ -837,8 +835,7 @@ fails or is cancelled before returning.
 Before spawning, `engine:start` **probes the chosen port's readiness
 endpoint**, including any manifest-declared JSON identity. If a compatible
 service answers there — the engine's own desktop
-app (e.g. the Ollama tray app on `11434`), or an instance left running from a
-previous session — the service **adopts** that instance: it marks the engine
+app, or an instance left running from a previous session — the service **adopts** that instance: it marks the engine
 `running` without launching its own, rather than spawning a duplicate that
 would only collide on the port. Consequences worth knowing:
 
@@ -846,10 +843,9 @@ would only collide on the port. Consequences worth knowing:
   (and `engine:restart`'s stop phase, and shutdown's cleanup) resolves the PID
   bound to the engine's port and terminates it **only when that process is
   running the very binary NVPAIR manages for the engine** — reclaiming an orphan
-  a prior run left on our own managed port (e.g. an `ollama serve` on `11435`
-  whose handle was lost after a crash). This is precise to the port, so a
-  genuine third-party listener on a *different* port (Ollama's own desktop app
-  on `11434` while NVPAIR manages `11435`) is never touched. A listener whose
+  a prior run left on our own managed port (e.g. an engine process whose
+  handle was lost after a crash). This is precise to the port, so a genuine
+  third-party listener on a *different* port is never touched. A listener whose
   image is **not** our managed binary is declined with an actionable error
   naming the offending PID and image path — the user / desktop app owns that
   process, and NVPAIR won't terminate it out from under them.
@@ -882,8 +878,8 @@ would only collide on the port. Consequences worth knowing:
   rather than leaving a duplicate serving the new port while the original keeps
   serving the old one. Stop the engine in its own app first, then set the port.
 - **`engine:install` short-circuits the same way.** `detect` honors existing
-  system installs (Ollama's detect paths include `/Applications/Ollama.app`,
-  `%LOCALAPPDATA%\Programs\Ollama`, etc.), so "installing" an engine that's
+  system installs (a manifest's detect paths may name an application bundle or
+  a per-user program directory), so "installing" an engine that's
   already present downloads nothing and reports `installed: true` — and a
   following `start:true` then adopts the running instance.
 - **Liveness reconciliation uses the same probe.** A fixed-port engine found
@@ -1101,7 +1097,7 @@ POST is never replayed through an alternate route.
 `{version:1, engine, available, installed, modelStore, exportLayouts, importLayouts, writable, reason, identityBoundRetry, receiptDurability}`.
 The peer route is pinned `GET /v1/models/copy-capabilities?engine=...`;
 `writable` reflects readiness and the actual caller's target-local permission.
-Adapter names are `ollama`, `llamacpp`, and `lmstudio`; llama.cpp also supports
+The adapter name is `llamacpp`; llama.cpp also supports
 `llama-artifacts-v1`. No filesystem paths or grant lists are returned. Missing
 routes/versions are unsupported. Source and destination layouts must intersect,
 the selected export must be supported by both, and the destination must be installed.
@@ -1131,7 +1127,7 @@ On the source, `GET /v1/models/files` resolves the model's files from the
 engine's on-disk layout and lists logical paths relative to that layout's root,
 with size and sha256. Hashes are computed when first asked for, by streaming
 the file, and cached by absolute path, size and modification time. Files whose
-name is already their sha256 (Ollama blobs) retain their native declaration;
+name is already their sha256 retain their native declaration;
 HF snapshot files use the checked full hashing/cache owner even behind local
 LFS blob names. The destination independently verifies every complete file. The
 listing is an NDJSON stream in the shape of the other streaming routes:
@@ -1209,7 +1205,7 @@ uses its existing catalogue HTTP owner to GET the fixed HF model revision API
 with `blobs=true`, requires the exact returned repository/revision and explicit
 public/ungated facts, and compares the exact sibling's LFS SHA256. No peer URL,
 mutable alias, filename similarity or local LFS blob filename supplies authority.
-Custom aliases, Ollama, LM Studio, private/gated repositories, non-LFS files,
+Custom aliases, private/gated repositories, non-LFS files,
 missing mappings and provider failures are unavailable; authorized transfer
 remains available. No credentials, settings, request fields or capabilities are
 added. Executor-only callers without a catalogue owner report unavailable.
@@ -1248,10 +1244,7 @@ executor-only tests have no catalogue owner. These tests do not contact HF.
 
 PAIR uses the engine's recognized model inventory, rather than importing loose
 files. For a recognized llama.cpp Hugging Face cache model it binds the selected
-ref, snapshot, GGUF shards and chosen projector. For Ollama it binds the
-selected manifest and only the blobs named by it. For LM Studio it binds the
-selected native row group: a GGUF and its configured-namespace projector, or
-the selected MLX tree, including empty sidecars. Supported source file and
+ref, snapshot, GGUF shards and chosen projector. Supported source file and
 directory symlinks, Windows junctions, and ordinary file hard links may point
 outside the configured store. Filesystem permissions still apply. Directory
 hard links are unsupported.
@@ -1259,11 +1252,9 @@ hard links are unsupported.
 The listing freezes the ordered logical file set and its selector, directory
 and opened-object evidence. Reads recheck that evidence; a replaced or retargeted
 source requires a fresh listing. A linked directory does not authorize later
-unlisted descendants, and LM Studio companion selection does not search the
-resolved target's parent. Peer file requests use only engine, model, logical
+unlisted descendants. Peer file requests use only engine, model, logical
 name and issued ID. For llama.cpp, peer inspection exposes path-free facts for
-the selected model under existing authorization; artifact inspection is not
-available for the other engines. Existing settings administration and
+the selected model under existing authorization. Existing settings administration and
 removal behavior are unchanged; destination paths remain confined. File hard
 links share mutable bytes with their other names.
 
@@ -1292,8 +1283,8 @@ process-wide filesystem attempt. See the existing
 coverage on base `10b8802d`. On macOS arm64/APFS (2026-10-30), the plain selector
 passed without skips. It exercises independent private controller/source/target
 fixtures for external preset file links and a file hardlink, selected typed
-export without `Runtime.Serving` despite unrelated model drift, HF cache and
-Ollama blob links, and an LM Studio directory link. Native results retain empty
+export without `Runtime.Serving` despite unrelated model drift, and HF cache
+links. Native results retain empty
 layout and durable receipt identity fields; custom results retain their receipt
 and fresh target settings review. Destination file sets and SHA256 values are
 checked against synthetic inputs.
@@ -1361,17 +1352,13 @@ receipt qualification are retained separately from inventory.
 
 | Engine | Store | What is copied | How the engine sees it |
 |---|---|---|---|
-| Ollama | `OLLAMA_MODELS` from the launch environment or this process, else `{models_dir}/models` (`~/.ollama/models`) | `blobs/sha256-*` named by the manifest, then `manifests/<host>/<namespace>/<name>/<tag>` | The manifest is written last, after checking every blob it names is in place. Ollama reads manifests on each listing, so no restart is needed |
 | llama.cpp | `LLAMA_CACHE` (the manifest sets `{models_dir}`, `~/.llamacpp`) | For `owner/repo:TAG`, the snapshot GGUF matching `TAG` with all its splits, plus the multimodal projector beside it, chosen as llama.cpp chooses them | Files go under the destination's existing snapshot for the repo, or the source's revision with `refs/main` written last. The first split goes last. A running router is asked to rescan (`GET /models?reload=1`) |
 | llama.cpp custom artifacts | `.pair-copies/<SHA256 of exact model ID>/<exportId>/` inside the destination's own store | Exact configured model and draft GGUF shards | Only the versioned alias-level `copy.json` receipt marks a completed bundle; native presets and inventory are not changed |
-| LM Studio | `{models_dir}` (`~/.lmstudio/models`) | The path `lms ls --json` gives for the model (a GGUF file plus any `mmproj` GGUF beside it, or an MLX directory). An id that matches several models by path prefix is refused | Same relative path. A running server is restarted afterwards, as for `delete_model`, because LM Studio indexes models at startup |
 
-Limits: one copy of a given model at a time per node. Ollama models named with
-a registry port (`host:port/...`) are refused. An adopted Ollama instance
-started outside PAIR may use a different `OLLAMA_MODELS` than this service
-resolves, and LM Studio's models root is the manifest's `models_dir`, not a
-custom folder chosen in LM Studio's settings. The destination's sha256 check
-catches a source file that changes during a copy.
+Limits: one copy of a given model at a time per node. An adopted llama.cpp
+instance started outside PAIR may use a different `LLAMA_CACHE` than this
+service resolves. The destination's sha256 check catches a source file that
+changes during a copy.
 
 Custom bundles use the same identity-withdrawal guard, file locks, free-space,
 resume and full-hash checks. The receipt is published only after every artifact
@@ -1433,7 +1420,7 @@ setup require separate acceptance.
 | `--http-port <port>` | `0` (off) | Serve the plain LAN model-list surface (`GET /v1/models`, the `em` service) on this port; the broker passes `:14322` |
 | `--control-port <port>` | `0` (off) | Serve the cluster-scoped mTLS remote-control surface (the `ec` service) on this port; callers are admitted only while this node is a cluster member. The broker passes `:14323` |
 | `--control-host <ip>` | `0.0.0.0` | Literal IPv4 or IPv6 bind address for `ec` only; `127.0.0.1` confines that listener to loopback. Does not change the `em` listener or authentication |
-| `--reserved-port <port>` | `0` (off) | Refuse local or remote engine starts and persisted port changes on a parent-owned proxy alias; the broker configures this from `OLLAMA_HOST` |
+| `--reserved-port <port>` | `0` (off) | Refuse local or remote engine starts and persisted port changes on a parent-owned proxy port |
 | `--cluster-dir <dir>` | _(none)_ | Cluster identity/pin directory; gates the `ec` surface on and supplies the leaf/pins used to serve it and to dial peers |
 | `--loaded-poll-interval <sec>` | `5` | Seconds between loaded-model polls that drive `engine:models-changed`; `0` disables the watcher |
 | `--log-level <level>` | _(env `NVPAIR_LOG_LEVEL` or `info`)_ | `debug` \| `info` \| `warn` \| `error` |
@@ -1511,8 +1498,7 @@ Unlike the rest of NVPAIR, engine-manager therefore **does terminate inter-node
 mTLS itself** (and dials peers' `ec` surfaces with the same pinned identity),
 matching how `nvpair-errors` and `nvpair-workload-manager` handle their own
 cluster traffic. Managed engines bind **loopback by default**, but a manifest's
-`runtime.bind` may open an inference engine to the LAN — Ollama ships
-`0.0.0.0` to serve the cluster — overridable per call via
+`runtime.bind` may open an inference engine to the LAN, overridable per call via
 `engine:start {bind}`; readiness/health probes always target loopback.
 Downloads are **HTTPS-only** (plain `http` only from loopback) and verified
 against the manifest's `sha256` when one is pinned; an unpinned fetch runs

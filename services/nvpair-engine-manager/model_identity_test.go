@@ -31,7 +31,7 @@ import (
 func TestModelDownloadIdentityRetainsUnsafeMaskAfterMutation(t *testing.T) {
 	test := func(name, requestModel, listedModel string) {
 		t.Run(name, func(t *testing.T) {
-			ex := ollamaDownloadInventoryExecutor(t)
+			ex := taggedDownloadInventoryExecutor(t)
 			original := ex.client.Transport
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 				if request.URL.Path == "/api/tags" {
@@ -41,14 +41,14 @@ func TestModelDownloadIdentityRetainsUnsafeMaskAfterMutation(t *testing.T) {
 				return original.RoundTrip(request)
 			})
 			ex.modelsSweep(context.Background(), true)
-			if got := ex.modelIdentity().Engines["ollama"].ModelDigests; len(got) != 2 {
+			if got := ex.modelIdentity().Engines["tagged"].ModelDigests; len(got) != 2 {
 				t.Fatalf("ready identity baseline = %v", got)
 			}
-			attempt := reserveModelDownload(t, ex.downloads, "ollama", requestModel, engines.ModelNamingImpliedLatestTag)
+			attempt := reserveModelDownload(t, ex.downloads, "tagged", requestModel, engines.ModelNamingImpliedLatestTag)
 			assertMasked := func() {
 				t.Helper()
 				want := map[string]string{"ready:latest": memoryTestDigest}
-				if got := ex.modelIdentity().Engines["ollama"].ModelDigests; !reflect.DeepEqual(got, want) {
+				if got := ex.modelIdentity().Engines["tagged"].ModelDigests; !reflect.DeepEqual(got, want) {
 					t.Fatalf("unsafe content escaped strict digest publication: %v", got)
 				}
 			}
@@ -59,7 +59,7 @@ func TestModelDownloadIdentityRetainsUnsafeMaskAfterMutation(t *testing.T) {
 			if err := ex.downloads.finish(attempt, modeldownload.PhaseFailed, modeldownload.ReasonDownloadFailed, ""); err != nil {
 				t.Fatalf("finish failed mutation: %v", err)
 			}
-			ex.endModelMutation("ollama", nil)
+			ex.endModelMutation("tagged", nil)
 			ex.modelsSweep(context.Background(), true)
 			assertMasked()
 		})
@@ -86,8 +86,8 @@ func TestModelDownloadRecoveryWithdrawsNamesAndDigestsOnly(t *testing.T) {
 	}
 }
 
-// digestManifest is the fake engine with an Ollama-shaped list_models that
-// declares the content digest field, as the bundled Ollama manifest does.
+// digestManifest is the fake engine with a list_models that declares the
+// content digest field.
 func digestManifest() *Manifest {
 	m := testEngineManifest(fakeEngineBin)
 	m.Actions["list_models"] = Action{

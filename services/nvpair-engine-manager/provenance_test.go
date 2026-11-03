@@ -30,8 +30,8 @@ func TestInstallMarkerRoundTrip(t *testing.T) {
 }
 
 // vendorEngineManifest describes one vendor-script engine whose files land
-// outside the install directory, which is the LM Studio shape the install
-// marker exists for. removeTargets empty leaves the engine in place, which is
+// outside the install directory, which is the shape the install marker
+// exists for. removeTargets empty leaves the engine in place, which is
 // how a failing uninstall is reproduced.
 func vendorEngineManifest(vendorRoot, modelsDir string, removeTargets []string) *Manifest {
 	ok := []string{"true"}

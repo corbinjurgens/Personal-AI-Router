@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 
@@ -20,146 +19,6 @@ import (
 
 func TestLinkedModelHTTPAccess(t *testing.T) {
 	t.Run("custom external export", testLinkedModelHTTPAccessCustom)
-	root := t.TempDir()
-	ex := copyTestExecutor(t, "ollama", root, true)
-	fixture := writeOllamaModel(t, filepath.Join(root, "models"), "tiny", 128, 3)
-	copyTestNativeModels(t, ex, "ollama", "tiny")
-	counts := &linkedHashCounts{}
-	usage := &servingReadUsage{}
-	var pathsMu sync.Mutex
-	paths := map[string]*linkedHashCounts{}
-	access := servingFileAccess{usage: usage, open: func(path string) (servingArtifactFile, error) {
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, err
-		}
-		counts.opens.Add(1)
-		pathsMu.Lock()
-		counter := paths[path]
-		if counter == nil {
-			counter = &linkedHashCounts{}
-			paths[path] = counter
-		}
-		pathsMu.Unlock()
-		counter.opens.Add(1)
-		return &linkedHashFile{File: f, counts: counts, afterRead: func(n int, _ int64) { counter.bytes.Add(int64(n)) }}, nil
-	}}
-	f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
-		mux := (&controlServer{exec: ex, mesh: mesh, access: access}).mux()
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if (r.Method != http.MethodGet && r.Method != http.MethodHead) || (r.URL.Path != controlModelFilesPath && r.URL.Path != controlModelFilePath) {
-				http.NotFound(w, r)
-				return
-			}
-			mux.ServeHTTP(w, r)
-		})
-	})
-	ctx := remoteFixtureContext(t)
-	client := f.client(t, ctx)
-	list, err := client.modelFiles(ctx, "ollama", "tiny", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _, err := client.modelFile(ctx, "ollama", "tiny", fixture.manifestRel, list.ExportID, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := io.ReadAll(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := body.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, fixture.manifest) || counts.readAt.Load() == 0 || counts.opens.Load() != counts.closes.Load() {
-		t.Fatalf("pinned response mismatch or reader not closed: opens=%d closes=%d reads=%d", counts.opens.Load(), counts.closes.Load(), counts.readAt.Load())
-	}
-	q := url.Values{"engine": {"ollama"}, "model": {"tiny"}, "path": {fixture.manifestRel}, "exportId": {list.ExportID}}
-	selectorPath := filepath.Join(root, "models", filepath.FromSlash(fixture.manifestRel))
-	pathsMu.Lock()
-	selector := paths[selectorPath]
-	pathsMu.Unlock()
-	if selector == nil {
-		t.Fatal("listing did not read manifest through injected reader")
-	}
-	beforeBytes, beforeSelector := counts.bytes.Load(), selector.bytes.Load()
-	beforeUsage := *usage
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, client.base+controlModelFilePath+"?"+q.Encode(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := client.controlClient(false).Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	headBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := resp.Body.Close(); err != nil {
-		t.Fatal(err)
-	}
-	observed := counts.bytes.Load() - beforeBytes
-	selectorBytes := selector.bytes.Load() - beforeSelector
-	accounted := (usage.SourceBytes - beforeUsage.SourceBytes) + (usage.SampleBytes - beforeUsage.SampleBytes) + (usage.HeaderBytes - beforeUsage.HeaderBytes)
-	if resp.StatusCode != http.StatusOK || len(headBody) != 0 || selectorBytes <= 0 || observed != selectorBytes || uint64(observed) != accounted || usage.SourceBytes == beforeUsage.SourceBytes || counts.opens.Load() != counts.closes.Load() {
-		t.Fatalf("HEAD status=%d body=%d observed=%d selector=%d accounted=%d usage=%+v opens=%d closes=%d", resp.StatusCode, len(headBody), observed, selectorBytes, accounted, *usage, counts.opens.Load(), counts.closes.Load())
-	}
-	body, offset, err := client.modelFile(ctx, "ollama", "tiny", fixture.manifestRel, list.ExportID, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err = io.ReadAll(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := body.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if offset != 2 || !bytes.Equal(got, fixture.manifest[2:]) {
-		t.Fatalf("range offset=%d bytes=%d", offset, len(got))
-	}
-	other := filepath.Join(root, "other")
-	writeTestFile(t, other, []byte("forbidden"))
-	reads := 0
-	closed := &linkedHashCounts{}
-	server := &controlServer{exec: ex, access: servingFileAccess{open: func(string) (servingArtifactFile, error) {
-		f, err := os.Open(other)
-		if err != nil {
-			return nil, err
-		}
-		closed.opens.Add(1)
-		return &linkedHashFile{File: f, counts: closed, forbidden: true}, nil
-	}}}
-	query := url.Values{"engine": {"ollama"}, "model": {"tiny"}, "path": {fixture.manifestRel}, "exportId": {list.ExportID}}
-	response := httptest.NewRecorder()
-	server.handleModelFile(response, httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+query.Encode(), nil))
-	if response.Code != http.StatusConflict || reads != 0 || closed.readAt.Load() != 0 || closed.opens.Load() != 1 || closed.closes.Load() != 1 {
-		t.Fatalf("status=%d reads=%d opens=%d closes=%d", response.Code, closed.readAt.Load(), closed.opens.Load(), closed.closes.Load())
-	}
-	t.Run("cancellation retains lease until body completes", func(t *testing.T) {
-		writer := &modelDownloadBodyWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		request := httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+q.Encode(), nil).WithContext(ctx)
-		done := make(chan struct{})
-		go func() { defer close(done); (&controlServer{exec: ex, access: access}).handleModelFile(writer, request) }()
-		<-writer.entered
-		cancel()
-		if err := ex.withModelMutation(context.Background(), "ollama", func() error { return nil }); err == nil {
-			t.Error("mutation acquired lease while response was active")
-		}
-		close(writer.release)
-		<-done
-		release, err := ex.downloads.acquireWrite("ollama")
-		if err != nil {
-			t.Fatalf("lease retained after response: %v", err)
-		}
-		release()
-		if counts.opens.Load() != counts.closes.Load() {
-			t.Fatalf("opens=%d closes=%d", counts.opens.Load(), counts.closes.Load())
-		}
-	})
 }
 
 func testLinkedModelHTTPAccessCustom(t *testing.T) {
@@ -251,4 +110,25 @@ func testLinkedModelHTTPAccessCustom(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("custom HEAD status=%d", resp.StatusCode)
 	}
+	t.Run("cancellation retains lease until body completes", func(t *testing.T) {
+		ex := f.source
+		writer := &modelDownloadBodyWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		request := httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+q.Encode(), nil).WithContext(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); (&controlServer{exec: ex, access: access}).handleModelFile(writer, request) }()
+		<-writer.entered
+		cancel()
+		if err := ex.withModelMutation(context.Background(), "llamacpp", func() error { return nil }); err == nil {
+			t.Error("mutation acquired lease while response was active")
+		}
+		close(writer.release)
+		<-done
+		release, err := ex.downloads.acquireWrite("llamacpp")
+		if err != nil {
+			t.Fatalf("lease retained after response: %v", err)
+		}
+		release()
+	})
 }

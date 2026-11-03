@@ -23,7 +23,7 @@ func (command launchCommand) text() (string, error) {
 
 func TestResolvedLaunchMatchesBundledEngines(t *testing.T) {
 	reg := loadWithOverrides(t, t.TempDir())
-	vars := map[string]string{"host": "127.0.0.1", "port": "12345", "cli": "/test path/lms", "install_dir": "/test path", "models_dir": "/test models"}
+	vars := map[string]string{"host": "127.0.0.1", "port": "12345", "cli": "/test path/engine-cli", "install_dir": "/test path", "models_dir": "/test models"}
 	for _, engine := range []string{"llamacpp"} {
 		manifest, ok := reg.Get(engine)
 		if !ok {

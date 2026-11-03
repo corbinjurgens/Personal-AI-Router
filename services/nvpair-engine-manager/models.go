@@ -27,7 +27,7 @@ const modelsTimeout = 5 * time.Second
 // ModelsResult is the model payload the LAN HTTP surface (/v1/models) and the
 // engine:models RPC return: the flat, de-duplicated union of every running
 // engine's models plus the per-engine attribution keyed by engine name (e.g.
-// "ollama", "lmstudio"). Models is retained unchanged for consumers that only
+// "llamacpp"). Models is retained unchanged for consumers that only
 // need the node-level set; ByEngine is the additive attribution a per-engine
 // consumer needs (a node's engine card, and the proxies' own-engine model-owner
 // ranking). ByEngine includes every running engine whose inventory was
@@ -120,7 +120,7 @@ func (e *Executor) Models(ctx context.Context) []string {
 // so the engines that did answer still surface their models.
 //
 // The per-engine queries run CONCURRENTLY. A host running several engines (e.g.
-// Ollama + LM Studio) must not have the later engines squeezed out of a single
+// llama.cpp plus a descriptor engine) must not have the later engines squeezed out of a single
 // shared deadline: sequential queries under one budget meant a slow first engine
 // left little for the second, and the peer's discovery daemon fetches this over
 // HTTP with its own (shorter) timeout, so a squeezed second engine silently
@@ -558,8 +558,8 @@ func extractStringsResult(raw json.RawMessage, spec *ActionResult) ([]string, bo
 // matchRow reports whether an element passes an ActionResult row filter.
 // Match.Field is a validated dot-separated object path. With Match.In set, the
 // resolved value must decode as a JSON string equal to one of In. With
-// Match.Nonempty set, it must decode as a JSON array with length > 0 (LM Studio
-// /api/v1/models loaded_instances). A missing or wrong-typed path fails the
+// Match.Nonempty set, it must decode as a JSON array with length > 0 (a
+// loaded_instances array). A missing or wrong-typed path fails the
 // match, so a row we cannot classify is excluded rather than counted as loaded.
 func matchRow(el map[string]json.RawMessage, m *ResultMatch) bool {
 	fv, ok := resolveObjectPath(el, m.Field)
@@ -602,9 +602,9 @@ func resolveObjectPath(obj map[string]json.RawMessage, path string) (json.RawMes
 }
 
 // sameReadRequest reports whether two manifest actions issue the identical
-// side-effect-free HTTP request, so one response can serve both. LM Studio and
-// llama.cpp answer list_models and loaded_models from the same endpoint and only
-// filter the result differently; without this the loaded-model watcher fetched
+// side-effect-free HTTP request, so one response can serve both. An engine such
+// as llama.cpp can answer list_models and loaded_models from the same endpoint
+// and only filter the result differently; without this the loaded-model watcher fetched
 // that endpoint twice on every tick.
 func sameReadRequest(a, b Action) bool {
 	if a.HTTP == nil || b.HTTP == nil {
@@ -613,7 +613,7 @@ func sameReadRequest(a, b Action) bool {
 	if len(a.Cmd) > 0 || len(b.Cmd) > 0 || a.RemovePath != nil || b.RemovePath != nil {
 		return false
 	}
-	if a.RestartAfter || b.RestartAfter || a.ProgressProtocol != "" || b.ProgressProtocol != "" || a.ModelResolution != "" || b.ModelResolution != "" {
+	if a.RestartAfter || b.RestartAfter || a.ProgressProtocol != "" || b.ProgressProtocol != "" {
 		return false
 	}
 	return a.HTTP.Method == b.HTTP.Method &&

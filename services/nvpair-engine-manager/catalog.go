@@ -388,32 +388,6 @@ func newCatalogService() *catalogService {
 func (c *catalogService) Catalog(ctx context.Context, engine, platform, arch, query string) (CatalogResult, error) {
 	platform, arch = catalogTarget(platform, arch)
 	switch c.adapterFor(engine) {
-	case modelFamilyOllama:
-		models, meta, err := c.ollamaCatalog()
-		if err != nil {
-			return CatalogResult{}, err
-		}
-		return CatalogResult{
-			Models:   models,
-			Source:   meta.Source,
-			Platform: platform,
-			Arch:     arch,
-			// The committed Ollama list carries no machine-locked entries, so
-			// nothing is dropped and the caller's target does not change it.
-			FetchedAt: meta.ScrapedAt,
-		}, nil
-	case modelFamilyLMStudio:
-		models, fetchedAt, err := c.lmStudio.get(ctx)
-		if err != nil {
-			return CatalogResult{}, err
-		}
-		return CatalogResult{
-			Models:    filterForTarget(models, platform, arch),
-			Source:    hfModelsAPI + "?author=" + lmStudioAuthor,
-			Platform:  platform,
-			Arch:      arch,
-			FetchedAt: fetchedAt.UTC().Format(time.RFC3339),
-		}, nil
 	case engines.NameLlamaCPP:
 		query, err := catalogQuery(query)
 		if err != nil {

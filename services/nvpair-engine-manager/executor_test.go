@@ -43,7 +43,7 @@ func testEngineManifest(bin string) *Manifest {
 				Detect: []string{bin},
 				Runtime: Runtime{
 					Bin:    bin,
-					Env:    map[string]string{"OLLAMA_HOST": "127.0.0.1:{port}"},
+					Env:    map[string]string{"FAKE_ADDR": "127.0.0.1:{port}"},
 					Port:   0, // auto-assign a free loopback port
 					Ready:  &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, TimeoutS: 10},
 					Health: &Probe{HTTP: "http://127.0.0.1:{port}/", Status: 200, IntervalS: 1},

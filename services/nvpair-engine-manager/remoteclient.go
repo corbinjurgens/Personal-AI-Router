@@ -165,7 +165,7 @@ func (c *remoteClient) controlClient(ready bool) *http.Client {
 // engine is healthy or a model is loaded, which the ordinary 30s
 // response-header budget cannot cover. loadBudget is the engine's model-load
 // response budget; a load waits on the readiness budget when that exceeds the
-// ordinary one (Ollama answers a load only once the model is resident).
+// ordinary one (an engine may answer a load only once the model is resident).
 //
 // Cutting such a call off is worse than slow. The initiator's cancellation
 // propagates into the peer's in-flight handler, so bringUpCommand tears the
@@ -175,8 +175,8 @@ func waitsForEngineReadiness(path string, loadBudget time.Duration) bool {
 	if path == settingsPath+"apply" {
 		return true
 	}
-	// controlDeletePath: LM Studio's delete_model declares restart_after, so the
-	// peer replies only after the post-delete restart is ready.
+	// controlDeletePath: a delete_model that declares restart_after makes the
+	// peer reply only after the post-delete restart is ready.
 	if path == controlLoadPath {
 		return loadBudget > remoteResponseHeaderTimeout
 	}

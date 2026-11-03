@@ -197,37 +197,6 @@ func llamaModelControlsExecutor(t *testing.T) *Executor {
 	return ex
 }
 
-func modelControlsExecutor(t *testing.T) *Executor {
-	t.Helper()
-	h := newMemoryEvidenceHarness(t)
-	st := h.ex.engines["ollama"]
-	st.manifest.ModelNaming = engines.ModelNamingExact
-	st.manifest.Actions = map[string]Action{
-		"warm":          {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/load"}},
-		"cool":          {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/unload"}},
-		"erase":         {HTTP: &ActionHTTP{Method: http.MethodDelete, Path: "/delete"}},
-		pullModelAction: {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/pull"}},
-		"opaque":        {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/opaque"}},
-		"list_models":   {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/list"}, Result: &ActionResult{Array: "models", Field: "name"}},
-		"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/loaded"}, Result: &ActionResult{Array: "models", Field: "name"}},
-	}
-	st.manifest.Operations = map[string]OperationBinding{
-		engines.OperationLoad:   {Action: "warm", ModelParam: "target"},
-		engines.OperationUnload: {Action: "cool", ModelParam: "target"},
-		engines.OperationDelete: {Action: "erase", ModelParam: "target"},
-		engines.OperationPull:   {Action: pullModelAction, ModelParam: "target"},
-	}
-	h.ex.client = &http.Client{Transport: memoryModelsTransport(func(*http.Request) (*http.Response, error) {
-		t.Error("unexpected engine request")
-		return nil, errors.New("unexpected engine request")
-	})}
-	h.ex.modelMutationParent = func(context.Context, string) error {
-		t.Error("unexpected model mutation")
-		return errors.New("unexpected model mutation")
-	}
-	return h.ex
-}
-
 func modelControlsJSON(t *testing.T, value any) json.RawMessage {
 	t.Helper()
 	raw, err := json.Marshal(value)
@@ -282,13 +251,13 @@ func TestModelDownloadPullIdentityFollowsDeclaredBinding(t *testing.T) {
 }
 
 func TestModelDownloadFailedBoundPullFencesActualNativeModel(t *testing.T) {
-	ex := modelControlsExecutor(t)
+	ex := llamaModelControlsExecutor(t)
 	acceptModelMutations(ex)
 	root := t.TempDir()
-	t.Setenv("OLLAMA_MODELS", root)
-	params := json.RawMessage(`{"target":"actual","name":"other"}`)
+	t.Setenv("LLAMA_CACHE", root)
+	const model, artifact = "owner/actual:Q4_K_M", "actual-Q4_K_M.gguf"
+	params := json.RawMessage(`{"target":"` + model + `","name":"other"}`)
 	var effects int
-	var artifact ollamaFixture
 	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
 		effects++
 		body, err := io.ReadAll(r.Body)
@@ -298,16 +267,12 @@ func TestModelDownloadFailedBoundPullFencesActualNativeModel(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != "/pull" || !bytes.Equal(body, params) {
 			return nil, errors.New("pull changed its native dispatch or caller params")
 		}
-		var native struct{ Target string }
-		if err := json.Unmarshal(body, &native); err != nil {
-			return nil, err
-		}
-		artifact = writeOllamaModel(t, root, native.Target, 16, 3)
+		writeLlamaCache(t, root, "owner/actual", strings.Repeat("a", 40), map[string][]byte{artifact: testBytes(16, 3)})
 		return mutationJSON(http.StatusOK, `{"error":"fixture native failure after content write"}`)
 	})
-	result, err := ex.Action(context.Background(), "ollama", pullModelAction, params)
-	if err == nil || result != nil || effects != 1 || artifact.manifestRel == "" {
-		t.Fatalf("failed native pull result=%s error=%v effects=%d artifact=%+v", result, err, effects, artifact)
+	result, err := ex.Action(context.Background(), "llamacpp", pullModelAction, params)
+	if err == nil || result != nil || effects != 1 {
+		t.Fatalf("failed native pull result=%s error=%v effects=%d", result, err, effects)
 	}
 	snapshot := ex.downloads.snapshot()
 	if err := snapshot.Validate(); err != nil {
@@ -317,34 +282,34 @@ func TestModelDownloadFailedBoundPullFencesActualNativeModel(t *testing.T) {
 		t.Fatalf("failed pull entries=%+v", snapshot)
 	}
 	entry := snapshot.Entries[0]
-	if entry.Model != "actual" || entry.Phase != modeldownload.PhaseFailed || entry.Reason != modeldownload.ReasonDownloadFailed || !entry.BlocksReadiness {
+	if entry.Model != model || entry.Phase != modeldownload.PhaseFailed || entry.Reason != modeldownload.ReasonDownloadFailed || !entry.BlocksReadiness {
 		t.Fatalf("failed native model was not fenced: %+v", entry)
 	}
 	markers, err := ex.downloads.store.load()
 	if err != nil {
 		t.Fatalf("read failed pull journal: %v", err)
 	}
-	marker, found := markers[downloadContentKey{"ollama", "actual"}]
-	if !found || len(markers) != 1 || marker.ID != entry.ID || marker.Model != "actual" {
+	marker, found := markers[downloadContentKey{"llamacpp", model}]
+	if !found || len(markers) != 1 || marker.ID != entry.ID || marker.Model != model {
 		t.Fatalf("journal does not identify native target: %+v", markers)
 	}
-	if _, err := ex.ModelLoad(context.Background(), "ollama", "actual"); !errors.Is(err, errDownloadBusy) {
+	if _, err := ex.ModelLoad(context.Background(), "llamacpp", model); !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("typed Load bypassed actual-model fence: %v", err)
 	}
-	if _, err := ex.Action(context.Background(), "ollama", "warm", params); !errors.Is(err, errDownloadBusy) {
+	if _, err := ex.Action(context.Background(), "llamacpp", "warm", params); !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("raw Load bypassed actual-model fence: %v", err)
 	}
 	server := &controlServer{exec: ex}
-	query := modelQueryValues("ollama", "actual")
+	query := modelQueryValues("llamacpp", model)
 	listing := httptest.NewRecorder()
 	server.handleModelFiles(listing, httptest.NewRequest(http.MethodGet, controlModelFilesPath+"?"+query.Encode(), nil))
-	query.Set("path", artifact.manifestRel)
+	query.Set("path", artifact)
 	file := httptest.NewRecorder()
 	server.handleModelFile(file, httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+query.Encode(), nil))
 	if listing.Code != http.StatusConflict || listing.Flushed || file.Code != http.StatusConflict || file.Flushed || effects != 1 {
 		t.Fatalf("failed model escaped export/Load fence: listing=%d file=%d native effects=%d", listing.Code, file.Code, effects)
 	}
-	release, err := ex.acquireModelRead("ollama", "other", false)
+	release, err := ex.acquireModelRead("llamacpp", "other", false)
 	if err != nil {
 		t.Fatalf("unrelated name alias was incorrectly fenced: %v", err)
 	}
@@ -591,12 +556,6 @@ func TestModelControlsCatalogCacheReturnBoundaries(t *testing.T) {
 		if got := filterForTarget(rows, target.platform, target.arch); !reflect.DeepEqual(got, []CatalogModel{valid}) {
 			t.Fatalf("target return retained invalid ID/name: %+v", got)
 		}
-	}
-	c := newCatalogService()
-	c.ollamaOnce.Do(func() { c.ollama = rows })
-	got, err := c.Catalog(context.Background(), "ollama", "windows", "amd64", "")
-	if err != nil || !reflect.DeepEqual(got.Models, []CatalogModel{valid}) {
-		t.Fatalf("embedded cached return = %+v, %v", got, err)
 	}
 }
 
@@ -2402,7 +2361,6 @@ func TestModelControlsConventionalConsumersRequireExactModelBeforeEffects(t *tes
 		{"command name placeholder", "delete_model", Action{Cmd: []string{"unreachable-compatibility-child", "{name}"}}},
 		{"remove path model placeholder", "delete_model", Action{RemovePath: &ActionRemovePath{Root: "unused", Path: "unused/{model}"}}},
 		{"unbound remove path model placeholder", "opaque", Action{RemovePath: &ActionRemovePath{Root: "unused", Path: "unused/{model}"}}},
-		{"model resolver", pullModelAction, Action{Cmd: []string{"unreachable-compatibility-child"}, ModelResolution: modelResolutionLMSGet}},
 		{"progress protocol", pullModelAction, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/models"}, ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

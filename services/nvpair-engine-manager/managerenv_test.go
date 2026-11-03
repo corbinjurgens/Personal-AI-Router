@@ -54,11 +54,11 @@ func TestManagerLaunchesUseIsolatedEnv(t *testing.T) {
 }
 
 func TestIsolatedManagerEnvClearsAddressOverrides(t *testing.T) {
-	for _, key := range []string{"FAKE_ADDR", "OLLAMA_HOST", "NVPAIR_EM_LIVE_TEST"} {
+	for _, key := range []string{"FAKE_ADDR", "NVPAIR_EM_LIVE_TEST"} {
 		t.Setenv(key, "ambient-value")
 	}
 	env := isolatedManagerEnv(t.TempDir(), t.TempDir())
-	for _, key := range []string{"FAKE_ADDR", "OLLAMA_HOST", "NVPAIR_EM_LIVE_TEST"} {
+	for _, key := range []string{"FAKE_ADDR", "NVPAIR_EM_LIVE_TEST"} {
 		var values []string
 		for _, entry := range env {
 			name, value, ok := strings.Cut(entry, "=")
@@ -96,10 +96,10 @@ func TestManagerFixtureBundleIsPrivate(t *testing.T) {
 		if rt.Bin != fakeEngineBin || !slices.Equal(platform.Detect, []string{fakeEngineBin}) || platform.Install != nil || platform.Uninstall != nil || platform.ModelsDir != "" {
 			t.Errorf("%s can reach a native installation: %+v", name, platform)
 		}
-		if rt.Port <= 0 || slices.Contains([]int{11434, 1234, 1235, 8080, 8081}, rt.Port) || rt.Bind != "" || rt.Mode != "" || len(rt.Start) != 0 || rt.CLI != "" {
+		if rt.Port <= 0 || slices.Contains([]int{8080, 8081}, rt.Port) || rt.Bind != "" || rt.Mode != "" || len(rt.Start) != 0 || rt.CLI != "" {
 			t.Errorf("%s does not use a private process port: %+v", name, rt)
 		}
-		if rt.Env["FAKE_ADDR"] != "{host}:{port}" || rt.Env["OLLAMA_HOST"] != "{host}:{port}" || rt.Ready == nil || rt.Ready.HTTP != "http://127.0.0.1:{port}/" || rt.Health == nil || rt.Health.HTTP != rt.Ready.HTTP {
+		if rt.Env["FAKE_ADDR"] != "{host}:{port}" || rt.Ready == nil || rt.Ready.HTTP != "http://127.0.0.1:{port}/" || rt.Health == nil || rt.Health.HTTP != rt.Ready.HTTP {
 			t.Errorf("%s can escape the fixture address: %+v", name, rt)
 		}
 	}

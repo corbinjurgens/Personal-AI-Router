@@ -406,9 +406,8 @@ func TestModelDownloadTerminalSnapshotSurvivesSameKeyRetry(t *testing.T) {
 
 func TestModelDownloadBlockedLoadAndExportDispatch(t *testing.T) {
 	root := t.TempDir()
-	writeOllamaModel(t, root, "demo", 64, 1)
-	ex := copyTestExecutor(t, "ollama", root, true)
-	st, err := ex.state("ollama")
+	ex := copyTestExecutor(t, "tagged", root, true)
+	st, err := ex.state("tagged")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,17 +415,17 @@ func TestModelDownloadBlockedLoadAndExportDispatch(t *testing.T) {
 	st.manifest.Actions = map[string]Action{"load_model": {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/load"}}}
 	var effects atomic.Int32
 	ex.client = &http.Client{Transport: &mutationTransport{respond: func(*http.Request) (*http.Response, error) { effects.Add(1); return mutationJSON(http.StatusOK, `{}`) }}}
-	a := reserveModelDownload(t, ex.downloads, "ollama", "demo:latest", engines.ModelNamingImpliedLatestTag)
+	a := reserveModelDownload(t, ex.downloads, "tagged", "demo:latest", engines.ModelNamingImpliedLatestTag)
 	if _, err := ex.downloads.changeMarker(a, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := ex.downloads.finish(a, "failed", "download_failed", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ex.Action(context.Background(), "ollama", "load_model", json.RawMessage(`{"model":"demo"}`)); err == nil {
+	if _, err := ex.Action(context.Background(), "tagged", "load_model", json.RawMessage(`{"model":"demo"}`)); err == nil {
 		t.Fatal("raw load dispatched unsafe alias")
 	}
-	if _, err := ex.ModelLoad(context.Background(), "ollama", "demo"); err == nil {
+	if _, err := ex.ModelLoad(context.Background(), "tagged", "demo"); err == nil {
 		t.Fatal("typed load dispatched unsafe alias")
 	}
 	st.opMu.Lock()
@@ -439,7 +438,7 @@ func TestModelDownloadBlockedLoadAndExportDispatch(t *testing.T) {
 	st.opMu.Unlock()
 	s := &controlServer{exec: ex}
 	for _, route := range []string{controlModelFilesPath, controlModelFilePath} {
-		r := httptest.NewRequest(http.MethodGet, route+"?engine=ollama&model=demo&path=blobs/unused", nil)
+		r := httptest.NewRequest(http.MethodGet, route+"?engine=tagged&model=demo&path=blobs/unused", nil)
 		w := httptest.NewRecorder()
 		if route == controlModelFilesPath {
 			s.handleModelFiles(w, r)
@@ -461,7 +460,7 @@ func testModelDownloads(t *testing.T) *modelDownloads {
 	if !ok {
 		t.Fatal("invalid descriptor engine")
 	}
-	return newModelDownloads(newOpID(), t.TempDir(), map[string]string{"ollama": engines.ModelNamingImpliedLatestTag, "llamacpp": engines.ModelNamingExact, other.Name: engines.ModelNamingExact})
+	return newModelDownloads(newOpID(), t.TempDir(), map[string]string{"tagged": engines.ModelNamingImpliedLatestTag, "llamacpp": engines.ModelNamingExact, other.Name: engines.ModelNamingExact})
 }
 
 func reserveModelDownload(t *testing.T, d *modelDownloads, engine, model, naming string) *modelDownloadAttempt {
@@ -475,14 +474,14 @@ func reserveModelDownload(t *testing.T, d *modelDownloads, engine, model, naming
 
 func TestModelDownloadNamingEquivalence(t *testing.T) {
 	d := testModelDownloads(t)
-	a := reserveModelDownload(t, d, "ollama", "demo", engines.ModelNamingImpliedLatestTag)
+	a := reserveModelDownload(t, d, "tagged", "demo", engines.ModelNamingImpliedLatestTag)
 	if a.entry.Model != "demo" || a.key.model != "demo:latest" {
 		t.Fatalf("raw spelling/key = %q/%q", a.entry.Model, a.key.model)
 	}
-	if _, err := d.reserve("ollama", "demo:latest", engines.ModelNamingImpliedLatestTag); !errors.Is(err, errDownloadBusy) {
+	if _, err := d.reserve("tagged", "demo:latest", engines.ModelNamingImpliedLatestTag); !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("duplicate = %v", err)
 	}
-	if !d.blocked(downloadContentKey{"ollama", "demo:latest"}) {
+	if !d.blocked(downloadContentKey{"tagged", "demo:latest"}) {
 		t.Fatal("equivalent key was not fenced")
 	}
 	if _, err := d.changeMarker(a, false); err != nil {
@@ -491,7 +490,7 @@ func TestModelDownloadNamingEquivalence(t *testing.T) {
 	if err := d.finish(a, "failed", "download_failed", ""); err != nil {
 		t.Fatal(err)
 	}
-	b := reserveModelDownload(t, d, "ollama", "demo:latest", engines.ModelNamingImpliedLatestTag)
+	b := reserveModelDownload(t, d, "tagged", "demo:latest", engines.ModelNamingImpliedLatestTag)
 	if err := d.finish(b, "failed", "interrupted", ""); err != nil {
 		t.Fatal(err)
 	}

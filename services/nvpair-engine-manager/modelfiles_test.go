@@ -164,7 +164,6 @@ func TestModelDownloadExportReaderHoldsThroughHashing(t *testing.T) {
 // under modelsDir. installed controls whether its detect path exists.
 func copyTestExecutor(t *testing.T, engine, modelsDir string, installed bool) *Executor {
 	t.Helper()
-	t.Setenv("OLLAMA_MODELS", "")
 	t.Setenv("LLAMA_CACHE", "")
 	bin := filepath.Join(t.TempDir(), "engine-bin")
 	if installed {
@@ -271,39 +270,22 @@ func testBytes(n int, seed byte) []byte {
 	return b
 }
 
-// ollamaFixture is a model written into an Ollama models root.
-type ollamaFixture struct {
-	manifestRel string
-	manifest    []byte
-	blobs       map[string][]byte // rel path -> content
+// llamaNativeFixture is a one-file model written into a llama.cpp hub cache.
+type llamaNativeFixture struct {
+	model, rel string
+	data       []byte
+	repoDir    string
+	snapshot   string // absolute snapshot directory holding rel
 }
 
-// writeOllamaModel writes a model with a config blob and one weights blob of
-// weightSize bytes under root ("<models_dir>/models").
-func writeOllamaModel(t *testing.T, root, name string, weightSize int, seed byte) ollamaFixture {
+// writeLlamaNativeModel writes a model named by a single GGUF of size bytes
+// into the hub cache under root.
+func writeLlamaNativeModel(t *testing.T, root string, size int, seed byte) llamaNativeFixture {
 	t.Helper()
-	config := []byte(`{"model_format":"gguf","seed":` + string('0'+rune(seed%10)) + `}`)
-	weights := testBytes(weightSize, seed)
-	m := map[string]any{
-		"schemaVersion": 2,
-		"config":        map[string]any{"digest": "sha256:" + sha256Hex(config), "size": len(config)},
-		"layers": []any{
-			map[string]any{"digest": "sha256:" + sha256Hex(weights), "size": len(weights)},
-		},
-	}
-	manifest, _ := json.Marshal(m)
-	rel, err := ollamaManifestRel(name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fx := ollamaFixture{manifestRel: rel, manifest: manifest, blobs: map[string][]byte{
-		"blobs/sha256-" + sha256Hex(config):  config,
-		"blobs/sha256-" + sha256Hex(weights): weights,
-	}}
-	for p, b := range fx.blobs {
-		writeTestFile(t, filepath.Join(root, filepath.FromSlash(p)), b)
-	}
-	writeTestFile(t, filepath.Join(root, filepath.FromSlash(rel)), manifest)
+	const repo, commit = "owner/tiny-GGUF", "0123456789abcdef0123456789abcdef01234567"
+	fx := llamaNativeFixture{model: repo + ":Q4_K_M", rel: "tiny-Q4_K_M.gguf", data: testBytes(size, seed), repoDir: llamaRepoDir(root, repo)}
+	fx.snapshot = filepath.Join(fx.repoDir, "snapshots", commit)
+	writeLlamaCache(t, root, repo, commit, map[string][]byte{fx.rel: fx.data})
 	return fx
 }
 
@@ -385,51 +367,6 @@ func TestModelPublisherSourceHashFailureRemainsHard(t *testing.T) {
 	}
 	if err := hashModelFiles(context.Background(), &list, nil); err == nil || list.ExportID != "" {
 		t.Fatal("hash read failure issued a successful export")
-	}
-}
-
-func TestOllamaManifestRel(t *testing.T) {
-	cases := map[string]string{
-		"llama3.2":                     "manifests/registry.ollama.ai/library/llama3.2/latest",
-		"llama3.2:1b":                  "manifests/registry.ollama.ai/library/llama3.2/1b",
-		"user/model:v1":                "manifests/registry.ollama.ai/user/model/v1",
-		"hf.co/owner/repo-GGUF:Q4_K_M": "manifests/hf.co/owner/repo-GGUF/Q4_K_M",
-	}
-	for in, want := range cases {
-		got, err := ollamaManifestRel(in)
-		if err != nil || got != want {
-			t.Errorf("ollamaManifestRel(%q) = %q, %v; want %q", in, got, err, want)
-		}
-	}
-	for _, in := range []string{"", "../x", "a/b/c/d", "a/..:x", "x:..", "host:1/ns/m"} {
-		if got, err := ollamaManifestRel(in); err == nil {
-			t.Errorf("ollamaManifestRel(%q) = %q, want an error", in, got)
-		}
-	}
-}
-
-func TestModelFilesListsOllamaModelWithHashes(t *testing.T) {
-	dir := t.TempDir()
-	exec := copyTestExecutor(t, "ollama", dir, true)
-	fx := writeOllamaModel(t, filepath.Join(dir, "models"), "tiny", 4096, 1)
-	copyTestNativeModels(t, exec, "ollama", "tiny")
-	_, client := modelFileServer(t, exec, nil)
-
-	list, err := client.modelFiles(context.Background(), "ollama", "tiny", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(list.Files) != 3 {
-		t.Fatalf("files = %+v, want two blobs and the manifest", list.Files)
-	}
-	if last := list.Files[len(list.Files)-1]; last.Path != fx.manifestRel || last.SHA256 != sha256Hex(fx.manifest) || last.Size != int64(len(fx.manifest)) {
-		t.Fatalf("manifest entry = %+v, want %s last with its real hash", last, fx.manifestRel)
-	}
-	for _, f := range list.Files[:2] {
-		data, ok := fx.blobs[f.Path]
-		if !ok || f.SHA256 != sha256Hex(data) || f.Size != int64(len(data)) {
-			t.Fatalf("blob entry %+v does not match the fixture", f)
-		}
 	}
 }
 

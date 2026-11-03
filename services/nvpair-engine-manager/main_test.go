@@ -56,9 +56,9 @@ func TestMain(m *testing.M) {
 	if len(os.Args) == 3 && os.Args[1] == "command-test-helper" {
 		os.Exit(runCommandTestHelper(os.Args[2]))
 	}
-	// fake-engine gives FAKE_ADDR precedence over OLLAMA_HOST. Ambient values
-	// must not redirect a fixture child to an installed engine's address.
-	for _, key := range []string{"FAKE_ADDR", "OLLAMA_HOST", "NVPAIR_EM_LIVE_TEST"} {
+	// fake-engine binds FAKE_ADDR. Ambient values must not redirect a fixture
+	// child to an installed engine's address.
+	for _, key := range []string{"FAKE_ADDR", "NVPAIR_EM_LIVE_TEST"} {
 		if err := os.Unsetenv(key); err != nil {
 			panic(err)
 		}

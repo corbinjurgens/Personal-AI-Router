@@ -32,12 +32,12 @@ func TestLinkedModelHTTPBinding(t *testing.T) {
 
 func testLinkedModelHTTPBindingRelisting(t *testing.T) {
 	root := t.TempDir()
-	fx := writeOllamaModel(t, filepath.Join(root, "models"), "tiny", 128, 3)
-	ex := copyTestExecutor(t, "ollama", root, true)
-	copyTestNativeModels(t, ex, "ollama", "tiny")
+	fx := writeLlamaNativeModel(t, root, 128, 3)
+	ex := copyTestExecutor(t, "llamacpp", root, true)
+	copyTestNativeModels(t, ex, "llamacpp", fx.model)
 	_, client := modelFileServer(t, ex, nil)
 	ctx := context.Background()
-	list, err := client.modelFiles(ctx, "ollama", "tiny", nil)
+	list, err := client.modelFiles(ctx, "llamacpp", fx.model, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func testLinkedModelHTTPBindingRelisting(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 4; i++ {
-			if _, err := client.modelFiles(ctx, "ollama", "tiny", nil); err != nil {
+			if _, err := client.modelFiles(ctx, "llamacpp", fx.model, nil); err != nil {
 				errors <- err
 				return
 			}
@@ -56,7 +56,7 @@ func testLinkedModelHTTPBindingRelisting(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 4; i++ {
-			body, _, err := client.modelFile(ctx, "ollama", "tiny", fx.manifestRel, list.ExportID, 0)
+			body, _, err := client.modelFile(ctx, "llamacpp", fx.model, fx.rel, list.ExportID, 0)
 			if err != nil {
 				errors <- err
 				return
@@ -71,7 +71,7 @@ func testLinkedModelHTTPBindingRelisting(t *testing.T) {
 				errors <- closeErr
 				return
 			}
-			if !bytes.Equal(got, fx.manifest) {
+			if !bytes.Equal(got, fx.data) {
 				errors <- fmt.Errorf("incorrect response during relisting")
 				return
 			}
@@ -212,10 +212,10 @@ func (w *driftResponseWriter) Write(data []byte) (int, error) {
 
 func testLinkedModelHTTPBindingHashDrift(t *testing.T) {
 	root := t.TempDir()
-	fx := writeOllamaModel(t, filepath.Join(root, "models"), "tiny", 128, 3)
-	ex := copyTestExecutor(t, "ollama", root, true)
-	copyTestNativeModels(t, ex, "ollama", "tiny")
-	manifest := filepath.Join(root, "models", filepath.FromSlash(fx.manifestRel))
+	fx := writeLlamaNativeModel(t, root, 128, 3)
+	ex := copyTestExecutor(t, "llamacpp", root, true)
+	copyTestNativeModels(t, ex, "llamacpp", fx.model)
+	artifact := filepath.Join(fx.snapshot, fx.rel)
 	var once sync.Once
 	var mutationErr error
 	// Permit replacement while hashing so Windows exercises drift refusal,
@@ -225,17 +225,17 @@ func testLinkedModelHTTPBindingHashDrift(t *testing.T) {
 	}}}
 	response := &driftResponseWriter{ResponseRecorder: httptest.NewRecorder(), mutate: func() {
 		once.Do(func() {
-			mutationErr = os.Rename(manifest, manifest+".old")
+			mutationErr = os.Rename(artifact, artifact+".old")
 			if mutationErr == nil {
-				mutationErr = os.WriteFile(manifest, fx.manifest, 0600)
+				mutationErr = os.WriteFile(artifact, fx.data, 0600)
 			}
 		})
 	}}
-	server.handleModelFiles(response, httptest.NewRequest(http.MethodGet, controlModelFilesPath+"?engine=ollama&model=tiny", nil))
+	server.handleModelFiles(response, httptest.NewRequest(http.MethodGet, controlModelFilesPath+"?engine=llamacpp&model="+url.QueryEscape(fx.model), nil))
 	if mutationErr != nil {
 		t.Fatal(mutationErr)
 	}
-	if _, err := os.Stat(manifest + ".old"); err != nil {
+	if _, err := os.Stat(artifact + ".old"); err != nil {
 		t.Fatalf("hash progress did not trigger drift: %v", err)
 	}
 	dec := json.NewDecoder(response.Body)
@@ -259,10 +259,10 @@ func testLinkedModelHTTPBindingHashDrift(t *testing.T) {
 
 func testLinkedModelHTTPBindingMembership(t *testing.T) {
 	root := t.TempDir()
-	fx := writeOllamaModel(t, filepath.Join(root, "models"), "tiny", 128, 3)
-	ex := copyTestExecutor(t, "ollama", root, true)
-	copyTestNativeModels(t, ex, "ollama", "tiny")
-	list := copyTestSourceListing(t, ex, "ollama", "tiny")
+	fx := writeLlamaNativeModel(t, root, 128, 3)
+	ex := copyTestExecutor(t, "llamacpp", root, true)
+	copyTestNativeModels(t, ex, "llamacpp", fx.model)
+	list := copyTestSourceListing(t, ex, "llamacpp", fx.model)
 	server := &controlServer{exec: ex}
 	request := func(engine, model, path, id string) int {
 		query := url.Values{"engine": {engine}, "model": {model}, "path": {path}, "exportId": {id}}
@@ -274,13 +274,13 @@ func testLinkedModelHTTPBindingMembership(t *testing.T) {
 		name, engine, model, path, id string
 		want                          int
 	}{
-		{"valid", "ollama", "tiny", fx.manifestRel, list.ExportID, http.StatusOK},
-		{"no listing", "ollama", "tiny", fx.manifestRel, "", http.StatusConflict},
-		{"wrong id", "ollama", "tiny", fx.manifestRel, "wrong", http.StatusConflict},
-		{"wrong engine", "missing", "tiny", fx.manifestRel, list.ExportID, http.StatusConflict},
-		{"wrong model", "ollama", "other", fx.manifestRel, list.ExportID, http.StatusConflict},
-		{"unlisted path", "ollama", "tiny", "unlisted", list.ExportID, http.StatusNotFound},
-		{"traversal", "ollama", "tiny", "../secret", list.ExportID, http.StatusBadRequest},
+		{"valid", "llamacpp", fx.model, fx.rel, list.ExportID, http.StatusOK},
+		{"no listing", "llamacpp", fx.model, fx.rel, "", http.StatusConflict},
+		{"wrong id", "llamacpp", fx.model, fx.rel, "wrong", http.StatusConflict},
+		{"wrong engine", "missing", fx.model, fx.rel, list.ExportID, http.StatusConflict},
+		{"wrong model", "llamacpp", "owner/other-GGUF:Q4_K_M", fx.rel, list.ExportID, http.StatusConflict},
+		{"unlisted path", "llamacpp", fx.model, "unlisted", list.ExportID, http.StatusNotFound},
+		{"traversal", "llamacpp", fx.model, "../secret", list.ExportID, http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := request(tc.engine, tc.model, tc.path, tc.id); got != tc.want {
@@ -288,33 +288,33 @@ func testLinkedModelHTTPBindingMembership(t *testing.T) {
 			}
 		})
 	}
-	st, err := ex.state("ollama")
+	st, err := ex.state("llamacpp")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 256; i++ {
 		rememberCopyExport(&engineState{}, modelFileList{Model: fmt.Sprintf("eviction-%d", i), ExportID: "id"})
 	}
-	if got := request("ollama", "tiny", fx.manifestRel, list.ExportID); got != http.StatusConflict {
+	if got := request("llamacpp", fx.model, fx.rel, list.ExportID); got != http.StatusConflict {
 		t.Fatalf("evicted status=%d", got)
 	}
-	list = copyTestSourceListing(t, ex, "ollama", "tiny")
-	invalidateCopyGeneration(st, "tiny", issuedCopyGeneration(st, "tiny"))
-	if got := request("ollama", "tiny", fx.manifestRel, list.ExportID); got != http.StatusConflict {
+	list = copyTestSourceListing(t, ex, "llamacpp", fx.model)
+	invalidateCopyGeneration(st, fx.model, issuedCopyGeneration(st, fx.model))
+	if got := request("llamacpp", fx.model, fx.rel, list.ExportID); got != http.StatusConflict {
 		t.Fatalf("expired status=%d", got)
 	}
-	refreshed := copyTestSourceListing(t, ex, "ollama", "tiny")
-	if got := request("ollama", "tiny", fx.manifestRel, refreshed.ExportID); got != http.StatusOK {
+	refreshed := copyTestSourceListing(t, ex, "llamacpp", fx.model)
+	if got := request("llamacpp", fx.model, fx.rel, refreshed.ExportID); got != http.StatusOK {
 		t.Fatalf("relisted status=%d", got)
 	}
-	restarted := copyTestExecutor(t, "ollama", root, true)
-	copyTestNativeModels(t, restarted, "ollama", "tiny")
+	restarted := copyTestExecutor(t, "llamacpp", root, true)
+	copyTestNativeModels(t, restarted, "llamacpp", fx.model)
 	server.exec = restarted
-	if got := request("ollama", "tiny", fx.manifestRel, refreshed.ExportID); got != http.StatusConflict {
+	if got := request("llamacpp", fx.model, fx.rel, refreshed.ExportID); got != http.StatusConflict {
 		t.Fatalf("restart status=%d", got)
 	}
-	refreshed = copyTestSourceListing(t, restarted, "ollama", "tiny")
-	if got := request("ollama", "tiny", fx.manifestRel, refreshed.ExportID); got != http.StatusOK {
+	refreshed = copyTestSourceListing(t, restarted, "llamacpp", fx.model)
+	if got := request("llamacpp", fx.model, fx.rel, refreshed.ExportID); got != http.StatusOK {
 		t.Fatalf("restart relist status=%d", got)
 	}
 }
@@ -343,28 +343,21 @@ func testLinkedModelHTTPBindingClone(t *testing.T) {
 func testLinkedModelHTTPBindingSubstitution(t *testing.T) {
 	for _, target := range []string{"selector", "artifact", "directory", "root"} {
 		t.Run(target, func(t *testing.T) {
-			root := t.TempDir()
-			fx := writeOllamaModel(t, filepath.Join(root, "models"), "tiny", 128, 3)
-			ex := copyTestExecutor(t, "ollama", root, true)
-			copyTestNativeModels(t, ex, "ollama", "tiny")
+			root := filepath.Join(t.TempDir(), "cache")
+			fx := writeLlamaNativeModel(t, root, 128, 3)
+			ex := copyTestExecutor(t, "llamacpp", root, true)
+			copyTestNativeModels(t, ex, "llamacpp", fx.model)
 			_, client := modelFileServer(t, ex, nil)
-			list, err := client.modelFiles(context.Background(), "ollama", "tiny", nil)
+			list, err := client.modelFiles(context.Background(), "llamacpp", fx.model, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			rel := fx.manifestRel
-			if target == "artifact" {
-				for path := range fx.blobs {
-					rel = path
-					break
-				}
-			}
-			path := filepath.Join(root, "models", filepath.FromSlash(rel))
-			if target == "directory" {
-				path = filepath.Join(root, "models", "blobs")
-			} else if target == "root" {
-				path = filepath.Join(root, "models")
-			}
+			path := map[string]string{
+				"selector":  filepath.Join(fx.repoDir, "refs", "main"),
+				"artifact":  filepath.Join(fx.snapshot, fx.rel),
+				"directory": filepath.Join(fx.repoDir, "snapshots"),
+				"root":      root,
+			}[target]
 			if err := os.Rename(path, path+".old"); err != nil {
 				t.Fatal(err)
 			}
@@ -385,7 +378,7 @@ func testLinkedModelHTTPBindingSubstitution(t *testing.T) {
 				counts.opens.Add(1)
 				return &linkedHashFile{File: file, counts: counts, forbidden: true}, nil
 			}}}
-			query := url.Values{"engine": {"ollama"}, "model": {"tiny"}, "path": {fx.manifestRel}, "exportId": {list.ExportID}}
+			query := url.Values{"engine": {"llamacpp"}, "model": {fx.model}, "path": {fx.rel}, "exportId": {list.ExportID}}
 			response := httptest.NewRecorder()
 			server.handleModelFile(response, httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+query.Encode(), nil))
 			if response.Code != http.StatusConflict || counts.bytes.Load() != 0 {

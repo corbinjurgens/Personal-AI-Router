@@ -3,22 +3,16 @@
 
 package main
 
-// modellayout.go knows how each engine family stores a model on disk, which model copy
-// needs on both ends: the source lists exactly the files that make up a model
+// modellayout.go knows how the llama.cpp family stores a model on disk, which model
+// copy needs on both ends: the source lists exactly the files that make up a model
 // (modelfiles.go), and the destination decides where each one goes and in what
 // order, so the engine only sees the model once it is complete (modelcopy.go).
 //
-//   - Ollama keeps content-addressed blobs (blobs/sha256-<hex>) and one manifest
-//     per model (manifests/<host>/<namespace>/<name>/<tag>) under OLLAMA_MODELS,
-//     ~/.ollama/models by default. A model exists for Ollama once its manifest
-//     does, so the manifest is written last.
-//   - llama.cpp's router keeps a Hugging Face hub cache under LLAMA_CACHE:
-//     models--<owner>--<repo>/{refs/<branch>, snapshots/<commit>/<files>,
-//     blobs/<oid>}. A model id "owner/repo:TAG" names the snapshot GGUF that
-//     matches TAG (all of its splits), plus the multimodal projector beside it.
-//     The selection's source basis is common/download.cpp at b11146.
-//   - LM Studio keeps models under its models root, where `lms ls --json` maps a
-//     model id to a path: a GGUF file, or a directory for MLX models.
+// llama.cpp's router keeps a Hugging Face hub cache under LLAMA_CACHE:
+// models--<owner>--<repo>/{refs/<branch>, snapshots/<commit>/<files>,
+// blobs/<oid>}. A model id "owner/repo:TAG" names the snapshot GGUF that
+// matches TAG (all of its splits), plus the multimodal projector beside it.
+// The selection's source basis is common/download.cpp at b11146.
 
 import (
 	"bytes"
@@ -54,7 +48,6 @@ type engineModelStore struct {
 	engine  string
 	adapter string
 	root    string // absolute
-	cli     string // LM Studio's lms, resolved
 }
 
 // modelStoreFor resolves an engine's model store on this node.
@@ -65,20 +58,10 @@ func (e *Executor) modelStoreFor(engine string) (*engineState, engineModelStore,
 	}
 	store := engineModelStore{engine: engine, adapter: modelStoreAdapter(st.manifest.FamilyOrDefault())}
 	switch store.adapter {
-	case modelFamilyOllama:
-		store.root = engineEnvValue(st, "OLLAMA_MODELS")
-		if store.root == "" && st.modelsDir != "" {
-			store.root = filepath.Join(st.modelsDir, "models")
-		}
 	case engines.NameLlamaCPP:
 		store.root = engineEnvValue(st, "LLAMA_CACHE")
 		if store.root == "" {
 			store.root = st.modelsDir
-		}
-	case modelFamilyLMStudio:
-		store.root = st.modelsDir
-		if cli := st.plat.Runtime.CLI; cli != "" {
-			store.cli = expandPath(cli)
 		}
 	default:
 		return nil, engineModelStore{}, fmt.Errorf("%w: %q", errModelCopyUnsupported, engine)
@@ -144,46 +127,8 @@ func (e *Executor) modelSourceFilesBound(ctx context.Context, engine, model stri
 	}
 	var list modelFileList
 	switch store.adapter {
-	case modelFamilyOllama:
-		var old *sourceSnapshot
-		if expected != nil {
-			old = expected.source
-			if old.engine != engine || old.root != store.root || old.inventory == nil ||
-				e.nativeSourceCurrent(ctx, st, store, *old.inventory) != nil || validateSourceSnapshot(ctx, old) != nil {
-				return modelFileList{}, errModelInspectionChanged
-			}
-		}
-		observation, recognitionErr := e.recognizeModelSource(ctx, engine, model)
-		if recognitionErr != nil {
-			return modelFileList{}, recognitionErr
-		}
-		if err := e.nativeSourceCurrent(ctx, st, store, observation); err != nil {
-			return modelFileList{}, err
-		}
-		if old != nil && (old.run != observation.runID || old.configuration != observation.launchDigest || !bytes.Equal(old.recognition, observation.raw)) {
-			return modelFileList{}, errModelInspectionChanged
-		}
-		list, err = ollamaSourceFilesBound(ctx, store.root, model, access, old)
-		if err == nil {
-			current, recognitionErr := e.recognizeModelSource(ctx, engine, model)
-			if recognitionErr != nil {
-				return modelFileList{}, recognitionErr
-			}
-			if current.runID != observation.runID || current.launchDigest != observation.launchDigest || !bytes.Equal(current.raw, observation.raw) {
-				return modelFileList{}, errModelInspectionChanged
-			}
-			err = e.nativeSourceCurrent(ctx, st, store, current)
-			native := nativeSourceSnapshot(store, observation, list.Files)
-			list.source.engine, list.source.run, list.source.configuration = native.engine, native.run, native.configuration
-			list.source.recognition, list.source.inventory = native.recognition, native.inventory
-			if err == nil {
-				err = validateSourceSnapshot(ctx, list.source)
-			}
-		}
 	case engines.NameLlamaCPP:
 		list, err = e.llamaExportFilesBound(ctx, st, store, model, access, expected)
-	case modelFamilyLMStudio:
-		list, err = e.lmstudioSourceFilesBound(ctx, st, store, model, access, expected)
 	}
 	if err != nil {
 		return modelFileList{}, err
@@ -243,9 +188,6 @@ type plannedFile struct {
 	dest     string
 	root     string
 	exportID string
-	// check, when set, runs on the verified download before it is renamed into
-	// place (Ollama checks a manifest's blobs are all present first).
-	check func(part string) error
 }
 
 // copyPlan is the destination's view of a copy: the files in the order they
@@ -306,12 +248,8 @@ func (e *Executor) planModelCopy(st *engineState, store engineModelStore, model 
 		plan, err = customArtifactPlan(store, model, list)
 	} else {
 		switch store.adapter {
-		case modelFamilyOllama:
-			plan, err = ollamaPlan(store.root, model, list)
 		case engines.NameLlamaCPP:
 			plan, err = e.llamacppPlan(st, store.root, model, list)
-		case modelFamilyLMStudio:
-			plan, err = e.lmstudioPlan(st, store, list)
 		default:
 			return copyPlan{}, fmt.Errorf("%w: %q", errModelCopyUnsupported, store.engine)
 		}
@@ -334,82 +272,6 @@ func (e *Executor) planModelCopy(st *engineState, store engineModelStore, model 
 	return plan, nil
 }
 
-// ---- Ollama ----
-
-const ollamaDefaultRegistry = "registry.ollama.ai"
-
-var ollamaNameSegment = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
-
-// ollamaManifestRel maps an Ollama model name ("llama3.2", "user/model:tag",
-// "hf.co/owner/repo:Q4_K_M") to its manifest path relative to the models root.
-func ollamaManifestRel(model string) (string, error) {
-	name := strings.TrimSpace(model)
-	tag := "latest"
-	if i := strings.LastIndex(name, ":"); i > strings.LastIndex(name, "/") {
-		name, tag = name[:i], name[i+1:]
-	}
-	parts := strings.Split(name, "/")
-	switch len(parts) {
-	case 1:
-		parts = []string{ollamaDefaultRegistry, "library", parts[0]}
-	case 2:
-		parts = []string{ollamaDefaultRegistry, parts[0], parts[1]}
-	case 3:
-	default:
-		return "", fmt.Errorf("invalid Ollama model name %q", model)
-	}
-	segs := append(parts, tag)
-	for _, s := range segs {
-		if !ollamaNameSegment.MatchString(s) || strings.HasSuffix(s, ".") {
-			return "", fmt.Errorf("invalid Ollama model name %q", model)
-		}
-	}
-	return "manifests/" + strings.Join(segs, "/"), nil
-}
-
-type ollamaManifest struct {
-	Config ollamaLayer   `json:"config"`
-	Layers []ollamaLayer `json:"layers"`
-}
-
-type ollamaLayer struct {
-	Digest string `json:"digest"`
-	Size   int64  `json:"size"`
-}
-
-// blobs returns the manifest's distinct blob digests (hex) with their declared
-// sizes, config first.
-func (m ollamaManifest) blobs() ([]ollamaLayer, error) {
-	var out []ollamaLayer
-	seen := map[string]bool{}
-	for _, l := range append([]ollamaLayer{m.Config}, m.Layers...) {
-		if l.Digest == "" {
-			continue
-		}
-		hex, ok := strings.CutPrefix(l.Digest, "sha256:")
-		if !ok || !validSHA256(hex) {
-			return nil, fmt.Errorf("manifest names an unsupported digest %q", l.Digest)
-		}
-		if seen[hex] {
-			continue
-		}
-		seen[hex] = true
-		out = append(out, ollamaLayer{Digest: hex, Size: l.Size})
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("manifest names no blobs")
-	}
-	return out, nil
-}
-
-func parseOllamaManifest(data []byte) (ollamaManifest, error) {
-	var m ollamaManifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return m, fmt.Errorf("parse manifest: %w", err)
-	}
-	return m, nil
-}
-
 func readSmallFile(path string, limit int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -424,223 +286,6 @@ func readSmallFile(path string, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("%s is larger than %d bytes", path, limit)
 	}
 	return data, nil
-}
-
-const ollamaManifestLimit = 4 << 20
-
-func ollamaSourceFiles(root, model string) (modelFileList, error) {
-	return ollamaSourceFilesWithAccess(context.Background(), root, model, servingFileAccess{})
-}
-
-func ollamaSourceFilesWithAccess(ctx context.Context, root, model string, access servingFileAccess) (modelFileList, error) {
-	return ollamaSourceFilesBound(ctx, root, model, access, nil)
-}
-
-func ollamaSourceFilesBound(ctx context.Context, root, model string, access servingFileAccess, expected *sourceSnapshot) (modelFileList, error) {
-	if expected != nil && (expected.root != root || len(expected.selectors) != 1 || validateSourceSnapshot(ctx, expected) != nil) {
-		return modelFileList{}, errModelInspectionChanged
-	}
-	if expected != nil && (expected.selectors[0].binding == nil || int64(len(expected.selectors[0].bytes)) != expected.selectors[0].file.size) {
-		return modelFileList{}, errModelInspectionChanged
-	}
-	rel, err := ollamaManifestRel(model)
-	if err != nil {
-		return modelFileList{}, fmt.Errorf("%w: %v", errModelNotFound, err)
-	}
-	source := &sourceSnapshot{root: root}
-	scan := &llamaCacheScan{snapshot: source, expected: expected}
-	path := filepath.Join(root, filepath.FromSlash(rel))
-	for _, dir := range []string{root, filepath.Dir(path)} {
-		if _, err := scan.directory(dir); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return modelFileList{}, fmt.Errorf("%w: Ollama has no model %q on this node", errModelNotFound, model)
-			}
-			return modelFileList{}, err
-		}
-	}
-	manifest, err := selectedNativeSourceArtifact(root, rel, "", expected)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return modelFileList{}, fmt.Errorf("%w: Ollama has no model %q on this node", errModelNotFound, model)
-		}
-		return modelFileList{}, err
-	}
-	selector := selectorEvidence{file: sourceEvidence{configured: manifest.configured, target: manifest.abs,
-		info: manifest.info, size: manifest.Size, mtime: manifest.info.ModTime().UnixNano()}}
-	if expected != nil {
-		selector = expected.selectors[0]
-		if selector.file.configured != path {
-			return modelFileList{}, errModelInspectionChanged
-		}
-	}
-	data, binding, err := access.sourceExpected(ctx, selector.file, ollamaManifestLimit, false)
-	if err != nil {
-		return modelFileList{}, err
-	}
-	if expected != nil && (!bytes.Equal(selector.bytes, data) || selector.binding == nil || *selector.binding != *binding) {
-		return modelFileList{}, errModelInspectionChanged
-	}
-	source.selectors = []selectorEvidence{{file: selector.file, bytes: append([]byte(nil), data...), binding: binding}}
-	m, err := parseOllamaManifest(data)
-	if err != nil {
-		return modelFileList{}, err
-	}
-	declared := map[string]int64{}
-	for _, layer := range append([]ollamaLayer{m.Config}, m.Layers...) {
-		if layer.Digest == "" {
-			continue
-		}
-		if size, ok := declared[layer.Digest]; layer.Size < 0 || (ok && size != layer.Size) {
-			return modelFileList{}, fmt.Errorf("manifest has inconsistent blob sizes")
-		}
-		declared[layer.Digest] = layer.Size
-	}
-	blobs, err := m.blobs()
-	if err != nil {
-		return modelFileList{}, err
-	}
-	if len(blobs) >= maxCopyArtifacts {
-		return modelFileList{}, errModelArtifactLimit
-	}
-	if _, err := scan.directory(filepath.Join(root, "blobs")); err != nil {
-		return modelFileList{}, err
-	}
-	list := modelFileList{source: source}
-	for _, b := range blobs {
-		if err := ctx.Err(); err != nil {
-			return modelFileList{}, err
-		}
-		brel := "blobs/sha256-" + b.Digest
-		file, err := selectedNativeSourceArtifact(root, brel, b.Digest, expected)
-		if err != nil {
-			return modelFileList{}, fmt.Errorf("model %q is incomplete on this node (%s): %w", model, brel, err)
-		}
-		if file.Size != b.Size {
-			return modelFileList{}, fmt.Errorf("model %q is incomplete on this node: %s is %d bytes, manifest says %d", model, brel, file.Size, b.Size)
-		}
-		// The blob's name is its sha256; the destination verifies it.
-		list.Files = append(list.Files, file)
-	}
-	list.Files = append(list.Files, manifest)
-	if err := finishNativeSource(ctx, &list, expected); err != nil {
-		return modelFileList{}, err
-	}
-	// Re-read only the bound selector after the complete artifact preflight.
-	data, finalBinding, err := access.sourceExpected(ctx, selector.file, ollamaManifestLimit, false)
-	if err != nil || !bytes.Equal(data, source.selectors[0].bytes) || finalBinding == nil || *finalBinding != *binding {
-		return modelFileList{}, errModelInspectionChanged
-	}
-	if err := validateSourceSnapshot(ctx, source); err != nil {
-		return modelFileList{}, err
-	}
-	return list, nil
-}
-
-// Only files selected by a native adapter enter this source route. Destination
-// paths retain their strict admission.
-func selectedNativeSourceArtifact(root, rel, digest string, expected *sourceSnapshot) (modelFile, error) {
-	path := filepath.Join(root, filepath.FromSlash(rel))
-	if expected != nil {
-		for _, old := range expected.artifacts {
-			if old.Path != rel {
-				continue
-			}
-			if old.configured != path || old.SHA256 != digest || old.info == nil ||
-				validateSource(sourceEvidence{configured: old.configured, target: old.abs, info: old.info, size: old.Size, mtime: old.info.ModTime().UnixNano()}) != nil {
-				return modelFile{}, errModelInspectionChanged
-			}
-			return old, nil
-		}
-		return modelFile{}, errModelInspectionChanged
-	}
-	evidence, err := captureSource(path, false)
-	if err != nil {
-		return modelFile{}, err
-	}
-	if !artifactPathSafe(evidence.configured) || !artifactPathSafe(evidence.target) {
-		return modelFile{}, errNoArtifactBinding
-	}
-	return modelFile{Path: rel, Size: evidence.size, SHA256: digest, configured: evidence.configured, abs: evidence.target, info: evidence.info}, nil
-}
-
-func finishNativeSource(ctx context.Context, list *modelFileList, expected *sourceSnapshot) error {
-	if expected != nil {
-		if len(list.Files) != len(expected.artifacts) || len(list.source.directories) != len(expected.directories) || len(list.source.selectors) != len(expected.selectors) {
-			return errModelInspectionChanged
-		}
-		for i, dir := range list.source.directories {
-			if dir.configured != expected.directories[i].configured {
-				return errModelInspectionChanged
-			}
-		}
-		for i, file := range list.Files {
-			old := expected.artifacts[i]
-			if file.Path != old.Path || file.Size != old.Size || file.SHA256 != old.SHA256 || file.Role != old.Role ||
-				file.configured != old.configured || file.abs != old.abs || !sameSource(file.info, old.info, false) {
-				return errModelInspectionChanged
-			}
-		}
-	}
-	list.source.artifacts = append([]modelFile(nil), list.Files...)
-	return validateSourceSnapshot(ctx, list.source)
-}
-
-func ollamaPlan(root, model string, list modelFileList) (copyPlan, error) {
-	rel, err := ollamaManifestRel(model)
-	if err != nil {
-		return copyPlan{}, err
-	}
-	var plan copyPlan
-	var manifest *plannedFile
-	for _, f := range list.Files {
-		pf := plannedFile{modelFile: f, dest: filepath.Join(root, filepath.FromSlash(f.Path))}
-		if f.Path == rel {
-			manifest = &pf
-			continue
-		}
-		hex, ok := strings.CutPrefix(f.Path, "blobs/sha256-")
-		if !ok || !validSHA256(hex) {
-			return copyPlan{}, fmt.Errorf("unexpected file %q in an Ollama model listing", f.Path)
-		}
-		if f.SHA256 != hex {
-			return copyPlan{}, fmt.Errorf("blob %q is listed with a different sha256", f.Path)
-		}
-		plan.files = append(plan.files, pf)
-	}
-	if manifest == nil {
-		return copyPlan{}, fmt.Errorf("the source's listing has no manifest %q for %q", rel, model)
-	}
-	// The manifest is what makes the model exist for Ollama: write it last, and
-	// only once every blob it names is in place.
-	manifest.check = func(part string) error {
-		data, err := readSmallFile(part, ollamaManifestLimit)
-		if err != nil {
-			return err
-		}
-		m, err := parseOllamaManifest(data)
-		if err != nil {
-			return err
-		}
-		blobs, err := m.blobs()
-		if err != nil {
-			return err
-		}
-		for _, b := range blobs {
-			info, err := os.Stat(filepath.Join(root, "blobs", "sha256-"+b.Digest))
-			if err != nil {
-				return fmt.Errorf("manifest names blob %s, which is not on this node", b.Digest)
-			}
-			if b.Size > 0 && info.Size() != b.Size {
-				return fmt.Errorf("blob %s is %d bytes, manifest says %d", b.Digest, info.Size(), b.Size)
-			}
-		}
-		return nil
-	}
-	plan.files = append(plan.files, *manifest)
-	// Ollama reads manifests from disk for every listing, so nothing else is
-	// needed for the model to appear.
-	plan.finalize = func(context.Context) error { return nil }
-	return plan, nil
 }
 
 // ---- llama.cpp ----
@@ -1410,278 +1055,4 @@ func writeFileAtomic(path string, data []byte) error {
 		slog.Warn("engine file replacement landed with uncertain durability", "path", path, "err", err)
 	}
 	return nil
-}
-
-// ---- LM Studio ----
-
-// lmsListModels runs `lms ls --json`. A variable so tests can stand in for the
-// CLI.
-var lmsListModels = func(ctx context.Context, e *Executor, cli string) ([]lmsListEntry, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	return e.lmsList(ctx, cli)
-}
-
-func (e *Executor) lmstudioSourceFiles(ctx context.Context, store engineModelStore, model string) (modelFileList, error) {
-	st, current, err := e.modelStoreFor(store.engine)
-	if err != nil || current != store {
-		return modelFileList{}, errModelInspectionChanged
-	}
-	return e.lmstudioSourceFilesBound(ctx, st, store, model, servingFileAccess{}, nil)
-}
-
-// LM Studio's downloaded row group is the native selector. Freeze its values,
-// together with the launch and namespace, before enumerating the selected model.
-func (e *Executor) lmstudioSourceFilesBound(ctx context.Context, st *engineState, store engineModelStore, model string, access servingFileAccess, expected *modelFileList) (modelFileList, error) {
-	configuration := func() (string, string, error) {
-		if err := ctx.Err(); err != nil {
-			return "", "", err
-		}
-		current, currentStore, err := e.modelStoreFor(store.engine)
-		if err != nil || current != st || currentStore != store {
-			return "", "", errModelInspectionChanged
-		}
-		st.mu.Lock()
-		run := st.runID
-		data, err := json.Marshal(struct {
-			CLI, Adapter, ModelsDir, Launch string
-			Running                         bool
-		}{store.cli, store.adapter, st.modelsDir, st.launchDigest, st.running})
-		st.mu.Unlock()
-		return run, string(data), err
-	}
-	run, config, err := configuration()
-	if err != nil {
-		return modelFileList{}, err
-	}
-	var old *sourceSnapshot
-	if expected != nil {
-		old = expected.source
-		if old == nil || old.engine != store.engine || old.root != store.root || old.run != run || old.configuration != config || validateSourceSnapshot(ctx, old) != nil {
-			return modelFileList{}, errModelInspectionChanged
-		}
-	}
-	matched, recognition, err := e.lmstudioSourceRows(ctx, store, model)
-	if err != nil {
-		return modelFileList{}, err
-	}
-	if old != nil && !bytes.Equal(old.recognition, recognition) {
-		return modelFileList{}, errModelInspectionChanged
-	}
-	checkConfiguration := func() error {
-		currentRun, currentConfig, err := configuration()
-		if err != nil || currentRun != run || currentConfig != config {
-			return errModelInspectionChanged
-		}
-		return nil
-	}
-	if err := checkConfiguration(); err != nil {
-		return modelFileList{}, err
-	}
-	if old != nil {
-		if err := validateSourceSnapshot(ctx, old); err != nil {
-			return modelFileList{}, err
-		}
-	}
-	source := &sourceSnapshot{engine: store.engine, root: store.root, run: run, configuration: config, recognition: recognition}
-	budget := access.scan
-	if budget == nil {
-		budget = &modelArtifactScan{}
-	}
-	scan := &llamaCacheScan{budget: budget, access: access, snapshot: source, expected: old}
-	_, err = scan.directory(store.root)
-	if err != nil {
-		return modelFileList{}, err
-	}
-	list := modelFileList{source: source}
-	added := map[string]bool{}
-	add := func(abs string) error {
-		rel, err := filepath.Rel(store.root, abs)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if !validModelRelPath(rel) {
-			return fmt.Errorf("model file has an unsafe relative name")
-		}
-		key := copyPathKey(rel)
-		if added[key] {
-			for _, file := range list.Files {
-				if file.Path == rel {
-					return nil
-				}
-			}
-			return errNoArtifactBinding
-		}
-		if len(list.Files) >= maxCopyArtifacts {
-			return errModelArtifactLimit
-		}
-		file, err := selectedNativeSourceArtifact(store.root, rel, "", old)
-		if err != nil {
-			return err
-		}
-		added[key] = true
-		list.Files = append(list.Files, file)
-		return nil
-	}
-	var walk func(string, int) error
-	walk = func(dir string, depth int) error {
-		if depth > 64 {
-			return errModelArtifactLimit
-		}
-		return scan.enumerate(ctx, dir, func(entry os.DirEntry) error {
-			path := filepath.Join(dir, entry.Name())
-			link, err := removalEntryIsLink(path, entry.Type())
-			if err != nil {
-				return errNoArtifactBinding
-			}
-			isDir := entry.IsDir()
-			if link {
-				info, err := os.Stat(path)
-				if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
-					return errNoArtifactBinding
-				}
-				isDir = info.IsDir()
-			} else if !isDir && !entry.Type().IsRegular() {
-				return errNoArtifactBinding
-			}
-			if isDir {
-				return walk(path, depth+1)
-			}
-			return add(path)
-		})
-	}
-	for _, entry := range matched {
-		if err := ctx.Err(); err != nil {
-			return modelFileList{}, err
-		}
-		rel := normalizeSlashPath(entry.Path)
-		abs := filepath.Join(store.root, filepath.FromSlash(rel))
-		entryInfo, err := os.Lstat(abs)
-		if err != nil {
-			return modelFileList{}, fmt.Errorf("LM Studio model is not on disk: %w", err)
-		}
-		link, err := removalEntryIsLink(abs, entryInfo.Mode())
-		if err != nil || (!link && !entryInfo.IsDir() && !entryInfo.Mode().IsRegular()) {
-			return modelFileList{}, errNoArtifactBinding
-		}
-		info, err := os.Stat(abs)
-		if err != nil {
-			return modelFileList{}, fmt.Errorf("LM Studio model is not on disk: %w", err)
-		}
-		if !info.IsDir() && !info.Mode().IsRegular() {
-			return modelFileList{}, errNoArtifactBinding
-		}
-		if info.IsDir() {
-			if err := walk(abs, 0); err != nil {
-				return modelFileList{}, err
-			}
-			continue
-		}
-		if err := add(abs); err != nil {
-			return modelFileList{}, err
-		}
-		// Enumerate the configured namespace, never the resolved file's parent.
-		err = scan.enumerate(ctx, filepath.Dir(abs), func(s os.DirEntry) error {
-			name := strings.ToLower(s.Name())
-			if !s.IsDir() && strings.HasSuffix(name, ".gguf") && strings.Contains(name, "mmproj") {
-				return add(filepath.Join(filepath.Dir(abs), s.Name()))
-			}
-			return nil
-		})
-		if err != nil {
-			return modelFileList{}, err
-		}
-	}
-	if err := finishNativeSource(ctx, &list, old); err != nil {
-		return modelFileList{}, err
-	}
-	if err := checkConfiguration(); err != nil {
-		return modelFileList{}, err
-	}
-	_, currentRows, err := e.lmstudioSourceRows(ctx, store, model)
-	if err != nil {
-		return modelFileList{}, err
-	}
-	if !bytes.Equal(recognition, currentRows) {
-		return modelFileList{}, errModelInspectionChanged
-	}
-	if err := checkConfiguration(); err != nil {
-		return modelFileList{}, err
-	}
-	if err := validateSourceSnapshot(ctx, source); err != nil {
-		return modelFileList{}, err
-	}
-	return list, nil
-}
-
-func (e *Executor) lmstudioSourceRows(ctx context.Context, store engineModelStore, model string) ([]lmsListEntry, []byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err
-	}
-	entries, err := lmsListModels(ctx, e, store.cli)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err
-	}
-	var matched []lmsListEntry
-	var group []lmsListEntry
-	seen := map[string]lmsListEntry{}
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		if !lmsEntryMatchesModel(entry, model) {
-			continue
-		}
-		p := normalizeSlashPath(entry.Path)
-		if p == "" || !validModelRelPath(p) {
-			return nil, nil, fmt.Errorf("LM Studio reports an unsafe model path")
-		}
-		if len(group) >= maxCopyArtifacts {
-			return nil, nil, errModelArtifactLimit
-		}
-		group = append(group, entry)
-		if previous, ok := seen[p]; ok {
-			if previous != entry {
-				return nil, nil, fmt.Errorf("LM Studio reports ambiguous model rows")
-			}
-			continue
-		}
-		seen[p] = entry
-		matched = append(matched, entry)
-	}
-	if len(matched) == 0 {
-		return nil, nil, fmt.Errorf("%w: LM Studio has no model %q on this node", errModelNotFound, model)
-	}
-	for _, entry := range matched[1:] {
-		if entry.ModelKey == "" || entry.ModelKey != matched[0].ModelKey {
-			return nil, nil, fmt.Errorf("model id matches distinct LM Studio models; name one by its model key")
-		}
-	}
-	data, err := json.Marshal(group)
-	return matched, data, err
-}
-
-func (e *Executor) lmstudioPlan(st *engineState, store engineModelStore, list modelFileList) (copyPlan, error) {
-	var plan copyPlan
-	var last []plannedFile
-	for _, f := range list.Files {
-		pf := plannedFile{modelFile: f, dest: filepath.Join(store.root, filepath.FromSlash(f.Path))}
-		if ggufIsModel(f.Path) {
-			last = append(last, pf)
-			continue
-		}
-		plan.files = append(plan.files, pf)
-	}
-	plan.files = append(plan.files, last...)
-	// LM Studio builds its model index at startup and offers no rescan, the same
-	// reason its delete_model declares restart_after: restart a running server
-	// so it lists the new model. A stopped one indexes it when next started.
-	plan.finalize = func(ctx context.Context) error {
-		return e.restartAfterAction(ctx, st, store.engine, "copy_model")
-	}
-	return plan, nil
 }

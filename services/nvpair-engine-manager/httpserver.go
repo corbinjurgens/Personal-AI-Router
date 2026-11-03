@@ -88,8 +88,8 @@ func serveOrWarn(srv *http.Server, l net.Listener) {
 }
 
 // modelsHandler serves the model inventory document on GET:
-// {"models":[...union...],"modelsByEngine":{"ollama":[...],...},
-// "loadedByEngine":{"ollama":[...],...},"policy":{...}}. The flat union stays for
+// {"models":[...union...],"modelsByEngine":{"llamacpp":[...],...},
+// "loadedByEngine":{"llamacpp":[...],...},"policy":{...}}. The flat union stays for
 // existing consumers; modelsByEngine and loadedByEngine are additive (both
 // omitempty, so absent when no engine reports them), and policy is this node's
 // advertisement, absent until the broker pushes it.

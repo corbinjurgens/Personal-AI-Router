@@ -11,13 +11,13 @@ package main
 // initiator). engine:action with action "pull_model" is routed here for exactly
 // this reason — a local pull streams progress just like a remote one.
 //
-// Ollama's /api/pull streams newline-delimited JSON status objects
-// ({"status":...,"total":N,"completed":M}); each line maps to a progress event,
-// coalesced so only changes in stage/percent are emitted (a single layer streams
-// many byte-progress lines at the same rendered percent). llama.cpp instead
-// acknowledges POST /models immediately and reports completion on /models/sse;
-// its manifest opts into that named adapter. CLI-driven pulls (LM Studio's
-// `lms get`) emit one "pulling" marker and return the final result.
+// An HTTP pull action without a progress_protocol streams newline-delimited
+// JSON status objects ({"status":...,"total":N,"completed":M}); each line maps
+// to a progress event, coalesced so only changes in stage/percent are emitted (a
+// single layer streams many byte-progress lines at the same rendered percent).
+// llama.cpp instead acknowledges POST /models immediately and reports completion
+// on /models/sse; its manifest opts into that named adapter. CLI-driven pulls
+// return the final result without line progress.
 
 import (
 	"bufio"
@@ -109,8 +109,8 @@ func (w *pullProgressWatchdog) resolveError(ctx context.Context, fallback error)
 	return fallback
 }
 
-// modelFromParams resolves conventional pull aliases, preferring Ollama's
-// "name" body key then the generic {model} placeholder. Explicit descriptor
+// modelFromParams resolves conventional pull aliases, preferring the "name"
+// body key then the generic {model} placeholder. Explicit descriptor
 // bindings take precedence in pullProgressModel; params are never rewritten.
 func modelFromParams(params json.RawMessage) string {
 	if len(params) == 0 {
@@ -462,8 +462,8 @@ func (e *Executor) runPullModel(ctx context.Context, st *engineState, engine, mo
 		token.dispatchRun = &dispatchRun
 	}
 	port := dispatchRun.port
-	// CLI action (e.g. lms get): no structured line progress; emit a start
-	// marker and return the final result via the existing runner.
+	// CLI action: no structured line progress; emit a start marker and return
+	// the final result via the existing runner.
 	if len(act.Cmd) > 0 {
 		actionCtx, cancel := context.WithTimeout(ctx, e.actionTimeout)
 		defer cancel()
@@ -484,7 +484,7 @@ func (e *Executor) runPullModel(ctx context.Context, st *engineState, engine, mo
 		return result, nil
 	}
 
-	// HTTP action (e.g. Ollama /api/pull): stream NDJSON progress.
+	// HTTP action: stream NDJSON progress.
 	if !dispatchRun.running {
 		return nil, fmt.Errorf("engine %q is not running", engine)
 	}
@@ -533,7 +533,7 @@ func (e *Executor) runPullModel(ctx context.Context, st *engineState, engine, mo
 			continue
 		}
 		last = append(json.RawMessage(nil), line...)
-		progress := decodeOllamaPullLine(line)
+		progress := decodePullStatusLine(line)
 		if progress.Error != "" {
 			return nil, pullFailure("failed", "download_failed", errors.New("engine reported download failure"))
 		}
@@ -857,7 +857,8 @@ func (e *Executor) reportPullFailed(engine, model string, err error) string {
 	return msg
 }
 
-type ollamaPullLine struct {
+// pullStatusLine is one NDJSON status object of a protocol-less HTTP pull.
+type pullStatusLine struct {
 	Error     string `json:"error"`
 	Status    string `json:"status"`
 	Digest    string `json:"digest"`
@@ -865,20 +866,20 @@ type ollamaPullLine struct {
 	Completed int64  `json:"completed"`
 }
 
-func decodeOllamaPullLine(line []byte) ollamaPullLine {
-	var progress ollamaPullLine
+func decodePullStatusLine(line []byte) pullStatusLine {
+	var progress pullStatusLine
 	_ = json.Unmarshal(line, &progress)
 	return progress
 }
 
-func (p ollamaPullLine) progressKey() string {
+func (p pullStatusLine) progressKey() string {
 	if p.Digest != "" {
 		return p.Digest
 	}
 	return p.Status
 }
 
-func (p ollamaPullLine) event(engine string) ProgressEvent {
+func (p pullStatusLine) event(engine string) ProgressEvent {
 	pct := 0
 	if p.Total > 0 {
 		pct = int(p.Completed * 100 / p.Total)
@@ -886,8 +887,8 @@ func (p ollamaPullLine) event(engine string) ProgressEvent {
 	return ProgressEvent{Engine: engine, Op: "pull", Stage: p.Status, Percent: pct, Message: p.Status}
 }
 
-// pullProgressFromLine maps an Ollama /api/pull status line into a ProgressEvent,
+// pullProgressFromLine maps a pull status line into a ProgressEvent,
 // computing a percentage when the line carries total/completed byte counts.
 func pullProgressFromLine(engine string, line []byte) ProgressEvent {
-	return decodeOllamaPullLine(line).event(engine)
+	return decodePullStatusLine(line).event(engine)
 }

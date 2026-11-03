@@ -295,7 +295,7 @@ func (e *Executor) SetReservedPort(port int) error {
 
 func (e *Executor) reservedPortError(port int) error {
 	if port > 0 && int(e.reservedPort.Load()) == port {
-		return fmt.Errorf("port %d is reserved by the inherited OLLAMA_HOST proxy alias", port)
+		return fmt.Errorf("port %d is reserved by the parent proxy", port)
 	}
 	return nil
 }
@@ -321,8 +321,8 @@ func (e *Executor) clientFor(budget time.Duration) *http.Client {
 
 // newEngineHTTPClient builds a client used for downloads, loopback actions,
 // and probes. The ordinary shared client keeps a 30s response-header bound;
-// an action a model operation binds with a longer budget (Ollama's cold load,
-// 10m) gets a client of its own (clientFor). Neither sets a total
+// an action a model operation binds with a longer budget (a cold load, 10m)
+// gets a client of its own (clientFor). Neither sets a total
 // http.Client.Timeout: a multi-GB engine download can legitimately run
 // for many minutes and every call site already bounds total time with a
 // context deadline or inactivity watchdog (install download 30m, streaming

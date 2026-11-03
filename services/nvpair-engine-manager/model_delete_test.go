@@ -14,7 +14,7 @@ import (
 	"nvpair-shared/testbin"
 )
 
-func TestLMStudioDeleteModelRemovePath(t *testing.T) {
+func TestDeleteModelRemovePath(t *testing.T) {
 	root := t.TempDir()
 	modelRel := "publisher/demo-model"
 	modelDir := filepath.Join(root, modelRel)
@@ -53,8 +53,8 @@ func TestLMStudioDeleteModelRemovePath(t *testing.T) {
 	}
 }
 
-// deleteModelRestartManifest mirrors LM Studio's bundled delete_model: a guarded
-// filesystem removal that declares restart_after. bin lets a caller point the
+// deleteModelRestartManifest declares a delete_model that is a guarded
+// filesystem removal with restart_after. bin lets a caller point the
 // engine at a private copy of the fake binary it is free to break.
 func deleteModelRestartManifest(t *testing.T, root, bin string) *Manifest {
 	t.Helper()
@@ -92,10 +92,10 @@ func engineRun(t *testing.T, ex *Executor, engine string) (generation int64, run
 	return st.gen, st.running
 }
 
-// TestDeleteModelRestartAfterBouncesRunningEngine pins why LM Studio's
-// delete_model declares restart_after: the files are gone, but its server keeps
-// answering /v1/models from an index built at startup, and it offers no rescan.
-// The engine must come back up, not merely stop.
+// TestDeleteModelRestartAfterBouncesRunningEngine pins why a delete_model can
+// declare restart_after: the files are gone, but an engine whose server keeps
+// answering from an index built at startup offers no rescan. The engine must
+// come back up, not merely stop.
 func TestDeleteModelRestartAfterBouncesRunningEngine(t *testing.T) {
 	root := t.TempDir()
 	modelRel := "publisher/demo-model"
@@ -147,11 +147,11 @@ func TestDeleteModelRestartAfterLeavesStoppedEngineDown(t *testing.T) {
 	}
 }
 
-// TestDeleteModelWithoutRestartAfterDoesNotBounce is the Ollama side of the
-// contract. Ollama reflects a deletion immediately, so its manifest omits
-// restart_after and its delete must leave the engine's process completely alone
-// — no bounce, no interrupted inference. The restart is opt-in per action, never
-// a property of deleting.
+// TestDeleteModelWithoutRestartAfterDoesNotBounce is the other side of the
+// contract. An engine that reflects a deletion immediately omits restart_after
+// and its delete must leave the engine's process completely alone — no bounce,
+// no interrupted inference. The restart is opt-in per action, never a property
+// of deleting.
 func TestDeleteModelWithoutRestartAfterDoesNotBounce(t *testing.T) {
 	root := t.TempDir()
 	modelRel := "publisher/demo-model"

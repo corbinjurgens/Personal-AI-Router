@@ -17,7 +17,6 @@ func bindingManifest() *Manifest {
 		"query_erase": {HTTP: &ActionHTTP{Method: "DELETE", Path: "/models", ParamsIn: "query"}},
 		"cli_load":    {Cmd: []string{"{cli}", "load", "{model}"}},
 		"rm":          {RemovePath: &ActionRemovePath{Root: "{install_dir}", Path: "{install_dir}/{target}"}},
-		"lms_get":     {Cmd: []string{"{cli}", "get", "{model}"}, ModelResolution: modelResolutionLMSGet},
 		pullModelAction: {
 			HTTP:             &ActionHTTP{Method: "POST", Path: "/models"},
 			ProgressProtocol: pullProgressProtocolLlamaCPPModelsSSE,
@@ -46,7 +45,6 @@ func TestOperationBindingValidation(t *testing.T) {
 		{name: "cmd not templating the param", op: "load", b: OperationBinding{Action: "cli_load", ModelParam: "name"}, want: "must template {name}"},
 		{name: "remove_path not templating the param", op: "delete", b: OperationBinding{Action: "rm"}, want: "must template {model} in its path"},
 		{name: "resolver reads model", op: "pull", b: OperationBinding{Action: pullModelAction, ModelParam: "name"}, want: `model_param must be "model"`},
-		{name: "lms resolver reads model", op: "load", b: OperationBinding{Action: "lms_get", ModelParam: "name"}, want: `model_param must be "model"`},
 		{name: "default shadows the model", op: "load", b: OperationBinding{Action: "http_load", Params: map[string]json.RawMessage{"model": raw(`"x"`)}}, want: "param \"model\""},
 		{name: "default is a runner placeholder", op: "load", b: OperationBinding{Action: "http_load", Params: map[string]json.RawMessage{"bin": raw(`"x"`)}}, want: "param \"bin\""},
 		{name: "default is an object", op: "load", b: OperationBinding{Action: "http_load", Params: map[string]json.RawMessage{"o": raw(`{}`)}}, want: "string, number or boolean"},

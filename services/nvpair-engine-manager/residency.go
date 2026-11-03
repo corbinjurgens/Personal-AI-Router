@@ -241,7 +241,7 @@ func (e *Executor) residentLoadCall(p nodepolicy.ReconcileResidentParams) (Actio
 
 func residentSafeHTTP(m *Manifest, name string, a Action, method string) bool {
 	return a.HTTP != nil && a.HTTP.Method == method && a.HTTP.Path != "" && a.HTTP.ParamsIn == "" &&
-		!a.RestartAfter && len(a.Cmd) == 0 && a.RemovePath == nil && a.ModelResolution == "" &&
+		!a.RestartAfter && len(a.Cmd) == 0 && a.RemovePath == nil &&
 		a.ProgressProtocol == "" && !m.mutatesModelContent(name)
 }
 

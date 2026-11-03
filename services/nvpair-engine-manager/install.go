@@ -328,7 +328,7 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) (err error) {
 var maxDownloadBytes int64 = 8 << 30 // 8 GiB
 
 // uninstallRetries / uninstallBackoff bound retrying a failed uninstall
-// command. A command-mode engine's daemon (e.g. LM Studio's backend) can
+// command. A command-mode engine's daemon can
 // outlive its `stop` and briefly hold files open, so a straight rm hits
 // "directory not empty"; a short retry lets the tree settle. Vars so tests
 // can shrink the backoff.

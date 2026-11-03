@@ -88,7 +88,7 @@ func TestModelCopySelectedExport(t *testing.T) {
 		if err := hashModelFiles(context.Background(), &list, func(string, int) {}); err != nil {
 			t.Fatal(err)
 		}
-		assertNoLlamaSpawn(t, f)
+		assertNoSpawn(t, f)
 	})
 	t.Run("typed exports after restart without native build reads", func(t *testing.T) {
 		f := newModelLoadFixture(t)

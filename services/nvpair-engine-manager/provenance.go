@@ -14,13 +14,12 @@ import (
 // installMarkerName records that this service, rather than the user, performed
 // an engine's install.
 //
-// Ownership is otherwise unknowable for an engine whose vendor script chooses
-// its own destination. LM Studio installs into ~/.lmstudio no matter who starts
-// it, so "the binary sits under our install directory" — the test that answers
-// this for Ollama and llama.cpp — is never true for it, and PAIR cannot
-// distinguish an install it performed from one the user already had. Uninstall
-// has to know: removing an engine the user installed themselves, with the model
-// library they built up in it, is not PAIR's call to make.
+// Ownership is otherwise unknowable for an engine whose installer chooses its
+// own destination: "the binary sits under our install directory" is never true
+// for it, and PAIR cannot distinguish an install it performed from one the user
+// already had. Uninstall has to know: removing an engine the user installed
+// themselves, with the model library they built up in it, is not PAIR's call to
+// make.
 //
 // The marker lives in the per-engine install directory, which is created for
 // every install regardless of where the engine itself lands.
@@ -98,14 +97,15 @@ type ManagedUninstall struct {
 //
 // This backs the platform uninstallers' "also remove my data" and both clients'
 // data reset. Without it that promise is false: deleting the app data root
-// happens to remove the Ollama and llama.cpp install directories, but never
-// reaches an engine a vendor script placed in the user's home.
+// happens to remove the llama.cpp install directory, but never reaches an
+// engine a vendor script placed in the user's home.
 //
 // Selection is by install marker, so an engine the user installed themselves is
 // never a candidate. That matters beyond safety: the alternative — offering
 // every detected engine and letting Uninstall decline the rest — raises a
 // service error per decline, and those sync to cluster peers, so resetting a
-// machine with the user's own LM Studio would plant an error on its neighbours.
+// machine with the user's own engine install would plant an error on its
+// neighbours.
 //
 // Each removal goes through Uninstall, so it gets the whole safety path: the
 // ownership checks, the stop, the retries a vendor daemon needs when it holds

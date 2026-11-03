@@ -235,7 +235,6 @@ func TestResidentDailyAdapterUnsafeShapes(t *testing.T) {
 	test("load wrong schema type", load(func(a *Action) { a.HTTP.BodySchema = json.RawMessage(`{"model":"number"}`) }))
 	test("load command", load(func(a *Action) { a.Cmd = []string{"forbidden"} }))
 	test("load remove", load(func(a *Action) { a.RemovePath = &ActionRemovePath{} }))
-	test("load model resolution", load(func(a *Action) { a.ModelResolution = "fixture-resolution" }))
 	test("load progress", load(func(a *Action) { a.ProgressProtocol = "ndjson" }))
 	test("different model parameter", func(m *Manifest) {
 		b := m.Operations[engines.OperationLoad]
@@ -639,7 +638,7 @@ func TestResidentContextBoundColdPreflight(t *testing.T) {
 				t.Fatalf("native resident execution escaped restriction: %+v, grants=%d", result, f.dispatches)
 			}
 			f.noCalls(t)
-			assertNoLlamaSpawn(t, cold)
+			assertNoSpawn(t, cold)
 		})
 	}
 	// NE identity requires an owned launch; an exact cold bound cannot bypass the earlier identity check.

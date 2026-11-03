@@ -24,8 +24,8 @@ import (
 )
 
 func TestPullProgressFromLine(t *testing.T) {
-	ev := pullProgressFromLine("ollama", []byte(`{"status":"pulling manifest","total":200,"completed":50}`))
-	if ev.Op != "pull" || ev.Engine != "ollama" {
+	ev := pullProgressFromLine("fake", []byte(`{"status":"pulling manifest","total":200,"completed":50}`))
+	if ev.Op != "pull" || ev.Engine != "fake" {
 		t.Fatalf("unexpected event meta: %+v", ev)
 	}
 	if ev.Percent != 25 {
@@ -36,7 +36,7 @@ func TestPullProgressFromLine(t *testing.T) {
 	}
 
 	// No total -> 0% (avoids divide-by-zero), still carries the status.
-	ev = pullProgressFromLine("ollama", []byte(`{"status":"verifying"}`))
+	ev = pullProgressFromLine("fake", []byte(`{"status":"verifying"}`))
 	if ev.Percent != 0 || ev.Stage != "verifying" {
 		t.Fatalf("unexpected zero-total event: %+v", ev)
 	}
@@ -45,7 +45,7 @@ func TestPullProgressFromLine(t *testing.T) {
 func TestHandlePullRejectsMissingTarget(t *testing.T) {
 	s := &controlServer{exec: &Executor{progress: newProgressHub()}}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", controlPullPath, strings.NewReader(`{"opId":"x","engine":"ollama"}`))
+	req := httptest.NewRequest("POST", controlPullPath, strings.NewReader(`{"opId":"x","engine":"fake"}`))
 	s.handlePull(rec, req)
 	if rec.Code != 400 {
 		t.Fatalf("expected 400 when neither model nor params set, got %d", rec.Code)
@@ -56,7 +56,7 @@ func TestModelFromParams(t *testing.T) {
 	cases := []struct {
 		params, want string
 	}{
-		{`{"name":"llama3.2"}`, "llama3.2"},      // Ollama body key
+		{`{"name":"llama3.2"}`, "llama3.2"},      // name body key
 		{`{"model":"owner/repo"}`, "owner/repo"}, // generic placeholder
 		{`{"name":"a","model":"b"}`, "a"},        // name wins
 		{`{}`, ""},                               // neither present
@@ -219,7 +219,7 @@ func TestPullModelLlamaCPPSSESubscribesBeforeStarting(t *testing.T) {
 	}
 }
 
-func TestPullModelOllamaAdvancingProgressRefreshesTimeout(t *testing.T) {
+func TestPullModelNDJSONAdvancingProgressRefreshesTimeout(t *testing.T) {
 	const (
 		idleTimeout     = 400 * time.Millisecond
 		progressDelay   = 90 * time.Millisecond
@@ -480,9 +480,9 @@ func TestActionPullModelStreamsProgress(t *testing.T) {
 	}
 }
 
-// TestActionPullModelCmdMarkerAndResult covers the CLI (LM Studio `lms get`)
-// pull path through the same engine:action routing: a Cmd-based pull_model can't
-// expose structured line progress, so it emits a single "pulling" marker and
+// TestActionPullModelCmdMarkerAndResult covers the CLI pull path through the
+// same engine:action routing: a Cmd-based pull_model can't expose structured
+// line progress, so it emits a single "pulling" marker and
 // returns the command's terminal result — the counterpart to the HTTP streaming
 // path in TestActionPullModelStreamsProgress.
 func TestActionPullModelCmdMarkerAndResult(t *testing.T) {
@@ -549,9 +549,9 @@ func TestActionPullModelCmdMarkerAndResult(t *testing.T) {
 func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
 	test := func(name string, retire func(*engineState), phase string, blocked bool) {
 		t.Run(name, func(t *testing.T) {
-			ex := modelControlsExecutor(t)
+			ex := llamaModelControlsExecutor(t)
 			acceptModelMutations(ex)
-			st := ex.engines["ollama"]
+			st := ex.engines["llamacpp"]
 			params := json.RawMessage(`{"target":"demo","TARGET":"opaque\nvariant"}`)
 			started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
 			var once sync.Once
@@ -576,7 +576,7 @@ func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
 			})
 			var pullErr error
 			go func() {
-				_, pullErr = ex.PullModelStream(ctx, "ollama", "demo", params)
+				_, pullErr = ex.PullModelStream(ctx, "llamacpp", "demo", params)
 				close(finished)
 			}()
 			t.Cleanup(func() {
@@ -617,7 +617,7 @@ func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
 				t.Fatalf("terminal snapshot=%+v", snapshot)
 			}
 			entry := snapshot.Entries[0]
-			if entry.ID != before.Entries[0].ID || entry.Engine != "ollama" || entry.Model != "demo" || entry.Phase != phase || entry.BlocksReadiness != blocked {
+			if entry.ID != before.Entries[0].ID || entry.Engine != "llamacpp" || entry.Model != "demo" || entry.Phase != phase || entry.BlocksReadiness != blocked {
 				t.Fatalf("terminal lost dispatch identity or readiness: %+v", entry)
 			}
 			if blocked && entry.Reason != modeldownload.ReasonInterrupted {
@@ -627,7 +627,7 @@ func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read retained journal: %v", err)
 			}
-			marker, retained := markers[downloadContentKey{"ollama", "demo"}]
+			marker, retained := markers[downloadContentKey{"llamacpp", "demo"}]
 			if retained != blocked || retained && marker.ID != entry.ID {
 				t.Fatalf("unsafe journal=%+v, blocked=%t", markers, blocked)
 			}

@@ -294,11 +294,6 @@ type Action struct {
 	// behavior; named protocols are validated so a typo cannot silently fall
 	// back to the wrong completion semantics.
 	ProgressProtocol string `json:"progress_protocol,omitempty"`
-	// ModelResolution, when set, expands or resolves the model param:
-	//   - "lms-get" on Cmd actions: try as-given → Hub id → Hugging Face URL.
-	//   - "lms-disk-path" on RemovePath actions: map logical ids to on-disk
-	//     files via `lms ls --json`.
-	ModelResolution string `json:"model_resolution,omitempty"`
 	// Result, when set, declares how to extract a normalized string list from
 	// this action's JSON response — the top-level array field to iterate and the
 	// string field to pull from each element. engine:models uses it to turn
@@ -1232,23 +1227,6 @@ func (a *Action) validate(name string) error {
 		hasIn := len(m.In) > 0
 		if hasIn == m.Nonempty {
 			return fmt.Errorf("action %q: result.match requires exactly one of a non-empty in or nonempty=true", name)
-		}
-	}
-	if a.ModelResolution != "" {
-		switch a.ModelResolution {
-		case modelResolutionLMSGet:
-			if !hasCmd {
-				return fmt.Errorf("action %q: model_resolution requires a cmd action", name)
-			}
-			if !cmdReferencesModel(a.Cmd) {
-				return fmt.Errorf("action %q: model_resolution requires the cmd to template {model}", name)
-			}
-		case modelResolutionLMSDiskPath:
-			if !hasRemovePath {
-				return fmt.Errorf("action %q: model_resolution %q requires remove_path", name, a.ModelResolution)
-			}
-		default:
-			return fmt.Errorf("action %q: model_resolution %q invalid (want %q or %q)", name, a.ModelResolution, modelResolutionLMSGet, modelResolutionLMSDiskPath)
 		}
 	}
 	return nil

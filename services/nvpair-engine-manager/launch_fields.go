@@ -67,7 +67,7 @@ func normalizeCORSBoolean(value, _ string) (string, error) {
 }
 
 // Canonicalize before validation and before handing values to the engine. This
-// closes differences such as Ollama stripping extra quotes around an origin list.
+// closes differences such as an engine stripping extra quotes around an origin list.
 func normalizeCORSOrigins(value string) (string, error) {
 	value = strings.Trim(strings.TrimSpace(value), "\"'")
 	origins := []string{}

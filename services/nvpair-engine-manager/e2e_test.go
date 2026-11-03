@@ -625,7 +625,7 @@ func isolatedManagerEnv(cfg, home string) []string {
 	return overrideEnv(map[string]string{
 		"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg,
 		"HOME": home, "USERPROFILE": home,
-		"FAKE_ADDR": "", "OLLAMA_HOST": "", "NVPAIR_EM_LIVE_TEST": "",
+		"FAKE_ADDR": "", "NVPAIR_EM_LIVE_TEST": "",
 	})
 }
 
