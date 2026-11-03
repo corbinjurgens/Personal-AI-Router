@@ -893,6 +893,45 @@ external app first and re-starting on its usual port works too. Auto-assigned
 ports (manifest `runtime.port: 0`) never adopt — there's no fixed address to
 probe — so they always spawn an owned process.
 
+## Model sources
+
+Model sources are folders where other applications keep models on this node.
+Engine-manager reads them in place and never writes to them. The built-in
+sources are:
+
+| Source | Folders | Model ID |
+|---|---|---|
+| `ollama` | `OLLAMA_MODELS` when set, else `~/.ollama/models` (Linux also `/usr/share/ollama/.ollama/models`) | `ollama/<name>@<tag>`; `<name>` gains its namespace outside `library` and its registry host outside `registry.ollama.ai` |
+| `lmstudio` | `~/.lmstudio/models`, `~/.cache/lm-studio/models` | `lmstudio/<path>`: the file's folder path and name without `.gguf` or a `-00001-of-NNNNN` shard suffix |
+
+An Ollama model is its manifest's model layer, with the projector layer as its
+multimodal projector; a model with an adapter layer is skipped. In LM Studio
+folders, GGUF files nested up to four folders deep are models, split models
+count once by their first shard, and files whose name contains `mmproj` are
+projectors. A folder's only projector pairs with every model in it. Files that
+are not GGUF are skipped. When two folders produce the same ID, the one listed
+first keeps it.
+IDs use `@` rather than `:` because llama.cpp rewrites a tag after a colon.
+
+Sources are engine-neutral: each found model carries its format, and an engine
+offers the formats it can run. llama.cpp is currently the only consumer. At
+each start of a llama.cpp-family engine, engine-manager scans the sources and
+writes a native preset to `model-sources/<engine>.ini` under its engine
+install base, one section per GGUF model naming its `model` (and `mmproj`)
+path, then adds `--models-preset` with that file. The router lists those models
+beside its own store. The manifest's fixed launch defaults stay, since the
+preset sets only paths. Models whose ID fails [model identifier](spec.md#model-identifiers)
+validation, or whose path contains `#`, `;`, `$`, `%`, `{`, `}`, a line break or
+NUL, are left out. With nothing to offer, the file is removed and no flag is
+added.
+
+The preset is skipped when the launch declares `runtime.serving`, carries typed
+model loads, or already names a preset through `--models-preset` or
+`LLAMA_ARG_MODELS_PRESET`; those launches own their model list. Sources are
+scanned only at start, so a model added later appears after a restart. Peer
+copy, model settings inspection and serving presets cover only an engine's own
+store, not source models. Adding sources by hand is not supported yet.
+
 ## Remote engine management
 
 When the parent passes `--control-port`, engine-manager serves the **`ec`

@@ -654,6 +654,27 @@ override preset values without a duplicate fixed default. Preview, editable
 argument readback and pre-spawn validation use the same effective fixed
 prefix. Launches without a preset preserve the existing fixed arguments.
 
+## Model sources
+
+Model sources are read-only folders other applications keep models in. The
+built-in sources are Ollama's store (`OLLAMA_MODELS`, else `~/.ollama/models`,
+plus `/usr/share/ollama/.ollama/models` on Linux) and LM Studio's model folders
+(`~/.lmstudio/models`, `~/.cache/lm-studio/models`); there is no setting to add
+more yet. Sources are engine-neutral: each found model carries its format, and
+IDs are `ollama/<name>@<tag>` or `lmstudio/<path>`, never containing `:`. The
+earliest folder keeps a duplicate ID.
+
+At each start of a llama.cpp-family engine without `runtime.serving`, typed
+model loads or a user preset (`--models-preset` in any spelling, or
+`LLAMA_ARG_MODELS_PRESET`), engine-manager writes the GGUF source models as a
+native preset under its install base (`model-sources/<engine>.ini`, written
+atomically) and appends `--models-preset` with that path after launch
+validation. Models with invalid identifiers or preset-unsafe paths are left
+out; with none left the file is removed and nothing is appended. Sources are
+rescanned only at start. Peer copy, model settings inspection, serving presets
+and typed loads do not cover source models. See the README's Model sources
+section for the folder layouts.
+
 ## Finite llama serving launch
 
 An optional versioned `runtime.serving` declaration activates the finite llama
