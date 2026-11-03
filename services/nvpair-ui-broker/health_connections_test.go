@@ -49,7 +49,7 @@ func TestHealthChecksReuseConnections(t *testing.T) {
 		})
 	}
 
-	test("ollama", "/", ollamaProxyProfile)
-	test("lmstudio", "/v1/models", lmstudioProxyProfile)
+	test("ollama", "/", mustEngineProxyProfile("ollama"))
+	test("lmstudio", "/v1/models", mustEngineProxyProfile("lmstudio"))
 	test("llamacpp", "/health", mustEngineProxyProfile("llamacpp"))
 }

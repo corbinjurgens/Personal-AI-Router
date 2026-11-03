@@ -842,19 +842,3 @@ func TestSettingsPortValidationIncludesStoppedEngines(t *testing.T) {
 		t.Fatalf("stopped engine reservation ignored: %v %v", preview, err)
 	}
 }
-
-func TestSettingsMigratesLegacyProxyChoiceBeforeManagedDefaults(t *testing.T) {
-	h := newSettingsHarness(t)
-	path, _ := h.b.engineSettingsPath()
-	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "proxy-port.json"), []byte(`{"port":26080}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	h.b.migrateLegacyEngineSettings()
-	config, ok := h.b.explicitEngineSettings("ollama")
-	if !ok || config.ProxyPort != 26080 {
-		t.Fatalf("legacy choice lost: %+v %v", config, ok)
-	}
-	if !h.b.prepareExplicitEngineSettings("ollama") || h.b.ollamaState().startupPort.Load() != 26080 || h.b.ollamaState().managedFacade.Load() {
-		t.Fatal("automatic startup overrode saved proxy choice")
-	}
-}

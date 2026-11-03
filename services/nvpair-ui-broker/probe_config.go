@@ -12,7 +12,7 @@ import (
 // of this node's own listener plan. Nil in workerPaths keeps worker defaults;
 // an explicit zero disables a probe rather than selecting a default target.
 type manualProbePorts struct {
-	ollama, lmstudio, nodeInfo int
+	nodeInfo int
 }
 
 func (p *manualProbePorts) validate() error {
@@ -23,8 +23,6 @@ func (p *manualProbePorts) validate() error {
 		name string
 		port int
 	}{
-		{"manual-ollama-port", p.ollama},
-		{"manual-lmstudio-port", p.lmstudio},
 		{"manual-node-info-port", p.nodeInfo},
 	} {
 		if target.port < 0 || target.port > 65535 {
@@ -37,7 +35,7 @@ func (p *manualProbePorts) validate() error {
 func (b *Broker) manualNodesArgs() []string {
 	args := append(b.logLevelArgs(), b.clusterDirArgs()...)
 	if p := b.manualProbePorts; p != nil {
-		args = append(args, "--ollama-port", strconv.Itoa(p.ollama), "--lmstudio-port", strconv.Itoa(p.lmstudio), "--node-info-port", strconv.Itoa(p.nodeInfo))
+		args = append(args, "--node-info-port", strconv.Itoa(p.nodeInfo))
 	}
 	return args
 }

@@ -206,8 +206,8 @@ reservation. Fully unrecognizable
 bytes cannot establish whether model work once existed; this fundamental ambiguity
 is reported as unknown, rather than asserted to be a model-free journal.
 
-The broker owns combined settings operations for Ollama, LM Studio, and
-llama.cpp. Each node owns its own configuration. `nodeId` selects a discovered,
+The broker owns combined settings operations for table engines.
+Each node owns its own configuration. `nodeId` selects a discovered,
 currently pinned peer; omission or the local host ID selects this node. Bulk
 propagation is not part of this API.
 
@@ -217,7 +217,7 @@ propagation is not part of this API.
 | `engine:preview-settings` | `{engine, nodeId?, expectedRevision, settings, modelChange?, resolution?}` | Normalized settings, errors, conflict, selected diff, review digest and runtime impact |
 | `engine:apply-settings` | Preview request plus `requestId`, and reviewed `modelChange.previewDigest` for selected edits | `{revision, phase}` attempt receipt after target-owned execution; lost replies require readback |
 
-`engine` is `ollama`, `lmstudio`, or `llamacpp`. `settings` contains
+`engine` is a table engine ID, such as `llamacpp`. `settings` contains
 `serverPort`, `proxyPort`, `launchText`, and optional `workingSetLimitMiB`.
 The limit is an integer from 256 through 1048576, accepted only by Windows
 llama.cpp engines in process mode. Absence or null removes the limit. Preview
@@ -326,11 +326,8 @@ engine overrides and proxy-port files remain their owners' configuration.
 Acceptance is written and synced before component changes. Interrupted applying
 records replay before enabled-engine restoration. Explicit settings override
 automatic facade defaults on later startup. Unreadable journal data is preserved
-and suppresses automatic component rewrites. On first upgrade, a valid existing
-proxy-port choice is preserved as explicit when it differs from the engine port
-(except LM Studio's obsolete 1235 default). Old stores lack choice provenance,
-so a historical automatic move is conservatively preserved too. Unreadable data
-blocks automatic recovery. The journal retains up to 256 terminal receipts
+and suppresses automatic component rewrites. Unreadable data blocks automatic
+recovery. The journal retains up to 256 terminal receipts
 per engine; evicted retries must still pass the original expected revision.
 
 ## Paired transport

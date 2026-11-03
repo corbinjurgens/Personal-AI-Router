@@ -6,7 +6,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -20,7 +19,7 @@ func TestSettingsRebindAddressesOnlyRequestedFacade(t *testing.T) {
 	for _, profile := range engineProxyProfiles {
 		t.Run(profile.Name, func(t *testing.T) {
 			h := newSettingsHarness(t)
-			p := h.b.getProxy()
+			p := h.b.engineProxyHandle(mustEngineProxyProfile("ollama"))
 			before := make(map[string]int, len(engineProxyProfiles))
 			for _, candidate := range engineProxyProfiles {
 				_, before[candidate.Name] = p.Status(candidate.Name)
@@ -58,14 +57,7 @@ func TestExplicitSettingsBindFailurePreservesChosenPort(t *testing.T) {
 				t.Fatal("explicit settings were not restored")
 			}
 			failure := settingsJSON(map[string]any{"code": "bind-failed", "port": requested})
-			switch profile.Name {
-			case "ollama":
-				b.forwardProxyNotification("error", failure)
-			case "lmstudio":
-				b.forwardLMStudioProxyNotification("error", failure)
-			default:
-				b.forwardDefaultEngineProxyNotification(profile, profile.addressed("error"), failure)
-			}
+			b.forwardDefaultEngineProxyNotification(profile, profile.addressed("error"), failure)
 			if got := b.engineProxy(profile).startupPort.Load(); got != requested {
 				t.Fatalf("bind notification changed chosen port to %d", got)
 			}
@@ -94,8 +86,8 @@ func TestSettingsReservesStoppedProxySavedPort(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newSettingsHarness(t)
 			request := h.request(t)
-			_, reserved := h.b.getLMStudioProxy().Status("lmstudio")
-			h.b.setLMStudioProxy(nil)
+			_, reserved := h.b.engineProxyHandle(mustEngineProxyProfile("lmstudio")).Status("lmstudio")
+			h.b.setEngineProxyHandle(mustEngineProxyProfile("lmstudio"), nil)
 			h.b.engineSettings["lmstudio"] = &engineSettingsRecord{
 				Explicit: true,
 				Snapshot: settings.Snapshot{Settings: settings.Config{ProxyPort: reserved}},
@@ -116,44 +108,6 @@ func TestSettingsReservesStoppedProxySavedPort(t *testing.T) {
 	}
 	test("server port cannot reuse saved proxy port", true)
 	test("proxy port cannot reuse saved proxy port", false)
-}
-
-func TestSettingsMigrationRejectsReservedPorts(t *testing.T) {
-	test := func(name string, reserve func(*settingsHarness, settings.Request) int) {
-		t.Run(name, func(t *testing.T) {
-			h := newSettingsHarness(t)
-			request := h.request(t)
-			delete(h.b.engineSettings, "ollama")
-			port := reserve(h, request)
-			path, err := h.b.engineSettingsPath()
-			if err != nil {
-				t.Fatal(err)
-			}
-			data, err := json.Marshal(map[string]int{"port": port})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(filepath.Dir(path), "proxy-port.json"), data, 0600); err != nil {
-				t.Fatal(err)
-			}
-			h.b.migrateLegacyEngineSettings()
-			if _, explicit := h.b.explicitEngineSettings("ollama"); explicit {
-				t.Fatal("reserved legacy port became an explicit setting")
-			}
-		})
-	}
-	test("PAIR control port", func(h *settingsHarness, request settings.Request) int {
-		return engineControlPort
-	})
-	test("stopped proxy saved port", func(h *settingsHarness, request settings.Request) int {
-		_, port := h.b.getLMStudioProxy().Status("lmstudio")
-		h.b.setLMStudioProxy(nil)
-		h.b.engineSettings["lmstudio"] = &engineSettingsRecord{
-			Explicit: true,
-			Snapshot: settings.Snapshot{Settings: settings.Config{ProxyPort: port}},
-		}
-		return port
-	})
 }
 
 func TestEnabledEngineRestorationSurvivesInvalidSettingsJournal(t *testing.T) {

@@ -107,7 +107,7 @@ type AvailableNode struct {
 	// node advertises no engines or none are running.
 	Models []string `json:"models,omitempty"`
 	// ModelsByEngine attributes Models to the engine that serves each model,
-	// keyed by engine-manager engine name (e.g. "ollama", "lmstudio"). Additive:
+	// keyed by engine-manager engine name (e.g. "llamacpp"). Additive:
 	// Models stays the flat de-duplicated union for consumers that only need the
 	// node-level set; this is the per-engine breakdown a consumer needs to show a
 	// remote node's models under the correct engine (the UI's engine card).
@@ -239,28 +239,13 @@ type Broker struct {
 	residentRetryDelay time.Duration
 	advertiseCadence   time.Duration
 	scannerWaits       scannerWaitOverrides
-	// Managed-port state is prepared before proxy startup and read by the proxy
-	// supervisor/reader goroutines. Ollama commits its pending backend move after
-	// its proxy reserves :11434; LM Studio moves through engine-manager first,
-	// then releases its gate after the proxy owns :1234 and has its backend.
-	//
-	// managedFacade, backendPort and startupPort now live per engine on
-	// engineProxyRuntime. What remains here is Ollama's deferred-move state,
-	// which only an adopted engine has.
-	managedOllamaBackend             atomic.Int32
-	ollamaMoveInFlight               atomic.Bool
-	ollamaProxyGeneration            atomic.Uint64
-	stickyErrorsMu                   sync.Mutex
-	stickyErrors                     map[string]errors.ServiceError // see stickyErrorIDs
-	ollamaPortReady                  chan struct{}
-	ollamaPortReadyOnce              sync.Once
-	lmstudioProxyGeneration          atomic.Uint64
-	lmstudioProxyPublishedGeneration atomic.Uint64
-	lmstudioPortReady                chan struct{}
-	lmstudioPortReadyOnce            sync.Once
-	lmstudioReadyMu                  sync.Mutex
-	store                            *discoveryStore
-	telemetry                        *telemetryCache
+	// facadesReady closes after the initial facade startup attempt, before
+	// enabled engines are restored. Nil means no startup wait is configured.
+	facadesReady   chan struct{}
+	stickyErrorsMu sync.Mutex
+	stickyErrors   map[string]errors.ServiceError // see stickyErrorIDs
+	store          *discoveryStore
+	telemetry      *telemetryCache
 	// relayDir is the discovery directory, fed by the promoted daemon's
 	// discovery:node-* stream. It runs alongside the legacy store during the
 	// migration; the client-facing get-nodes/subscribe path moves onto it at the
@@ -517,7 +502,7 @@ type workerPaths struct {
 // the scanner is the broker's core worker. Every other path is optional:
 // an empty string means the broker won't spawn that worker (e.g. the
 // binary couldn't be resolved). Without node-info the broker runs without
-// local node advertisement; without the proxy, no local Ollama reverse
+// local node advertisement; without the proxy, no local engine reverse
 // proxy; without the workload-manager, no cluster workload relay; without
 // nvpair-errors, the service-error pipeline is disabled (producers' errors
 // are dropped, as before); without the cluster-manager, no cluster pairing
@@ -579,8 +564,7 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		manualNodeKeys:       make(map[string]string),
 		manualNodeStatuses:   make(map[string]manualNodeStatusEntry),
 		workloads:            workloadstore.New(),
-		ollamaPortReady:      make(chan struct{}),
-		lmstudioPortReady:    make(chan struct{}),
+		facadesReady:         make(chan struct{}),
 	}
 }
 
@@ -656,14 +640,6 @@ func (b *Broker) getNodeInfo() *nodeInfoProcess {
 	b.workersMu.Lock()
 	defer b.workersMu.Unlock()
 	return b.nodeInfo
-}
-
-func (b *Broker) setProxy(p *proxyProcess) {
-	b.setEngineProxyHandle(ollamaProxyProfile, p)
-}
-
-func (b *Broker) getProxy() *proxyProcess {
-	return b.engineProxyHandle(ollamaProxyProfile)
 }
 
 func (b *Broker) setWorkloadMgr(m *workloadManagerProcess) {
@@ -847,21 +823,33 @@ func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
 	}
 }
 
-func (b *Broker) restoreEnabledEnginesAfterPortGate(ctx context.Context) bool {
-	if !b.waitForManagedPortOwnership(ctx) {
+func (b *Broker) facadeStartupReady() bool {
+	if b.facadesReady == nil {
+		return true
+	}
+	select {
+	case <-b.facadesReady:
+		return true
+	default:
 		return false
 	}
-	b.restoreEnabledEngines(b.getEngineMgr())
-	return true
 }
 
-func (b *Broker) runEngineAvailabilityAfterPortGates(
+func (b *Broker) runEngineAvailability(
 	ctx context.Context,
 	runners ...func(context.Context),
 ) bool {
-	if !b.restoreEnabledEnginesAfterPortGate(ctx) {
+	if b.facadesReady != nil {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-b.facadesReady:
+		}
+	}
+	if ctx.Err() != nil {
 		return false
 	}
+	b.restoreEnabledEngines(b.getEngineMgr())
 	for index, run := range runners {
 		if index == len(runners)-1 {
 			run(ctx)
@@ -934,18 +922,13 @@ func (b *Broker) getClusterMgr() *clusterManagerProcess {
 // the engine each belongs to.
 //
 // A facade-scoped notification is addressed, so it goes to that engine's
-// handler with that engine's generation. A process-scoped one is unaddressed
+// handler. The source process is fenced by forwardProxyNotificationFrom.
+// A process-scoped notification is unaddressed
 // and must be handled exactly once, not once per engine — routing a workload
 // record through both handlers would record every job twice.
-func (b *Broker) forwardProxyProcessNotification(
-	ollamaGeneration, lmstudioGeneration uint64, method string, params json.RawMessage,
-) {
+func (b *Broker) forwardProxyProcessNotification(method string, params json.RawMessage) {
 	engine, bare := engines.SplitAddressedMethod(method)
 	switch engine {
-	case ollamaProxyProfile.Name:
-		b.forwardProxyNotificationForGeneration(ollamaGeneration, method, params)
-	case lmstudioProxyProfile.Name:
-		b.forwardLMStudioProxyNotificationForGeneration(lmstudioGeneration, method, params)
 	case "":
 		if !b.routeProcessScopedProxyNotification(bare, params) {
 			slog.Debug("ignoring unaddressed proxy notification", "method", bare)
@@ -1019,8 +1002,7 @@ func (b *Broker) restoreClusterIdentity(cm *clusterManagerProcess) {
 }
 
 // getSettingValue calls a nvpair-node-settings getter that returns {"value": "..."}
-// and returns the string, or "" on any error. Mirrors the settings reads in
-// prepareManagedOllamaFacade.
+// and returns the string, or "" on any error.
 func getSettingValue(ctx context.Context, settings *rpcWorker, method string) string {
 	result, rpcErr, err := settings.Call(ctx, method, nil)
 	if err != nil || rpcErr != nil {
@@ -1271,7 +1253,6 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 		return
 	}
 	if method == "engine:ready" {
-		b.reconcileLMStudioProxyAfterEngineManagerReady()
 		// A (re)started engine-manager holds no node projection until it is
 		// sent one. Off the read pump, like the settings projection below.
 		go b.publishNodeProjection()
@@ -1386,16 +1367,10 @@ func (b *Broker) forwardManualNodesNotificationLocked(method string, params json
 	}
 }
 
-// trackManualNode records the discovery-store key a manual node currently
-// occupies and reports the previous key when it changed (a manual node's
-// node-info first reported its real hostUuid, moving it off the manual id). On a
-// rekey it drops the manual claim under the old key (the scanner's claim, if
-// any, survives); the caller rebridges the proxy overlay off the old key.
 // upsertManualNode ingests a manual node status: it records the alias's payload,
 // keys the discovery store by the node's operational identity (its hostUuid once
-// node-info reports one, else the manual id), and bridges the proxy candidate
-// under that same key so scheduler priority and scheduledOn resolve to it. If
-// the alias's key changed (node-info revealed its real UUID) the
+// node-info reports one, else the manual id), and updates scheduler telemetry.
+// If the alias's key changed (node-info revealed its real UUID) the
 // old key is reprojected from a surviving alias or released.
 func (b *Broker) upsertManualNode(s manualNodeStatus) {
 	b.manualMu.Lock()
@@ -1419,14 +1394,10 @@ func (b *Broker) upsertManualNodeLocked(s manualNodeStatus) {
 
 	b.store.Upsert(en, sourceManual)
 	b.ingestTelemetryAt(sourceManual, manualNodeTelemetry(s, key), receivedAt)
-	// Bridge a reachable manual node into each engine's proxy (ollama-proxy /
-	// lmstudio-proxy) so inference can route to it; an unreachable engine is
-	// pulled back out. No-op for a proxy the broker doesn't supervise.
-	b.bridgeManualNode(s, key)
 
 	if existed && oldKey != key {
 		// This alias moved off oldKey: refresh oldKey from a surviving alias, or
-		// release its store/proxy claim if this was its last owner.
+		// release its discovery claim if this was its last owner.
 		b.reprojectOrReleaseLocked(oldKey)
 	}
 }
@@ -1455,9 +1426,8 @@ func (b *Broker) removeManualNodeLocked(id string) {
 
 // reprojectOrRelease refreshes or drops a key's manual claim after an alias
 // stopped pointing at it. If another manual alias still resolves to key, that
-// survivor's payload is re-projected into the store's single manual slot and its
-// proxy candidate rebridged; otherwise the store and proxy manual claim is
-// released.
+// survivor's payload is re-projected into the store's single manual slot;
+// otherwise the discovery and telemetry claims are released.
 func (b *Broker) reprojectOrRelease(key string) {
 	b.manualMu.Lock()
 	defer b.manualMu.Unlock()
@@ -1471,12 +1441,10 @@ func (b *Broker) reprojectOrReleaseLocked(key string) {
 	survivor, ok := b.survivingAliasLocked(key)
 	if ok {
 		b.store.Upsert(manualToEnriched(survivor.status), sourceManual)
-		b.bridgeManualNode(survivor.status, key)
 		b.ingestTelemetryAt(sourceManual, manualNodeTelemetry(survivor.status, key), survivor.receivedAt)
 		return
 	}
 	b.store.Remove(key, sourceManual)
-	b.removeManualNodeFromProxies(key)
 	b.removeTelemetry(sourceManual, key)
 }
 
@@ -1524,10 +1492,6 @@ func (b *Broker) clearManualNodesStateLocked() {
 		// Drop only the manual claim; a co-located scanner node keeps its record.
 		b.store.Remove(key, sourceManual)
 		b.removeTelemetry(sourceManual, key)
-		// Pull the now-orphaned node out of every proxy too, so inference
-		// doesn't keep a stale manual target the crashed prober can no
-		// longer vouch for. Clients re-add manual nodes after the restart.
-		b.removeManualNodeFromProxies(key)
 	}
 }
 
@@ -1961,10 +1925,7 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 		slog.Info("nvpair-errors path not resolved; running with the error pipeline disabled")
 	}
 
-	// Settings and engine-manager must be available before either proxy starts.
-	// Managed ownership prepares Ollama's deferred move and lets engine-manager
-	// safely move an identified LM Studio command runtime. Unknown owners are
-	// never terminated; preparation instead selects an explicit fallback.
+	// Settings and engine-manager must be available before facade preparation.
 	b.settingsSup = b.startOptionalWorker("settings", b.settingsPath, b.spawnSettings, func() { b.setSettings(nil) })
 	if b.settingsSup != nil {
 		defer b.settingsSup.Stop()
@@ -1973,7 +1934,6 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 	if b.engineMgrSup != nil {
 		defer b.engineMgrSup.Stop()
 	}
-	b.migrateLegacyEngineSettings()
 	b.loadDynamicEngines()
 	b.prepareEnabledFacades()
 
@@ -2020,30 +1980,27 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 		reason, report := proxyDisabledReason(b.proxyPath)
 		slog.Info("engine proxy not enabled; running without one",
 			"engine", profile.Name, "reason", reason)
-		// Preparation was skipped for a disabled engine, so managedFacade is
-		// necessarily false and there is no facade to block. Surface the
-		// unavailability directly instead, when it is worth surfacing.
+		// Preparation was skipped for a disabled engine. Surface its
+		// unavailability directly when it is worth surfacing.
 		if report {
 			b.reportProxyUnavailable(profile, reason)
 		}
-		b.finishEngineProxyStartup(profile)
 	}
 	b.startProxySupervision(anyProxyEnabled || len(b.dynamicEngineProfiles()) > 0)
+	if b.facadesReady != nil {
+		close(b.facadesReady)
+	}
 	defer func() {
 		stopEgressRenewal()
 		b.shutdownProxySupervision()
 	}()
 
-	// Restore engines and begin advertising only after both managed proxy
-	// startup attempts have established either readiness or a terminal outcome.
+	// Restore engines and begin advertising after the initial facade attempts.
 	// This prevents a restored engine from taking a persisted proxy port before
 	// the broker can resolve ownership.
-	availabilityRunners := []func(context.Context){b.runAutoAdvertise, b.runAutoAdvertiseLMStudio}
+	var availabilityRunners []func(context.Context)
 	for _, profile := range engineProxyProfiles {
 		if !b.proxyEnabled(profile) {
-			continue
-		}
-		if profile.Name == ollamaProxyProfile.Name || profile.Name == lmstudioProxyProfile.Name {
 			continue
 		}
 		profile := profile
@@ -2052,7 +2009,7 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 		})
 	}
 	availabilityRunners = append(availabilityRunners, b.dynamicEngineAvailabilityRunners()...)
-	go b.runEngineAvailabilityAfterPortGates(ctx, availabilityRunners...)
+	go b.runEngineAvailability(ctx, availabilityRunners...)
 
 	// nvpair-workload-manager is another auxiliary worker: it relays local
 	// workload lifecycle events to peer nodes and surfaces peer events
@@ -2168,73 +2125,6 @@ func (b *Broker) pushNodesChanged() {
 	if err := b.codec.Notify("discovery:nodes-changed", b.store.Snapshot()); err != nil {
 		slog.Warn("emit discovery:nodes-changed failed", "err", err)
 	}
-}
-
-// forwardProxyNotification is the hook startProxy invokes on the proxy
-// reader goroutine for every notification the proxy emits. It re-emits the
-// notification to the client as proxy:<method> (the proxy's native method
-// name, prefixed) with params passed through unchanged — but only when the
-// peer has opted in via proxy:subscribe. The stream is off by default, so
-// an unsubscribed peer sees nothing. errors:report / errors:clear are
-// routed into the nvpair-errors pipeline (the broker now supervises it)
-// rather than dropped, so the proxy's upstream-unreachable reports reach
-// the registry.
-func (b *Broker) forwardProxyNotification(method string, params json.RawMessage) {
-	b.forwardProxyNotificationForGeneration(b.currentOllamaProxyGeneration(), method, params)
-}
-
-func (b *Broker) forwardProxyNotificationForGeneration(generation uint64, method string, params json.RawMessage) {
-	if generation != b.currentOllamaProxyGeneration() {
-		return
-	}
-	// Strip the facade address before anything dispatches on the method: every
-	// comparison below, and the errors relay in particular, matches bare names.
-	method, addressed := facadeMethodFor(ollamaProxyProfile, method)
-	if !addressed {
-		return
-	}
-	if b.dispatchErrorsNotif(ollamaProxyProfile.ComponentName(), method, params) {
-		return
-	}
-	// A process can win the port after startup preflight but before the facade
-	// binds. Choose a safe fallback here, without calling back into this reader
-	// goroutine; the backend move is still pending, so no engine state needs
-	// rollback.
-	//
-	// This notification precedes the failing enable's response on the same
-	// stream, so the port chosen here is what ollamaFallbackPort finds when the
-	// enable retries. Deciding it here rather than there is deliberate: only
-	// this path knows whether the managed facade has to be given up, and it
-	// owns telling the user.
-	if method == "error" {
-		var ep struct {
-			Code string `json:"code"`
-			Port int    `json:"port"`
-		}
-		if json.Unmarshal(params, &ep) == nil && ep.Code == "bind-failed" && !b.ollamaState().explicitSettings.Load() {
-			switch {
-			case b.ollamaState().managedFacade.Load() && ep.Port == managedOllamaFacadePort:
-				b.blockManagedOllamaFacade("another process acquired the compatibility port during startup")
-			default:
-				// Without this the retry asks for the same port and the enable
-				// fails identically, leaving the facade down for the life of
-				// the process.
-				fallback := b.setOllamaProxyFallback(ep.Port)
-				slog.Warn("Ollama proxy bind failed; retrying on fallback", "port", ep.Port, "fallback", fallback)
-			}
-		}
-	}
-	// When the proxy announces a (re)bound port — notably its restored port
-	// on startup — steer it clear of any running engine's port. Dispatched
-	// on a separate goroutine: the corrective set-port round-trips through
-	// this same proxy-reader goroutine, so calling it inline would deadlock.
-	if method == "ready" {
-		var rp proxyReadyParams
-		if err := json.Unmarshal(params, &rp); err == nil && rp.Port > 0 {
-			go b.reconcileProxyPortOnReady(rp.Port)
-		}
-	}
-	b.forwardEngineProxyNotification(ollamaProxyProfile, method, params)
 }
 
 // routeNodeActivity relays a proxy's liveness report about a peer down to the

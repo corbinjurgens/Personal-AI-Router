@@ -20,9 +20,9 @@ func TestResidentProtectionAutomaticUnload(t *testing.T) {
 			worker := attachFakeEngine(t, b)
 			r := b.nodePolicyRuntime()
 			r.mu.Lock()
-			r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "resident"}}
+			r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
 			r.mu.Unlock()
-			b.unloadModels("ollama", []string{"resident:latest", "neighbor"}, reason)
+			b.unloadModels("llamacpp", []string{"resident", "neighbor"}, reason)
 			calls := worker.snapshot()
 			if len(calls) != 1 || calls[0].method != engineUnloadModelMethod {
 				t.Fatalf("automatic unload calls = %+v, want only neighbor unload", calls)
@@ -45,12 +45,12 @@ func TestResidentProtectionRechecksQueuedUnload(t *testing.T) {
 	worker.setAnswer(func(method string, _ json.RawMessage) (any, string) {
 		if method == engineUnloadModelMethod {
 			r.mu.Lock()
-			r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "later"}}
+			r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "later"}}
 			r.mu.Unlock()
 		}
 		return map[string]bool{"ok": true}, ""
 	})
-	b.unloadModels("ollama", []string{"first", "later:latest"}, "admission")
+	b.unloadModels("llamacpp", []string{"first", "later"}, "admission")
 	if calls := worker.snapshot(); len(calls) != 1 {
 		t.Fatalf("queued unload ignored new resident preference: %+v", calls)
 	}

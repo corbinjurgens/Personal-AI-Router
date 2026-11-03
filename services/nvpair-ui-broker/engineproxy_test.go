@@ -65,41 +65,6 @@ func TestEngineHealthProbePaths(t *testing.T) {
 	}
 }
 
-// proxyport.go and lmstudioport.go restate ports and error-ID prefixes the
-// engine table already carries, because they feed int32 atomics throughout the
-// package. They are deleted when those files collapse; until then this is what
-// stops them drifting from the table.
-func TestBrokerConstantsMatchTheEngineTable(t *testing.T) {
-	for _, tc := range []struct {
-		engine       string
-		facade       int
-		backendStart int
-		blockedID    string
-	}{
-		{"ollama", managedOllamaFacadePort, managedOllamaBackendStart, portOwnershipBlockedID},
-		{"lmstudio", managedLMStudioFacadePort, managedLMStudioBackendStart, lmstudioPortOwnershipBlockedID},
-	} {
-		t.Run(tc.engine, func(t *testing.T) {
-			p, ok := engineProxyProfileFor(tc.engine)
-			if !ok {
-				t.Fatalf("no profile for %s", tc.engine)
-			}
-			if tc.facade != p.FacadePort {
-				t.Errorf("facade constant = %d, table says %d", tc.facade, p.FacadePort)
-			}
-			if tc.backendStart != p.EnginePortBase {
-				t.Errorf("backend-start constant = %d, table says %d", tc.backendStart, p.EnginePortBase)
-			}
-			if want := p.ComponentName() + ":port-ownership-blocked"; tc.blockedID != want {
-				t.Errorf("blocked error id = %q, want %q", tc.blockedID, want)
-			}
-		})
-	}
-	if want := ollamaProxyProfile.ComponentName() + ":port-bumped"; proxyPortBumpedID != want {
-		t.Errorf("bumped error id = %q, want %q", proxyPortBumpedID, want)
-	}
-}
-
 // Every engine's relocation authority is pinned explicitly. Getting these
 // backwards does not fail
 // to compile — it silently changes which engine the broker believes it may stop.
@@ -149,7 +114,7 @@ func TestOwnershipDecidesTheOccupiedFacadeOutcome(t *testing.T) {
 			}
 			// Running on the facade, which is therefore taken; the backend base
 			// is free.
-			status := ollamaPortStatus{Running: true, Port: p.FacadePort}
+			status := enginePortStatus{Running: true, Port: p.FacadePort}
 			available := func(port int) bool { return port == p.EnginePortBase }
 
 			got := planManagedEnginePorts(p, true, status, available)
@@ -212,83 +177,16 @@ func TestParseProxyEngines(t *testing.T) {
 // engine when the binary could not be resolved.
 func TestProxyEnabledHonorsSelectionAndBinary(t *testing.T) {
 	b := &Broker{proxyPath: "/path/to/nvpair-proxy", proxyEngines: []string{"ollama"}}
-	if !b.proxyEnabled(ollamaProxyProfile) {
+	if !b.proxyEnabled(mustEngineProxyProfile("ollama")) {
 		t.Error("ollama was selected but is not enabled")
 	}
-	if b.proxyEnabled(lmstudioProxyProfile) {
+	if b.proxyEnabled(mustEngineProxyProfile("lmstudio")) {
 		t.Error("lmstudio was not selected but is enabled")
 	}
 
 	b = &Broker{proxyEngines: []string{"ollama", "lmstudio"}}
-	if b.proxyEnabled(ollamaProxyProfile) {
+	if b.proxyEnabled(mustEngineProxyProfile("ollama")) {
 		t.Error("no proxy binary resolved, but the engine is enabled")
-	}
-}
-
-// Preparing a facade is not read-only. For a managed engine the backend move
-// runs inside preparation, so preparing an engine whose proxy is then never
-// started relocates the engine off its own stock port and leaves nothing
-// serving it — every existing client on that port breaks.
-//
-// Ollama cannot show the symptom, because its move is deferred until its proxy
-// proves it holds the facade. That asymmetry is exactly why the guard has to be
-// at the preparation call rather than relied on further down.
-func TestDeselectedEngineIsNotPrepared(t *testing.T) {
-	settings, settingsCodec := newTestRPCWorkerPipe(t)
-	engine, engineCodec := newTestRPCWorkerPipe(t)
-
-	// Every preparation begins by reading the managed-port policy, so counting
-	// those reads is what proves how many engines were prepared — one for
-	// Ollama and no more. Asserting on engine:set-port instead would depend on
-	// whether 1234/1235 happen to be free on this machine, and would pass for
-	// the wrong reason whenever they are not.
-	policyReads := make(chan struct{}, 4)
-	go func() {
-		for {
-			msg, err := settingsCodec.Read()
-			if err != nil {
-				return
-			}
-			if msg.Method == "settings/get-force-ports" {
-				policyReads <- struct{}{}
-			}
-			_ = settingsCodec.Respond(msg.ID, map[string]bool{"value": true})
-		}
-	}()
-	go func() {
-		for {
-			msg, err := engineCodec.Read()
-			if err != nil {
-				return
-			}
-			_ = engineCodec.Respond(msg.ID, json.RawMessage(`{}`))
-		}
-	}()
-
-	b := &Broker{
-		nodeID:            "local-node",
-		proxyPath:         "/path/to/nvpair-proxy",
-		proxyEngines:      []string{"ollama"},
-		ollamaPortReady:   make(chan struct{}),
-		lmstudioPortReady: make(chan struct{}),
-	}
-	b.setSettings(settings)
-	b.setEngineMgr(engine)
-
-	// Keep the managed policy branch deterministic without binding any of the
-	// real engines' compatibility or backend ports.
-	useSyntheticBrokerPortChecks(t, b)
-	b.prepareEnabledFacades()
-
-	select {
-	case <-policyReads:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the selected engine was never prepared; the fixture is not exercising preparation")
-	}
-	select {
-	case <-policyReads:
-		t.Fatal("a deselected engine was prepared; its backend would be relocated with no proxy to claim the port")
-	case <-time.After(300 * time.Millisecond):
 	}
 }
 
@@ -300,7 +198,7 @@ func TestAStrangerOnTheFacadeBlocksEveryEngine(t *testing.T) {
 		t.Run(p.Name, func(t *testing.T) {
 			// The engine is stopped somewhere else entirely, so whoever holds
 			// the facade is not it.
-			status := ollamaPortStatus{Port: p.EnginePortBase + 100}
+			status := enginePortStatus{Port: p.EnginePortBase + 100}
 			available := func(port int) bool { return port != p.FacadePort }
 
 			got := planManagedEnginePorts(p, true, status, available)
@@ -339,8 +237,8 @@ func TestUnaddressedProxyErrorsReachThePipeline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.forwardProxyProcessNotification(0, 0, "errors:report", report)
-	b.forwardProxyProcessNotification(0, 0, "errors:clear", json.RawMessage(`{"id":"`+id+`"}`))
+	b.forwardProxyProcessNotification("errors:report", report)
+	b.forwardProxyProcessNotification("errors:clear", json.RawMessage(`{"id":"`+id+`"}`))
 
 	for _, want := range []string{"errors:report", "errors:clear"} {
 		select {
@@ -428,14 +326,14 @@ func TestRoutingListenerCollisionSurvivesAnErrorsRestart(t *testing.T) {
 	}
 
 	first := errorsPipe(t, b)
-	b.forwardProxyProcessNotification(0, 0, "errors:report", report)
+	b.forwardProxyProcessNotification("errors:report", report)
 	wait(t, first, "errors:report")
 
 	restarted := errorsPipe(t, b)
 	b.replayStickyErrors()
 	wait(t, restarted, "errors:report")
 
-	b.forwardProxyProcessNotification(0, 0, "errors:clear", json.RawMessage(`{"id":"`+id+`"}`))
+	b.forwardProxyProcessNotification("errors:clear", json.RawMessage(`{"id":"`+id+`"}`))
 	wait(t, restarted, "errors:clear")
 	if cached := b.stickyError(id); cached != nil {
 		t.Fatalf("a cleared collision is still cached: %+v", cached)
@@ -511,6 +409,16 @@ func init() {
 // unless told to accept it, and exits when its stdin closes, which is how the
 // broker stops a proxy.
 func runFakeProxy() {
+	if path := os.Getenv("NVPAIR_BROKER_TEST_PROXY_STARTS"); path != "" {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			os.Exit(2)
+		}
+		_, writeErr := file.WriteString("started\n")
+		if err := file.Close(); err != nil || writeErr != nil {
+			os.Exit(2)
+		}
+	}
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(nil, 1<<20)
 	out := json.NewEncoder(os.Stdout)
@@ -578,10 +486,23 @@ const testListenerPort = 40123
 // child as its proxy binary. It is driven the way a client drives it: through
 // handleMessage.
 type supervisedBroker struct {
-	b    *Broker
-	out  *syncBuffer
-	path string
-	next int
+	b          *Broker
+	out        *syncBuffer
+	path       string
+	next       int
+	startsPath string
+}
+
+func (sb *supervisedBroker) proxyStarts(t *testing.T) int {
+	t.Helper()
+	data, err := os.ReadFile(sb.startsPath)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "started\n")
 }
 
 // newSupervisedBroker loads a policy whose listener is enabled or not. The
@@ -597,8 +518,8 @@ func newSupervisedBroker(t *testing.T, listener bool, facades ...string) *superv
 	useSyntheticBrokerPortChecks(t, b)
 	b.proxyPath = exe
 	b.proxyEngines = facades
-	b.ollamaPortReady = make(chan struct{})
-	b.lmstudioPortReady = make(chan struct{})
+	startsPath := filepath.Join(t.TempDir(), "proxy-starts")
+	t.Setenv("NVPAIR_BROKER_TEST_PROXY_STARTS", startsPath)
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
 	if listener {
 		doc := nodepolicy.Default()
@@ -612,7 +533,7 @@ func newSupervisedBroker(t *testing.T, listener bool, facades ...string) *superv
 		cancel()
 		b.shutdownProxySupervision()
 	})
-	return &supervisedBroker{b: b, out: out, path: path}
+	return &supervisedBroker{b: b, out: out, path: path, startsPath: startsPath}
 }
 
 // policyResponse is a policy:set answer, decoded.
@@ -729,7 +650,7 @@ func TestProxySupervisionRunsTheListenerWithoutFacades(t *testing.T) {
 	if b.getProxySupervisor() == nil {
 		t.Fatal("the listener's proxy is not supervised")
 	}
-	if b.engineProxyHandle(ollamaProxyProfile) != nil {
+	if b.engineProxyHandle(mustEngineProxyProfile("ollama")) != nil {
 		t.Fatal("a facade is published on a node with none configured")
 	}
 	if got := b.policyProxy(); got != first {
@@ -739,7 +660,7 @@ func TestProxySupervisionRunsTheListenerWithoutFacades(t *testing.T) {
 		return b.localPolicy().Activation == activationActive
 	})
 
-	spawns := b.currentOllamaProxyGeneration()
+	spawns := sb.proxyStarts(t)
 	if got := sb.mustSetListener(t, false); got.activation == activationError {
 		t.Fatal("disabling the listener reported a failed activation for the proxy it stopped")
 	}
@@ -751,7 +672,7 @@ func TestProxySupervisionRunsTheListenerWithoutFacades(t *testing.T) {
 	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil || b.policyProxy() != nil {
 		t.Fatal("a stopped proxy is still supervised or published")
 	}
-	if got := b.currentOllamaProxyGeneration(); got != spawns {
+	if got := sb.proxyStarts(t); got != spawns {
 		t.Fatalf("stopping a proxy with no facade configured spawned another (%d -> %d)", spawns, got)
 	}
 
@@ -856,9 +777,8 @@ func TestProxySupervisionStartsForAnEnabledListenerWithoutFacades(t *testing.T) 
 // and the failed engines take the terminal path a spawn with some facade up
 // gives them, because this incarnation is not retried.
 func TestProxySupervisionKeepsTheProxyWhenEveryFacadeFailsAndTheListenerIsEnabled(t *testing.T) {
-	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	sb := newSupervisedBroker(t, true, mustEngineProxyProfile("ollama").Name)
 	b := sb.b
-	b.ollamaState().managedFacade.Store(true)
 
 	b.startProxySupervision(true)
 
@@ -866,12 +786,8 @@ func TestProxySupervisionKeepsTheProxyWhenEveryFacadeFailsAndTheListenerIsEnable
 	if b.getProxySupervisor() == nil {
 		t.Fatal("the proxy is not supervised")
 	}
-	if b.engineProxyHandle(ollamaProxyProfile) != nil {
+	if b.engineProxyHandle(mustEngineProxyProfile("ollama")) != nil {
 		t.Fatal("a refused facade is published as up")
-	}
-	requireGateOpens(t, b.ollamaPortReady, "the refused facade is terminal for the kept process")
-	if b.ollamaState().managedFacade.Load() {
-		t.Fatal("the refused facade kept its managed claim in a process that is not retried")
 	}
 	if got := b.localPolicy().Activation; got != activationActive {
 		t.Fatalf("activation = %q, want %q", got, activationActive)
@@ -881,19 +797,17 @@ func TestProxySupervisionKeepsTheProxyWhenEveryFacadeFailsAndTheListenerIsEnable
 // With the listener disabled and every facade failing, a start fails as it
 // always has: no process stays and the supervisor is dropped.
 func TestProxySupervisionFailsAStartWithNoFacadeAndNoListener(t *testing.T) {
-	sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
-	sb.b.ollamaState().managedFacade.Store(true)
+	sb := newSupervisedBroker(t, false, mustEngineProxyProfile("ollama").Name)
 
 	sb.b.startProxySupervision(true)
 
 	if sb.b.getProxySupervisor() != nil || sb.b.proxyProcessHandle() != nil {
 		t.Fatal("a proxy with no facade and no listener was kept")
 	}
-	requireGateOpens(t, sb.b.ollamaPortReady, "a failed start releases the startup gate")
 }
 
 func TestProxySupervisionEnablingTheListenerRecoversFailedFacadeStartup(t *testing.T) {
-	sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
+	sb := newSupervisedBroker(t, false, mustEngineProxyProfile("ollama").Name)
 	b := sb.b
 	b.startProxySupervision(true)
 	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil {
@@ -909,7 +823,7 @@ func TestProxySupervisionEnablingTheListenerRecoversFailedFacadeStartup(t *testi
 	if b.getProxySupervisor() == nil {
 		t.Fatal("the recovered listener's proxy is not supervised")
 	}
-	if b.engineProxyHandle(ollamaProxyProfile) != nil {
+	if b.engineProxyHandle(mustEngineProxyProfile("ollama")) != nil {
 		t.Fatal("the refused facade is published as up")
 	}
 	eventually(t, "the recovered listener's revision activating", func() bool {
@@ -919,15 +833,15 @@ func TestProxySupervisionEnablingTheListenerRecoversFailedFacadeStartup(t *testi
 }
 
 func TestProxySupervisionDisablingTheListenerStopsAfterEveryFacadeFails(t *testing.T) {
-	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	sb := newSupervisedBroker(t, true, mustEngineProxyProfile("ollama").Name)
 	b := sb.b
 	b.startProxySupervision(true)
 	pp := b.proxyProcessHandle()
 	requireProxyRunning(t, pp, "the enabled listener keeps the proxy after every facade was refused")
-	if b.engineProxyHandle(ollamaProxyProfile) != nil {
+	if b.engineProxyHandle(mustEngineProxyProfile("ollama")) != nil {
 		t.Fatal("the refused facade is published as up")
 	}
-	spawns := b.currentOllamaProxyGeneration()
+	spawns := sb.proxyStarts(t)
 
 	got := sb.mustSetListener(t, false)
 	if got.elapsed > policyActivationTimeout+2*time.Second {
@@ -940,14 +854,14 @@ func TestProxySupervisionDisablingTheListenerStopsAfterEveryFacadeFails(t *testi
 	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil || b.policyProxy() != nil {
 		t.Fatal("the idle proxy is still supervised or published")
 	}
-	if got := b.currentOllamaProxyGeneration(); got != spawns {
+	if got := sb.proxyStarts(t); got != spawns {
 		t.Fatalf("stopping the idle proxy spawned a replacement (%d -> %d)", spawns, got)
 	}
 }
 
 // A serving facade keeps the supervisor Serve gave it across listener changes.
 func TestProxySupervisionLeavesAFacadeNodesSupervisorAlone(t *testing.T) {
-	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	sb := newSupervisedBroker(t, true, mustEngineProxyProfile("ollama").Name)
 	t.Setenv(fakeProxyEnv, fakeProxyAcceptsFacades)
 	b := sb.b
 	b.startProxySupervision(true)
@@ -961,7 +875,7 @@ func TestProxySupervisionLeavesAFacadeNodesSupervisorAlone(t *testing.T) {
 			t.Fatalf("setting the listener to %t replaced the supervisor or the process of a node with a facade", enabled)
 		}
 		requireProxyRunning(t, pp, "a listener change must not stop a facade node's proxy")
-		if b.engineProxyHandle(ollamaProxyProfile) != pp {
+		if b.engineProxyHandle(mustEngineProxyProfile("ollama")) != pp {
 			t.Fatal("the accepted facade is not published on its original process")
 		}
 	}
@@ -970,7 +884,7 @@ func TestProxySupervisionLeavesAFacadeNodesSupervisorAlone(t *testing.T) {
 // During a crash backoff the facade node's supervisor still has its restart
 // budget; a listener change must neither replace it nor end the backoff.
 func TestProxySupervisionKeepsTheBackoffOfAFacadeNodeAcrossListenerChanges(t *testing.T) {
-	sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
+	sb := newSupervisedBroker(t, false, mustEngineProxyProfile("ollama").Name)
 	t.Setenv(fakeProxyEnv, fakeProxyAcceptsFacades)
 	b := sb.b
 	b.startProxySupervision(true)
@@ -1034,7 +948,7 @@ func fastProxyRestartBudget(b *Broker) func() {
 }
 
 func TestProxySupervisionDefersDisableUntilRespawnPublication(t *testing.T) {
-	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	sb := newSupervisedBroker(t, true, mustEngineProxyProfile("ollama").Name)
 	b := sb.b
 	pause, reached, release := publicationBarrier(t)
 	spawned := 0
@@ -1072,13 +986,13 @@ func TestProxySupervisionDefersDisableUntilRespawnPublication(t *testing.T) {
 	if !exited(respawned) || b.proxyProcessHandle() != nil {
 		t.Fatal("deferred disable left an idle proxy after respawn publication")
 	}
-	if got := b.currentOllamaProxyGeneration(); got != 2 {
-		t.Fatalf("spawn generation = %d, want exactly the initial spawn and its respawn", got)
+	if got := sb.proxyStarts(t); got != 2 {
+		t.Fatalf("proxy starts = %d, want exactly the initial spawn and its respawn", got)
 	}
 }
 
 func TestProxySupervisionDefersEnableUntilExhaustionPublication(t *testing.T) {
-	sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
+	sb := newSupervisedBroker(t, false, mustEngineProxyProfile("ollama").Name)
 	t.Setenv(fakeProxyEnv, fakeProxyAcceptsFacades)
 	b := sb.b
 	b.beforeProxySpawnPublished = fastProxyRestartBudget(b)
@@ -1116,13 +1030,13 @@ func TestProxySupervisionDefersEnableUntilExhaustionPublication(t *testing.T) {
 		got := b.localPolicy()
 		return got.Activation == activationActive && got.ActiveRevision == revision && got.Policy.Revision == revision
 	})
-	if got := b.currentOllamaProxyGeneration(); got != 3 {
-		t.Fatalf("spawn generation = %d, want initial, failed recovery and one replacement", got)
+	if got := sb.proxyStarts(t); got != 3 {
+		t.Fatalf("proxy starts = %d, want initial, failed recovery and one replacement", got)
 	}
 }
 
 func TestProxySupervisionExhaustionWithoutPendingChangeStaysExhausted(t *testing.T) {
-	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	sb := newSupervisedBroker(t, true, mustEngineProxyProfile("ollama").Name)
 	b := sb.b
 	b.beforeProxySpawnPublished = fastProxyRestartBudget(b)
 	pause, reached, release := publicationBarrier(t)
@@ -1141,9 +1055,9 @@ func TestProxySupervisionExhaustionWithoutPendingChangeStaysExhausted(t *testing
 		t.Fatal(err)
 	}
 	awaitPublication(t, reached)
-	spawns := b.currentOllamaProxyGeneration()
+	spawns := sb.proxyStarts(t)
 	if spawns != 2 {
-		t.Fatalf("spawn generation = %d, want initial plus the budgeted respawn", spawns)
+		t.Fatalf("proxy starts = %d, want initial plus the budgeted respawn", spawns)
 	}
 	release()
 	// Join the exhausted monitor so its publication and wakeup have completed;
@@ -1153,7 +1067,7 @@ func TestProxySupervisionExhaustionWithoutPendingChangeStaysExhausted(t *testing
 	if !b.proxySupExhausted.Load() || b.getProxySupervisor() != sup || b.proxyProcessHandle() != nil {
 		t.Fatal("exhaustion with no pending listener change restarted supervision")
 	}
-	if got := b.currentOllamaProxyGeneration(); got != spawns {
+	if got := sb.proxyStarts(t); got != spawns {
 		t.Fatalf("exhaustion renewed the restart budget (%d -> %d)", spawns, got)
 	}
 }
@@ -1181,7 +1095,7 @@ func TestProxySupervisionUnrelatedPolicyEditPreservesExhaustion(t *testing.T) {
 	release()
 	sup.Stop()
 	waitReconciled(t, b)
-	if !b.proxySupExhausted.Load() || b.currentOllamaProxyGeneration() != 2 {
+	if !b.proxySupExhausted.Load() || sb.proxyStarts(t) != 2 {
 		t.Fatal("the fixture did not exhaust its initial spawn and one restart")
 	}
 
@@ -1199,8 +1113,8 @@ func TestProxySupervisionUnrelatedPolicyEditPreservesExhaustion(t *testing.T) {
 	if b.getProxySupervisor() != sup || !b.proxySupExhausted.Load() || b.proxyProcessHandle() != nil {
 		t.Fatal("an unrelated policy edit renewed exhausted supervision")
 	}
-	if got := b.currentOllamaProxyGeneration(); got != 2 {
-		t.Fatalf("unrelated policy edit spawned generation %d, want 2", got)
+	if got := sb.proxyStarts(t); got != 2 {
+		t.Fatalf("unrelated policy edit recorded proxy starts %d, want 2", got)
 	}
 
 	got = sb.setListener(t, true, testListenerPort+1)
@@ -1212,8 +1126,8 @@ func TestProxySupervisionUnrelatedPolicyEditPreservesExhaustion(t *testing.T) {
 		t.Fatal("a listener port change did not renew exhausted supervision")
 	}
 	requireProxyRunning(t, b.proxyProcessHandle(), "the changed listener renews the budget")
-	if got := b.currentOllamaProxyGeneration(); got != 3 {
-		t.Fatalf("listener port change spawned generation %d, want 3", got)
+	if got := sb.proxyStarts(t); got != 3 {
+		t.Fatalf("listener port change recorded proxy starts %d, want 3", got)
 	}
 }
 
@@ -1232,8 +1146,8 @@ func TestProxySupervisionQueuedStartHonorsServeCancellation(t *testing.T) {
 	cancel()
 	unlock()
 	waitReconciled(t, b)
-	if got := b.currentOllamaProxyGeneration(); got != 0 {
-		t.Fatalf("queued reconciliation spawned generation %d after Serve cancellation, want 0", got)
+	if got := sb.proxyStarts(t); got != 0 {
+		t.Fatalf("queued reconciliation recorded proxy starts %d after Serve cancellation, want 0", got)
 	}
 	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil {
 		t.Fatal("cancelled Serve retained proxy supervision")
@@ -1266,8 +1180,8 @@ func TestProxySupervisionQueuedStartHonorsShutdownEntry(t *testing.T) {
 	// released. Let the already-queued reconciliation finish ahead of it.
 	unlock()
 	waitReconciled(t, b)
-	if got := b.currentOllamaProxyGeneration(); got != 0 {
-		t.Fatalf("queued reconciliation spawned generation %d after shutdown entry, want 0", got)
+	if got := sb.proxyStarts(t); got != 0 {
+		t.Fatalf("queued reconciliation recorded proxy starts %d after shutdown entry, want 0", got)
 	}
 	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil {
 		t.Fatal("shutdown entry allowed queued proxy supervision")
@@ -1338,14 +1252,14 @@ func TestPolicySetRefusesAListenerPortAFacadeUses(t *testing.T) {
 		port  int
 		setup func(b *Broker)
 	}{
-		{"compatibility port", ollamaProxyProfile.FacadePort, func(*Broker) {}},
-		{"planned port", planned, func(b *Broker) { b.ollamaState().startupPort.Store(planned) }},
+		{"compatibility port", mustEngineProxyProfile("ollama").FacadePort, func(*Broker) {}},
+		{"planned port", planned, func(b *Broker) { b.engineProxy(mustEngineProxyProfile("ollama")).startupPort.Store(planned) }},
 		{"bound port", bound, func(b *Broker) {
-			publishTestProxy(b, &proxyProcess{facadeState: readyFacade(ollamaProxyProfile.Name, bound)})
+			publishTestProxy(b, &proxyProcess{facadeState: readyFacade(mustEngineProxyProfile("ollama").Name, bound)})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
+			sb := newSupervisedBroker(t, false, mustEngineProxyProfile("ollama").Name)
 			tc.setup(sb.b)
 			before := sb.b.localPolicy().Policy
 
@@ -1362,7 +1276,7 @@ func TestPolicySetRefusesAListenerPortAFacadeUses(t *testing.T) {
 
 	t.Run("a node that does not front the engine", func(t *testing.T) {
 		sb := newSupervisedBroker(t, false)
-		if got := sb.setListener(t, true, ollamaProxyProfile.FacadePort); got.Error != nil {
+		if got := sb.setListener(t, true, mustEngineProxyProfile("ollama").FacadePort); got.Error != nil {
 			t.Fatalf("policy:set refused a port no facade uses: %+v", got.Error)
 		}
 	})
@@ -1371,9 +1285,9 @@ func TestPolicySetRefusesAListenerPortAFacadeUses(t *testing.T) {
 // The other direction: moving a facade onto the enabled listener's port is
 // refused, so the overlap cannot be reached from either side.
 func TestFacadeSetPortRefusesTheListenersPort(t *testing.T) {
-	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	sb := newSupervisedBroker(t, true, mustEngineProxyProfile("ollama").Name)
 	call := func(port int) policyResponse {
-		return sb.call(t, ollamaProxyProfile.ComponentName()+":set-port", map[string]int{"port": port}, 5*time.Second)
+		return sb.call(t, mustEngineProxyProfile("ollama").ComponentName()+":set-port", map[string]int{"port": port}, 5*time.Second)
 	}
 
 	got := call(testListenerPort)
@@ -1405,8 +1319,8 @@ func TestConfiguredEngineProxyPort(t *testing.T) {
 	}
 
 	// Persisting one engine's port must not move another's.
-	stored := lmstudioProxyProfile.FacadePort + 6
-	path, err := appdir.Path(lmstudioProxyProfile.PortFile)
+	stored := mustEngineProxyProfile("lmstudio").FacadePort + 6
+	path, err := appdir.Path(mustEngineProxyProfile("lmstudio").PortFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1416,17 +1330,17 @@ func TestConfiguredEngineProxyPort(t *testing.T) {
 	if err := os.WriteFile(path, fmt.Appendf(nil, `{"port":%d}`, stored), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := configuredEngineProxyPort(lmstudioProxyProfile); got != stored {
+	if got := configuredEngineProxyPort(mustEngineProxyProfile("lmstudio")); got != stored {
 		t.Fatalf("persisted port = %d, want %d", got, stored)
 	}
-	if got := configuredEngineProxyPort(ollamaProxyProfile); got != ollamaProxyProfile.FacadePort {
+	if got := configuredEngineProxyPort(mustEngineProxyProfile("ollama")); got != mustEngineProxyProfile("ollama").FacadePort {
 		t.Fatalf("ollama port = %d, want its own facade %d; it read LM Studio's file",
-			got, ollamaProxyProfile.FacadePort)
+			got, mustEngineProxyProfile("ollama").FacadePort)
 	}
 
 	// The fallback reservation set also includes the persisted sibling port.
 	b := &Broker{}
-	if reason := b.siblingEngineProxyPorts(ollamaProxyProfile)[stored]; reason == "" {
+	if reason := b.siblingEngineProxyPorts(mustEngineProxyProfile("ollama"))[stored]; reason == "" {
 		t.Fatalf("persisted sibling port %d is not reserved against fallback selection", stored)
 	}
 }
@@ -1437,26 +1351,22 @@ func TestConfiguredEngineProxyPort(t *testing.T) {
 // sibling configured just above the search base was taken, and that engine then
 // silently failed to start on the next desired-state restore.
 //
-// Both directions are checked because the two engines have separate fallback
-// functions and fixing one is not evidence about the other.
+// Both directions exercise the shared planner with different sibling ports.
 func TestProxyFallbackSkipsASiblingEnginesConfiguredPort(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		self     engineProxyProfile
-		sibling  engineProxyProfile
-		fallback func(*Broker, ...int) int
+		name    string
+		self    engineProxyProfile
+		sibling engineProxyProfile
 	}{
 		{
-			name:     "ollama fallback avoids LM Studio",
-			self:     ollamaProxyProfile,
-			sibling:  lmstudioProxyProfile,
-			fallback: (*Broker).setOllamaProxyFallback,
+			name:    "ollama fallback avoids LM Studio",
+			self:    mustEngineProxyProfile("ollama"),
+			sibling: mustEngineProxyProfile("lmstudio"),
 		},
 		{
-			name:     "lmstudio fallback avoids Ollama",
-			self:     lmstudioProxyProfile,
-			sibling:  ollamaProxyProfile,
-			fallback: (*Broker).setLMStudioProxyFallback,
+			name:    "lmstudio fallback avoids Ollama",
+			self:    mustEngineProxyProfile("lmstudio"),
+			sibling: mustEngineProxyProfile("ollama"),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1478,9 +1388,11 @@ func TestProxyFallbackSkipsASiblingEnginesConfiguredPort(t *testing.T) {
 
 			b := &Broker{}
 			useSyntheticBrokerPortChecks(t, b)
-			got := tc.fallback(b, tc.self.EnginePortBase)
-			if got == stored {
-				t.Fatalf("fallback chose %d, the port %s is configured on", got, tc.sibling.DisplayName)
+			got := b.defaultEngineFallbackPortWithCheck(tc.self, tc.self.FacadePort, func(port int) bool {
+				return port >= stored
+			})
+			if got != stored+1 {
+				t.Fatalf("fallback port = %d, want %d after the sibling's configured port", got, stored+1)
 			}
 			if got == tc.sibling.FacadePort || got == tc.sibling.EnginePortBase {
 				t.Fatalf("fallback chose %d, one of %s's default ports", got, tc.sibling.DisplayName)

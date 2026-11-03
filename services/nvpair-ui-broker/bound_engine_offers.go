@@ -50,9 +50,6 @@ func (b *Broker) bindingOffersLocked() *nodepolicy.EngineBindingOffers {
 	var models []nodepolicy.Role
 	for _, ref := range policy.EngineBindings {
 		profile, fronted := b.frontedEngineProfile(ref.Engine)
-		if profile.Name == ollamaProxyProfile.Name && b.ollamaFacadeIsPendingBackend() {
-			continue
-		}
 		if !fronted || b.engineProxyListenPort(profile) == 0 || r.drains[ref.Engine] ||
 			!b.bindingSettingsResolvedLocked(ref.Engine) || !b.bindingPermitted(policy, ref.Engine, ref.Model) {
 			continue

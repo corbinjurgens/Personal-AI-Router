@@ -913,7 +913,6 @@ func (b *Broker) rebindSettingsProxy(engine string, port int) error {
 	profile, _ := engineProxyProfileFor(engine)
 	state := b.engineProxy(profile)
 	state.explicitSettings.Store(true)
-	state.managedFacade.Store(false)
 	_, rpcErr, err := p.Call(context.Background(), engine+":set-port", settingsJSON(map[string]int{"port": port}))
 	if err != nil {
 		return err
@@ -921,7 +920,6 @@ func (b *Broker) rebindSettingsProxy(engine string, port int) error {
 	if rpcErr != nil {
 		return fmt.Errorf("%s", rpcErr.Message)
 	}
-	state.managedFacade.Store(false)
 	state.startupPort.Store(int32(port))
 	return nil
 }
@@ -934,7 +932,7 @@ func (b *Broker) refreshEngineSettings(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !b.managedPortOwnershipReady() {
+			if !b.facadeStartupReady() {
 				continue
 			}
 			func() {

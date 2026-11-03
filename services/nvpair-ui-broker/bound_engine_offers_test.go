@@ -72,39 +72,6 @@ func TestEngineBindingOffersProjectionContentionKeepsColdRegistration(t *testing
 	}
 }
 
-func TestEngineBindingOffersWithdrawDuringManagedBackendMove(t *testing.T) {
-	h := newBindingOfferHarness(t)
-	h.pp.readyMu.Lock()
-	h.pp.facadeState["ollama"] = proxyFacadeState{ready: true, port: 18080}
-	h.pp.readyMu.Unlock()
-	r := h.b.nodePolicyRuntime()
-	h.b.engineConfigMu.Lock()
-	r.mu.Lock()
-	r.current.Revision, r.activeRevision = "2", "2"
-	r.current.EngineBindings = nodepolicy.EngineBindings{{Engine: "ollama", Model: "fixture"}}
-	r.mu.Unlock()
-	base := h.engine.answer
-	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
-		if method == "engine:get-installed" {
-			return map[string]any{"engines": []map[string]any{{"engine": "ollama", "installed": true, "running": false, "healthy": false, "locked": false}}}, ""
-		}
-		return base(method, raw)
-	})
-	registered := h.b.registerBindingFacadeLocked(ollamaProxyProfile)
-	h.b.engineConfigMu.Unlock()
-	if !registered {
-		t.Fatal("fixture did not register stopped bound facade")
-	}
-	h.b.managedOllamaBackend.Store(1)
-	h.b.reconcileAdvertise(nil) // the managed move must skip all engine probing
-	h.b.engineConfigMu.Lock()
-	offers := h.b.bindingOffersLocked()
-	h.b.engineConfigMu.Unlock()
-	if offers != nil || len(h.b.regCache.Snapshot()) != 0 {
-		t.Fatalf("unresolved backend move retained a cold offer: %+v", offers)
-	}
-}
-
 func TestEngineBindingOffersAdvertiserPreservesSourceDrain(t *testing.T) {
 	h := newBindingOfferHarness(t)
 	h.b.reconcileAdvertiseDynamicEngine(offerProfile(h), nil)

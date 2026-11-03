@@ -4,13 +4,9 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"log/slog"
 	"time"
 
 	"nvpair-shared/buildinfo"
-	"nvpair-shared/engines"
 	"nvpair-shared/noderec"
 )
 
@@ -18,9 +14,8 @@ import (
 // broker needs. Its JSON tags match the producer's so node/discovered|
 // updated|removed payloads unmarshal straight into it (the GPU/CPU/memory
 // sub-objects reuse the broker's discovery types, whose tags are identical).
-// The ollama_* / lmstudio_* fields drive the per-engine manual→proxy bridge
-// (bridgeManualNode); the rest project into the discovery store via
-// manualToEnriched.
+// Engine status fields are retained until the manual-node payload is updated.
+// Projection into the discovery store is owned by manualToEnriched.
 type manualNodeStatus struct {
 	MemoryObservation *noderec.MemoryObservation `json:"memoryObservation,omitempty"`
 	MemoryHop         *noderec.MemoryHop         `json:"memoryHop,omitempty"`
@@ -141,96 +136,4 @@ func mergeModels(lists ...[]string) []string {
 		}
 	}
 	return out
-}
-
-// proxyManualNode is the node/add-manual payload the broker hands
-// ollama-proxy to bridge a reachable manual node into inference routing.
-// It mirrors the proxy's Node wire shape (id/host/port/addresses[/txt]);
-// the proxy requires a non-empty address list and a port to forward to.
-type proxyManualNode struct {
-	ID        string   `json:"id"`
-	Host      string   `json:"host"`
-	Port      int      `json:"port"`
-	Addresses []string `json:"addresses"`
-	TXT       []string `json:"txt,omitempty"`
-	Models    []string `json:"models,omitempty"`
-}
-
-// bridgeManualNode keeps every supervised proxy's manual-node set in step with
-// a manual node's per-engine reachability: a node whose Ollama is up is bridged
-// into ollama-proxy and one whose LM Studio is up into lmstudio-proxy
-// (idempotent — each proxy upserts on a repeat), while an engine that is not
-// (or no longer) reachable is removed from its proxy. Each leg is a no-op when
-// that proxy isn't supervised — the bridge only applies when the broker owns
-// both ends.
-//
-// Manual nodes are, by definition, the nodes that never appear in the discovery
-// relay's snapshots — they advertise no _nvpair-node record for the scanner
-// daemon to carry — so without this explicit add the proxies can't route
-// inference to them even though both workers are broker-owned.
-func (b *Broker) bridgeManualNode(s manualNodeStatus, key string) {
-	b.bridgeToProxy(b.getProxy(), "ollama", s, key, s.OllamaUp, s.OllamaPort, s.OllamaModels)
-	b.bridgeToProxy(b.getLMStudioProxy(), "lmstudio", s, key, s.LMStudioUp, s.LMStudioPort, s.LMStudioModels)
-}
-
-// bridgeToProxy adds the node to p when its engine is reachable, or removes it
-// otherwise. up/port/models are the engine-specific fields the caller pulled
-// off the node's status. The proxy candidate is keyed by `key` — the node's
-// operational identity (its hostUuid once node-info reports it, else the manual
-// id) — the same key the discovery store and scheduler use, so the scheduler's
-// priority list and scheduledOn resolve to this candidate.
-func (b *Broker) bridgeToProxy(p *proxyProcess, engine string, s manualNodeStatus, key string, up bool, port int, models []string) {
-	if p == nil {
-		return
-	}
-	if up && s.Address != "" && port > 0 {
-		node := proxyManualNode{
-			ID:        key,
-			Host:      s.Address,
-			Port:      port,
-			Addresses: []string{s.Address},
-			Models:    models,
-		}
-		b.callProxyManual(p, engine, "node/add-manual", node, key)
-		return
-	}
-	// Engine unreachable (down, or this node doesn't run it): make sure the
-	// proxy isn't left holding a stale manual entry it would try to route to.
-	b.callProxyManual(p, engine, "node/remove-manual", map[string]string{"id": key}, key)
-}
-
-// removeManualNodeFromProxies drops a manual node from every supervised proxy.
-// Idempotent: a no-op for a proxy where the node was never bridged or that
-// isn't supervised (the proxy's RemoveManual just reports removed=false).
-func (b *Broker) removeManualNodeFromProxies(id string) {
-	b.callProxyManual(b.getProxy(), "ollama", "node/remove-manual", map[string]string{"id": id}, id)
-	b.callProxyManual(b.getLMStudioProxy(), "lmstudio", "node/remove-manual", map[string]string{"id": id}, id)
-}
-
-// callProxyManual issues a best-effort node/add-manual|remove-manual to one
-// engine's facade. The bridge is advisory plumbing the broker owns, not part of
-// the manual-node request's own response, so a failure is logged and swallowed
-// rather than surfaced to the client. A nil proxy (not supervised) is a no-op.
-// Runs synchronously on the manual-nodes reader goroutine; a proxy answers
-// these control-plane calls locally in well under proxyCallTimeout, and
-// manual-node events are infrequent (one per 10s probe), so the brief inline
-// call keeps add/remove strictly ordered without a queue.
-//
-// Every method routed here is facade-scoped — a manual node belongs to one
-// engine's routing set — so the engine is addressed on the wire rather than
-// left implicit in which process was picked.
-func (b *Broker) callProxyManual(p *proxyProcess, engine, method string, params any, id string) {
-	if p == nil {
-		return
-	}
-	raw, err := json.Marshal(params)
-	if err != nil {
-		slog.Warn("manual->proxy bridge: marshal failed", "engine", engine, "method", method, "id", id, "err", err)
-		return
-	}
-	if _, rpcErr, err := p.Call(context.Background(), engines.AddressMethod(engine, method), raw); err != nil {
-		slog.Warn("manual->proxy bridge failed", "engine", engine, "method", method, "id", id, "err", err)
-	} else if rpcErr != nil {
-		slog.Warn("manual->proxy bridge rejected", "engine", engine, "method", method, "id", id, "code", rpcErr.Code, "msg", rpcErr.Message)
-	}
 }

@@ -277,7 +277,7 @@ func TestRepushPriorityDeliversCompleteSnapshotToReplacementProxy(t *testing.T) 
 		},
 	}
 	b.cachePrioritySnapshot(want)
-	b.setProxy(proxy) // replacement proxy starts with no scheduler state
+	b.setEngineProxyHandle(mustEngineProxyProfile("ollama"), proxy) // replacement proxy starts with no scheduler state
 
 	replayed := make(chan struct{})
 	go func() {

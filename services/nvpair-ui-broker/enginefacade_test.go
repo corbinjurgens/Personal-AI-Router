@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -115,7 +116,7 @@ func TestLlamaCPPFacadePreparationPreservesConfiguredPorts(t *testing.T) {
 						return
 					}
 					calls.Add(1)
-					if err := codec.Respond(msg.ID, ollamaPortStatus{Running: true, Port: tc.serverPort}); err != nil {
+					if err := codec.Respond(msg.ID, enginePortStatus{Running: true, Port: tc.serverPort}); err != nil {
 						t.Errorf("respond to unexpected engine request %s: %v", msg.Method, err)
 						return
 					}
@@ -141,69 +142,28 @@ func TestLlamaCPPFacadePreparationPreservesConfiguredPorts(t *testing.T) {
 	}
 }
 
-func TestLlamaCPPProxyTerminalHandlingPreservesEngineState(t *testing.T) {
-	profile := mustEngineProxyProfile("llamacpp")
-	b := &Broker{ollamaPortReady: make(chan struct{}), lmstudioPortReady: make(chan struct{})}
-	state := b.engineProxy(profile)
-	state.backendPort.Store(int32(profile.EnginePortBase))
-	state.startupPort.Store(18080)
-	state.managedFacade.Store(true)
-
-	b.blockAndFinishEngineProxy(profile)
-	b.finishEngineProxyStartup(profile)
-
-	if got := int(state.backendPort.Load()); got != profile.EnginePortBase {
-		t.Fatalf("engine port = %d, want %d", got, profile.EnginePortBase)
-	}
-	if got := state.startupPort.Load(); got != 18080 || !state.managedFacade.Load() {
-		t.Fatalf("terminal handling changed facade state: port=%d managed=%v", got, state.managedFacade.Load())
-	}
-	for _, gate := range []struct {
-		name  string
-		ready <-chan struct{}
-	}{{"Ollama", b.ollamaPortReady}, {"LM Studio", b.lmstudioPortReady}} {
-		select {
-		case <-gate.ready:
-			t.Fatalf("llama.cpp terminal handling released %s's gate", gate.name)
-		default:
-		}
-	}
-}
-
-func TestLlamaCPPEngineStatusRelaysBeforeOtherPortGates(t *testing.T) {
-	profile := mustEngineProxyProfile("llamacpp")
-	b := brokerWithEngineStatus(t, profile.Name, profile.EnginePortBase)
-	b.ollamaPortReady = make(chan struct{})
-	b.lmstudioPortReady = make(chan struct{})
-	b.managedOllamaBackend.Store(managedOllamaBackendStart)
-	client, server := net.Pipe()
-	t.Cleanup(func() {
-		close(b.ollamaPortReady)
-		close(b.lmstudioPortReady)
-		_ = client.Close()
-		_ = server.Close()
-	})
-	b.codec = NewCodec(server)
-	id := json.RawMessage(`1`)
-
-	b.relayToEngine(&Message{ID: &id, Method: "engine:status", Params: json.RawMessage(`{"engine":"llamacpp"}`)})
-
-	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatalf("set response deadline: %v", err)
-	}
-	response, err := NewCodec(client).Read()
-	if err != nil {
-		t.Fatalf("read llama.cpp status while other port gates are pending: %v", err)
-	}
-	if response.Error != nil {
-		t.Fatalf("llama.cpp status failed: %+v", response.Error)
-	}
-	var status ollamaPortStatus
-	if err := json.Unmarshal(response.Result, &status); err != nil {
-		t.Fatalf("decode llama.cpp status: %v", err)
-	}
-	if status.Port != profile.EnginePortBase {
-		t.Fatalf("status port = %d, want %d", status.Port, profile.EnginePortBase)
+func TestFacadePreparationUsesTheGenericPathForEveryTableEngine(t *testing.T) {
+	for _, profile := range engineProxyProfiles {
+		t.Run(profile.Name, func(t *testing.T) {
+			b := &Broker{
+				proxyPath: "test-proxy", proxyEngines: []string{profile.Name},
+				engineSettingsLoaded: true,
+			}
+			b.prepareEnabledFacades()
+			for _, candidate := range engineProxyProfiles {
+				want := 0
+				if candidate.Name == profile.Name {
+					want = candidate.EnginePortBase
+				}
+				if got := int(b.engineProxy(candidate).backendPort.Load()); got != want {
+					t.Fatalf("%s engine port = %d, want %d", candidate.Name, got, want)
+				}
+			}
+			spec := b.defaultEngineFacadeSpec(profile)
+			if spec.Engine != profile.Name || spec.Port != profile.FacadePort || spec.IgnorePersistedPort {
+				t.Fatalf("facade spec = %+v, want %s on %d with ordinary port restore", spec, profile.Name, profile.FacadePort)
+			}
+		})
 	}
 }
 
@@ -222,7 +182,7 @@ func TestLlamaCPPProxyNotificationDispatchPreservesFacadeAddress(t *testing.T) {
 	payload := json.RawMessage(`{"port":8080}`)
 	done := make(chan struct{})
 	go func() {
-		b.forwardProxyProcessNotification(0, 0, profile.addressed("ready"), payload)
+		b.forwardProxyProcessNotification(profile.addressed("ready"), payload)
 		close(done)
 	}()
 	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
@@ -246,5 +206,34 @@ func TestLlamaCPPProxyNotificationDispatchPreservesFacadeAddress(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("notification forwarding did not finish")
+	}
+}
+
+func TestProxyNotificationsRejectReplacedProcessForEveryTableEngine(t *testing.T) {
+	for _, profile := range engineProxyProfiles {
+		t.Run(profile.Name, func(t *testing.T) {
+			var output bytes.Buffer
+			b := &Broker{codec: NewCodec(&output)}
+			previous, current := &proxyProcess{}, &proxyProcess{}
+			b.setProxyProcessHandle(current)
+			b.setEngineProxySubscribed(profile, true)
+			params := json.RawMessage(`{"port":25080}`)
+			b.forwardProxyNotificationFrom(previous, profile.addressed("ready"), params)
+			if output.Len() != 0 {
+				t.Fatal("replaced proxy forwarded a ready notification")
+			}
+			b.forwardProxyNotificationFrom(current, profile.addressed("ready"), params)
+			msg, err := NewCodec(&output).Read()
+			if err != nil {
+				t.Fatalf("read current proxy notification: %v", err)
+			}
+			var ready proxyReadyParams
+			if err := json.Unmarshal(msg.Params, &ready); err != nil {
+				t.Fatalf("decode current proxy notification: %v", err)
+			}
+			if msg.Method != profile.ComponentName()+":ready" || ready.Port != 25080 {
+				t.Fatalf("forwarded notification = %s %+v, want %s:ready on 25080", msg.Method, ready, profile.ComponentName())
+			}
+		})
 	}
 }

@@ -68,7 +68,7 @@ type EnrichedNode struct {
 	// engine-manager /v1/models endpoint (models-http).
 	Models []string `json:"models,omitempty"`
 	// ModelsByEngine attributes Models to the engine serving each model, keyed by
-	// engine-manager engine name (e.g. "ollama", "lmstudio"). Additive alongside
+	// engine-manager engine name (e.g. "llamacpp"). Additive alongside
 	// the flat Models union; carried through to AvailableNode for per-engine
 	// consumers.
 	ModelsByEngine map[string][]string `json:"modelsByEngine,omitempty"`

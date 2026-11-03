@@ -1037,7 +1037,7 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 
 func TestProxyAdmissionNotificationsReachThePolicy(t *testing.T) {
 	b, _ := newPolicyBroker(t)
-	b.forwardProxyProcessNotification(0, 0, nodepolicy.NotifyAdmissionState, json.RawMessage(`{"active":3,"activeByEngine":{"llamacpp":3},"queued":1,"lastActivityMs":{"llamacpp":5}}`))
+	b.forwardProxyProcessNotification(nodepolicy.NotifyAdmissionState, json.RawMessage(`{"active":3,"activeByEngine":{"llamacpp":3},"queued":1,"lastActivityMs":{"llamacpp":5}}`))
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	st, have := r.admission, r.haveAdmission

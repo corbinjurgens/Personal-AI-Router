@@ -17,6 +17,11 @@ func TestIdentityCurrentModel(t *testing.T) {
 	test := func(name, engine, model string, current map[string]string, wantReady bool) {
 		t.Run(name, func(t *testing.T) {
 			f := newStrictFixture(t)
+			if engine == "custom-implied" {
+				d := testDescriptor(engine, engines.ProtocolOpenAIV1)
+				d.ModelNaming = engines.ModelNamingImpliedLatestTag
+				f.b.setDynamicEngines([]engines.Descriptor{d}, func(int) bool { return true })
+			}
 			capability := strictCapability(t, engine, model)
 			r := f.b.nodePolicyRuntime()
 			r.mu.Lock()
@@ -49,15 +54,15 @@ func TestIdentityCurrentModel(t *testing.T) {
 			waitAdvertised(t, f, want)
 		})
 	}
-	test("replaced tag cannot borrow another tag digest", "ollama", "a:v1", map[string]string{"a:v1": otherDigest, "a:v2": modelDigestB}, false)
-	test("unchanged tag with repeated digest", "ollama", "a:v2", map[string]string{"a:v1": modelDigestB, "a:v2": modelDigestB}, true)
-	test("missing requested model", "ollama", "a:v1", map[string]string{"a:v2": modelDigestB}, false)
-	test("agreeing implied latest aliases", "ollama", "a", map[string]string{" a ": modelDigestB, "a:latest": modelDigestB}, true)
-	test("conflicting implied latest aliases", "ollama", "a", map[string]string{"a": modelDigestB, "a:latest": otherDigest}, false)
-	test("conflicting reverse alias digest assignment", "ollama", "a:latest", map[string]string{"a": otherDigest, "a:latest": modelDigestB}, false)
+	test("replaced tag cannot borrow another tag digest", "llamacpp", "a:v1", map[string]string{"a:v1": otherDigest, "a:v2": modelDigestB}, false)
+	test("unchanged tag with repeated digest", "llamacpp", "a:v2", map[string]string{"a:v1": modelDigestB, "a:v2": modelDigestB}, true)
+	test("missing requested model", "llamacpp", "a:v1", map[string]string{"a:v2": modelDigestB}, false)
+	test("agreeing implied latest aliases", "custom-implied", "a", map[string]string{" a ": modelDigestB, "a:latest": modelDigestB}, true)
+	test("conflicting implied latest aliases", "custom-implied", "a", map[string]string{"a": modelDigestB, "a:latest": otherDigest}, false)
+	test("conflicting reverse alias digest assignment", "custom-implied", "a:latest", map[string]string{"a": otherDigest, "a:latest": modelDigestB}, false)
 	test("exact names do not imply latest", "llamacpp", "a", map[string]string{"a:latest": modelDigestB}, false)
 	test("exact names trim whitespace", "llamacpp", "org/a", map[string]string{" org/a ": modelDigestB}, true)
-	test("reserved alias stays exempt", "ollama", "weak:latest", map[string]string{"weak": modelDigestB}, false)
+	test("reserved alias stays exempt", "llamacpp", "weak:latest", map[string]string{"weak": modelDigestB}, false)
 }
 
 func TestIdentityCurrentModelDescriptorSelection(t *testing.T) {

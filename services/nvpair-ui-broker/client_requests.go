@@ -433,35 +433,6 @@ func (b *Broker) supersedeInstallStartsLocked(engine string) {
 }
 
 func (b *Broker) relayToEngineNow(msg *Message) {
-	if needsOllamaPortGate(msg.Method, msg.Params) && b.ollamaFacadeIsPendingBackend() {
-		go func() {
-			select {
-			case <-b.ollamaPortReady:
-				// Recovery opens the general port gate before a best-effort live
-				// rebind can finish. Never probe if the proxy still owns :11434.
-				if b.ollamaFacadeIsPendingBackend() {
-					_ = b.codec.RespondError(msg.ID, -32000, "Ollama port setup is still reconciling; retry")
-					return
-				}
-				b.relayToEngine(msg)
-			case <-time.After(rpcWorkerCallTimeout):
-				_ = b.codec.RespondError(msg.ID, -32000, "Ollama port setup did not finish; retry")
-			}
-		}()
-		return
-	}
-	if needsLMStudioPortGate(msg.Method, msg.Params) && b.lmstudioPortOwnershipPending() {
-		go func() {
-			select {
-			case <-b.lmstudioPortReady:
-				b.relayToEngine(msg)
-			case <-time.After(rpcWorkerCallTimeout):
-				_ = b.codec.RespondError(msg.ID, -32000, "LM Studio port setup did not finish; retry")
-			}
-		}()
-		return
-	}
-
 	var installStart *pendingInstallStart
 	if msg.Method == "engine:install" && engineLocalOnRequest(msg.Method, msg.Params) {
 		// Preserve early proxy-port refusal before doing installation work.
@@ -579,21 +550,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		}
 		defer b.reconcileLegacySettingsLocked()
 	}
-	isOllamaPortAssignment := isEnginePortAssignment && requestedEngine == "ollama"
 	if isEnginePortAssignment && b.rejectProxyHeldPort(msg, requestedPort, requestedEngine) {
-		return
-	}
-	if isOllamaPortAssignment && requestedPort == managedOllamaFacadePort && b.ollamaState().managedFacade.Load() {
-		if err := b.codec.RespondError(msg.ID, -32000, "port 11434 is reserved by the managed Ollama proxy; choose another backend port or disable managed port ownership and restart NVPAIR"); err != nil {
-			log.Printf("failed to reject conflicting Ollama port assignment")
-		}
-		return
-	}
-	requestedLMStudioPort, isLMStudioSetPort := lmstudioSetPortRequest(msg.Method, msg.Params)
-	if isLMStudioSetPort && requestedLMStudioPort == managedLMStudioFacadePort && b.lmstudioState().managedFacade.Load() {
-		if err := b.codec.RespondError(msg.ID, -32000, "port 1234 is reserved by the managed LM Studio proxy; choose another backend port or disable managed port ownership and restart NVPAIR"); err != nil {
-			log.Printf("failed to reject conflicting LM Studio engine:set-port")
-		}
 		return
 	}
 
@@ -691,17 +648,6 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			if json.Unmarshal(result, &status) == nil && status.Engine != "" && status.Running != nil {
 				b.observeEngineRunningFrom(source, status.Engine, *status.Running)
 			}
-		}
-		if isOllamaPortAssignment {
-			var status struct {
-				Port int `json:"port"`
-			}
-			if json.Unmarshal(result, &status) == nil && status.Port > 0 {
-				b.ollamaState().backendPort.Store(int32(status.Port))
-			}
-		}
-		if isLMStudioSetPort {
-			b.lmstudioState().backendPort.Store(int32(requestedLMStudioPort))
 		}
 		reply = func() {
 			if e := b.codec.Respond(id, result); e != nil {

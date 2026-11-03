@@ -215,7 +215,7 @@ func startProxyWithHistory(history *brokerRoutingHistory, name, binaryPath, logL
 	return pp, nil
 }
 
-func (b *Broker) forwardProxyNotificationFrom(source *proxyProcess, ollamaGeneration, lmstudioGeneration uint64, method string, params json.RawMessage) {
+func (b *Broker) forwardProxyNotificationFrom(source *proxyProcess, method string, params json.RawMessage) {
 	if b.handleBoundEngineNotification(source, method, params) {
 		return
 	}
@@ -246,7 +246,7 @@ func (b *Broker) forwardProxyNotificationFrom(source *proxyProcess, ollamaGenera
 		b.routeProxyWorkloadFrom(source, bare, params)
 		return
 	}
-	b.forwardProxyProcessNotification(ollamaGeneration, lmstudioGeneration, method, params)
+	b.forwardProxyProcessNotification(method, params)
 }
 
 // attachPeer builds the JSON-RPC peer over the proxy's pipes. A Call whose
@@ -496,16 +496,6 @@ func (b *Broker) startProxySupervisorLocked() {
 		slog.Warn("proxy failed to start; continuing without local engine proxies",
 			"path", b.proxyPath, "err", err)
 		b.setProxySupervisor(nil)
-		// No facade will come up, so both engines take the terminal path:
-		// report the blocked claim where one was made, then release the gate.
-		if b.ollamaState().managedFacade.Load() {
-			b.blockManagedOllamaFacade("the proxy could not be started")
-		}
-		b.finishOllamaProxyTerminal()
-		if b.lmstudioState().managedFacade.Load() {
-			_, _ = b.blockManagedLMStudioFacade("the proxy could not be started", nil)
-		}
-		b.finishLMStudioProxyTerminal()
 	}
 }
 

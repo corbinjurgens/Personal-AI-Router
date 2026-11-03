@@ -162,24 +162,6 @@ func (b *Broker) proxyArgs() []string {
 	return b.clusterDirArgs()
 }
 
-func (b *Broker) beginOllamaProxyGeneration() uint64 {
-	return b.ollamaProxyGeneration.Add(1)
-}
-
-func (b *Broker) currentOllamaProxyGeneration() uint64 {
-	return b.ollamaProxyGeneration.Load()
-}
-
-// ollamaFacadeSpec is the enable request for Ollama's planned facade port.
-func (b *Broker) ollamaFacadeSpec() enableFacadeRequest {
-	spec := enableFacadeRequest{Engine: ollamaProxyProfile.Name}
-	if port := int(b.ollamaState().startupPort.Load()); port != 0 {
-		spec.Port = port
-		spec.IgnorePersistedPort = true
-	}
-	return spec
-}
-
 // setServeCtx records the broker's own lifetime so work started on a spawn
 // goroutine can be abandoned when the broker is shutting down.
 func (b *Broker) setServeCtx(ctx context.Context) {
@@ -249,50 +231,23 @@ func (b *Broker) enableEngineFacadeWithPortCheck(
 	profile engineProxyProfile,
 	available func(int) bool,
 ) error {
-	switch profile.Name {
-	case ollamaProxyProfile.Name:
-		return b.enableProxyFacadeWithFallback(ctx, pp, b.ollamaFacadeSpec(), b.ollamaFallbackPort)
-	case lmstudioProxyProfile.Name:
-		return b.enableProxyFacadeWithFallback(ctx, pp, b.lmstudioFacadeSpec(), b.lmstudioFallbackPort)
-	default:
-		if _, dynamic := b.dynamicEngineProfile(profile.Name); dynamic {
-			spec, err := b.dynamicEngineFacadeSpec(profile)
-			if err != nil {
-				return err
-			}
-			return b.enableProxyFacadeWithFallback(ctx, pp, spec, func(failed int) int {
-				return b.dynamicEngineFallbackPort(profile, failed, available)
-			})
+	if _, dynamic := b.dynamicEngineProfile(profile.Name); dynamic {
+		spec, err := b.dynamicEngineFacadeSpec(profile)
+		if err != nil {
+			return err
 		}
-		return b.enableProxyFacadeWithFallback(
-			ctx,
-			pp,
-			b.defaultEngineFacadeSpec(profile),
-			func(failed int) int {
-				return b.defaultEngineFallbackPortWithCheck(profile, failed, available)
-			},
-		)
+		return b.enableProxyFacadeWithFallback(ctx, pp, spec, func(failed int) int {
+			return b.dynamicEngineFallbackPort(profile, failed, available)
+		})
 	}
-}
-
-// blockAndFinishEngineProxy gives up one engine's managed claim, reports it, and
-// releases its startup gate — the treatment for an engine whose facade will not
-// come up in a process that is otherwise staying.
-func (b *Broker) blockAndFinishEngineProxy(profile engineProxyProfile) {
-	switch profile.Name {
-	case ollamaProxyProfile.Name:
-		if b.ollamaState().managedFacade.Load() {
-			b.blockManagedOllamaFacade("the Ollama proxy facade could not be brought up")
-		}
-		b.finishOllamaProxyTerminal()
-	case lmstudioProxyProfile.Name:
-		if b.lmstudioState().managedFacade.Load() {
-			_, _ = b.blockManagedLMStudioFacade("the LM Studio proxy facade could not be brought up", nil)
-		}
-		b.finishLMStudioProxyTerminal()
-	default:
-		// Other engines have no compatibility-port claim or startup gate.
-	}
+	return b.enableProxyFacadeWithFallback(
+		ctx,
+		pp,
+		b.defaultEngineFacadeSpec(profile),
+		func(failed int) int {
+			return b.defaultEngineFallbackPortWithCheck(profile, failed, available)
+		},
+	)
 }
 
 // facadeCameUpAnyway reports whether a facade that failed to answer its enable
@@ -332,24 +287,6 @@ func isTransportAmbiguous(err error) bool {
 	return err != nil && !stderrors.Is(err, errRPCAnswered)
 }
 
-// ollamaFallbackPort is the port to retry an Ollama facade on after a lost bind
-// race.
-//
-// The child's bind-failed notification precedes the enable response on the same
-// stream, and forwardProxyNotification handles it inline — so by the time the
-// response is dispatched, that path has usually already chosen a fallback and
-// reported the ownership block to the UI. Prefer its choice: it also decides
-// whether the managed facade is off, which a port picked here would not.
-//
-// Recomputed only when that did not happen, because the notification is
-// best-effort on the child side.
-func (b *Broker) ollamaFallbackPort(failed int) int {
-	if planned := int(b.ollamaState().startupPort.Load()); planned != 0 && planned != failed {
-		return planned
-	}
-	return b.setOllamaProxyFallback(failed)
-}
-
 // spawnProxy starts the one nvpair-proxy process and brings up a facade in it
 // for every enabled engine.
 //
@@ -369,21 +306,9 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	if ctx := b.getServeCtx(); ctx != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	// Both generations are captured before the spawn and advance together: they
-	// are per-incarnation stale-notification filters, and with one process the
-	// facades are re-created as a set. Each engine keeps its own counter so its
-	// existing port choreography is untouched.
-	ollamaGeneration := b.beginOllamaProxyGeneration()
-	// Bumped without lmstudioReadyMu. Reconciliation holds that mutex across
-	// its set-port and engine:status round trips, so taking it here would make
-	// a replacement spawn wait out the dead process's RPC timeouts before it
-	// could even start. The generation itself is atomic, and
-	// lmstudioProxyGenerationIsCurrent is what drops the stale run.
-	lmstudioGeneration := b.lmstudioProxyGeneration.Add(1)
-
 	pp, err := startProxyWithHistory(b.routingHistory, engines.ProxyComponent, b.proxyPath, applog.LevelString(), b.proxyCredentialRefs(), b.relayDir,
 		func(source *proxyProcess, method string, params json.RawMessage) {
-			b.forwardProxyNotificationFrom(source, ollamaGeneration, lmstudioGeneration, method, params)
+			b.forwardProxyNotificationFrom(source, method, params)
 		}, b.proxyArgs()...)
 	if err != nil {
 		return nil, err
@@ -398,7 +323,6 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 			b.setEngineProxyHandle(profile, pp)
 		}
 	}
-	b.lmstudioProxyPublishedGeneration.Store(lmstudioGeneration)
 	slog.Info("proxy started", "path", b.proxyPath, "pid", pp.cmd.Process.Pid)
 
 	// The child is serving its JSON-RPC channel but has no listeners yet, so
@@ -452,13 +376,9 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 			r.incarnation = nil
 		}
 		r.mu.Unlock()
-		// The supervisor will retry with the existing managed claims.
+		// The supervisor retries with the existing facade port plans.
 		pp.Stop()
 		b.clearProxyHandles()
-		// Release startup gates even while supervision retries, so engine
-		// queries and desired-state restore do not wait through backoff.
-		b.markOllamaPortReady()
-		b.markLMStudioPortReady()
 		return nil, fmt.Errorf("no engine facade could be brought up in %s", b.proxyPath)
 	}
 
@@ -467,19 +387,6 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	// for it.
 	for _, profile := range failed {
 		b.setEngineProxyHandle(profile, nil)
-		b.blockAndFinishEngineProxy(profile)
-	}
-
-	// A facade can announce ready before its handle was published, so replay
-	// the reconciliation now. Both gates are sync.Once-guarded, which makes
-	// this safe when the notification goroutine already handled it.
-	if b.ollamaState().managedFacade.Load() {
-		if ready, port := pp.Status(ollamaProxyProfile.Name); ready && port > 0 {
-			go b.reconcileProxyPortOnReady(port)
-		}
-	}
-	if ready, port := pp.Status(lmstudioProxyProfile.Name); ready && port > 0 {
-		go b.reconcileLMStudioProxyPortOnReadyForGeneration(lmstudioGeneration, port)
 	}
 	if b.beforeProxySpawnPublished != nil {
 		b.beforeProxySpawnPublished()
@@ -581,10 +488,9 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	// The recovery loop owns all retries; this continuation runs once, only
 	// after successful cleanup of this still-current replacement.
 	go b.refreshEnginePolicySnapshotFrom(w, source)
-	b.reconcileLMStudioProxyAfterEngineManagerReady()
-	// Initial restore waits for both managed compatibility ports below. A later
-	// engine-manager respawn sees the already-open gates and restores here.
-	if b.managedPortOwnershipReady() {
+	// Initial restore waits for facade startup. A later engine-manager respawn
+	// restores here after that shared startup boundary has completed.
+	if b.facadeStartupReady() {
 		b.restoreEnabledEngines(w)
 	}
 	// Register engine-manager's HTTP surface so the daemon advertises em= on this

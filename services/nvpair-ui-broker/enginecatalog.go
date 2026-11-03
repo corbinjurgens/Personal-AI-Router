@@ -54,10 +54,7 @@ type dynamicEngineCatalog struct {
 // engineModelNaming resolves the built-in profiles or the installed catalog.
 // The catalog lock is a leaf: this may be called while policy state is locked.
 func (b *Broker) engineModelNaming(engine string) (string, bool) {
-	if profile, ok := engineProxyProfileFor(engine); ok {
-		if profile.Name == engines.NameOllama {
-			return engines.ModelNamingImpliedLatestTag, true
-		}
+	if _, ok := engineProxyProfileFor(engine); ok {
 		return engines.ModelNamingExact, true
 	}
 	c := &b.dynamicEngines
@@ -162,7 +159,7 @@ func (b *Broker) setDynamicEngines(list []engines.Descriptor, available func(int
 }
 
 // dynamicHealthProbePath is where a descriptor engine answers 200 when it is
-// up: its OpenAI model list when it serves one, otherwise Ollama's.
+// up: its OpenAI model list when it serves one, otherwise its native model list.
 func dynamicHealthProbePath(d engines.Descriptor) string {
 	for _, p := range d.Protocols {
 		if p == engines.ProtocolOpenAIV1 || p == engines.ProtocolOpenAIChat {

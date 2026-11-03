@@ -81,7 +81,7 @@ func TestEngineBindingsPolicyRejectsTargetOverlapBeforePersistence(t *testing.T)
 			}
 		})
 	}
-	test("builtin overlap", nodepolicy.EngineBindings{{Engine: "ollama", Model: "m:latest"}, {Engine: "llamacpp", Model: "m"}}, nil)
+	test("builtin overlap", nodepolicy.EngineBindings{{Engine: "lmstudio", Model: "m"}, {Engine: "llamacpp", Model: "m"}}, nil)
 	test("descriptor overlap", nodepolicy.EngineBindings{{Engine: "custom-tagged", Model: "m:latest"}, {Engine: "llamacpp", Model: "m"}}, nil)
 	test("deny all", nodepolicy.EngineBindings{{Engine: "llamacpp", Model: "m"}}, nodepolicy.ServedModels{})
 }

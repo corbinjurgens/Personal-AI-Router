@@ -8,37 +8,29 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	settings "nvpair-shared/enginesettings"
 )
 
-func TestEnabledEngineRestoreWaitsForBothPortGates(t *testing.T) {
+func TestEnabledEngineRestoreWaitsForFacadeStartup(t *testing.T) {
 	worker, codec := newTestRPCWorkerPipe(t)
 	broker := &Broker{
-		clusterDir:        filepath.Join(t.TempDir(), "cluster"),
-		ollamaPortReady:   make(chan struct{}),
-		lmstudioPortReady: make(chan struct{}),
+		clusterDir:   filepath.Join(t.TempDir(), "cluster"),
+		facadesReady: make(chan struct{}),
 	}
 	broker.setEngineMgr(worker)
 	method := recordEnabledEngineRestoration(t, codec)
 	done := make(chan bool, 1)
-	go func() { done <- broker.restoreEnabledEnginesAfterPortGate(context.Background()) }()
+	go func() { done <- broker.runEngineAvailability(context.Background()) }()
 
 	select {
 	case got := <-method:
-		t.Fatalf("restore %q was sent before either port gate opened", got)
+		t.Fatalf("restore %q was sent before facade startup", got)
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(broker.ollamaPortReady)
-	select {
-	case got := <-method:
-		t.Fatalf("restore %q was sent before the LM Studio port gate opened", got)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(broker.lmstudioPortReady)
+	close(broker.facadesReady)
 	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, "engine:settings-projection", restoreEnabledEnginesMethod} {
 		select {
 		case got := <-method:
@@ -46,7 +38,7 @@ func TestEnabledEngineRestoreWaitsForBothPortGates(t *testing.T) {
 				t.Fatalf("restoration method = %q, want %q", got, want)
 			}
 		case <-time.After(2 * time.Second):
-			t.Fatalf("%s was not sent after both port gates opened", want)
+			t.Fatalf("%s was not sent after facade startup", want)
 		}
 	}
 	select {
@@ -59,156 +51,11 @@ func TestEnabledEngineRestoreWaitsForBothPortGates(t *testing.T) {
 	}
 }
 
-func TestPlanManagedOllamaPorts(t *testing.T) {
-	free := func(ports ...int) func(int) bool {
-		set := map[int]bool{}
-		for _, port := range ports {
-			set[port] = true
-		}
-		return func(port int) bool { return set[port] }
-	}
-
-	for _, tc := range []struct {
-		name      string
-		enabled   bool
-		status    ollamaPortStatus
-		available func(int) bool
-		want      managedPortPlan
-	}{
-		{
-			name:      "policy disabled changes nothing",
-			available: free(managedOllamaFacadePort, managedOllamaBackendStart),
-		},
-		{
-			name:      "stopped default engine moves behind facade",
-			enabled:   true,
-			status:    ollamaPortStatus{Port: managedOllamaFacadePort},
-			available: free(managedOllamaFacadePort, managedOllamaBackendStart),
-			want:      managedPortPlan{Enabled: true, BackendPort: managedOllamaBackendStart},
-		},
-		{
-			name:      "allocator skips occupied preferred backend",
-			enabled:   true,
-			status:    ollamaPortStatus{Port: managedOllamaFacadePort},
-			available: free(managedOllamaFacadePort, managedOllamaBackendStart+1),
-			want:      managedPortPlan{Enabled: true, BackendPort: managedOllamaBackendStart + 1},
-		},
-		{
-			name:      "occupied stopped backend advances",
-			enabled:   true,
-			status:    ollamaPortStatus{Port: managedOllamaBackendStart},
-			available: free(managedOllamaFacadePort, managedOllamaBackendStart+1),
-			want:      managedPortPlan{Enabled: true, BackendPort: managedOllamaBackendStart + 1},
-		},
-		{
-			name:      "running backend is preserved",
-			enabled:   true,
-			status:    ollamaPortStatus{Running: true, Port: managedOllamaBackendStart},
-			available: free(managedOllamaFacadePort, managedOllamaBackendStart+1),
-			want:      managedPortPlan{Enabled: true},
-		},
-		{
-			name:      "custom backend is preserved",
-			enabled:   true,
-			status:    ollamaPortStatus{Running: true, Port: 12000},
-			available: free(managedOllamaFacadePort),
-			want:      managedPortPlan{Enabled: true},
-		},
-		{
-			name:      "running default engine is never moved",
-			enabled:   true,
-			status:    ollamaPortStatus{Running: true, Port: managedOllamaFacadePort},
-			available: free(managedOllamaFacadePort, managedOllamaBackendStart),
-			want:      managedPortPlan{Blocked: "Ollama is already running on the compatibility port"},
-		},
-		{
-			name:      "unknown facade owner is never touched",
-			enabled:   true,
-			status:    ollamaPortStatus{Port: managedOllamaFacadePort},
-			available: free(managedOllamaBackendStart),
-			want:      managedPortPlan{Blocked: "the compatibility port is already in use"},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := planManagedOllamaPorts(tc.enabled, tc.status, tc.available)
-			if got != tc.want {
-				t.Fatalf("plan = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestNextAvailablePortExcludingCustomBackend(t *testing.T) {
 	available := func(port int) bool { return port == 11435 || port == 11436 }
 	if got := nextAvailablePortExcluding(11435, []int{11435}, available); got != 11436 {
 		t.Fatalf("fallback = %d, want 11436 (11435 is the configured backend)", got)
 	}
-}
-
-func TestTakePendingManagedOllamaBackendOnce(t *testing.T) {
-	b := &Broker{}
-	b.ollamaState().managedFacade.Store(true)
-	b.managedOllamaBackend.Store(11435)
-
-	if got := b.takePendingManagedOllamaBackend(11436); got != 0 {
-		t.Fatalf("wrong bound port consumed pending backend: %d", got)
-	}
-	if got := b.takePendingManagedOllamaBackend(managedOllamaFacadePort); got != 11435 {
-		t.Fatalf("first facade reconciliation got %d, want 11435", got)
-	}
-	if got := b.takePendingManagedOllamaBackend(managedOllamaFacadePort); got != 0 {
-		t.Fatalf("duplicate reconciliation consumed backend twice: %d", got)
-	}
-}
-
-func TestOllamaBackendSourcePort(t *testing.T) {
-	b := &Broker{}
-	if got := b.ollamaBackendSourcePort(); got != managedOllamaFacadePort {
-		t.Fatalf("unset source = %d, want %d", got, managedOllamaFacadePort)
-	}
-	b.ollamaState().backendPort.Store(managedOllamaBackendStart)
-	if got := b.ollamaBackendSourcePort(); got != managedOllamaBackendStart {
-		t.Fatalf("configured source = %d, want %d", got, managedOllamaBackendStart)
-	}
-}
-
-func TestDuplicateOllamaReadyDoesNotOpenGateDuringMove(t *testing.T) {
-	b := &Broker{ollamaPortReady: make(chan struct{})}
-	b.ollamaState().managedFacade.Store(true)
-	b.managedOllamaBackend.Store(managedOllamaBackendStart + 1)
-	b.setProxy(&proxyProcess{})
-	if got := b.takePendingManagedOllamaBackend(managedOllamaFacadePort); got != managedOllamaBackendStart+1 {
-		t.Fatalf("first reconciler got %d", got)
-	}
-
-	b.reconcileProxyPortOnReady(managedOllamaFacadePort)
-	requireGateShutNow(t, b.ollamaPortReady, "a duplicate ready while the backend move was in flight")
-}
-
-func TestOwningOllamaReadyOpensGateAfterMove(t *testing.T) {
-	engineClient, engineServer := net.Pipe()
-	defer engineClient.Close()
-	defer engineServer.Close()
-	worker := &rpcWorker{peer: NewPeer(NewCodec(engineClient))}
-	go worker.peer.Serve(nil, nil)
-
-	b := &Broker{ollamaPortReady: make(chan struct{})}
-	b.ollamaState().managedFacade.Store(true)
-	b.managedOllamaBackend.Store(managedOllamaBackendStart + 1)
-	b.ollamaState().backendPort.Store(managedOllamaBackendStart)
-	b.setEngineMgr(worker)
-	b.setProxy(&proxyProcess{})
-
-	go func() {
-		codec := NewCodec(engineServer)
-		msg, err := codec.Read()
-		if err == nil {
-			_ = codec.Respond(msg.ID, ollamaPortStatus{Port: managedOllamaBackendStart + 1})
-		}
-	}()
-
-	b.reconcileProxyPortOnReady(managedOllamaFacadePort)
-	requireGateOpenNow(t, b.ollamaPortReady, "a successful backend move")
 }
 
 func TestEnginePortAssignmentRequest(t *testing.T) {
@@ -230,164 +77,6 @@ func TestEnginePortAssignmentRequest(t *testing.T) {
 		if _, _, ok := enginePortAssignmentRequest(tc.method, []byte(tc.params)); ok {
 			t.Fatalf("unexpected engine set-port match for %s %s", tc.method, tc.params)
 		}
-	}
-}
-
-func TestLMStudioSetPortRequest(t *testing.T) {
-	port, ok := lmstudioSetPortRequest("engine:set-port", []byte(`{"engine":"lmstudio","port":1234}`))
-	if !ok || port != managedLMStudioFacadePort {
-		t.Fatalf("valid LM Studio request = (%d, %v), want (%d, true)", port, ok, managedLMStudioFacadePort)
-	}
-	for _, tc := range []struct {
-		method string
-		params string
-	}{
-		{"engine:status", `{"engine":"lmstudio","port":1234}`},
-		{"engine:set-port", `{"engine":"ollama","port":1234}`},
-		{"engine:set-port", `{"engine":"lmstudio","port":0}`},
-		{"engine:set-port", `{`},
-	} {
-		if _, ok := lmstudioSetPortRequest(tc.method, []byte(tc.params)); ok {
-			t.Fatalf("unexpected LM Studio set-port match for %s %s", tc.method, tc.params)
-		}
-	}
-}
-
-func TestManagedLMStudioRejectsFacadeBackendPort(t *testing.T) {
-	brokerClient, brokerServer := net.Pipe()
-	defer brokerClient.Close()
-	defer brokerServer.Close()
-	b := &Broker{codec: NewCodec(brokerClient)}
-	b.lmstudioState().managedFacade.Store(true)
-
-	response := make(chan *Message, 1)
-	go func() {
-		msg, err := NewCodec(brokerServer).Read()
-		if err == nil {
-			response <- msg
-		}
-	}()
-	id := json.RawMessage(`11`)
-	b.relayToEngine(&Message{
-		JSONRPC: "2.0",
-		ID:      &id,
-		Method:  "engine:set-port",
-		Params:  json.RawMessage(`{"engine":"lmstudio","port":1234}`),
-	})
-
-	select {
-	case got := <-response:
-		if got.Error == nil || !strings.Contains(got.Error.Message, "reserved by the managed LM Studio proxy") {
-			t.Fatalf("reservation response = %+v", got.Error)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("missing managed LM Studio reservation response")
-	}
-}
-
-func TestLMStudioSetPortUpdatesBackendCache(t *testing.T) {
-	engineClient, engineServer := net.Pipe()
-	brokerClient, brokerServer := net.Pipe()
-	defer engineClient.Close()
-	defer engineServer.Close()
-	defer brokerClient.Close()
-	defer brokerServer.Close()
-
-	engine := &rpcWorker{peer: NewPeer(NewCodec(engineClient))}
-	go engine.peer.Serve(nil, nil)
-	b := &Broker{codec: NewCodec(brokerClient)}
-	b.setEngineMgr(engine)
-
-	request := make(chan *Message, 1)
-	go func() {
-		codec := NewCodec(engineServer)
-		msg, err := codec.Read()
-		if err != nil {
-			return
-		}
-		request <- msg
-		_ = codec.Respond(msg.ID, ollamaPortStatus{Running: true, Port: 12400})
-	}()
-	response := make(chan *Message, 1)
-	go func() {
-		msg, err := NewCodec(brokerServer).Read()
-		if err == nil {
-			response <- msg
-		}
-	}()
-
-	id := json.RawMessage(`12`)
-	b.relayToEngine(&Message{
-		JSONRPC: "2.0",
-		ID:      &id,
-		Method:  "engine:set-port",
-		Params:  json.RawMessage(`{"engine":"lmstudio","port":12400}`),
-	})
-	select {
-	case got := <-request:
-		if got.Method != "engine:set-port" {
-			t.Fatalf("relayed method = %q", got.Method)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("LM Studio set-port was not relayed")
-	}
-	select {
-	case got := <-response:
-		if got.Error != nil {
-			t.Fatalf("LM Studio set-port response error: %v", got.Error)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("missing LM Studio set-port response")
-	}
-	if got := b.lmstudioState().backendPort.Load(); got != 12400 {
-		t.Fatalf("cached LM Studio backend = %d, want 12400", got)
-	}
-}
-
-func TestRelayCachesActualOllamaPortFromResponse(t *testing.T) {
-	engineClient, engineServer := net.Pipe()
-	defer engineClient.Close()
-	defer engineServer.Close()
-	worker := &rpcWorker{peer: NewPeer(NewCodec(engineClient))}
-	go worker.peer.Serve(nil, nil)
-
-	brokerConn, clientConn := net.Pipe()
-	defer brokerConn.Close()
-	defer clientConn.Close()
-	b := &Broker{codec: NewCodec(brokerConn)}
-	b.setEngineMgr(worker)
-
-	go func() {
-		codec := NewCodec(engineServer)
-		request, err := codec.Read()
-		if err == nil {
-			_ = codec.Respond(request.ID, map[string]any{"engine": "ollama", "port": 11435})
-		}
-	}()
-	response := make(chan *Message, 1)
-	go func() {
-		msg, _ := NewCodec(clientConn).Read()
-		response <- msg
-	}()
-
-	id := json.RawMessage(`9`)
-	b.relayToEngine(&Message{
-		JSONRPC: "2.0",
-		ID:      &id,
-		Method:  "engine:start",
-		Params:  json.RawMessage(`{"engine":"ollama","port":12000}`),
-	})
-
-	select {
-	case msg := <-response:
-		if msg == nil || msg.Error != nil {
-			t.Fatalf("response = %+v, want success", msg)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for engine:start response")
-	}
-	if got := b.ollamaState().backendPort.Load(); got != 11435 {
-		t.Fatalf("cached Ollama backend port = %d, want returned port 11435", got)
 	}
 }
 
@@ -417,148 +106,6 @@ func TestBrokerDoesNotExposeInternalReservationSetter(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for private-method rejection")
-	}
-}
-
-func TestNeedsOllamaPortGate(t *testing.T) {
-	for _, tc := range []struct {
-		method string
-		params string
-		want   bool
-	}{
-		{"engine:get-installed", `{}`, true},
-		{"engine:status", `{"engine":"ollama"}`, true},
-		{"engine:install", `{"engine":"ollama"}`, true},
-		{"engine:start", `{"engine":"ollama"}`, true},
-		{"engine:restart", `{"engine":"ollama"}`, true},
-		{"engine:status", `{"engine":"lmstudio"}`, false},
-		{"engine:models", `{"engine":"ollama"}`, false},
-		{"engine:status", `{`, false},
-	} {
-		if got := needsOllamaPortGate(tc.method, []byte(tc.params)); got != tc.want {
-			t.Errorf("needsOllamaPortGate(%q, %s) = %v, want %v", tc.method, tc.params, got, tc.want)
-		}
-	}
-}
-
-func TestOllamaPresenceRequestWaitsForPortGate(t *testing.T) {
-	workerClient, workerServer := net.Pipe()
-	defer workerClient.Close()
-	defer workerServer.Close()
-	worker := &rpcWorker{peer: NewPeer(NewCodec(workerClient))}
-	go worker.peer.Serve(nil, nil)
-
-	brokerClient, brokerServer := net.Pipe()
-	defer brokerClient.Close()
-	defer brokerServer.Close()
-	b := &Broker{codec: NewCodec(brokerClient), ollamaPortReady: make(chan struct{})}
-	b.setEngineMgr(worker)
-	b.ollamaState().managedFacade.Store(true)
-	b.ollamaState().backendPort.Store(managedOllamaFacadePort)
-
-	method := make(chan string, 1)
-	workerErr := make(chan error, 1)
-	go func() {
-		codec := NewCodec(workerServer)
-		request, err := codec.Read()
-		if err != nil {
-			workerErr <- err
-			return
-		}
-		method <- request.Method
-		workerErr <- codec.Respond(request.ID, json.RawMessage(`{"engines":[{"engine":"custom","running":false,"terminationVerified":true}]}`))
-	}()
-
-	response := make(chan error, 1)
-	var result json.RawMessage
-	go func() {
-		msg, err := NewCodec(brokerServer).Read()
-		if msg != nil {
-			result = msg.Result
-		}
-		response <- err
-	}()
-
-	id := json.RawMessage(`7`)
-	b.relayToEngine(&Message{
-		JSONRPC: "2.0",
-		ID:      &id,
-		Method:  "engine:get-installed",
-	})
-
-	select {
-	case got := <-method:
-		t.Fatalf("%q was relayed before the Ollama port gate opened", got)
-	case err := <-workerErr:
-		t.Fatalf("worker failed before the Ollama port gate opened: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	// Model the successful backend move before releasing the existing gate.
-	b.ollamaState().backendPort.Store(managedOllamaBackendStart)
-	close(b.ollamaPortReady)
-	select {
-	case got := <-method:
-		if got != "engine:get-installed" {
-			t.Fatalf("method = %q, want engine:get-installed", got)
-		}
-	case err := <-workerErr:
-		t.Fatalf("worker failed after the Ollama port gate opened: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("engine:get-installed was not relayed after the Ollama port gate opened")
-	}
-	if err := <-workerErr; err != nil {
-		t.Fatalf("respond to relayed request: %v", err)
-	}
-	select {
-	case err := <-response:
-		if err != nil {
-			t.Fatalf("read broker response: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("broker did not return the relayed response")
-	}
-	var inventory struct {
-		Engines []struct {
-			Engine              string `json:"engine"`
-			Running             bool   `json:"running"`
-			TerminationVerified bool   `json:"terminationVerified"`
-		} `json:"engines"`
-	}
-	if err := json.Unmarshal(result, &inventory); err != nil {
-		t.Fatal(err)
-	}
-	if len(inventory.Engines) != 1 || inventory.Engines[0].Running || !inventory.Engines[0].TerminationVerified {
-		t.Fatalf("relay lost termination evidence: %+v", inventory)
-	}
-}
-
-func TestBrokerFallbackUsesPrivatePortCheck(t *testing.T) {
-	isolateBrokerTestConfig(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("allocate private fallback endpoint: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	port := listener.Addr().(*net.TCPAddr).Port
-	if port <= managedOllamaBackendStart {
-		t.Fatalf("private endpoint %d is below the fallback search ranges", port)
-	}
-	for _, tc := range []struct {
-		name     string
-		fallback func(*Broker, ...int) int
-	}{
-		{name: "ollama", fallback: (*Broker).setOllamaProxyFallback},
-		{name: "lmstudio", fallback: (*Broker).setLMStudioProxyFallback},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			b := &Broker{portAvailableCheck: func(candidate int) bool { return candidate == port }}
-			// The endpoint is held above, so a real bind check would reject it.
-			// Only this broker's synthetic checker may select it for a fake proxy.
-			if got := tc.fallback(b); got != port {
-				t.Fatalf("fallback = %d, want private fixture endpoint %d", got, port)
-			}
-		})
 	}
 }
 

@@ -133,7 +133,7 @@ func TestPolicyIdentityReplacedSourceCannotChangeReadiness(t *testing.T) {
 	if fx.b.StrictReadiness().Capability == nil {
 		t.Fatal("current source did not establish readiness")
 	}
-	fx.b.forwardProxyNotificationFrom(old, 0, 0, nodepolicy.NotifyStrictReadiness, json.RawMessage(`{}`))
+	fx.b.forwardProxyNotificationFrom(old, nodepolicy.NotifyStrictReadiness, json.RawMessage(`{}`))
 	if fx.b.StrictReadiness().Capability == nil {
 		t.Fatal("old process callback withdrew current readiness")
 	}
