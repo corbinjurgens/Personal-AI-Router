@@ -43,9 +43,9 @@ flowchart TB
     Cluster["<b>Cluster</b><br/>a set of paired nodes"]
     NodeA["<b>Node</b><br/>one machine running PAIR"]
     NodeB["<b>Node</b>"]
-    EngineA1["<b>Engine</b><br/>Ollama"]
-    EngineA2["<b>Engine</b><br/>LM Studio"]
-    EngineB1["<b>Engine</b><br/>Ollama"]
+    EngineA1["<b>Engine</b><br/>llama.cpp"]
+    EngineA2["<b>Engine</b><br/>Strata"]
+    EngineB1["<b>Engine</b><br/>llama.cpp"]
     ModelA1["<b>Models</b><br/>present on this engine"]
     ModelA2["<b>Models</b>"]
     ModelB1["<b>Models</b>"]
@@ -65,8 +65,8 @@ flowchart TB
   one cluster.
 - A **node** is one machine. Nodes are peers where each runs the same services, and
   each can both serve requests and route them elsewhere.
-- An **engine** is an inference server on a node: Ollama, LM Studio, or
-  llama.cpp. A node can run any combination. Serving requires a running engine;
+- An **engine** is an inference server on a node: llama.cpp, or an engine
+  defined by a manifest such as Strata. A node can run any combination. Serving requires a running engine;
   an explicit model binding can let a request wait for guarded activation.
 - **Models** belong to an engine on a specific node. Nothing is shared. The same
   model on two nodes is two independent copies and that duplication is what makes
@@ -308,7 +308,7 @@ A TLS handshake record starts with
 | Not `0x16` | Plaintext HTTP, loopback only | Your local applications |
 | `0x16` | Mutual TLS | Paired nodes in the cluster |
 
-This is why an endpoint is `http://127.0.0.1:11434` for an application on the
+This is why an endpoint is `http://127.0.0.1:8080` for an application on the
 machine itself while the same port serves authenticated TLS to the network. Local
 clients need no certificates, and routed inference between nodes is never
 plaintext.
@@ -479,8 +479,8 @@ When an inference request contains a non-empty model, candidates need matching
 current engine inventory or a supported `engineBindingOffers` entry. Empty or
 nonmatching inventory alone remains ineligible. Offers are separate from
 inventory, engine health and strict readiness; a stopped offered facade can
-remain reachable without making its engine healthy. Ollama's implicit `:latest`
-tag is normalized; exact-name descriptors retain native ID matching.
+remain reachable without making its engine healthy. Model identifiers match
+exactly.
 
 Without an eligible owner or supported offer, the proxy retains its local
 no-owner `502`. A selected offer can wait within one preparation budget, then
@@ -491,8 +491,8 @@ describes ready-first classes, explicit selection, bounds and refusal semantics.
 
 A request whose model cannot be parsed keeps the ordinary non-model ordering.
 
-Model listings are not routed at all. A `GET` of `/v1/models`, Ollama's
-`/api/tags`, or llama.cpp's `/models` is fanned out to every candidate for that
+Model listings are not routed at all. A `GET` of `/v1/models` or
+llama.cpp's `/models` is fanned out to every candidate for that
 engine concurrently and the replies are merged, which is why the answer is the
 cluster's inventory for that engine rather than one node's. Binding offers do
 not add invented models to those listings.
@@ -557,7 +557,7 @@ that admission will succeed.
 to an engine's own port is absent from workload events. GPU-heavy external work
 can still raise pressure, but CPU-only work and queued demand remain invisible.
 
-**All engines are counted as one pool.** Ollama, LM Studio, and llama.cpp load is
+**All engines are counted as one pool.** Load from every engine on a node is
 summed, and maximum GPU pressure applies node-wide. This is conservative on a
 typical single-GPU machine and can underuse a multi-GPU node where the engines
 occupy different devices.
@@ -591,7 +591,7 @@ port it listens on.
 ### Finding an Engine
 
 PAIR does not assume it installed the engine. Detection checks the manifest's
-known install locations for each engine, so an Ollama or LM Studio you installed
+known install locations for each engine, so an engine you installed
 yourself is found where it already is. "Installing" an engine that is already
 present downloads nothing and reports it as installed.
 
@@ -614,31 +614,23 @@ port nothing else is serving.
 
 ### Port Takeover
 
-An application that already works with Ollama is configured for `11434`. If PAIR
-listened somewhere else, every tool would need reconfiguring to gain anything, so
-PAIR inverts it: the **proxy** takes the port the engine would normally use, and
-the engine moves behind it — Ollama to `11435` and upwards, LM Studio to `1235`
-and upwards. The managed llama.cpp router stays on `8081` while its facade takes
-`8080`. Existing clients keep working untouched and transparently gain the cluster.
+An application that already works with a llama.cpp server is configured for
+`8080`. If PAIR listened somewhere else, every tool would need reconfiguring to
+gain anything, so PAIR inverts it: the **proxy** takes the port the engine would
+normally use, and the engine moves behind it. The managed llama.cpp router stays
+on `8081` while its facade takes `8080`. Existing clients keep working untouched
+and transparently gain the cluster.
 
 This is also what makes the engine unreachable from outside. Engines PAIR starts
 bind to loopback, so the only network-facing listener is the proxy, which is where
 cluster authentication lives.
 
-An inherited `OLLAMA_HOST` naming a different local plaintext port is honored as
-well. The broker gives the proxy that normalized loopback-only alias, reserved
-against every engine and every facade's port plan so a relocating engine can never
-land on it. `localhost` claims IPv4 and IPv6 together, and remote and HTTPS
-targets are never intercepted. Clients already configured through the variable
-therefore enter the same routing path without being reconfigured.
-
 The rearrangement is conditional, and PAIR yields rather than fights:
 
 - An **unknown process** is never moved or killed, whatever is holding the port.
-- A running externally owned engine PAIR **adopted** is left alone. An official
-  stop command, including LM Studio's `lms server stop`, does not confer ownership
-  or permit automatic relocation. Reclaiming a managed-process orphan instead
-  requires positive managed-install, image and endpoint evidence.
+- A running externally owned engine PAIR **adopted** is left alone, and is not
+  relocated automatically. Reclaiming a managed-process orphan instead requires
+  positive managed-install, image and endpoint evidence.
 - If the engine is already running on the compatibility port, PAIR does not take
   that port. The proxy stays where it is and the takeover is reported as blocked.
 - If anything else holds the port, the outcome is the same. PAIR steers the proxy
@@ -646,8 +638,8 @@ The rearrangement is conditional, and PAIR yields rather than fights:
 
 The practical consequence is the one in
 [Troubleshooting](troubleshooting.mdx#requests-work-but-pair-shows-no-jobs). Start
-the Ollama desktop application and it takes `11434` for itself, so PAIR cannot,
-and requests reach that local Ollama without ever being routed.
+a standalone llama.cpp server on `8080` and it holds that port, so PAIR cannot,
+and requests reach that local server without ever being routed.
 
 ### Port Map
 
@@ -655,8 +647,6 @@ A default installation listens on these ports:
 
 | Port | Listener |
 | --- | --- |
-| `11434` | Ollama-compatible proxy (Ollama itself moves to `11435`+) |
-| `1234` | OpenAI-compatible proxy (LM Studio moves to `1235`+) |
 | `8080` | OpenAI-compatible llama.cpp proxy (managed router on `8081`) |
 | `14318` | Node hardware and model inventory |
 | `14319` | Service-error synchronization between nodes |

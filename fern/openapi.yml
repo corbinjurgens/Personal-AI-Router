@@ -15,7 +15,7 @@ info:
 
 
     Use the exact base URL copied from PAIR's **Endpoints** window. Do not assume
-    default engine ports such as `11434` (Ollama) or `1234` (LM Studio).
+    a default engine port such as `8080` (llama.cpp).
 servers:
   - url: "{baseUrl}"
     description: >
@@ -23,72 +23,16 @@ servers:
       window for the running engine you want to target.
     variables:
       baseUrl:
-        default: http://127.0.0.1:11434
+        default: http://127.0.0.1:8080
         description: >
           Placeholder only. The real host and port are assigned by PAIR and
           shown in the Endpoints window; do not assume default engine ports.
 tags:
-  - name: Ollama-compatible
-    description: Ollama-compatible inference proxied to an eligible node.
   - name: OpenAI-compatible
     description: OpenAI-compatible inference proxied to an eligible node.
   - name: Node info
     description: Read-only node telemetry polled from discovered PAIR nodes.
 paths:
-  /api/chat:
-    post:
-      tags:
-        - Ollama-compatible
-      operationId: ollamaChat
-      summary: Ollama-compatible chat
-      description: >
-        Send an Ollama-compatible chat request to the local PAIR proxy. PAIR
-        forwards the request to one eligible node running a compatible engine
-        with the requested model available. With streaming enabled the upstream
-        engine returns newline-delimited JSON chunks; the final chunk sets
-        `done` to true.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/OllamaChatRequest"
-            examples:
-              default:
-                value:
-                  model: llama3.1
-                  stream: false
-                  messages:
-                    - role: user
-                      content: Explain what NVIDIA Personal AI Router does in one sentence.
-      responses:
-        "200":
-          description: Chat response from the serving node.
-          headers:
-            X-PAIR-Served-By:
-              description: Stable host UUID of the node that served the request.
-              schema:
-                type: string
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/OllamaChatResponse"
-              examples:
-                default:
-                  value:
-                    model: llama3.1
-                    created_at: "2026-06-03T07:45:00Z"
-                    message:
-                      role: assistant
-                      content: >-
-                        NVIDIA Personal AI Router routes each AI request to one
-                        eligible system on your local network to serve
-                        inference.
-                    done: true
-                    done_reason: stop
-                    total_duration: 4200000000
-        default:
-          $ref: "#/components/responses/ErrorResponse"
   /v1/chat/completions:
     post:
       tags:
@@ -181,10 +125,10 @@ paths:
                       member: true
                       clusterId: cluster_01J0D5TCGS8JQ2N8TZFRA0VN08
                     engines:
-                      - ollama
+                      - llamacpp
                     models:
                       - name: llama3.1
-                        engine: ollama
+                        engine: llamacpp
         default:
           $ref: "#/components/responses/ErrorResponse"
 components:
@@ -214,52 +158,6 @@ components:
         content:
           type: string
           example: Explain what NVIDIA Personal AI Router does in one sentence.
-    OllamaChatRequest:
-      type: object
-      required:
-        - model
-        - messages
-      properties:
-        model:
-          type: string
-          description: Model name that must be available on an eligible node.
-          example: llama3.1
-        messages:
-          type: array
-          items:
-            $ref: "#/components/schemas/ChatMessage"
-        stream:
-          type: boolean
-          description: >
-            When true (the Ollama default), the response is streamed as
-            newline-delimited JSON chunks.
-          default: true
-    OllamaChatResponse:
-      type: object
-      required:
-        - model
-        - message
-        - done
-      properties:
-        model:
-          type: string
-          example: llama3.1
-        created_at:
-          type: string
-          format: date-time
-        message:
-          $ref: "#/components/schemas/ChatMessage"
-        done:
-          type: boolean
-          example: true
-        done_reason:
-          type: string
-          example: stop
-        total_duration:
-          type: integer
-          format: int64
-          description: Total request time in nanoseconds, as reported by the engine.
-          example: 4200000000
     ChatCompletionRequest:
       type: object
       required:
@@ -348,9 +246,8 @@ components:
           example: 42
     EngineKind:
       type: string
-      enum:
-        - ollama
-        - lmstudio
+      description: Engine ID, such as `llamacpp` or a descriptor engine's own ID.
+      example: llamacpp
     TrustState:
       type: string
       enum:

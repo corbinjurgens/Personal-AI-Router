@@ -166,7 +166,7 @@ the pipe's first-instance flag does the same job.
 ```sh
 nvpair-service                              # serve; broker found beside this binary
 nvpair-service --log-level debug            # also passed to the broker
-nvpair-service -- --proxy-engines ollama    # everything after -- goes to the broker
+nvpair-service -- --proxy-engines llamacpp  # everything after -- goes to the broker
 nvpair-service status                       # print service/status of the running service
 nvpair-service diagnose [--json]            # bounded local report; see Diagnosis
 nvpair-service call <method> [json-params]  # send any request through the service and print the result
@@ -262,7 +262,7 @@ Limits of what it reports:
   credentials, and it keeps no history.
 
 A node with a pending policy activation, running on the recovery policy, with
-Ollama's facade relocated to another port (synthetic values):
+the llama.cpp facade relocated to another port (synthetic values):
 
 ```text
 PAIR service diagnosis (cached local state)
@@ -273,9 +273,7 @@ Policy: known
   persisted revision 1792285135482000000, active revision 1792285135481000000, activation pending
   availability available, recovery required yes
 Built-in facades:
-  Ollama: known, bound on port 11500
-  LM Studio: known, not bound
-  llama.cpp: known, not bound
+  llama.cpp: known, bound on port 11500
 Resident configuration: known
   states: blocked 1
   reasons: no-fit 1
@@ -296,9 +294,7 @@ The same capture with `--json`:
   "service": {"status": "known", "pid": 4242, "brokerPid": 4243, "brokerRestarts": 0, "version": "0.2.0", "buildId": "git:0123456789abcdef0123456789abcdef01234567"},
   "policy": {"status": "known", "persistedRevision": "1792285135482000000", "activeRevision": "1792285135481000000", "activation": "pending", "availability": "available", "recoveryRequired": true},
   "builtinFacades": [
-    {"engine": "ollama", "status": "known", "ready": true, "port": 11500},
-    {"engine": "lmstudio", "status": "known", "ready": false},
-    {"engine": "llamacpp", "status": "known", "ready": false}
+    {"engine": "llamacpp", "status": "known", "ready": true, "port": 11500}
   ],
   "residentConfiguration": {"status": "known", "stateCounts": {"blocked": 1}, "reasonCounts": {"no-fit": 1}}
 }
@@ -620,8 +616,8 @@ through `policy:get`. They assert that:
   complete policy/live snapshot and exact stored bytes; a set based on the
   reloaded revision then succeeds. A `policy:set` without
   `expectedPersistedRevision` returns `-32602` and changes neither.
-- With a copied `nvpair-proxy` fronting ollama (the proxy variant of the
-  fixture; the Ollama facade picks a free port), `policy:get` and the `policy:set`
+- With a copied `nvpair-proxy` fronting llamacpp (the proxy variant of the
+  fixture; the llama.cpp facade picks a free port), `policy:get` and the `policy:set`
   result report `activation` `active` with `activeRevision` equal to the
   persisted `policy.revision` after a set, a pause and a resume.
 - CLI `call policy:get '{}'` transports the complete updated policy through
@@ -637,7 +633,7 @@ recovered without launching a process or opening an endpoint. The lifecycle
 cases instead run real copied processes, so the verified process absence and
 retained bundles they check come from the fixture's own process inventory and
 endpoint. The proxy variant of the fixture also copies `nvpair-proxy` into the
-bundle and passes `--proxy-path <copied proxy> --proxy-engines ollama` instead of
+bundle and passes `--proxy-path <copied proxy> --proxy-engines llamacpp` instead of
 `--proxy-engines=`.
 
 Each lifecycle case copies only `nvpair-service`, `nvpair-ui-broker` and

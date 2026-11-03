@@ -39,7 +39,7 @@ Broker-owned workers:
 - `nvpair-proxy`, one process hosting a facade per enabled engine. It starts
  with no engine and no listener; the broker sends a `facade/enable` per engine
  carrying that engine's port. Clients still address each facade as
- `ollama-proxy:`, `lmstudio-proxy:`, or `llamacpp-proxy:`, and one supervisor
+ `<engine>-proxy:` (for example `llamacpp-proxy:`), and one supervisor
  covers them all, so a crash is reported against `nvpair-proxy` and restarts
  every facade together;
 - `nvpair-node-scanner`;
@@ -120,7 +120,7 @@ The broker uses both for scheduling.
 
 ### Inference HTTP
 
-Ollama, LM Studio, and llama.cpp proxies expose local client-compatible HTTP
+Each engine's proxy facade exposes local client-compatible HTTP
 endpoints. Chat behaves as a local third-party client. Prompts, messages,
 chunks, and response bodies must never be logged.
 
@@ -159,8 +159,7 @@ Backend-coupled constants belong in
 
 - Prefer live broker or discovery values.
 - Do not assume a proxy port before the broker reports it.
-- Native chat fallbacks are Ollama `127.0.0.1:11434`, LM Studio
-  `127.0.0.1:1234`, and llama.cpp `127.0.0.1:8080`.
+- The native chat fallback is llama.cpp `127.0.0.1:8080`.
 - Cluster pairing currently uses port `14321`.
 - Node telemetry path is `/v1/node-info`.
 
@@ -273,10 +272,9 @@ operations.
 The model catalogue is owned by `nvpair-engine-manager` and served over
 `engine:catalog`, so the desktop app and the terminal interface browse one
 implementation. Electron relays it through
-`src/electron/service-bridge/model-catalog.ts`. It provides curated Ollama,
-LM Studio, and llama.cpp catalogs, filtered for the OS and CPU a model will
-install on; model operations go through the engine manager. llama.cpp's is
-populated from approved Hugging Face publishers and also answers a bounded
+`src/electron/service-bridge/model-catalog.ts`. It provides the llama.cpp
+catalog, filtered for the OS and CPU a model will install on; model operations
+go through the engine manager. The catalog is populated from approved Hugging Face publishers and also answers a bounded
 search across public publishers. Every llama.cpp result is an exact
 `owner/repository:Q4_K_M` pull ID.
 

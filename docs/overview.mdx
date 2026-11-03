@@ -48,9 +48,9 @@ These terms have specific meanings in PAIR:
   is no server, controller, or primary node.
 - **Cluster** — the set of nodes you have paired together. A node belongs to at
   most one cluster, and it must leave before it can join another.
-- **Engine** — the local inference server that runs models: Ollama, LM Studio,
-  or llama.cpp. PAIR can install, start, stop, and update these engines; it can
-  also adopt supported existing Ollama and LM Studio installations.
+- **Engine** — the local inference server that runs models, such as llama.cpp.
+  PAIR can install, start, stop, and update the engines it manages; it can also
+  adopt an engine that is already running on its usual port.
 - **Model** — what you prepare on each node. Nodes do not share models, so a
   node can serve a request only for a model it already holds. Preparing the same
   model on several nodes is what makes those nodes interchangeable.
@@ -86,14 +86,13 @@ you form a cluster, only the last step repeats.
 
 ## Request Model
 
-An application sends an ordinary Ollama-compatible or OpenAI-compatible
-request, or an Anthropic Messages API request, to a local proxy. The proxy
+An application sends an ordinary OpenAI-compatible request to a local proxy. The proxy
 selects one eligible node and forwards the whole request. That node's engine
 performs the inference, and the response streams back through the proxy.
 
 ```mermaid
 flowchart LR
-    Client["Your AI app or agent"] -->|"Ollama, OpenAI, or Anthropic Messages request"| Endpoint["PAIR endpoint<br/>on your machine"]
+    Client["Your AI app or agent"] -->|"OpenAI-compatible request"| Endpoint["PAIR endpoint<br/>on your machine"]
     Endpoint <-->|"encrypted both ways"| Node["A paired node<br/>with the model"]
     Node --> Engine["Inference engine"]
 ```
@@ -146,8 +145,7 @@ PAIR provides these capabilities:
 
 - A local endpoint for compatible AI applications and development tools.
 - LAN discovery plus manually configured nodes.
-- Routing proxies for Ollama-compatible, OpenAI-compatible, and Anthropic
-  Messages API requests.
+- Routing proxies for OpenAI-compatible requests.
 - Pairing and cluster membership managed by the background services.
 - Model-aware, workload-informed routing of independent requests.
 - Encrypted routing between machines: a request sent to another node travels over

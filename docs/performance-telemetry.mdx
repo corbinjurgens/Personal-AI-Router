@@ -47,8 +47,7 @@ samples; an empty measured-run section can therefore remain expected. Hardware
 utilization history is independent of execution measurements.
 
 Streaming measurements use the proxy's existing response reader. llama.cpp and
-Strata Chat completions preserve reviewed engine-native timing semantics;
-Ollama native streaming retains its count/duration measurements. Nonstream
+Strata Chat completions preserve reviewed engine-native timing semantics. Nonstream
 responses have unknown protocol/numeric evidence in this milestone. The serving
 fingerprint includes the joined engine runtime, settings, launch and model-content
 identity, effective request options, API and timing schema. Identity changes
@@ -107,7 +106,7 @@ The persistence file layout remains version 1. The upgraded reader preserves
 valid history without the optional new fields and round-trips new measurements.
 Older binaries cannot safely reopen upgraded history: use separate candidate
 data for rollback validation, never the installed history. Native MSI llama.cpp,
-MSI Strata and PC3 llama.cpp evidence, trustworthy non-Ollama identities and
+MSI Strata and PC3 llama.cpp evidence, trustworthy installed identities and
 end-to-end propagation acceptance remain pending. Deterministic producer checks
 do not establish daily-engine acceptance.
 

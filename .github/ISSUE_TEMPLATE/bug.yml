@@ -29,8 +29,7 @@ body:
         - Desktop application
         - Services / broker
         - Discovery or pairing
-        - Ollama proxy
-        - LM Studio proxy
+        - Engine proxy
         - Engine or model management
         - Terminal UI
         - Installer or update

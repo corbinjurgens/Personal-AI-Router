@@ -239,7 +239,7 @@ parameter, because one flag cannot carry multiple engines' plans.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `engine` | *(required)* | Which engine to front: a built-in `ollama`, `lmstudio` or `llamacpp`, or a descriptor engine ID together with `descriptor`. An unknown name without a descriptor is rejected with the accepted values. |
+| `engine` | *(required)* | Which engine to front: the built-in `llamacpp`, or a descriptor engine ID together with `descriptor`. An unknown name without a descriptor is rejected with the accepted values. |
 | `port` | per engine, see below | HTTP listen port for request forwarding. Must be 1–65535, or omitted for the engine's standalone default. `0` means "the default" rather than "pick an ephemeral port", and any other out-of-range value is rejected, because the facade announces the requested port in its `ready` notification and the broker would be told `0`. |
 | `ignorePersistedPort` | `false` | Use `port` even when a saved port exists (used by broker-managed startup) |
 | `descriptor` | *(none)* | The engine's `nvpair-shared/engines.Descriptor`, required for a descriptor engine and refused for a built-in one. The facade is built from its protocols (see below); a descriptor that `engines.ProxyCanFront` rejects, or one naming another engine, is refused. A descriptor engine also needs an explicit `port`. |
@@ -316,7 +316,7 @@ node. Inference arriving this way is admitted first (see "Node policy" below). M
 cluster needs no restart.
 
 **Peer transport.** Cluster candidates use the shared pinned peer/service
-adapter with the engine's advertised facade endpoint (`ol`, `lm`, or `lc`),
+adapter with the engine's advertised facade endpoint (`lc` for llama.cpp, `e-<id>` for a descriptor engine),
 including runtime port changes. It prefers direct mTLS, then uses the existing
 authenticated reverse session after a bounded failure before HTTP request
 dispatch. The stream still carries inner mTLS to the receiving facade; it does

@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 NVIDIA Personal AI Router (PAIR), shown as **NVIDIA PAIR** once installed, is a
 local inference router for a group of compatible computers on the same network. It discovers participating nodes,
 manages supported inference engines, and presents local proxy endpoints for
-Ollama-compatible, OpenAI-compatible, and Anthropic Messages API requests.
+OpenAI-compatible requests.
 Independent requests can be routed to eligible nodes according to engine
 availability, model availability, and current workload.
 
@@ -38,7 +38,7 @@ one, and both report live GPU and memory use throughout.
 | **Architectures** | x64 and arm64 on all three. Windows on ARM is experimental. |
 | **Installers** | Windows `.exe`; Linux `.deb`; macOS `.dmg`. On other Linux distributions, [build from source](docs/building.mdx). |
 | **Mixing nodes** | Windows, Linux, and macOS nodes can all be paired with each other |
-| **Inference engines** | Ollama, LM Studio, and llama.cpp |
+| **Inference engines** | llama.cpp |
 
 **PAIR running on a machine does not mean an engine will.** PAIR itself runs on
 any supported Windows, Linux, or macOS machine. Each engine sets its own requirements
@@ -119,19 +119,19 @@ you want by its full filename instead.
   status there.
 
 - **Get an engine running.** On the node's card, open **Engine settings** and
-  select **Install** next to Ollama, LM Studio, or llama.cpp. PAIR downloads and
-  sets the engine up for you, so nothing needs to be in place beforehand. The
-  llama.cpp install is a separate, on-demand download and is not selected during
-  first-run setup by default.
+  select **Install** next to llama.cpp. PAIR downloads and sets the engine up for
+  you, so nothing needs to be in place beforehand.
 
-  ![The Install engines dialog with Ollama downloading, reporting progress as it installs.](docs/assets/onboarding/engine-lifecycle/01-engine-installing.png)
+  ![The Install engines dialog with an engine downloading, reporting progress as it installs.](docs/assets/onboarding/engine-lifecycle/01-engine-installing.png)
 
 - **Add a model.** Select **Add model** on the same card and download one.
-  `qwen4:12b` is used for this example; it can be replaced with a model of your
-  choice. llama.cpp populates this list from popular GGUF repositories on
-  Hugging Face. Type to filter the list, or press Enter to search the wider
-  public catalog. Its exact IDs include the repository and quantization, such
-  as `ggml-org/gemma-3-1b-it-GGUF:Q4_K_M`.
+  `ggml-org/gemma-3-1b-it-GGUF:Q4_K_M` is used for this example; it can be
+  replaced with a model of your choice. llama.cpp populates this list from
+  popular GGUF repositories on Hugging Face. Type to filter the list, or press
+  Enter to search the wider public catalog. Its exact IDs include the repository
+  and quantization. llama.cpp also lists GGUF models it finds in Ollama and LM
+  Studio model folders; see
+  [Model sources](services/nvpair-engine-manager/README.md#model-sources).
 
   ![A node card with its engine expanded, one model pulling and the Add model button beside the list.](docs/assets/onboarding/getting-started/07-add-model.png)
 
@@ -146,12 +146,12 @@ you want by its full filename instead.
   - **Send one yourself.** Use the `curl` call below. The job then appears under
     **Jobs**, naming the node that served it.
 
-With Ollama on its default port, this runs as written:
+With llama.cpp on its default port, this runs as written:
 
 ```bash
-curl http://127.0.0.1:11434/v1/chat/completions \
+curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen4:12b","messages":[{"role":"user","content":"In one sentence, what does a router do?"}]}'
+  -d '{"model":"ggml-org/gemma-3-1b-it-GGUF:Q4_K_M","messages":[{"role":"user","content":"In one sentence, what does a router do?"}]}'
 ```
 
 The reply is ordinary OpenAI-shaped JSON, abbreviated here:
@@ -159,7 +159,7 @@ The reply is ordinary OpenAI-shaped JSON, abbreviated here:
 ```json
 {
   "object": "chat.completion",
-  "model": "qwen4:12b",
+  "model": "ggml-org/gemma-3-1b-it-GGUF:Q4_K_M",
   "choices": [
     {
       "message": {
@@ -172,9 +172,8 @@ The reply is ordinary OpenAI-shaped JSON, abbreviated here:
 }
 ```
 
-If you changed a port, or you are using LM Studio or llama.cpp rather than
-Ollama, copy the URL from **Endpoints → API endpoints** instead of assuming the
-one above.
+If you changed a port, copy the URL from **Endpoints → API endpoints** instead
+of assuming the one above.
 
 That is a single machine working. To route across machines, pair a second one
 from **Settings → Cluster** and repeat the engine and model steps there. The
@@ -198,9 +197,7 @@ your data. Decline and it stays; accept and it is removed.
 **Linux.** `sudo apt remove nvpair` uninstalls the application and keeps your
 data. Use `sudo apt purge nvpair` to remove the data as well. Run
 `dpkg -l | grep -i pair` first if you need to confirm the installed package name.
-A purge removes the engines PAIR installed under its own data directory, but not
-one a vendor installer placed in your home, as LM Studio does — uninstall that
-engine from PAIR before removing the package, or use its own uninstaller.
+A purge removes the engines PAIR installed under its own data directory.
 
 **macOS.** Run the uninstaller that ships inside the app bundle. It stops PAIR,
 removes its firewall rules, unregisters its privileged helper, and then removes
@@ -219,7 +216,7 @@ Your data means settings, logs, cluster identity and certificates, and any engin
 PAIR installed for you. An engine the uninstaller cannot remove — one still
 holding a file open, say — is left in place rather than stopping the uninstall;
 remove it with its own uninstaller. **Model weights are not touched** — they live in the
-engine's own storage (`~/.ollama`, `~/.llamacpp`, `~/.lmstudio/models`), so
+engine's own storage (`~/.llamacpp`), so
 removing PAIR does not delete the models you downloaded. Delete those through the
 engine, or by removing its directory. An engine you installed yourself is also
 left alone.

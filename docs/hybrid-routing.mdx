@@ -248,7 +248,7 @@ cannot provide trusted framing/disposition metadata.
 
 SC-a preserves complete frames and discards torn tails. On managed OpenAI
 streams, peer or engine loss mid-stream ends with an error frame plus `[DONE]`,
-not a pause, until SC-b. Managed Ollama streams receive an error object.
+not a pause, until SC-b.
 Reasons come from the closed operational set in specification §5.2; response
 content is not copied into the reason. HTTP status remains committed and the
 workload fails. Delivery is best effort when the client is gone or writes

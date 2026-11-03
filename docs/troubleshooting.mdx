@@ -101,8 +101,8 @@ If **Endpoints** cannot find a usable engine or model:
 4. Select **Add model**, download a model, and load it if the engine requires
    an explicit load step.
 
-PAIR may adopt an existing local Ollama or LM Studio installation instead of
-installing a new copy. An engine must be running before you can use models.
+PAIR may adopt an engine already running on its usual port instead of
+starting a new copy. An engine must be running before you can use models.
 
 To test routing across multiple nodes, prepare the same model on each node that
 should serve requests.
@@ -224,21 +224,21 @@ If inference succeeds and yet **Jobs** stays empty, and the machine you sent the
 request from appears to serve everything, something other than PAIR is holding
 the proxy's port.
 
-The usual cause is the **Ollama desktop application**. When it starts, it binds
-`11434` itself, the port PAIR's Ollama-compatible proxy uses. Requests then go
-straight to that local Ollama, so PAIR never sees them and cannot route them to
-another node.
+The usual cause is a **standalone llama.cpp server** or an application that
+embeds one. When it starts, it binds `8080` itself, the port PAIR's llama.cpp
+proxy uses. Requests then go straight to that local server, so PAIR never sees
+them and cannot route them to another node.
 
 To fix it:
 
-1. Quit the Ollama desktop application completely, including any tray or
-   menu-bar icon.
+1. Quit that server or application completely, including any tray or menu-bar
+   icon.
 2. In PAIR, open **Overview**, expand **Engine settings** on that node, and
-   toggle the Ollama engine off and back on.
+   toggle the llama.cpp engine off and back on.
 
-That relaunches PAIR's proxy on `11434`. Send another request and the job should
-appear. This is about the Ollama _desktop application_ specifically. PAIR can
-manage or adopt an Ollama it starts itself.
+That relaunches PAIR's proxy on `8080`. Send another request and the job should
+appear. This is about a server PAIR did not start. PAIR can manage or adopt a
+llama.cpp it starts itself.
 
 ## Jobs Do Not Show Expected Routing
 

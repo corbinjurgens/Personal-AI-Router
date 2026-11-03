@@ -50,7 +50,7 @@ PAIR is a LAN-first, multi-process application:
 - The broker supervises Go workers and relays their control-plane methods and
   notifications.
 - Discovery and selected metadata endpoints operate on the local network.
-- Ollama-compatible and OpenAI-compatible local HTTP proxies carry inference
+- OpenAI-compatible local HTTP proxies carry inference
   traffic and may route a request to another paired node.
 - The cluster manager uses a six-digit PIN to bootstrap trust. Cluster-scoped
   peer traffic and promoted proxy ingress are designed to use certificates and
