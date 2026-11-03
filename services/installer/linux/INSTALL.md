@@ -77,9 +77,9 @@ that directory too if you want a fully clean slate.
 - **No nodes discovered**: confirm UDP 5353 isn't blocked by your firewall and
   that other machines on the LAN are actually advertising. Run the broker with
   `--log-level debug` to see live discovery logs on stderr.
-- **"Bind: address already in use"**: port 11435 is the Ollama proxy port;
+- **"Bind: address already in use"**: port 8080 is the llama.cpp proxy port;
   another instance of the proxy or another process is holding it. Find the
-  offender with `ss -tlnp | grep 11435` and stop or kill it.
+  offender with `ss -tlnp | grep 8080` and stop or kill it.
 
 Report issues at the project's tracker. Include the broker's `--log-level debug`
 output and your distro / kernel version.

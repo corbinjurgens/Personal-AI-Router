@@ -76,8 +76,8 @@ xattr -dr com.apple.quarantine /path/to/NVIDIA-Personal-AI-Router-<version>
   Network → Firewall, and that other machines on the LAN are actually
   advertising. Run the broker with `--log-level debug` to see live discovery
   logs on stderr.
-- **"Bind: address already in use"**: another process is holding port 11435.
-  Find the offender with `lsof -i :11435` and stop it.
+- **"Bind: address already in use"**: another process is holding port 8080.
+  Find the offender with `lsof -i :8080` and stop it.
 
 Report issues at the project's tracker. Include the broker's `--log-level debug`
 output and your macOS version (`sw_vers`) and architecture (`uname -m`).

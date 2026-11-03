@@ -82,16 +82,13 @@
   ClearErrors
 !macroend
 
-; Remove the engines NVIDIA PAIR installed, which the data-root removal below
-; cannot do on its own. Ollama and llama.cpp install under a data root and so
-; disappear with it, but LM Studio's vendor installer always lands in
-; %USERPROFILE%\.lmstudio and nothing here ever reached it — so removing "the
-; engines NVIDIA PAIR installed" removed one engine and left the other.
+; Remove the engines NVIDIA PAIR installed, through engine-manager's
+; --uninstall-managed pass rather than by deleting a data-root folder.
 ;
 ; engine-manager owns this because the manifests do: it knows each engine's
 ; install location, and it skips each engine's model store, so the prompt's
 ; promise that downloaded models are kept holds for engine files too. It also
-; only removes an install PAIR recorded as its own, so a copy of LM Studio the
+; only removes an install PAIR recorded as its own, so a llama.cpp build the
 ; user installed themselves is left alone.
 ;
 ; ORDER MATTERS: this must run before pairRemoveUserData (the records of which
@@ -108,10 +105,10 @@
 !macroend
 
 ; Best-effort: when the user opts to remove data, stop any process whose
-; executable lives UNDER one of the data roots (e.g. an engine like Ollama
+; executable lives UNDER one of the data roots (e.g. an engine like llama.cpp
 ; running from %LOCALAPPDATA%\Nvidia Corporation\Personal AI Router\engine-bin\)
 ; so RMDir /r can then delete it. Scoped by ExecutablePath, so an external
-; Ollama installed elsewhere is never touched. nsExec::ExecToLog never aborts the (un)installer,
+; llama.cpp installed elsewhere is never touched. nsExec::ExecToLog never aborts the (un)installer,
 ; PowerShell swallows its own errors (-ErrorAction SilentlyContinue), and a
 ; missing powershell.exe just logs a failure — every failure mode lets the
 ; uninstall continue. PowerShell reads $env:LOCALAPPDATA itself so usernames
@@ -137,7 +134,7 @@
   IfFileExists "$0\nvpair-updater\*.*" 0 +2
     StrCpy $9 "$9$\n$0\nvpair-updater"
   StrCmp $9 "" pairNoLeftover
-    MessageBox MB_OK|MB_ICONEXCLAMATION "Some NVIDIA PAIR data could not be removed because files were still in use (for example, a running engine such as Ollama).$\n$\nClose those programs, then delete these folders manually:$9"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "Some NVIDIA PAIR data could not be removed because files were still in use (for example, a running engine such as llama.cpp).$\n$\nClose those programs, then delete these folders manually:$9"
   pairNoLeftover:
 !macroend
 

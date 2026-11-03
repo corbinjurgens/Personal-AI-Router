@@ -44,16 +44,14 @@ fi
 
 # 4. Remove per-user data only on `purge`, never on a plain `remove`. Per-user
 # data here means settings, logs, cluster identity and certificates, and the
-# engines NVIDIA PAIR installed under those roots (Ollama and llama.cpp);
-# downloaded model weights live outside them (~/.ollama, ~/.llamacpp,
-# ~/.lmstudio/models) and are never touched.
+# engines NVIDIA PAIR installed under those roots (llama.cpp); downloaded model
+# weights live outside them (~/.llamacpp) and are never touched.
 #
-# An engine a vendor installer placed in the user's home, as LM Studio does with
-# ~/.lmstudio, survives a purge here. The Windows and macOS uninstallers remove
-# those by running `nvpair-engine-manager --uninstall-managed`, which cannot work
-# from postrm: dpkg deletes the package's files during `remove`, so the binary is
-# already gone by the time `purge` runs. Uninstall such an engine from PAIR
-# before removing the package, or use the vendor's own uninstaller.
+# The Windows and macOS uninstallers remove engines through
+# `nvpair-engine-manager --uninstall-managed`, which cannot work from postrm:
+# dpkg deletes the package's files during `remove`, so the binary is already
+# gone by the time `purge` runs. An engine installed under those roots goes with
+# them; one installed anywhere else survives a purge here.
 #
 # This is the standard Debian choice:
 # `apt remove` uninstalls the app but keeps data; `apt purge` (or
