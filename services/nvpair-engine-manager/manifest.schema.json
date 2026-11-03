@@ -16,11 +16,11 @@
       "type": "array",
       "uniqueItems": true,
       "items": {
-        "enum": ["ollama-api", "openai-v1", "openai-chat", "anthropic-messages", "llamacpp-router"]
+        "enum": ["openai-v1", "openai-chat", "anthropic-messages", "llamacpp-router"]
       }
     },
     "model_naming": {
-      "enum": ["exact", "implied-latest-tag"]
+      "enum": ["exact"]
     },
     "memory_plan": {
       "type": "object", "additionalProperties": false, "required": ["adapter"],

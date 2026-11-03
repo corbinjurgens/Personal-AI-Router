@@ -403,11 +403,11 @@ func TestModelDownloadBlockedLoadAndExportDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.manifest.ModelNaming = engines.ModelNamingImpliedLatestTag
+	st.manifest.ModelNaming = engines.ModelNamingExact
 	st.manifest.Actions = map[string]Action{"load_model": {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/load"}}}
 	var effects atomic.Int32
 	ex.client = &http.Client{Transport: &mutationTransport{respond: func(*http.Request) (*http.Response, error) { effects.Add(1); return mutationJSON(http.StatusOK, `{}`) }}}
-	a := reserveModelDownload(t, ex.downloads, "tagged", "demo:latest", engines.ModelNamingImpliedLatestTag)
+	a := reserveModelDownload(t, ex.downloads, "tagged", "demo", engines.ModelNamingExact)
 	if _, err := ex.downloads.changeMarker(a, false); err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func testModelDownloads(t *testing.T) *modelDownloads {
 	if !ok {
 		t.Fatal("invalid descriptor engine")
 	}
-	return newModelDownloads(newOpID(), t.TempDir(), map[string]string{"tagged": engines.ModelNamingImpliedLatestTag, "llamacpp": engines.ModelNamingExact, other.Name: engines.ModelNamingExact})
+	return newModelDownloads(newOpID(), t.TempDir(), map[string]string{"tagged": engines.ModelNamingExact, "llamacpp": engines.ModelNamingExact, other.Name: engines.ModelNamingExact})
 }
 
 func reserveModelDownload(t *testing.T, d *modelDownloads, engine, model, naming string) *modelDownloadAttempt {
@@ -462,34 +462,6 @@ func reserveModelDownload(t *testing.T, d *modelDownloads, engine, model, naming
 		t.Fatal(err)
 	}
 	return a
-}
-
-func TestModelDownloadNamingEquivalence(t *testing.T) {
-	d := testModelDownloads(t)
-	a := reserveModelDownload(t, d, "tagged", "demo", engines.ModelNamingImpliedLatestTag)
-	if a.entry.Model != "demo" || a.key.model != "demo:latest" {
-		t.Fatalf("raw spelling/key = %q/%q", a.entry.Model, a.key.model)
-	}
-	if _, err := d.reserve("tagged", "demo:latest", engines.ModelNamingImpliedLatestTag); !errors.Is(err, errDownloadBusy) {
-		t.Fatalf("duplicate = %v", err)
-	}
-	if !d.blocked(downloadContentKey{"tagged", "demo:latest"}) {
-		t.Fatal("equivalent key was not fenced")
-	}
-	if _, err := d.changeMarker(a, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.finish(a, "failed", "download_failed", ""); err != nil {
-		t.Fatal(err)
-	}
-	b := reserveModelDownload(t, d, "tagged", "demo:latest", engines.ModelNamingImpliedLatestTag)
-	if err := d.finish(b, "failed", "interrupted", ""); err != nil {
-		t.Fatal(err)
-	}
-	s := d.snapshot()
-	if len(s.Entries) != 1 || s.Entries[0].ID != b.entry.ID || !s.Entries[0].BlocksReadiness {
-		t.Fatalf("retry lost earlier unsafe marker: %+v", s)
-	}
 }
 
 func TestModelDownloadFixedCapacity(t *testing.T) {

@@ -580,7 +580,7 @@ func TestResidentContextBoundConfigured(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := nodepolicy.ReconcileResidentParams{Model: "m", Load: nodepolicy.ResidentLoadOptions{ContextLength: context}}
 			readback := &engines.ServingReadback{Configured: envelopes}
-			if got := residentConfiguredContext(p, engines.ModelNamingImpliedLatestTag, readback); got != want {
+			if got := residentConfiguredContext(p, engines.ModelNamingExact, readback); got != want {
 				t.Fatalf("configured context accepted=%v, want %v", got, want)
 			}
 		})

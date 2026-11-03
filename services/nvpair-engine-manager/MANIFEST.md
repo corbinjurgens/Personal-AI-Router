@@ -517,8 +517,8 @@ and recovery. Editing `args`/`start` directly remains trusted manifest authoring
 | `platforms` | object | yes | Map of `"<goos>/<goarch>"` → platform block (e.g. `"windows/amd64"`, `"darwin/arm64"`, `"linux/amd64"`). At least one entry. The runner selects the block matching the host. |
 | `actions` | object | no | Map of action name → action (see below). |
 | `family` | string | no | The engine's lineage, same syntax as `engine`; defaults to the engine id. It selects the coded adapters the family shares: the model-store layout used by model copy and the download catalogue (`ollama`, `lmstudio` and `llamacpp` have both). A fork with its own id declares the family it came from. |
-| `protocols` | string[] | no | Protocol profiles the engine serves: `ollama-api`, `openai-v1`, `openai-chat`, `anthropic-messages`, `llamacpp-router`. `openai-chat` claims only `/v1/chat/completions` and `/v1/models`, without legacy completions or embeddings; `openai-v1` retains all of those routes. Published in the engine's descriptor; none means no inference surface is claimed. |
-| `model_naming` | string | no | `exact` (default) or `implied-latest-tag` (an untagged name means `:latest`, as in Ollama). |
+| `protocols` | string[] | no | Protocol profiles the engine serves: `openai-v1`, `openai-chat`, `anthropic-messages`, `llamacpp-router`. `openai-chat` claims only `/v1/chat/completions` and `/v1/models`, without legacy completions or embeddings; `openai-v1` retains all of those routes. Published in the engine's descriptor; none means no inference surface is claimed. |
+| `model_naming` | string | no | `exact` (default): a model is named by exactly the identifier the engine lists. |
 | `operations` | object | no | Semantic model operation bindings; see Model operations. |
 | `detect` / `detect_required` / `install` / `uninstall` / `models_dir` / `runtime` | — | no | Optional **shared defaults** inherited by every platform (see below). |
 

@@ -6,7 +6,6 @@ package nodepolicy
 import (
 	"encoding/json"
 	"errors"
-	"strings"
 
 	"nvpair-shared/engines"
 )
@@ -66,7 +65,7 @@ func (p Policy) ValidateEngineBindings(naming func(string) (string, bool)) error
 	matches := make([]match, 0, len(p.EngineBindings))
 	for _, ref := range p.EngineBindings {
 		rule, ok := naming(ref.Engine)
-		if !ok || rule != engines.ModelNamingExact && rule != engines.ModelNamingImpliedLatestTag {
+		if !ok || rule != engines.ModelNamingExact {
 			return errors.New("engineBindings require a current target engine naming descriptor")
 		}
 		canonical := engines.NormalizeModelName(ref.Model, rule)
@@ -88,20 +87,9 @@ func (p Policy) ValidateEngineBindings(naming func(string) (string, bool)) error
 		matches = append(matches, match{rule, canonical})
 	}
 	for i, a := range matches {
-		// Under descriptor naming, a canonical name and its valid untagged
-		// spelling exhaust the distinct matching classes (outer space is trimmed).
-		spellings := []string{a.canonical}
-		if base, ok := strings.CutSuffix(a.canonical, ":latest"); ok && engines.NormalizeModelName(base, a.naming) == a.canonical {
-			spellings = append(spellings, base)
-		}
 		for j, b := range matches {
-			if i == j {
-				continue
-			}
-			for _, spelling := range spellings {
-				if engines.NormalizeModelName(spelling, b.naming) == b.canonical {
-					return errors.New("engineBindings have overlapping model matching sets")
-				}
+			if i != j && engines.NormalizeModelName(a.canonical, b.naming) == b.canonical {
+				return errors.New("engineBindings have overlapping model matching sets")
 			}
 		}
 	}

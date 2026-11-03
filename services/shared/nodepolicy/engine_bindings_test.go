@@ -81,9 +81,7 @@ func TestEngineBindingsRejectMalformedInput(t *testing.T) {
 func TestEngineBindingsTargetNaming(t *testing.T) {
 	naming := func(engine string) (string, bool) {
 		switch engine {
-		case "ollama", "custom-tagged":
-			return engines.ModelNamingImpliedLatestTag, true
-		case "llamacpp":
+		case "llamacpp", "llamacpp-custom":
 			return engines.ModelNamingExact, true
 		default:
 			return "", false
@@ -98,16 +96,12 @@ func TestEngineBindingsTargetNaming(t *testing.T) {
 			}
 		})
 	}
-	test("latest overlaps exact base", EngineBindings{{"ollama", "m:latest"}, {"llamacpp", "m"}}, nil, false)
-	test("reverse order overlaps", EngineBindings{{"llamacpp", "m"}, {"ollama", "m:latest"}}, nil, false)
-	test("custom descriptor overlaps", EngineBindings{{"custom-tagged", "m:latest"}, {"llamacpp", "m"}}, nil, false)
-	test("same engine aliases overlap", EngineBindings{{"ollama", "m"}, {"ollama", "m:latest"}}, nil, false)
-	test("case-sensitive names", EngineBindings{{"ollama", "M"}, {"llamacpp", "m"}}, nil, true)
-	test("different tags", EngineBindings{{"ollama", "m:small"}, {"llamacpp", "m"}}, nil, true)
-	test("served normalized", EngineBindings{{"ollama", "m:latest"}}, ServedModels{{"ollama", "m"}}, true)
-	test("binding normalized", EngineBindings{{"ollama", "m"}}, ServedModels{{"ollama", "m:latest"}}, true)
-	test("explicit deny all", EngineBindings{{"ollama", "m"}}, ServedModels{}, false)
-	test("wrong served engine", EngineBindings{{"ollama", "m"}}, ServedModels{{"llamacpp", "m"}}, false)
+	test("same model on two engines overlaps", EngineBindings{{"llamacpp-custom", "m"}, {"llamacpp", "m"}}, nil, false)
+	test("case-sensitive names", EngineBindings{{"llamacpp-custom", "M"}, {"llamacpp", "m"}}, nil, true)
+	test("different tags", EngineBindings{{"llamacpp-custom", "m:small"}, {"llamacpp", "m"}}, nil, true)
+	test("served exact", EngineBindings{{"llamacpp", "m"}}, ServedModels{{"llamacpp", "m"}}, true)
+	test("explicit deny all", EngineBindings{{"llamacpp", "m"}}, ServedModels{}, false)
+	test("wrong served engine", EngineBindings{{"llamacpp", "m"}}, ServedModels{{"llamacpp-custom", "m"}}, false)
 	test("unknown descriptor", EngineBindings{{"unknown", "m"}}, nil, false)
 }
 

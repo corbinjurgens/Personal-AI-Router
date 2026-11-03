@@ -53,12 +53,12 @@ const dynamicKeyPrefix = "e-"
 // classifications for. A protocol outside this set cannot be fronted, so a
 // descriptor declaring one fails closed rather than being forwarded as
 // unclassified traffic.
-var facadeProtocols = []string{ProtocolOllamaAPI, ProtocolOpenAIV1, ProtocolOpenAIChat, ProtocolAnthropicMessages, ProtocolLlamaCPPRouter}
+var facadeProtocols = []string{ProtocolOpenAIV1, ProtocolOpenAIChat, ProtocolAnthropicMessages, ProtocolLlamaCPPRouter}
 
 // facadeBaseProtocols each give a facade both an inference route and a model
 // list. A facade needs at least one; the other facade protocols only add
 // routes beside it.
-var facadeBaseProtocols = []string{ProtocolOllamaAPI, ProtocolOpenAIV1, ProtocolOpenAIChat}
+var facadeBaseProtocols = []string{ProtocolOpenAIV1, ProtocolOpenAIChat}
 
 // FacadeProtocols returns the protocol profiles nvpair-proxy can front.
 func FacadeProtocols() []string { return slices.Clone(facadeProtocols) }

@@ -113,7 +113,7 @@ func TestModelDownloadDispatcherRequiresCurrentCanonicalReadyContent(t *testing.
 }
 
 func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *testing.T) {
-	test := func(name, phase, requested, reported string) {
+	test := func(name, phase, requested string) {
 		t.Run(name, func(t *testing.T) {
 			f := newReconnectUIFixture(t)
 			f.serve(t, nil)
@@ -122,7 +122,7 @@ func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *te
 			d.pane = detailModels
 			d.descriptors = engineDescriptors{"ollama": {
 				Version: engines.DescriptorVersion, Engine: "ollama", Family: "ollama", Label: "Ollama",
-				ModelNaming: engines.ModelNamingImpliedLatestTag,
+				ModelNaming: engines.ModelNamingExact,
 				Operations:  map[string]engines.OperationCapability{engines.OperationDelete: {}, engines.OperationUnload: {}},
 			}}
 			snapshot := tuiDownloadSnapshot()
@@ -141,7 +141,7 @@ func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *te
 				t.Fatal("initial Delete did not wait for confirmation")
 			}
 			active := tuiDownloadSnapshot()
-			active.Revision, active.Entries[0].Model, active.Entries[0].Phase = "8", reported, phase
+			active.Revision, active.Entries[0].Model, active.Entries[0].Phase = "8", requested, phase
 			d.update(tuiDownloadProgress(t, "engine:pull-progress", "", active, active.Entries[0]))
 			// Confirm a Delete armed before the pull started. Any mistakenly
 			// returned command runs against the pipe fixture and is counted.
@@ -172,9 +172,8 @@ func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *te
 			}
 		})
 	}
-	test("queued exact model", modeldownload.PhaseQueued, "exact/model", "exact/model")
-	test("in progress implied latest", modeldownload.PhaseInProgress, "demo", "demo:latest")
-	test("queued explicit latest", modeldownload.PhaseQueued, "demo:latest", "demo")
+	test("queued exact model", modeldownload.PhaseQueued, "exact/model")
+	test("in progress exact model", modeldownload.PhaseInProgress, "exact/model")
 }
 
 func TestModelDownloadDeleteOutsideMatchingActivePullKeepsAuthority(t *testing.T) {

@@ -97,7 +97,6 @@ export const ENGINE_DESCRIPTOR_VERSION = 1
 
 /** Protocol profiles a descriptor may declare (`engines.Protocols`). */
 export const EngineDescriptorProtocols = [
-    'ollama-api',
     'openai-v1',
     'openai-chat',
     'anthropic-messages',
@@ -105,7 +104,7 @@ export const EngineDescriptorProtocols = [
 ] as const
 
 /** Model naming rules a descriptor may declare (`engines.ModelNamings`). */
-export const EngineDescriptorModelNamings = ['exact', 'implied-latest-tag'] as const
+export const EngineDescriptorModelNamings = ['exact'] as const
 
 /** Upper bound on a declared operation response budget (`engines.MaxOperationResponseTimeoutS`). */
 export const ENGINE_OPERATION_MAX_RESPONSE_TIMEOUT_S = 30 * 60

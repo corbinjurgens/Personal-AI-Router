@@ -80,43 +80,6 @@ func modelsMemoryEntry(t *testing.T, result ModelsResult) performancewire.Memory
 	return memoryEntry(t, result.MemoryEvidence.Entries)
 }
 
-// This fixture has no process, listener or installed engine. Its transport
-// accepts inventory reads only and its profile is private to the test.
-func taggedDownloadInventoryExecutor(t *testing.T) *Executor {
-	t.Helper()
-	manifest := &Manifest{Engine: "tagged", DisplayName: "Fixture", ModelNaming: engines.ModelNamingImpliedLatestTag,
-		Actions: map[string]Action{
-			"list_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/api/tags"},
-				Result: &ActionResult{Array: "models", Field: "name", Digest: "digest"}},
-			"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/api/ps"},
-				Result: &ActionResult{Array: "models", Field: "name"}},
-		}}
-	reg := NewRegistry()
-	reg.engines[manifest.Engine] = manifest
-	ex := NewExecutor(reg, NewReporter(nil), nil, t.TempDir())
-	ex.engines[manifest.Engine] = &engineState{manifest: manifest, plat: &Platform{}, running: true,
-		runID: "fixture-run", launchDigest: memoryTestLaunch, proc: &managedProc{}, contentMu: make(chan struct{}, 1)}
-	ex.client = &http.Client{Transport: memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-		if request.Method != http.MethodGet {
-			t.Errorf("unexpected engine effect: %s %s", request.Method, request.URL.Path)
-			return nil, fmt.Errorf("fixture refuses engine effects")
-		}
-		var body string
-		switch request.URL.Path {
-		case "/api/tags":
-			body = fmt.Sprintf(`{"models":[{"name":"demo:latest","digest":%q},{"name":"ready:latest","digest":%q}]}`, memoryTestDigest, memoryTestDigest)
-		case "/api/ps":
-			body = `{"models":[{"name":"demo:latest"}]}`
-		default:
-			t.Errorf("unexpected engine endpoint: %s", request.URL.Path)
-			return nil, fmt.Errorf("fixture refuses unexpected endpoint")
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
-	})}
-	ex.modelMutationParent = func(context.Context, string) error { return nil }
-	return ex
-}
-
 func modelDownloadInventoryExecutor(t *testing.T) *Executor {
 	t.Helper()
 	manifest := &Manifest{Engine: engines.NameLlamaCPP, DisplayName: "llama.cpp fixture", ModelNaming: engines.ModelNamingExact,
@@ -169,14 +132,10 @@ func modelInventoryObservation(t *testing.T, ex *Executor, engine string) observ
 }
 
 func TestLinkedModelInventory(t *testing.T) {
-	test := func(name, body, model string, want inventoryMembership, impliedLatest bool) {
+	test := func(name, body, model string, want inventoryMembership) {
 		t.Run(name, func(t *testing.T) {
 			ex := modelDownloadInventoryExecutor(t)
 			engine, path := "llamacpp", "/models"
-			if impliedLatest {
-				ex = taggedDownloadInventoryExecutor(t)
-				engine, path = "tagged", "/api/tags"
-			}
 			calls := 0
 			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
 				calls++
@@ -197,11 +156,9 @@ func TestLinkedModelInventory(t *testing.T) {
 			}
 		})
 	}
-	test("descriptor naming", `{"models":[{"name":"demo:latest"}]}`, "demo", inventoryPresent, true)
-	test("empty", `{"data":[]}`, "demo", inventoryAbsent, false)
-	test("duplicate aliases", `{"models":[{"name":"demo"},{"name":"demo:latest"}]}`, "demo", inventoryAmbiguous, true)
-	test("failed", "failure", "demo", inventoryFailed, false)
-	test("invalid response", `{"data":null}`, "demo", inventoryFailed, false)
+	test("empty", `{"data":[]}`, "demo", inventoryAbsent)
+	test("failed", "failure", "demo", inventoryFailed)
+	test("invalid response", `{"data":null}`, "demo", inventoryFailed)
 
 	t.Run("exact naming and unrelated engine", func(t *testing.T) {
 		ex := modelDownloadInventoryExecutor(t)
@@ -274,57 +231,6 @@ func TestLinkedModelInventory(t *testing.T) {
 			t.Fatalf("recognition failed: %+v", got)
 		}
 	})
-}
-
-func TestModelDownloadInventoryMasksEquivalentKeys(t *testing.T) {
-	test := func(name, requestModel, listedModel, terminalPhase, reason string) {
-		t.Run(name, func(t *testing.T) {
-			ex := taggedDownloadInventoryExecutor(t)
-			original := ex.client.Transport
-			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-				response, err := original.RoundTrip(request)
-				if err == nil && request.URL.Path == "/api/tags" {
-					if err := response.Body.Close(); err != nil {
-						return nil, err
-					}
-					body := fmt.Sprintf(`{"models":[{"name":%q,"digest":%q},{"name":"ready:latest","digest":%q}]}`, listedModel, memoryTestDigest, memoryTestDigest)
-					response.Body = io.NopCloser(strings.NewReader(body))
-				}
-				return response, err
-			})
-			attempt := reserveModelDownload(t, ex.downloads, "tagged", requestModel, engines.ModelNamingImpliedLatestTag)
-			assertMasked := func(wantPhase string) {
-				t.Helper()
-				result := ex.ModelsResult(context.Background())
-				want := []string{"ready:latest"}
-				if !reflect.DeepEqual(result.Models, want) || !reflect.DeepEqual(result.ByEngine["tagged"], want) ||
-					!reflect.DeepEqual(ex.cachedInventory()["tagged"], want) {
-					t.Fatalf("unsafe alias escaped ready inventory/cache: %+v", result)
-				}
-				if !reflect.DeepEqual(result.LoadedByEngine["tagged"], []string{"demo:latest"}) {
-					t.Fatalf("mask changed actual loaded observation: %+v", result.LoadedByEngine)
-				}
-				if result.DownloadState == nil || len(result.DownloadState.Entries) != 1 {
-					t.Fatalf("missing target lifecycle: %+v", result.DownloadState)
-				}
-				entry := result.DownloadState.Entries[0]
-				if entry.ID != attempt.entry.ID || entry.Model != requestModel || entry.Phase != wantPhase || !entry.BlocksReadiness {
-					t.Fatalf("lifecycle lost exact request identity or fence: %+v", entry)
-				}
-			}
-			assertMasked(modeldownload.PhaseQueued)
-			if _, err := ex.downloads.changeMarker(attempt, false); err != nil {
-				t.Fatalf("persist unsafe marker: %v", err)
-			}
-			if err := ex.downloads.finish(attempt, terminalPhase, reason, ""); err != nil {
-				t.Fatalf("finish unsafe attempt: %v", err)
-			}
-			assertMasked(terminalPhase)
-		})
-	}
-	test("untagged request blocks tagged inventory", "demo", "demo:latest", modeldownload.PhaseFailed, modeldownload.ReasonDownloadFailed)
-	test("tagged request blocks untagged inventory", "demo:latest", "demo", modeldownload.PhaseFailed, modeldownload.ReasonDownloadFailed)
-	test("unknown attempt retains unsafe content", "demo", "demo:latest", modeldownload.PhaseUnknown, modeldownload.ReasonInterrupted)
 }
 
 func TestModelDownloadPreEffectFailurePreservesReadyContent(t *testing.T) {

@@ -61,7 +61,7 @@ func (b *Broker) engineModelNaming(engine string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	d, ok := c.descriptors[engine]
-	return d.ModelNaming, ok && (d.ModelNaming == engines.ModelNamingExact || d.ModelNaming == engines.ModelNamingImpliedLatestTag)
+	return d.ModelNaming, ok && d.ModelNaming == engines.ModelNamingExact
 }
 
 // loadDynamicEngines reads engine-manager's descriptors and fronts the ones

@@ -128,7 +128,6 @@ afterEach(() => {
 describe('engine descriptor parsing', () => {
     it('preserves every Go descriptor protocol and rejects an unknown protocol', () => {
         const protocols = [
-            'ollama-api',
             'openai-v1',
             'openai-chat',
             'anthropic-messages',

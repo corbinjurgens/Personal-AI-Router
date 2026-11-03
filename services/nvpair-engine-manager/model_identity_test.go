@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,43 +28,29 @@ import (
 )
 
 func TestModelDownloadIdentityRetainsUnsafeMaskAfterMutation(t *testing.T) {
-	test := func(name, requestModel, listedModel string) {
-		t.Run(name, func(t *testing.T) {
-			ex := taggedDownloadInventoryExecutor(t)
-			original := ex.client.Transport
-			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
-				if request.URL.Path == "/api/tags" {
-					body := fmt.Sprintf(`{"models":[{"name":%q,"digest":%q},{"name":"ready:latest","digest":%q}]}`, listedModel, memoryTestDigest, memoryTestDigest)
-					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
-				}
-				return original.RoundTrip(request)
-			})
-			ex.modelsSweep(context.Background(), true)
-			if got := ex.modelIdentity().Engines["tagged"].ModelDigests; len(got) != 2 {
-				t.Fatalf("ready identity baseline = %v", got)
-			}
-			attempt := reserveModelDownload(t, ex.downloads, "tagged", requestModel, engines.ModelNamingImpliedLatestTag)
-			assertMasked := func() {
-				t.Helper()
-				want := map[string]string{"ready:latest": memoryTestDigest}
-				if got := ex.modelIdentity().Engines["tagged"].ModelDigests; !reflect.DeepEqual(got, want) {
-					t.Fatalf("unsafe content escaped strict digest publication: %v", got)
-				}
-			}
-			assertMasked()
-			if _, err := ex.downloads.changeMarker(attempt, false); err != nil {
-				t.Fatalf("persist unsafe content: %v", err)
-			}
-			if err := ex.downloads.finish(attempt, modeldownload.PhaseFailed, modeldownload.ReasonDownloadFailed, ""); err != nil {
-				t.Fatalf("finish failed mutation: %v", err)
-			}
-			ex.endModelMutation("tagged", nil)
-			ex.modelsSweep(context.Background(), true)
-			assertMasked()
-		})
+	ex := modelDownloadInventoryExecutor(t)
+	ex.modelsSweep(context.Background(), true)
+	if got := ex.modelIdentity().Engines["llamacpp"].ModelDigests; len(got) != 2 {
+		t.Fatalf("ready identity baseline = %v", got)
 	}
-	test("untagged unsafe key masks tagged digest", "demo", "demo:latest")
-	test("tagged unsafe key masks untagged digest", "demo:latest", "demo")
+	attempt := reserveModelDownload(t, ex.downloads, "llamacpp", "demo", engines.ModelNamingExact)
+	assertMasked := func() {
+		t.Helper()
+		want := map[string]string{"ready": memoryTestDigest}
+		if got := ex.modelIdentity().Engines["llamacpp"].ModelDigests; !reflect.DeepEqual(got, want) {
+			t.Fatalf("unsafe content escaped strict digest publication: %v", got)
+		}
+	}
+	assertMasked()
+	if _, err := ex.downloads.changeMarker(attempt, false); err != nil {
+		t.Fatalf("persist unsafe content: %v", err)
+	}
+	if err := ex.downloads.finish(attempt, modeldownload.PhaseFailed, modeldownload.ReasonDownloadFailed, ""); err != nil {
+		t.Fatalf("finish failed mutation: %v", err)
+	}
+	ex.endModelMutation("llamacpp", nil)
+	ex.modelsSweep(context.Background(), true)
+	assertMasked()
 }
 
 func TestModelDownloadRecoveryWithdrawsNamesAndDigestsOnly(t *testing.T) {

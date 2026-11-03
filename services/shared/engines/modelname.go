@@ -6,15 +6,8 @@ package engines
 import "strings"
 
 // NormalizeModelName applies descriptor-selected naming to a model identifier.
+// Every naming rule is exact, so it only trims surrounding whitespace.
 // Callers must exempt reserved routing aliases before applying model naming.
 func NormalizeModelName(model, naming string) string {
-	model = strings.TrimSpace(model)
-	if naming != ModelNamingImpliedLatestTag || model == "" {
-		return model
-	}
-	name := model[strings.LastIndex(model, "/")+1:]
-	if name != "" && !strings.ContainsAny(name, ":@") {
-		return model + ":latest"
-	}
-	return model
+	return strings.TrimSpace(model)
 }

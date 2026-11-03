@@ -19,7 +19,6 @@ import (
 func TestEngineBindingOffersDescriptorDefaultConfiguration(t *testing.T) {
 	h := newBindingOfferHarness(t)
 	d := testDescriptor("custom", engines.ProtocolOpenAIChat)
-	d.ModelNaming = engines.ModelNamingImpliedLatestTag
 	// In-flight harness projections may still reference the original engine.
 	h.b.setDynamicEngines([]engines.Descriptor{testDescriptor("llamacpp-custom", engines.ProtocolOpenAIChat), d}, func(int) bool { return true })
 	profile, ok := h.b.dynamicEngineProfile("custom")
@@ -36,7 +35,7 @@ func TestEngineBindingOffersDescriptorDefaultConfiguration(t *testing.T) {
 	r.current.Revision = "2"
 	r.activeRevision = "2"
 	r.current.EngineBindings = nodepolicy.EngineBindings{{Engine: "custom", Model: "fixture"}}
-	r.current.ServedModels = nodepolicy.ServedModels{{Engine: "custom", Model: "fixture:latest"}}
+	r.current.ServedModels = nodepolicy.ServedModels{{Engine: "custom", Model: "fixture"}}
 	r.mu.Unlock()
 	h.b.engineConfigMu.Unlock()
 	base := h.engine.answer

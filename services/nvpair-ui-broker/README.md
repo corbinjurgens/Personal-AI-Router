@@ -143,8 +143,7 @@ native references. Absence and `[]` disable the binding configuration; new
 local and peer readbacks always emit `engineBindings: []` when empty. The policy
 schema remains version 2. Each native name has one binding, with at most 256
 entries and the existing identifier and encoded-reference bounds. The target
-uses current descriptor naming to reject overlapping matching sets, including
-implied-latest aliases, and requires each binding to be served when served
+uses current descriptor naming to reject overlapping matching sets and requires each binding to be served when served
 permission is explicit. Names remain case-sensitive. Saving changes no engine
 intent and starts no engine; request-triggered preparation is a separate feature.
 

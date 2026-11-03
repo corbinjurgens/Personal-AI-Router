@@ -114,7 +114,7 @@ func TestProxyCanFront(t *testing.T) {
 	if err := ProxyCanFront(frontableDescriptor()); err != nil {
 		t.Fatalf("llama.cpp fork rejected: %v", err)
 	}
-	for _, protocols := range [][]string{{ProtocolOpenAIChat}, {ProtocolOllamaAPI}, {ProtocolOpenAIV1, ProtocolAnthropicMessages}} {
+	for _, protocols := range [][]string{{ProtocolOpenAIChat}, {ProtocolOpenAIV1, ProtocolAnthropicMessages}} {
 		d := frontableDescriptor()
 		d.Protocols = protocols
 		if err := ProxyCanFront(d); err != nil {

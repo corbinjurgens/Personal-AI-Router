@@ -104,7 +104,7 @@ const (
 
 // ParseAlias splits a hybrid alias into its tier and mode. The reserved names
 // are each tier in TierOrder, bare or with the -api or -local suffix. Matching
-// is exact: no case folding, no trimming and no Ollama :latest handling. ok is
+// is exact: no case folding, no trimming and no implied tags. ok is
 // false, with empty tier and mode, for any other name.
 func ParseAlias(name string) (tier string, mode AliasMode, ok bool) {
 	tier, mode = name, AliasBare

@@ -417,8 +417,8 @@ type Profile struct {
 	MemoryBytes   int64 `json:"memoryBytes,omitempty"`
 	MaxConcurrent int   `json:"maxConcurrent,omitempty"`
 	// RequestOptions is merged into every request body for this model before it
-	// reaches the engine, e.g. {"options":{"num_ctx":16384}} for Ollama or
-	// {"keep_alive":"10m"}. Keys already present win in the default mode;
+	// reaches the engine, e.g. {"temperature":0.2} or
+	// {"top_k":40}. Keys already present win in the default mode;
 	// enforced mode replaces each configured leaf, recursively merging objects.
 	RequestOptions json.RawMessage `json:"requestOptions,omitempty"`
 	// Enforced replaces configured leaves; defaults allows request overrides.

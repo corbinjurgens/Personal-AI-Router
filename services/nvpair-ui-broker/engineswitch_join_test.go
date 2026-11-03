@@ -141,7 +141,6 @@ func TestSwitchRoutabilityUsesDescriptorProtocolsAndFacadeReadiness(t *testing.T
 	}{
 		{"OpenAI chat", []string{engines.ProtocolOpenAIChat}, true, true},
 		{"OpenAI v1", []string{engines.ProtocolOpenAIV1}, true, true},
-		{"Ollama", []string{engines.ProtocolOllamaAPI}, true, true},
 		{"list only", []string{engines.ProtocolLlamaCPPRouter}, true, false},
 		{"messages only", []string{engines.ProtocolAnthropicMessages}, true, false},
 		{"unsupported", []string{"grpc"}, true, false},

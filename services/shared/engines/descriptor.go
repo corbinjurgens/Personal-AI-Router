@@ -89,9 +89,6 @@ const MaxOperationResponseTimeoutS = 30 * 60
 // request surface; declaring one is a claim the engine serves it, not a
 // request for generic forwarding.
 const (
-	// ProtocolOllamaAPI is Ollama's native /api surface: generate, chat,
-	// embeddings and the /api/tags model list.
-	ProtocolOllamaAPI = "ollama-api"
 	// ProtocolOpenAIV1 is the OpenAI-compatible chat, completions and
 	// embeddings routes with the /v1/models list.
 	ProtocolOpenAIV1 = "openai-v1"
@@ -110,15 +107,12 @@ const (
 	// ModelNamingExact: a model is named by exactly the identifier the engine
 	// lists.
 	ModelNamingExact = "exact"
-	// ModelNamingImpliedLatestTag: an untagged name means its ":latest" tag,
-	// as in Ollama.
-	ModelNamingImpliedLatestTag = "implied-latest-tag"
 )
 
 var (
 	operations   = []string{OperationLoad, OperationUnload, OperationPull, OperationDelete}
-	protocols    = []string{ProtocolOllamaAPI, ProtocolOpenAIV1, ProtocolOpenAIChat, ProtocolAnthropicMessages, ProtocolLlamaCPPRouter}
-	modelNamings = []string{ModelNamingExact, ModelNamingImpliedLatestTag}
+	protocols    = []string{ProtocolOpenAIV1, ProtocolOpenAIChat, ProtocolAnthropicMessages, ProtocolLlamaCPPRouter}
+	modelNamings = []string{ModelNamingExact}
 )
 
 // Operations returns the semantic model operation names.

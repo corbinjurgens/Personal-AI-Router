@@ -278,7 +278,7 @@ func TestParseAliasRejectsEverythingElse(t *testing.T) {
 		{name: "uppercase tier", input: "Weak"},
 		{name: "uppercase suffix", input: "weak-API"},
 		{name: "uppercase local suffix", input: "weak-Local"},
-		{name: "ollama latest", input: "medium:latest"},
+		{name: "tagged name", input: "medium:latest"},
 		{name: "leading space", input: " weak"},
 		{name: "trailing space", input: "weak "},
 		{name: "unknown suffix", input: "weak-cloud"},
