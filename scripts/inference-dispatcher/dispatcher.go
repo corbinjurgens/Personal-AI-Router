@@ -243,7 +243,6 @@ func (d *dispatcher) baseRecord() map[string]any {
 		"timeout_seconds": d.cfg.TimeoutSeconds,
 		"max_tokens":      d.cfg.MaxTokens,
 		"temperature":     d.cfg.Temperature,
-		"ollama_think":    d.cfg.OllamaThink,
 		"seed":            d.cfg.Seed,
 	}
 }

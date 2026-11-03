@@ -23,10 +23,10 @@
 #   - desktop/scripts/build/{installer.nsh,linux/after-remove.sh,macos/uninstall.sh}
 #   - scripts/wipe-app-data.sh (Unix twin — update both in the same change)
 #
-# Explicit exclusions (never add): %USERPROFILE%\.ollama, %USERPROFILE%\.llamacpp,
-# %USERPROFILE%\.lmstudio, external engine installs, and the application install
-# tree (Program Files\PAIR). Those three are the engines' model stores; each
-# engine declares its own as models_dir, and nothing PAIR removes may delete one.
+# Explicit exclusions (never add): %USERPROFILE%\.llamacpp, other tools' model
+# folders that engine-manager reads as model sources, external engine installs,
+# and the application install tree (Program Files\PAIR). These are model stores
+# and installs PAIR does not own; nothing PAIR removes may delete one.
 # ---------------------------------------------------------------------------
 
 [CmdletBinding()]
@@ -53,7 +53,7 @@ Usage: scripts\wipe-app-data.cmd [options]
 Delete all NVIDIA PAIR-owned application data (settings, logs, cluster
 identity, chat history, PAIR-managed engines under the app data root).
 
-Does NOT delete model libraries (%USERPROFILE%\.ollama, .llamacpp, .lmstudio\models).
+Does NOT delete model libraries (%USERPROFILE%\.llamacpp, or any model-source folder).
 Does NOT uninstall the application binary.
 
 Options:
@@ -137,9 +137,6 @@ $PairProcs = @(
     'PAIR',
     'nvpair-ui-broker',
     'nvpair-proxy',
-    # Pre-unification names, so this still cleans up after an older install.
-    'ollama-proxy',
-    'lmstudio-proxy',
     'nvpair-node-info',
     'nvpair-node-scanner',
     'nvpair-manual-nodes',
@@ -227,7 +224,7 @@ if (-not $Confirmed) {
     }
     Write-Host ''
     Write-Host 'WARNING: This permanently deletes all NVIDIA PAIR app data.'
-    Write-Host 'Model libraries (%USERPROFILE%\.ollama, .llamacpp, .lmstudio\models) are NOT removed.'
+    Write-Host 'Model libraries (%USERPROFILE%\.llamacpp, or any model-source folder) are NOT removed.'
     Write-Host ''
     Write-Host 'Paths to remove:'
     foreach ($t in $Targets) { Write-Host ("  - {0}" -f $t.Path) }

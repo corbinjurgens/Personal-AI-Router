@@ -1,17 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Send synthetic inference traffic at an Ollama- or LM Studio-compatible
-# endpoint. Pointed at a Personal AI Router proxy it behaves exactly like any
+# Send synthetic inference traffic at an OpenAI-compatible endpoint. Pointed at a Personal AI Router proxy it behaves exactly like any
 # other third-party client, so the request enters the cluster router.
 #
 # Runnable from anywhere:
 #   .\scripts\inference-dispatcher.ps1
-#   .\scripts\inference-dispatcher.ps1 --backend lmstudio --count 5 --mode parallel
+#   .\scripts\inference-dispatcher.ps1 --backend llamacpp --count 5 --mode parallel
 #   .\scripts\inference-dispatcher.ps1 --list-models
 #   .\scripts\inference-dispatcher.ps1 --help
 #
-# With no arguments one prompt is sent to the default Ollama-compatible port
+# With no arguments one prompt is sent to the default llama.cpp port (8080)
 # using an automatically selected model.
 #
 # Requires go on PATH — the same toolchain services\build.bat already needs. No

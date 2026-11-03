@@ -24,10 +24,11 @@
 #   - desktop/scripts/build/{installer.nsh,linux/after-remove.sh,macos/uninstall.sh}
 #   - scripts/wipe-app-data.ps1 (Windows twin — update both in the same change)
 #
-# Explicit exclusions (never add): ~/.ollama, ~/.llamacpp, ~/.lmstudio, external
-# engine installs, and the application install tree (Program Files / /opt/PAIR /
-# the macOS app bundle). Those three are the engines' model stores; each engine
-# declares its own as models_dir, and nothing PAIR removes may delete one.
+# Explicit exclusions (never add): ~/.llamacpp, other tools' model folders that
+# engine-manager reads as model sources, external engine installs, and the
+# application install tree (Program Files / /opt/PAIR / the macOS app bundle).
+# These are model stores and installs PAIR does not own; nothing PAIR removes
+# may delete one.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -46,7 +47,7 @@ Usage: scripts/wipe-app-data.sh [options]
 Delete all NVIDIA PAIR-owned application data (settings, logs, cluster
 identity, chat history, PAIR-managed engines under the app data root).
 
-Does NOT delete model libraries (~/.ollama, ~/.llamacpp, ~/.lmstudio/models).
+Does NOT delete model libraries (~/.llamacpp, or any model-source folder).
 Does NOT uninstall the application binary.
 
 Options:
@@ -148,9 +149,6 @@ PAIR_PROCS=(
   PAIR
   nvpair-ui-broker
   nvpair-proxy
-  # Pre-unification names, so this still cleans up after an older install.
-  ollama-proxy
-  lmstudio-proxy
   nvpair-node-info
   nvpair-node-scanner
   nvpair-manual-nodes
@@ -216,7 +214,7 @@ if [[ "$CONFIRM" -eq 0 ]]; then
   fi
   echo ""
   echo "WARNING: This permanently deletes all NVIDIA PAIR app data."
-  echo "Model libraries (~/.ollama, ~/.llamacpp, ~/.lmstudio/models) are NOT removed."
+  echo "Model libraries (~/.llamacpp, or any model-source folder) are NOT removed."
   echo ""
   echo "Paths to remove:"
   for entry in "${TARGETS[@]}"; do
