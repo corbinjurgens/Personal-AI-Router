@@ -58,12 +58,12 @@ func TestProxyNotificationsAreScopedByPrefix(t *testing.T) {
 	}
 }
 
-// TestProxyPushesUseTheFacadePrefix is the regression guard for the Ollama
+// TestProxyPushesUseTheFacadePrefix is the regression guard for a facade
 // proxy's pushes being dropped.
 //
 // The broker forwards each facade's pushes as <engine>-proxy:<method>. Routing
 // still looked for the bare "proxy:" of the single-engine proxy this replaced,
-// so Ollama readiness and failure only ever reached the screen through the
+// so a facade's readiness and failure only ever reached the screen through the
 // periodic status poll — and a proxy that died read as up until the next one.
 func TestProxyPushesUseTheFacadePrefix(t *testing.T) {
 	p := newProxyTracker()

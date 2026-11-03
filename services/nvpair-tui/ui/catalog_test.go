@@ -166,10 +166,10 @@ func TestUnsearchableCatalogStillFiltersLocally(t *testing.T) {
 }
 
 func loadedBrowser() *catalogBrowser {
-	b := newCatalogBrowser(nil, "ollama", "Ollama", "this-host", false)
+	b := newCatalogBrowser(nil, "llamacpp-custom", "llama.cpp custom", "this-host", false)
 	b.SetSize(100, 24)
 	b.update(catalogLoadedMsg{
-		engine:    "ollama",
+		engine:    "llamacpp-custom",
 		fetchedAt: "2026-07-21T02:07:47Z",
 		models: []catalogModel{
 			{ID: "llama3.2:8b", Name: "llama3.2:8b", Size: 5 << 30, Family: "llama", ParameterSize: "8B"},

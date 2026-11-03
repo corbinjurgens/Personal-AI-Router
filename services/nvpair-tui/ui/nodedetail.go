@@ -1777,7 +1777,7 @@ func (d *nodeDetail) submitSettings(mode detailInputMode, raw, trimmed string) t
 	// The engine the field was opened for, not the one under the cursor. A
 	// field can open after a settings read, and the cursor is free to move
 	// while that read is in flight — so reading the selection here wrote a
-	// value typed for Ollama into LM Studio's settings when the operator had
+	// value typed for one engine into another's settings when the operator had
 	// pressed down in the meantime.
 	engine := d.settingsEngine
 	d.settingsEngine = ""
@@ -1999,7 +1999,7 @@ func (d *nodeDetail) modelCmd(engine string, act modelAction, model string) tea.
 		d.status.error("%s: content readiness unknown or download blocks readiness", model)
 		return nil
 	}
-	return d.own(modelCmd(d.client, d.nodeArg(), engine, d.descriptors.family(engine), act, model))
+	return d.own(modelCmd(d.client, d.nodeArg(), engine, act, model))
 }
 
 func (d *nodeDetail) modelReady(engine, model string) bool {
@@ -2084,8 +2084,8 @@ func (d *nodeDetail) arm(prompt string, run func() tea.Cmd) tea.Cmd {
 // The verdict is the backend's, carried in the snapshot as a phase and, when it
 // failed, a reason. It is not inferred from comparing the saved ports against
 // the effective ones: the effective engine port is observed at the moment the
-// apply replies, and an engine that restarts onto its new port — LM Studio's
-// server re-launches detached, so the manager loses sight of it — finishes
+// apply replies, and an engine that restarts onto its new port and re-launches
+// detached, so the manager loses sight of it, finishes
 // after that. The reading then lags a change behind, and reading failure into
 // it reported a move that had plainly happened as one that had not, naming a
 // port nothing was listening on.
@@ -2438,8 +2438,8 @@ func (d *nodeDetail) engineLabel(key string) string {
 	// and a peer's can be empty — the manager not running, the read failing, or
 	// a reply that genuinely lists nothing — while the models table still has
 	// rows, because a remote node's models come from discovery instead. Falling
-	// back to the raw wire id made the same engine read "Ollama" on one machine
-	// and "ollama" on another, purely from whether that fetch had landed.
+	// back to the raw wire id made the same engine read "llama.cpp" on one machine
+	// and "llamacpp" on another, purely from whether that fetch had landed.
 	//
 	// A descriptor names an engine the list has not, such as a configured
 	// variant. engineDisplayName answers from the static proxy inventory, so it

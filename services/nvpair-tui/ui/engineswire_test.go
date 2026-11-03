@@ -23,7 +23,7 @@ import (
 func tuiDownloadSnapshot() *modeldownload.Snapshot {
 	return &modeldownload.Snapshot{
 		Version: modeldownload.Version, SourceID: strings.Repeat("a", 32), Revision: "7",
-		Entries: []modeldownload.Entry{{ID: strings.Repeat("b", 32), Engine: "ollama", Model: "exact/model",
+		Entries: []modeldownload.Entry{{ID: strings.Repeat("b", 32), Engine: "llamacpp-custom", Model: "exact/model",
 			Phase: modeldownload.PhaseInProgress, BlocksReadiness: true}},
 	}
 }
@@ -113,7 +113,7 @@ func localRequest(t *testing.T, engine, op, model string) (string, map[string]an
 	if !ok {
 		t.Fatalf("unknown model operation %q", op)
 	}
-	return localModelRequest(engine, engine, act, model)
+	return localModelRequest(engine, act, model)
 }
 
 // TestLocalModelOperationsUseTypedMethods checks load, eject and delete reach
@@ -213,19 +213,18 @@ func TestDeadlineLeniencyTracksOperationLength(t *testing.T) {
 	}
 }
 
-// TestPullSpellsByFamily checks a pull is spelled by the engine's family, not
-// its ID: a llama.cpp fork pulls like llama.cpp, with the model under "model"
-// alone, since llama.cpp would take a second key as a parameter it does not
-// accept. Other descriptor families use the conventional model key too.
-func TestPullSpellsByFamily(t *testing.T) {
+// TestLocalPullSendsOnlyTheModel checks a local pull carries the model under
+// "model" alone, for a llama.cpp fork and for another descriptor engine: llama.cpp
+// would take a second key as a parameter it does not accept.
+func TestLocalPullSendsOnlyTheModel(t *testing.T) {
 	pull := modelActions["pull"]
-	_, envelope := localModelRequest("llamacpp-custom", engines.NameLlamaCPP, pull, "m:Q4")
+	_, envelope := localModelRequest("llamacpp-custom", pull, "m:Q4")
 	if !reflect.DeepEqual(envelope["params"], map[string]any{"model": "m:Q4"}) {
 		t.Errorf("llama.cpp fork pull params = %v, want only the model", envelope["params"])
 	}
-	_, envelope = localModelRequest("strata", "strata", pull, "m")
+	_, envelope = localModelRequest("strata", pull, "m")
 	if !reflect.DeepEqual(envelope["params"], map[string]any{"model": "m"}) {
-		t.Errorf("unknown-family pull params = %v, want the conventional model key", envelope["params"])
+		t.Errorf("descriptor engine pull params = %v, want the conventional model key", envelope["params"])
 	}
 }
 
@@ -374,7 +373,7 @@ func TestTerminalControlsCanonicalFrames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, broker := nodeInfoRPCFixture(t)
-			request, result := terminalControlsReply(t, broker, modelCmd(client, tc.node, "llamacpp", "llamacpp", modelActions[tc.op], "model"), &rpc.Message{Result: []byte(`{}`)})
+			request, result := terminalControlsReply(t, broker, modelCmd(client, tc.node, "llamacpp", modelActions[tc.op], "model"), &rpc.Message{Result: []byte(`{}`)})
 			var params map[string]string
 			if err := json.Unmarshal(request.Params, &params); err != nil {
 				t.Fatal(err)
@@ -435,7 +434,7 @@ func TestTerminalControlsTypedRefusals(t *testing.T) {
 				case "lifecycle":
 					cmd = engineCmd(client, "peer", "llamacpp", "engine:start", "start", "start")
 				case "model":
-					cmd = modelCmd(client, "peer", "llamacpp", "llamacpp", modelActions["load"], "model")
+					cmd = modelCmd(client, "peer", "llamacpp", modelActions["load"], "model")
 				case "settings read":
 					cmd = getEngineSettingsCmd(client, "peer", "llamacpp")
 				case "settings preview":

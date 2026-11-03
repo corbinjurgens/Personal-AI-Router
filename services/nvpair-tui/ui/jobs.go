@@ -610,7 +610,7 @@ func (v *jobsView) Help() []key.Binding {
 
 // workloadKey is a job's identity: the node it arrived at, the engine and proxy
 // run that minted it, and the ID within that run — the broker's own key.
-// Origin and ID alone collapsed a concurrent Ollama and LM Studio job, or a job
+// Origin and ID alone collapsed a concurrent job of two engines, or a job
 // from before a proxy restart and one after it, into a single row.
 func workloadKey(w workload) string {
 	return w.OriginatedFrom + "\x00" + w.Engine + "\x00" + w.RunID + "\x00" + w.ID

@@ -342,7 +342,7 @@ func TestGeneratesMirrorsTheDispatcher(t *testing.T) {
 		{"nothing declared", dispatcherModel{}, true},
 		{"type wins over capabilities", dispatcherModel{
 			Type: "embeddings", Capabilities: []string{"chat"}}, false},
-		// Verbatim from a live LM Studio: a real chat model whose advertised
+		// Verbatim from a live engine: a real chat model whose advertised
 		// capabilities name neither chat nor completion. Checking capabilities
 		// ahead of the type would exclude the only usable model on the host, so
 		// the ordering above is load-bearing rather than arbitrary.

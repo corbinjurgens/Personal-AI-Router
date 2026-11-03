@@ -120,14 +120,14 @@ func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *te
 			d := newNodeDetail(f.client, nodeRow{key: "self", self: true, presence: presenceOnline})
 			d.SetSize(120, 30)
 			d.pane = detailModels
-			d.descriptors = engineDescriptors{"ollama": {
-				Version: engines.DescriptorVersion, Engine: "ollama", Family: "ollama", Label: "Ollama",
+			d.descriptors = engineDescriptors{"llamacpp-custom": {
+				Version: engines.DescriptorVersion, Engine: "llamacpp-custom", Family: engines.NameLlamaCPP, Label: "llama.cpp custom",
 				ModelNaming: engines.ModelNamingExact,
 				Operations:  map[string]engines.OperationCapability{engines.OperationDelete: {}, engines.OperationUnload: {}},
 			}}
 			snapshot := tuiDownloadSnapshot()
 			snapshot.Entries = []modeldownload.Entry{}
-			if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"ollama": {requested}}, DownloadState: snapshot, current: true}, true) {
+			if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"llamacpp-custom": {requested}}, DownloadState: snapshot, current: true}, true) {
 				t.Fatal("initial canonical inventory rejected")
 			}
 			press := func(k string) {
@@ -153,7 +153,7 @@ func TestModelDownloadActivePullSuppressesDeleteKeyConfirmationAndDispatch(t *te
 			if d.pending != nil || f.count("engine:delete-model") != 0 || !strings.Contains(d.status.text, "Download in progress") {
 				t.Fatal("Delete key armed or dispatched during an active pull")
 			}
-			if cmd := d.modelCmd("ollama", modelActions["delete"], requested); cmd != nil {
+			if cmd := d.modelCmd("llamacpp-custom", modelActions["delete"], requested); cmd != nil {
 				d.update(cmd())
 			}
 			if f.count("engine:delete-model") != 0 {

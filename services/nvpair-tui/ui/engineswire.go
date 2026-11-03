@@ -136,7 +136,7 @@ var modelActions = map[string]modelAction{
 	"unload": {op: engines.OperationUnload, local: "engine:unload-model", remote: "engine:remote-unload-model", what: "eject"},
 	"delete": {op: engines.OperationDelete, local: "engine:delete-model", remote: "engine:remote-delete-model", what: "delete"},
 	// A local pull has no typed method yet: it is engine:action pull_model,
-	// spelled by pullParams.
+	// spelled by localModelRequest.
 	"pull": {op: engines.OperationPull, remote: "engine:remote-pull-model", what: "download"},
 }
 
@@ -213,19 +213,12 @@ func downloadPrompt(family, label string) string {
 	return "model name for " + label
 }
 
-// pullParams spells a local pull_model for an engine family.
-//
-// The conventional parameter is "model" alone.
-func pullParams(family, model string) map[string]any {
-	return map[string]any{"model": model}
-}
-
 // localModelRequest is the method and params of a model operation on this
 // machine.
-func localModelRequest(engine, family string, act modelAction, model string) (string, map[string]any) {
+func localModelRequest(engine string, act modelAction, model string) (string, map[string]any) {
 	if act.local == "" {
 		return "engine:action", map[string]any{
-			"engine": engine, "action": "pull_model", "params": pullParams(family, model),
+			"engine": engine, "action": "pull_model", "params": map[string]any{"model": model},
 		}
 	}
 	return act.local, map[string]any{"engine": engine, "model": model}
@@ -272,14 +265,14 @@ func engineCmd(client *rpc.Client, node, engine, method, op, what string) tea.Cm
 // this replaced, which left the operator with no acknowledgement that the
 // download had started at all, and nothing to distinguish it from a keystroke
 // that missed.
-func modelCmd(client *rpc.Client, node, engine, family string, act modelAction, model string) tea.Cmd {
+func modelCmd(client *rpc.Client, node, engine string, act modelAction, model string) tea.Cmd {
 	what := act.what + " " + model
 	// The methods take the operation in the method name, so the engine's own
 	// action vocabulary stays with the engine-manager that runs it.
 	method := act.remote
 	params := map[string]any{"node": node, "engine": engine, "model": model}
 	if node == "" {
-		method, params = localModelRequest(engine, family, act, model)
+		method, params = localModelRequest(engine, act, model)
 	}
 	return call(client, method, params, func(_ *rpc.Message, err error) tea.Msg {
 		return classifyOpResult(what, engine, act.op, err)
@@ -294,13 +287,12 @@ func modelCmd(client *rpc.Client, node, engine, family string, act modelAction, 
 // feed. Reporting a failure is actively misleading: the operator sees "load
 // failed" at the same moment the model finishes loading.
 //
-// Ollama's load is `run_model` with streaming off, which does not answer until
-// the model is resident and has produced a response, so a large model on cold
-// storage exceeds the reply deadline routinely. Install downloads an engine.
+// A load does not answer until the model is resident, so a large model on cold
+// storage can exceed the reply deadline. Install downloads an engine.
 //
 // Start and restart belong here too. The engine manager answers only once the
-// engine passes its readiness probe, and the manifests allow that probe six
-// hundred seconds for Ollama and sixty for LM Studio — the desktop app gives
+// engine passes its readiness probe, and the manifests allow that probe
+// several minutes — the desktop app gives
 // the same calls a fourteen-minute envelope for exactly this reason. Held to
 // the thirty-five-second reply deadline, a cold start behind a slow probe
 // reported failure while the engine went on to come up.

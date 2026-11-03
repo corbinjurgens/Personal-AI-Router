@@ -29,7 +29,7 @@ import (
 // only arrives if all the hops on its path allow the same size, and a frame over
 // the limit is a terminal read error rather than a skipped message.
 //
-// The largest real frame is engine:catalog's Ollama list, around 1.9 MiB.
+// The largest real frame is an engine:catalog list, around 1.9 MiB.
 const maxFrame = jsonrpc.WorkerFrameBytes
 
 // ErrStreamBroken marks a read failure the transport cannot recover from, as

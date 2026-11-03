@@ -111,7 +111,7 @@ var demoStages = []demoStage{
 //
 // backend is the dispatcher's own engine name, and port is a proxy's listen
 // port — never an engine's own. Addressing the proxy is what makes this a demo
-// of PAIR rather than of Ollama: the request enters the router and the backend
+// of PAIR rather than of one engine: the request enters the router and the backend
 // places it. Hitting an engine's port directly would bypass routing, which
 // proxy-inference-routing.mdc prohibits.
 type demoTarget struct {
