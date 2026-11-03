@@ -34,7 +34,6 @@
         "service-contracts:write": "tsx scripts/verify-service-contracts.ts --write",
         "service-contracts:check": "tsx scripts/verify-service-contracts.ts --check",
         "vendor:kaizen-css": "tsx scripts/vendor-kaizen-ui-foundations-css.ts",
-        "scrape:ollama-models": "tsx scripts/scrape-ollama-models.ts",
         "build:modular-binaries": "tsx scripts/build-modular-binaries.ts",
         "build:modular-binaries:win:x64": "tsx scripts/build-modular-binaries.ts --platform=win32 --arch=x64",
         "build:modular-binaries:win:arm64": "tsx scripts/build-modular-binaries.ts --platform=win32 --arch=arm64",

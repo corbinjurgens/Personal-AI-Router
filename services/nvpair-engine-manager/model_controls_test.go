@@ -368,12 +368,6 @@ func TestModelControlsCatalogRawBeforeTrimAndFallback(t *testing.T) {
 			continue // An absent optional primary identifier may use its alias.
 		}
 		t.Run(tc.name, func(t *testing.T) {
-			if got := normalizeOllamaRows([]ollamaLibraryRow{{Name: tc.model, Model: "fallback"}, {Name: "sibling"}}); len(got) != 1 || got[0].ID != "sibling" {
-				t.Fatalf("Ollama retained a malformed row or lost sibling: %+v", got)
-			}
-			if got := normalizeHFRows([]hfModelRow{{ID: tc.model, ModelID: "owner/fallback"}, {ID: "owner/sibling"}}); len(got) != 1 || got[0].ID != "owner/sibling" {
-				t.Fatalf("HF retained a malformed row or lost sibling: %+v", got)
-			}
 			bad, good := modelControlsLlamaRow(tc.model), modelControlsLlamaRow("owner/sibling")
 			bad.ModelID = "owner/fallback"
 			if got := normalizeLlamaCPPRows([]hfModelRow{bad, good}); len(got) != 1 || got[0].ID != "owner/sibling:Q4_K_M" {
@@ -389,10 +383,8 @@ func TestModelControlsCatalogRawBeforeTrimAndFallback(t *testing.T) {
 		{"512 multibyte bytes", strings.Repeat("界", 170) + "aa", "", strings.Repeat("界", 170) + "aa"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ollama := normalizeOllamaRows([]ollamaLibraryRow{{Name: tc.primary, Model: tc.fallback}})
-			hf := normalizeHFRows([]hfModelRow{{ID: tc.primary, ModelID: tc.fallback}})
-			if len(ollama) != 1 || ollama[0].ID != tc.want || len(hf) != 1 || hf[0].ID != tc.want {
-				t.Fatalf("valid identifier changed: Ollama=%+v HF=%+v", ollama, hf)
+			if got, ok := catalogIdentifier(tc.primary, tc.fallback); !ok || got != tc.want {
+				t.Fatalf("valid identifier changed: %q, %v", got, ok)
 			}
 		})
 	}
@@ -432,19 +424,18 @@ func TestModelControlsCatalogJSONSkipsIndividualInvalidFields(t *testing.T) {
 		{"513 bytes", `"` + strings.Repeat("s", 513) + `"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var ollama []ollamaLibraryRow
-			if err := json.Unmarshal([]byte(`[{"name":`+tc.raw+`,"model":"fallback"},{"name":"sibling"}]`), &ollama); err != nil {
-				t.Fatalf("decode Ollama listing: %v", err)
-			}
-			if got := normalizeOllamaRows(ollama); len(got) != 1 || got[0].ID != "sibling" {
-				t.Fatalf("Ollama filtering = %+v", got)
-			}
 			var hf []hfModelRow
 			if err := json.Unmarshal([]byte(`[{"id":`+tc.raw+`,"modelId":"owner/fallback"},{"id":"owner/sibling"}]`), &hf); err != nil {
 				t.Fatalf("decode HF listing: %v", err)
 			}
-			if got := normalizeHFRows(hf); len(got) != 1 || got[0].ID != "owner/sibling" {
-				t.Fatalf("HF filtering = %+v", got)
+			if len(hf) != 2 {
+				t.Fatalf("decoded %d rows, want 2", len(hf))
+			}
+			if _, ok := catalogIdentifier(hf[0].ID, hf[0].ModelID); ok && !hf[0].invalidIdentifier {
+				t.Fatalf("malformed row accepted: %+v", hf[0])
+			}
+			if id, ok := catalogIdentifier(hf[1].ID, hf[1].ModelID); !ok || hf[1].invalidIdentifier || id != "owner/sibling" {
+				t.Fatalf("sibling lost: %q, %v, %+v", id, ok, hf[1])
 			}
 		})
 	}
@@ -560,15 +551,13 @@ func TestModelControlsCatalogCacheReturnBoundaries(t *testing.T) {
 }
 
 func TestModelControlsCatalogFilteredRefreshReplacesLastGood(t *testing.T) {
-	for _, source := range []string{"lmstudio", "llamacpp", "search"} {
+	for _, source := range []string{"llamacpp", "search"} {
 		t.Run(source, func(t *testing.T) {
 			var calls int
 			cache := &listingCache{label: source, models: []CatalogModel{{ID: "old", Name: "old"}}, fetched: time.Now().Add(-2 * catalogCacheTTL)}
 			cache.fetch = func(context.Context) ([]CatalogModel, error) {
 				calls++
 				switch source {
-				case "lmstudio":
-					return normalizeHFRows([]hfModelRow{{ID: "\nprivate-model", ModelID: "fallback"}}), nil
 				case "llamacpp":
 					return normalizeLlamaCPPRows([]hfModelRow{modelControlsLlamaRow("\nowner/model")}), nil
 				default:
@@ -1069,11 +1058,8 @@ func TestModelControlsLoadedRowsKeepValidSiblingsAndMatch(t *testing.T) {
 }
 
 func TestModelControlsCatalogInvalidSecondaryCannotHideBehindPrimary(t *testing.T) {
-	if got := normalizeOllamaRows([]ollamaLibraryRow{{Name: "valid", Model: "private\nmodel"}}); len(got) != 0 {
-		t.Fatalf("Ollama retained invalid alias: %+v", got)
-	}
-	if got := normalizeHFRows([]hfModelRow{{ID: "valid", ModelID: "private\u0085model"}}); len(got) != 0 {
-		t.Fatalf("HF retained invalid alias: %+v", got)
+	if got, ok := catalogIdentifier("valid", "private\u0085model"); ok {
+		t.Fatalf("catalog retained invalid alias: %q", got)
 	}
 	row := modelControlsLlamaRow("owner/valid")
 	row.ModelID = "private\nmodel"
@@ -1452,19 +1438,20 @@ func TestModelControlsCatalogCompleteBodyBeforeCacheReplacement(t *testing.T) {
 			}
 			previous := []CatalogModel{{ID: "owner/previous", Name: "owner/previous"}}
 			previousAt := time.Now().Add(-2 * catalogCacheTTL)
-			catalog.lmStudio.models, catalog.lmStudio.fetched = previous, previousAt
-			got, at, err := catalog.lmStudio.get(context.Background())
+			search := catalog.llamaCPPSearch("query")
+			search.models, search.fetched = previous, previousAt
+			got, at, err := search.get(context.Background())
 			if err != nil {
 				t.Fatalf("refresh with last-good cache: %v", err)
 			}
 			if tc.accepted {
-				if got == nil || len(got) != 0 || !at.After(previousAt) || !catalog.lmStudio.failed.IsZero() {
+				if got == nil || len(got) != 0 || !at.After(previousAt) || !search.failed.IsZero() {
 					t.Fatalf("valid filtered refresh was not authoritative empty: models=%+v at=%v", got, at)
 				}
-			} else if !reflect.DeepEqual(got, previous) || !at.Equal(previousAt) || catalog.lmStudio.failed.IsZero() {
+			} else if !reflect.DeepEqual(got, previous) || !at.Equal(previousAt) || search.failed.IsZero() {
 				t.Fatalf("incomplete body replaced last-good: models=%+v at=%v", got, at)
 			}
-			if _, _, err := catalog.lmStudio.get(context.Background()); err != nil || calls != 2 {
+			if _, _, err := search.get(context.Background()); err != nil || calls != 2 {
 				t.Fatalf("cache/backoff missed after refresh: error=%v calls=%d", err, calls)
 			}
 		})

@@ -79,77 +79,34 @@ func TestModelPublisherRejectsProviderRedirect(t *testing.T) {
 	}
 }
 
-// TestOllamaCatalogLoadsFromEmbeddedFile checks the committed list is compiled in
-// and parses. If the embed directive or the file shape ever breaks, the catalog
-// silently becomes empty, and an empty catalog looks identical to "this engine
-// has nothing to offer".
-func TestOllamaCatalogLoadsFromEmbeddedFile(t *testing.T) {
-	c := newCatalogService()
-	res, err := c.Catalog(context.Background(), "ollama", "linux", "amd64", "")
-	if err != nil {
-		t.Fatalf("ollama catalog: %v", err)
-	}
-	if len(res.Models) == 0 {
-		t.Fatal("embedded ollama catalog is empty")
-	}
-	if res.FetchedAt == "" {
-		t.Error("no scrape timestamp; an operator cannot tell how stale the list is")
-	}
-	if !strings.Contains(res.Source, "ollama.com") {
-		t.Errorf("source = %q", res.Source)
-	}
-
-	for _, m := range res.Models {
-		if m.Name == "" {
-			t.Fatal("a model has no pull name")
-		}
-		if m.ID != m.Name {
-			t.Fatalf("id %q and name %q disagree; both must be pull-ready", m.ID, m.Name)
-		}
-		if !strings.HasPrefix(m.URL, "https://ollama.com/library/") {
-			t.Fatalf("model %q has url %q", m.Name, m.URL)
-		}
-		// The tag must not leak into the library URL path.
-		if strings.Contains(strings.TrimPrefix(m.URL, "https://ollama.com/library/"), ":") {
-			t.Fatalf("model %q url carries a tag: %q", m.Name, m.URL)
-		}
-	}
-}
-
-// TestOllamaCatalogIsServedFromCache checks the embedded list is parsed once
-// rather than on every request: it is several thousand entries.
-func TestOllamaCatalogIsServedFromCache(t *testing.T) {
-	c := newCatalogService()
-	first, _, err := c.ollamaCatalog()
-	if err != nil {
-		t.Fatalf("first load: %v", err)
-	}
-	second, _, err := c.ollamaCatalog()
-	if err != nil {
-		t.Fatalf("second load: %v", err)
-	}
-	if len(first) != len(second) {
-		t.Fatal("repeat load produced a different list")
-	}
-	if len(first) > 0 && &first[0] != &second[0] {
-		t.Error("catalog re-parsed instead of being reused")
-	}
-}
-
-// TestOllamaCatalogFitsInAFrame is the guard for the failure that made this
+// TestLlamaCPPCatalogFitsInAFrame is the guard for the failure that made this
 // method unusable: the reply is one JSON-RPC line, and a line over the
 // worker-path frame cap is a terminal read error, not a dropped message. The
 // broker's peer then closes while the child keeps running, so nothing restarts
 // and every later engine:* call hangs.
 //
-// The check is on the marshalled result rather than the model count, because it
-// is bytes on the wire that matter and a regenerated catalog can grow either by
-// adding rows or by widening them.
-func TestOllamaCatalogFitsInAFrame(t *testing.T) {
+// The check is on the marshalled result of the largest browse list the
+// catalogue can serve, every publisher returning a full page of wide rows,
+// because it is bytes on the wire that matter and a row can grow by widening.
+func TestLlamaCPPCatalogFitsInAFrame(t *testing.T) {
+	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/catalog", func(w http.ResponseWriter, r *http.Request) {
+		author := r.URL.Query().Get("author")
+		rows := make([]hfModelRow, llamaCPPLimit)
+		for i := range rows {
+			rows[i] = ggufRow(fmt.Sprintf("%s/%s-%d", author, strings.Repeat("n", 100), i), i)
+			rows[i].Tags = append(rows[i].Tags, strings.Repeat("t", 100))
+		}
+		_ = json.NewEncoder(w).Encode(rows)
+	}))
+	defer srv.Close()
 	c := newCatalogService()
-	res, err := c.Catalog(context.Background(), "ollama", "linux", "amd64", "")
+	c.baseURL = srv.URL + "/catalog"
+	res, err := c.Catalog(context.Background(), "llamacpp", "linux", "amd64", "")
 	if err != nil {
-		t.Fatalf("ollama catalog: %v", err)
+		t.Fatalf("llama.cpp catalog: %v", err)
+	}
+	if want := len(llamaCPPPublishers) * llamaCPPLimit; len(res.Models) != want {
+		t.Fatalf("got %d models, want %d", len(res.Models), want)
 	}
 	body, err := json.Marshal(res)
 	if err != nil {
@@ -158,23 +115,30 @@ func TestOllamaCatalogFitsInAFrame(t *testing.T) {
 	// The real frame carries a JSON-RPC envelope around this; leave room for it.
 	const envelopeAllowance = 4096
 	if len(body)+envelopeAllowance > jsonrpc.WorkerFrameBytes {
-		t.Errorf("marshalled ollama catalog is %d bytes, over the %d-byte frame cap; "+
+		t.Errorf("marshalled llama.cpp catalog is %d bytes, over the %d-byte frame cap; "+
 			"filter or paginate engine:catalog rather than raising the cap again",
 			len(body), jsonrpc.WorkerFrameBytes)
 	}
-	t.Logf("ollama catalog: %d models, %d bytes (%.0f%% of the %d-byte frame cap)",
-		len(res.Models), len(body),
-		100*float64(len(body))/float64(jsonrpc.WorkerFrameBytes), jsonrpc.WorkerFrameBytes)
 }
 
-// TestLmStudioCatalogCoalescesConcurrentCallers is the guard for the request
+// listingBody is a listing holding one llama.cpp download.
+func listingBody(t *testing.T) []byte {
+	t.Helper()
+	body, err := json.Marshal([]hfModelRow{ggufRow("owner/Model-GGUF", 5)})
+	if err != nil {
+		t.Fatalf("marshal listing: %v", err)
+	}
+	return body
+}
+
+// TestListingCacheCoalescesConcurrentCallers is the guard for the request
 // herd. Both front ends plus the warm-up can ask at once, and the point of the
 // in-flight channel is that they share one upstream request.
 //
 // Run under -race this also covers the close-under-lock fix: the channel used to
 // be closed after releasing the mutex, leaving a window where an arriving caller
 // saw no request in flight and started a second one.
-func TestLmStudioCatalogCoalescesConcurrentCallers(t *testing.T) {
+func TestListingCacheCoalescesConcurrentCallers(t *testing.T) {
 	var requests atomic.Int32
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -182,13 +146,14 @@ func TestLmStudioCatalogCoalescesConcurrentCallers(t *testing.T) {
 	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/catalog", func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		<-release // hold the request open so the callers genuinely overlap
-		_, _ = w.Write([]byte(`[{"id":"lmstudio-community/Model-GGUF","downloads":5}]`))
+		_, _ = w.Write(listingBody(t))
 	}))
 	defer srv.Close()
 	defer unblock()
 
 	c := newCatalogService()
 	c.baseURL = srv.URL + "/catalog"
+	cache := c.llamaCPPSearch("model")
 
 	const callers = 8
 	var wg sync.WaitGroup
@@ -198,7 +163,7 @@ func TestLmStudioCatalogCoalescesConcurrentCallers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			models, _, err := c.lmStudio.get(context.Background())
+			models, _, err := cache.get(context.Background())
 			errs[i], counts[i] = err, len(models)
 		}()
 	}
@@ -222,10 +187,10 @@ func TestLmStudioCatalogCoalescesConcurrentCallers(t *testing.T) {
 	}
 }
 
-// TestLmStudioCatalogBacksOffAfterFailure is the guard for a stall: only a
+// TestListingCacheBacksOffAfterFailure is the guard for a stall: only a
 // success stamped the cache, so against a dead upstream every later call retried
 // and waited out the full timeout before handing back the same stale list.
-func TestLmStudioCatalogBacksOffAfterFailure(t *testing.T) {
+func TestListingCacheBacksOffAfterFailure(t *testing.T) {
 	var requests atomic.Int32
 	fail := true
 	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/catalog", func(w http.ResponseWriter, _ *http.Request) {
@@ -234,29 +199,30 @@ func TestLmStudioCatalogBacksOffAfterFailure(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
-		_, _ = w.Write([]byte(`[{"id":"lmstudio-community/Model-GGUF","downloads":5}]`))
+		_, _ = w.Write(listingBody(t))
 	}))
 	defer srv.Close()
 
 	c := newCatalogService()
 	c.baseURL = srv.URL + "/catalog"
+	cache := c.llamaCPPSearch("model")
 	assertFixtureRejectsProbe(t, srv.URL)
 
 	// Seed a good list, then start failing.
 	fail = false
-	if _, _, err := c.lmStudio.get(context.Background()); err != nil {
+	if _, _, err := cache.get(context.Background()); err != nil {
 		t.Fatalf("seed fetch: %v", err)
 	}
 	fail = true
 
 	// Force a refresh by ageing the cache past its TTL.
-	c.lmStudio.mu.Lock()
-	c.lmStudio.fetched = time.Now().Add(-2 * catalogCacheTTL)
-	c.lmStudio.mu.Unlock()
+	cache.mu.Lock()
+	cache.fetched = time.Now().Add(-2 * catalogCacheTTL)
+	cache.mu.Unlock()
 
 	before := requests.Load()
 	for range 3 {
-		models, _, err := c.lmStudio.get(context.Background())
+		models, _, err := cache.get(context.Background())
 		if err != nil {
 			t.Fatalf("a failed refresh should still serve the stale list: %v", err)
 		}
@@ -269,12 +235,12 @@ func TestLmStudioCatalogBacksOffAfterFailure(t *testing.T) {
 	}
 }
 
-// TestLmStudioCatalogBacksOffWithNothingCached is the same guard for a machine
+// TestListingCacheBacksOffWithNothingCached is the same guard for a machine
 // that has never reached the upstream. The backoff was keyed on having a list
 // to serve, so with an empty cache every call started a fresh fetch and waited
 // out the full timeout — the warm-up, then each modal open, then the terminal
 // browser, each in turn.
-func TestLmStudioCatalogBacksOffWithNothingCached(t *testing.T) {
+func TestListingCacheBacksOffWithNothingCached(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/catalog", func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
@@ -284,10 +250,11 @@ func TestLmStudioCatalogBacksOffWithNothingCached(t *testing.T) {
 
 	c := newCatalogService()
 	c.baseURL = srv.URL + "/catalog"
+	cache := c.llamaCPPSearch("model")
 	assertFixtureRejectsProbe(t, srv.URL)
 
 	for i := range 3 {
-		if _, _, err := c.lmStudio.get(context.Background()); err == nil {
+		if _, _, err := cache.get(context.Background()); err == nil {
 			t.Fatalf("call %d: a failing upstream with nothing cached returned no error", i)
 		}
 	}
@@ -296,10 +263,10 @@ func TestLmStudioCatalogBacksOffWithNothingCached(t *testing.T) {
 	}
 
 	// Once the backoff has run out, the next call tries again.
-	c.lmStudio.mu.Lock()
-	c.lmStudio.failed = time.Now().Add(-2 * catalogRetryAfterFailure)
-	c.lmStudio.mu.Unlock()
-	_, _, _ = c.lmStudio.get(context.Background())
+	cache.mu.Lock()
+	cache.failed = time.Now().Add(-2 * catalogRetryAfterFailure)
+	cache.mu.Unlock()
+	_, _, _ = cache.get(context.Background())
 	if got := requests.Load(); got != 2 {
 		t.Errorf("after the backoff expired: %d requests, want a second attempt", got)
 	}
@@ -312,12 +279,8 @@ func TestNormalizeCatalogEngine(t *testing.T) {
 			t.Errorf("normalizeCatalogEngine(%q) = %q, want %q", in, got, want)
 		}
 	}
-	expectNormalized("ollama", "ollama")
-	expectNormalized("Ollama", "ollama")
-	expectNormalized("  ollama ", "ollama")
-	expectNormalized("lmstudio", "lmstudio")
-	expectNormalized("LM Studio", "lmstudio")
-	expectNormalized("lm-studio", "lmstudio")
+	expectNormalized("LlamaCpp", "llamacpp")
+	expectNormalized("  llamacpp ", "llamacpp")
 	expectNormalized("llamacpp", "llamacpp")
 	expectNormalized("llama-cpp", "llamacpp")
 	expectNormalized("llama.cpp", "llamacpp")
@@ -330,36 +293,6 @@ func TestCatalogRejectsUnknownEngine(t *testing.T) {
 	c := newCatalogService()
 	if _, err := c.Catalog(context.Background(), "vllm", "linux", "amd64", ""); err == nil {
 		t.Error("unknown engine returned a catalog")
-	}
-}
-
-// TestNormalizeHFRowsMarksMLX checks Apple-only quantizations are labelled
-// rather than dropped during normalization. `lms get` refuses them anywhere but
-// Apple Silicon, but the machine that asks is not always the machine that
-// installs, so the drop decision belongs to the caller's platform.
-func TestNormalizeHFRowsMarksMLX(t *testing.T) {
-	rows := []hfModelRow{
-		{ID: "lmstudio-community/Qwen3-8B-GGUF", Downloads: 10},
-		{ID: "lmstudio-community/Qwen3-8B-MLX-4bit", Downloads: 99},
-		{ID: "lmstudio-community/Tagged-Model", Downloads: 50, Tags: []string{"MLX"}},
-	}
-
-	got := normalizeHFRows(rows)
-	if len(got) != 3 {
-		t.Fatalf("normalize kept %d models, want all three (filtering happens later)", len(got))
-	}
-	marked := map[string]bool{}
-	for _, m := range got {
-		marked[m.ID] = m.AppleOnly
-	}
-	if marked["lmstudio-community/Qwen3-8B-GGUF"] {
-		t.Error("a GGUF model was marked Apple-only")
-	}
-	if !marked["lmstudio-community/Qwen3-8B-MLX-4bit"] {
-		t.Error("an MLX repo id was not marked Apple-only")
-	}
-	if !marked["lmstudio-community/Tagged-Model"] {
-		t.Error("an MLX tag was not marked Apple-only")
 	}
 }
 
@@ -394,8 +327,10 @@ func TestFilterForTarget(t *testing.T) {
 // for, so a client can tell the operator rather than presenting a filtered list
 // as universal.
 func TestCatalogEchoesTarget(t *testing.T) {
+	srv, _ := llamaCPPServer(t, "")
 	c := newCatalogService()
-	res, err := c.Catalog(context.Background(), "ollama", "darwin", "amd64", "")
+	c.baseURL = srv.URL + "/catalog"
+	res, err := c.Catalog(context.Background(), "llamacpp", "darwin", "amd64", "")
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
@@ -404,7 +339,7 @@ func TestCatalogEchoesTarget(t *testing.T) {
 	}
 
 	// Omitting both means this host.
-	res, err = c.Catalog(context.Background(), "ollama", "", "", "")
+	res, err = c.Catalog(context.Background(), "llamacpp", "", "", "")
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
@@ -415,70 +350,12 @@ func TestCatalogEchoesTarget(t *testing.T) {
 
 	// A named platform does not borrow this host's architecture: that would
 	// describe a machine the caller did not ask about.
-	res, err = c.Catalog(context.Background(), "ollama", "darwin", "", "")
+	res, err = c.Catalog(context.Background(), "llamacpp", "darwin", "", "")
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
 	if res.Arch != "" {
 		t.Errorf("Arch = %q for a platform named without one, want it left unknown", res.Arch)
-	}
-}
-
-// TestNormalizeHFRowsSortsByDownloads checks the most-used models lead, which is
-// what makes an unfiltered first page useful.
-func TestNormalizeHFRowsSortsByDownloads(t *testing.T) {
-	rows := []hfModelRow{
-		{ID: "a/low", Downloads: 1},
-		{ID: "a/high", Downloads: 100},
-		{ID: "a/mid", Downloads: 50},
-	}
-	got := normalizeHFRows(rows)
-	if got[0].ID != "a/high" || got[2].ID != "a/low" {
-		t.Errorf("order = %q, %q, %q", got[0].ID, got[1].ID, got[2].ID)
-	}
-}
-
-// TestNormalizeHFRowsSkipsUnusableEntries checks an entry with no id is dropped
-// rather than becoming a row that cannot be pulled.
-func TestNormalizeHFRowsSkipsUnusableEntries(t *testing.T) {
-	rows := []hfModelRow{
-		{ID: "", ModelID: ""},
-		{ID: "", ModelID: "a/from-modelid"},
-		{ID: "a/normal"},
-	}
-	got := normalizeHFRows(rows)
-	if len(got) != 2 {
-		t.Fatalf("kept %d rows, want 2", len(got))
-	}
-	for _, m := range got {
-		if m.Name == "" || m.ID == "" {
-			t.Error("kept a row with no pull id")
-		}
-		if !strings.HasPrefix(m.URL, "https://huggingface.co/") {
-			t.Errorf("url = %q", m.URL)
-		}
-		if m.Author != "a" {
-			t.Errorf("author = %q, want the id's owner", m.Author)
-		}
-	}
-}
-
-// TestNormalizeOllamaRowsDedupes checks a duplicated pull name yields one row.
-func TestNormalizeOllamaRowsDedupes(t *testing.T) {
-	rows := []ollamaLibraryRow{
-		{Name: "llama3.2:latest", Size: 1},
-		{Name: "llama3.2:latest", Size: 2},
-		{Name: "qwen3:8b"},
-		{Name: "   "},
-	}
-	got := normalizeOllamaRows(rows)
-	if len(got) != 2 {
-		t.Fatalf("got %d rows, want 2", len(got))
-	}
-	for _, m := range got {
-		if m.Name == "llama3.2:latest" && m.Size != 2 {
-			t.Errorf("duplicate kept size %d, want the later entry's 2", m.Size)
-		}
 	}
 }
 
@@ -748,24 +625,5 @@ func TestLlamaCPPSearchesAreBounded(t *testing.T) {
 	}
 	if c.llamaCPPSearch("first") == first {
 		t.Error("the least recently used search was not evicted")
-	}
-}
-
-// TestQueryIsIgnoredByASourceThatCannotSearch checks a query sent for an engine
-// whose source cannot search returns the whole list, marked unsearchable, for
-// the client to filter itself.
-func TestQueryIsIgnoredByASourceThatCannotSearch(t *testing.T) {
-	c := newCatalogService()
-	all, err := c.Catalog(context.Background(), "ollama", "", "", "")
-	if err != nil {
-		t.Fatalf("ollama catalog: %v", err)
-	}
-	queried, err := c.Catalog(context.Background(), "ollama", "", "", "llama")
-	if err != nil {
-		t.Fatalf("ollama catalog with a query: %v", err)
-	}
-	if queried.Searchable || queried.Query != "" || len(queried.Models) != len(all.Models) {
-		t.Errorf("searchable %v, query %q, %d of %d models",
-			queried.Searchable, queried.Query, len(queried.Models), len(all.Models))
 	}
 }

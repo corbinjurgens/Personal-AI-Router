@@ -450,29 +450,22 @@ The model catalogue is owned by `nvpair-engine-manager` and served over
 `src/electron/service-bridge/model-catalog.ts`; the terminal interface calls the
 same method, so both front ends browse one implementation.
 
-- Ollama models come from a locked, committed list
-  (`services/nvpair-engine-manager/catalog/ollama-models.json`) compiled in with
-  `go:embed` — there is no runtime Ollama scraping. Devs regenerate the list with
-  `npm run scrape:ollama-models` (`scripts/scrape-ollama-models.ts`) and commit
-  it when Ollama's catalog changes;
-- LM Studio models come from the curated `lmstudio-community` catalog, still
-  fetched live from Hugging Face and cached for six hours, with concurrent
-  callers coalesced onto one request and a failure backoff. The cache is warmed
-  when the Overview renderer reports ready, not when the service connects, so a
-  slow or hanging catalog fetch cannot compete with the window's first paint;
 - llama.cpp models come from the 50 most-downloaded GGUF repositories of each
-  approved publisher (`ggml-org`, `bartowski`, and `unsloth`), fetched and cached
-  the same way. It is the one searchable source: a `query` searches up to 50
-  public Hugging Face matches across publishers, each query cached on its own.
-  Both keep only public, generative repositories with a primary `Q4_K_M` file
-  and emit exact `owner/repository:Q4_K_M` pull IDs;
-- the request takes an optional `platform` and `arch`, marks Apple-only (MLX)
-  rows, keeps them only for Apple Silicon, and echoes the target it filtered
-  for, so a client driving a peer is not offered models that peer cannot
-  install. The desktop names no target: the hub installs only to this machine,
-  which is also the one answering;
-- the Ollama reply is a single multi-megabyte frame, so every hop on its path
-  shares `jsonrpc.WorkerFrameBytes`. See `docs/services-backend.md`;
+  approved publisher (`ggml-org`, `bartowski`, and `unsloth`), fetched live from
+  Hugging Face and cached for six hours, with concurrent callers coalesced onto
+  one request and a failure backoff. The cache is warmed when the Overview
+  renderer reports ready, not when the service connects, so a slow or hanging
+  catalog fetch cannot compete with the window's first paint. The catalogue is
+  searchable: a `query` searches up to 50 public Hugging Face matches across
+  publishers, each query cached on its own. It keeps only public, generative
+  repositories with a primary `Q4_K_M` file and emits exact
+  `owner/repository:Q4_K_M` pull IDs;
+- the request takes an optional `platform` and `arch` and echoes the target it
+  was asked for. The llama.cpp list is not machine-locked, so nothing is
+  filtered for it. The desktop names no target: the hub installs only to this
+  machine, which is also the one answering;
+- the reply is a single JSON-RPC frame, so every hop on its path shares
+  `jsonrpc.WorkerFrameBytes`. See `docs/services-backend.md`;
 - model pulls still run through `nvpair-engine-manager`.
 
 ## Inference Demo
