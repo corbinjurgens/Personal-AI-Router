@@ -165,6 +165,9 @@ type Executor struct {
 	progress  *progressHub
 	downloads *modelDownloads
 	baseDir   string // user-scoped install base
+	// modelSources are the folders whose models engines offer in place
+	// (modelsources.go). main sets the built-in defaults; nil offers none.
+	modelSources []modelSource
 	// desired persists explicit per-engine ON/OFF intent and allocated endpoints.
 	// Shutdown clears endpoint evidence without rewriting saved intent.
 	desired *desiredStateStore

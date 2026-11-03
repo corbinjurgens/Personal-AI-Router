@@ -474,6 +474,11 @@ func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st
 		}
 		return err
 	}
+	if !serving {
+		if preset := e.llamaSourcePreset(ctx, st, engine, rt, launch); preset != "" {
+			launch.Args = append(slices.Clone(launch.Args), "--models-preset", preset)
+		}
+	}
 	var prepared *llamaServingLaunch
 	var bufferInputs map[string]modelEstimateInput
 	var releaseSnapshot func()
