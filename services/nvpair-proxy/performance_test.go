@@ -806,26 +806,6 @@ func TestPerformancePreparationSkipsIgnoredContent(t *testing.T) {
 	}
 }
 
-func TestPerformancePreparationPreservesNestedOptions(t *testing.T) {
-	a, ok := performanceOptionsDigest([]byte(`{"model":"m","options":{"b":[1e0,"a\u003cb"],"a":9007199254740993.0}}`), "ollama")
-	if !ok {
-		t.Fatal("valid nested options refused")
-	}
-	b, ok := performanceOptionsDigest([]byte(`{"options":{"a":9007199254740993,"b":[1,"a<b"]},"model":"alias"}`), "ollama")
-	if !ok || a != b {
-		t.Fatal("nested canonical options changed digest")
-	}
-	for _, raw := range []string{
-		`{"model":"m","messages":[{"role":"user","ROLE":"assistant"}]}`,
-		`{"model":"m","options":{"k":1,"\u006b":1}}`,
-		`{"model":"m","options":{"K":1,"\u212a":1}}`,
-	} {
-		if _, ok := performanceOptionsDigest([]byte(raw), "ollama"); ok {
-			t.Fatal("duplicate decoded/folded key accepted")
-		}
-	}
-}
-
 func TestPerformancePreparationImpossibleBeforeAllocation(t *testing.T) {
 	root, err := newBufferBudget(120000, time.Second)
 	if err != nil {
@@ -1717,24 +1697,6 @@ func TestPerformanceDeliveryFailureExcludesRate(t *testing.T) {
 	}
 }
 
-func TestPerformanceOllamaNativeDestination(t *testing.T) {
-	p := performanceProxy(t, "ollama")
-	u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		if _, err := io.WriteString(w, "{\"done\":true,\"eval_count\":3,\"eval_duration\":1000000000}\n"); err != nil {
-			t.Error(err)
-		}
-	}))
-	defer u.Close()
-	setBackend(t, p.soleFacade(), u.URL, true)
-	w := httptest.NewRecorder()
-	p.soleFacade().serveIngress(w, httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"m","stream":true,"prompt":"x"}`)), "peer")
-	s := performanceOne(t, p)
-	if s.Key.Model != "m:latest" || s.Outcome != performancewire.OutcomeCompleted || s.DecodeNs == nil || *s.DecodeNs != 1000000000 || s.OutputTokens == nil || *s.OutputTokens != 3 || s.EngineDecodeTokensPerSecond != nil {
-		t.Fatalf("native measurement=%+v", s)
-	}
-}
-
 func TestPerformanceStreamNumericSeam(t *testing.T) {
 	test := func(name, payload string, check func(*testing.T, streamFrameResult)) {
 		t.Run(name, func(t *testing.T) {
@@ -1810,28 +1772,6 @@ func TestPerformanceStreamNumericSeam(t *testing.T) {
 			t.Fatalf("outcome=%v", r.Outcome)
 		}
 	})
-}
-
-func TestPerformanceResultOwnsNumericCopy(t *testing.T) {
-	r, err := newStreamFrameReader(streamFrameConfig{Budget: newFrameBudget(64 << 20), Protocol: streamProtocolNDJSON, Upstream: io.NopCloser(strings.NewReader("{\"done\":true,\"eval_count\":3,\"eval_duration\":1000000000}\n")), Extract: func(b []byte) performanceExtractMetadata {
-		return extractPerformancePayload(b, performanceExtractQualification{EngineFamily: "ollama", APIPath: "/api/generate", Streaming: true})
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	if _, err := io.Copy(io.Discard, r); err != nil {
-		t.Fatal(err)
-	}
-	a := r.Result()
-	b := r.Result()
-	if !reflect.DeepEqual(a, b) || a.Numeric.OutputTokens == nil {
-		t.Fatal("missing stable numeric copy")
-	}
-	*a.Numeric.OutputTokens = 99
-	if *r.Result().Numeric.OutputTokens != 3 {
-		t.Fatal("result aliases reader storage")
-	}
 }
 
 func TestPerformanceTimingReadFieldsInvalidateStickyEvidence(t *testing.T) {

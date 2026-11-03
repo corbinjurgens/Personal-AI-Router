@@ -66,20 +66,11 @@ func newStopPauseEngine(t *testing.T, path, media, first string) *stopPauseEngin
 	return e
 }
 
-// continuityEngine is the engine whose facade classifies path as inference:
-// the NDJSON routes are Ollama-native, the others are OpenAI-compatible.
-func continuityEngine(path string) string {
-	if strings.HasPrefix(path, "/api/") {
-		return "ollama"
-	}
-	return "llamacpp"
-}
-
 func TestStopPauseRouting(t *testing.T) {
 	committed := func(name, entry, path, media, first string, protocol streamProtocol, requesterCancel bool) {
 		t.Run(name, func(t *testing.T) {
 			w := &recordingWriter{}
-			p := performanceProxyWithCodec(t, continuityEngine(path), NewCodec(w))
+			p := performanceProxyWithCodec(t, "llamacpp", NewCodec(w))
 			e := newStopPauseEngine(t, path, media, first)
 			f := p.soleFacade()
 			setBackend(t, f, e.URL, true)
@@ -190,9 +181,7 @@ func TestStopPauseRouting(t *testing.T) {
 		})
 	}
 	committed("local concrete committed SSE", "local", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
-	committed("local concrete committed NDJSON", "local", "/api/chat", "application/x-ndjson", continuityNDJSONEvent, streamProtocolNDJSON, false)
 	committed("terminal peer ordinary committed SSE", "peer", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
-	committed("terminal peer ordinary committed NDJSON", "peer", "/api/chat", "application/x-ndjson", continuityNDJSONEvent, streamProtocolNDJSON, false)
 	committed("local strict committed SSE", "strict local", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
 	committed("terminal peer strict committed SSE", "strict peer", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
 	committed("local hybrid committed SSE", "hybrid", routeChatCompletions, "text/event-stream", continuitySSEEvent, streamProtocolSSE, false)
@@ -302,7 +291,7 @@ func stopPausePeerHeaders(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			engineCancelled := make(chan struct{})
 			var engineHits atomic.Int32
-			peer := newProxyReverseFixture(t, continuityEngine(path), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			peer := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				engineHits.Add(1)
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
 					t.Errorf("read engine request: %v", err)
@@ -445,7 +434,6 @@ func stopPausePeerHeaders(t *testing.T) {
 		})
 	}
 	test("SSE", routeChatCompletions, "text/event-stream", continuitySSEEvent+"data: [DONE]\n\n")
-	test("NDJSON", "/api/chat", "application/x-ndjson", continuityNDJSONEvent+"{\"done\":true}\n")
 }
 
 func stopPauseHybrid(t *testing.T, f *facade, w http.ResponseWriter, r *http.Request, body string, attempts int) {

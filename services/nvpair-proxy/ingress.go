@@ -146,7 +146,7 @@ func (f *facade) handlePlain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Engine-manager marks its private identity/action requests so this
-	// compatibility facade can never be mistaken for the local Ollama backend.
+	// compatibility facade can never be mistaken for the local engine backend.
 	if r.Header.Get(engineIdentityProbeHeader) == "1" {
 		writeIngressError(w, http.StatusConflict, "proxy-facade",
 			"the compatibility facade is not the "+f.profile.DisplayName+" engine")

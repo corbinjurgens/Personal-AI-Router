@@ -106,7 +106,6 @@ func TestServedModelsCaseSensitivity(t *testing.T) {
 	test("descriptor engine model case", "llamacpp-custom", "qwen3-8b", "QWEN3-8B", false)
 	test("llamacpp exact", "llamacpp", "m:tag", "m:tag", true)
 	test("llamacpp untagged request", "llamacpp", "m", "m:tag", false)
-	test("ollama untagged request", "ollama", "m", "m:latest", true)
 	test("descriptor engine exact", "llamacpp-custom", "qwen3-8b", "qwen3-8b", true)
 }
 

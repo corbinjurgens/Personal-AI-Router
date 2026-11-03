@@ -142,7 +142,7 @@
     },
     {
       "name": "unsupported route",
-      "route": "/api/chat",
+      "route": "/unsupported",
       "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
       "reject": "is not qualified"
     }

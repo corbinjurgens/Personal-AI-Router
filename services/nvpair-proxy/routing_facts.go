@@ -162,11 +162,11 @@ func requestedDescriptor(model, tier, path string) *routingRequestedDescriptor {
 		d.tier = 3
 	}
 	switch path {
-	case "/api/chat", "/v1/chat/completions", "/v1/messages":
+	case "/v1/chat/completions", "/v1/messages":
 		d.mode = 1
-	case "/api/generate", "/v1/completions":
+	case "/v1/completions":
 		d.mode = 2
-	case "/api/embed", "/api/embeddings", "/v1/embeddings":
+	case "/v1/embeddings":
 		d.mode = 3
 	}
 	return d

@@ -915,7 +915,7 @@ func TestQualificationDocumentRejects(t *testing.T) {
 			e["accounting"] = map[string]any{"method": "bytes-div-4"}
 			return doc(e)
 		}, "accounting method"},
-		{"unsupported route", func() []byte { e := valid(); e["routes"] = []string{"/api/chat"}; return doc(e) }, "route"},
+		{"unsupported route", func() []byte { e := valid(); e["routes"] = []string{"/unsupported"}; return doc(e) }, "route"},
 		{"no model digest", func() []byte { e := valid(); e["modelDigests"] = []string{}; return doc(e) }, "modelDigests"},
 		{"prefixed launch digest", func() []byte {
 			e := valid()

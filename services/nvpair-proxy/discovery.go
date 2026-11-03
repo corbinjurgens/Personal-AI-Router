@@ -4,9 +4,9 @@
 package main
 
 // Discovery is the proxy's routing-target set. Post-cutover the proxy
-// no longer runs its own _nvpair-ollama browse: routing targets are pushed down
-// from the broker's discovery relay (discovery:nodes snapshots for the ol
-// service) into the subscribed overlay, merged with user-added manual nodes. The
+// no longer runs its own per-engine browse: routing targets are pushed down
+// from the broker's discovery relay into the subscribed overlay for each engine,
+// merged with user-added manual nodes. The
 // proxy is
 // itself advertised — as an ol service — by the node-scanner daemon's single
 // _nvpair-node record, keyed off the engine port the broker's poller registers.
@@ -420,7 +420,7 @@ func (d *Discovery) Has(id string) bool {
 // broker pushes the full filtered snapshot on every change, so the overlay is
 // replaced wholesale; the returned diff lets the caller emit node/discovered|
 // updated|removed so a consumer (the UI) learns which peers currently run this
-// engine — the signal the proxy's own _nvpair-ollama browse provided before
+// engine — the signal the proxy's own per-engine browse provided before
 // discovery was consolidated onto the relay. Manual nodes are a separate overlay
 // and are untouched.
 func (d *Discovery) SetSubscribed(nodes []Node) (discovered, updated, removed []Node) {

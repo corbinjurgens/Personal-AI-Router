@@ -15,8 +15,7 @@ package main
 // The built-in engines are one fixed entry each here plus one in the broker's
 // table. The values that are derivable are derived: the applog component and
 // the error-ID prefix both come from Name via ComponentName, so they cannot
-// disagree with each other. The persisted-port filename is declared instead,
-// because Ollama's predates the multi-engine world — see PortFile in
+// disagree with each other. The persisted-port filename is declared by
 // nvpair-shared/engines.
 //
 // Any other engine is fronted from its descriptor (dynamicProfile): its
@@ -29,18 +28,11 @@ import (
 	"strings"
 
 	"nvpair-shared/engines"
-	"nvpair-shared/nodepolicy"
 )
 
-// routeRole classifies an inbound request path. It carries the HTTP method
-// because the method is part of the classification, not a separate axis: a
-// POST to /v1/models is not a model list, and a GET to /api/chat is not
-// inference. Folding them into one constant keeps the two from disagreeing.
-//
-// The dialect distinction is meaningful only for model-list roles. All of
-// Ollama's inference paths are handled identically — no envelope, identity
-// field or response shape is selected — so there is deliberately no
-// per-dialect inference role.
+// routeRole classifies an inbound request path and HTTP method together.
+// A POST to /v1/models is not a model list, and a GET to an inference path
+// does not emit a workload.
 type routeRole int
 
 const (
@@ -49,12 +41,6 @@ const (
 	// notifications, and retries a 404 on another owner.
 	roleInferencePOST routeRole = iota
 
-	// roleModelListNativeGET is Ollama's /api/tags dialect: the upstream
-	// envelope carries a "models" array, each record's identity is its
-	// "model" field falling back to "name", and the federated response is
-	// re-emitted as {"models": [...]}.
-	roleModelListNativeGET
-
 	// roleModelListOpenAIGET is the OpenAI /v1/models dialect: the upstream
 	// envelope carries a "data" array, each record's identity is its "id",
 	// and the federated response is re-emitted as
@@ -62,24 +48,12 @@ const (
 	roleModelListOpenAIGET
 )
 
-// modelNaming is how an engine spells a model identifier. It governs the
-// native model list's dedupe key and nodeAdvertisesModel's match against a
-// node's advertised inventory; those two must agree there, or the proxy can
-// list a model it then refuses to route.
-//
-// The OpenAI list path (roleModelListOpenAIGET) is deliberately outside that
-// pairing: it dedupes on the upstream identity verbatim, as the pre-unification
-// proxies both did, while nodeAdvertisesModel still normalizes. Widening the
-// claim to "both list paths" would describe code that does not exist.
+// modelNaming is the model identifier convention shared by facade profiles.
 type modelNaming int
 
 const (
-	// impliedLatestTag is Ollama's convention: an untagged name means the
-	// ":latest" tag, so "llama3" and "llama3:latest" are one model.
-	impliedLatestTag modelNaming = iota
-
 	// exactID compares identifiers byte for byte.
-	exactID
+	exactID modelNaming = iota
 )
 
 // route is one classified request path.
@@ -108,8 +82,7 @@ type engineProfile struct {
 
 	// Routes classifies the paths this engine's clients call. It is NOT an
 	// allowlist: an unlisted path is forwarded verbatim, which is how
-	// /api/show, /api/pull, /api/ps, /api/version and OPTIONS preflights keep
-	// working.
+	// unclassified engine controls and OPTIONS preflights keep working.
 	Routes []route
 
 	// ModelNaming is how this engine spells model identifiers.
@@ -128,27 +101,10 @@ type engineProfile struct {
 	SupportsHostAlias bool
 }
 
-// ollamaNativeRoutes is Ollama's native /api surface: the ollama-api protocol.
-var ollamaNativeRoutes = []route{
-	{Path: "/api/generate", Role: roleInferencePOST},
-	{Path: "/api/chat", Role: roleInferencePOST},
-	{Path: "/api/embeddings", Role: roleInferencePOST},
-	{Path: "/api/embed", Role: roleInferencePOST},
-	{Path: "/api/tags", Role: roleModelListNativeGET},
-}
-
 // openAIModelListRoutes is the OpenAI-compatible /v1/models list.
 var openAIModelListRoutes = []route{
 	{Path: "/v1/models", Role: roleModelListOpenAIGET},
 }
-
-// ollamaBaseRoutes is the engine-specific surface that Ollama exposes before
-// the shared compatibility routes are added.
-var ollamaBaseRoutes = slices.Concat(ollamaNativeRoutes, openAIModelListRoutes)
-
-// lmStudioBaseRoutes is the engine-specific surface that LM Studio exposes
-// before the shared compatibility routes are added.
-var lmStudioBaseRoutes = slices.Clone(openAIModelListRoutes)
 
 // llamaCPPBaseRoutes serves both model-list paths through the fleet inventory,
 // querying llama.cpp's router endpoint. Its response uses the OpenAI envelope.
@@ -171,11 +127,9 @@ var anthropicInferenceRoutes = []route{
 
 // protocolRoutes is the proxy's protocol registry: the route set each
 // descriptor protocol selects for a dynamic facade. It is finite and coded; a
-// protocol missing here cannot be fronted, and engines.ProxyCanFront refuses it
-// before a facade is built. TestProtocolRoutesCoverFacadeProtocols keeps this
-// table and engines.FacadeProtocols in step.
+// protocol missing here cannot be fronted. dynamicProfile refuses it before
+// a facade is built. TestProtocolRoutesMatchSupportedProtocols pins this registry.
 var protocolRoutes = map[string][]route{
-	engines.ProtocolOllamaAPI:         ollamaNativeRoutes,
 	engines.ProtocolOpenAIV1:          slices.Concat(openAIModelListRoutes, openAIInferenceRoutes),
 	engines.ProtocolOpenAIChat:        slices.Concat(openAIModelListRoutes, []route{{Path: "/v1/chat/completions", Role: roleInferencePOST}}),
 	engines.ProtocolAnthropicMessages: anthropicInferenceRoutes,
@@ -216,11 +170,7 @@ func dynamicProfile(d engines.Descriptor) (engineProfile, error) {
 			}
 		}
 	}
-	naming := exactID
-	if d.ModelNaming == engines.ModelNamingImpliedLatestTag {
-		naming = impliedLatestTag
-	}
-	return engineProfile{Engine: identity, Family: d.Family, Routes: routes, ModelNaming: naming}, nil
+	return engineProfile{Engine: identity, Family: d.Family, Routes: routes, ModelNaming: exactID}, nil
 }
 
 // dynamic reports whether the profile was built from a descriptor rather than
@@ -236,28 +186,23 @@ func buildProfiles() []engineProfile {
 	ollama, _ := engines.ByName("ollama")
 	lmstudio, _ := engines.ByName("lmstudio")
 	llamacpp, _ := engines.ByName("llamacpp")
-	ollamaRoutes := slices.Concat(ollamaBaseRoutes, openAIInferenceRoutes, anthropicInferenceRoutes)
-	lmStudioRoutes := slices.Concat(lmStudioBaseRoutes, openAIInferenceRoutes, anthropicInferenceRoutes)
 	llamaCPPRoutes := slices.Concat(llamaCPPBaseRoutes, openAIInferenceRoutes)
 
 	return []engineProfile{
 		{
 			Engine:                ollama,
 			StandalonePort:        11435,
-			Routes:                ollamaRoutes,
-			ModelNaming:           impliedLatestTag,
+			Routes:                slices.Concat(openAIModelListRoutes, openAIInferenceRoutes, anthropicInferenceRoutes),
+			ModelNaming:           exactID,
 			ReservedPersistedPort: 0,
 			SupportsHostAlias:     true,
 		},
 		{
-			Engine:         lmstudio,
-			StandalonePort: 1234,
-			Routes:         lmStudioRoutes,
-			ModelNaming:    exactID,
-			// 1235 is where engine-manager runs a managed LM Studio, so a
-			// proxy that restored it would sit on the engine's own port. The
-			// stored value predates the current default of 1234.
-			ReservedPersistedPort: 1235,
+			Engine:                lmstudio,
+			StandalonePort:        1234,
+			Routes:                slices.Concat(openAIModelListRoutes, openAIInferenceRoutes, anthropicInferenceRoutes),
+			ModelNaming:           exactID,
+			ReservedPersistedPort: 0,
 		},
 		{
 			Engine:                llamacpp,
@@ -326,21 +271,11 @@ func (r routeRole) method() string {
 
 // isModelList reports whether a role serves the federated model list.
 func (r routeRole) isModelList() bool {
-	return r == roleModelListNativeGET || r == roleModelListOpenAIGET
+	return r == roleModelListOpenAIGET
 }
 
-// normalizeModel applies the engine's naming convention to a model
-// identifier, so the federated list's dedupe key and the routing gate agree.
-// A reserved hybrid alias is not a model identifier: it is returned as is, so
-// the implied ":latest" tag never turns "weak" into the model "weak:latest".
+// normalizeModel trims surrounding whitespace and otherwise preserves the
+// exact identifier used by the engine inventory.
 func (p engineProfile) normalizeModel(model string) string {
-	model = strings.TrimSpace(model)
-	if nodepolicy.IsReservedAlias(model) {
-		return model
-	}
-	naming := engines.ModelNamingExact
-	if p.ModelNaming == impliedLatestTag {
-		naming = engines.ModelNamingImpliedLatestTag
-	}
-	return engines.NormalizeModelName(model, naming)
+	return engines.NormalizeModelName(model, engines.ModelNamingExact)
 }

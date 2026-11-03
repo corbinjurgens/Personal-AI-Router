@@ -755,12 +755,12 @@ func TestRequestOptionsOwnedBuffers(t *testing.T) {
 
 func TestOwnedInferenceBuffersAliasBorrowedScan(t *testing.T) {
 	for _, tc := range []struct{ name, target, body, want string }{
-		{"folded escaped key and value", "/api/chat", `{"Na\u004de":"  weak\u002dapi\u2003"}`, "weak-api"},
-		{"completed prefix before malformed suffix", "/api/chat", `{"name":"weak-api","broken":`, "weak-api"},
-		{"completed string before invalid separator", "/api/chat", `{"name":"weak-api"invalid`, "weak-api"},
-		{"malformed value before later alias", "/api/chat", `{"ignored":[,],"name":"weak-api"}`, ""},
-		{"unfinished alias string", "/api/chat", `{"name":"weak-api`, ""},
-		{"null and bare aliases remain eligible", "/api/chat", `{"model":null,"name":"weak"}`, ""},
+		{"folded escaped key and value", "/v1/chat/completions", `{"Na\u004de":"  weak\u002dapi\u2003"}`, "weak-api"},
+		{"completed prefix before malformed suffix", "/v1/chat/completions", `{"name":"weak-api","broken":`, "weak-api"},
+		{"completed string before invalid separator", "/v1/chat/completions", `{"name":"weak-api"invalid`, "weak-api"},
+		{"malformed value before later alias", "/v1/chat/completions", `{"ignored":[,],"name":"weak-api"}`, ""},
+		{"unfinished alias string", "/v1/chat/completions", `{"name":"weak-api`, ""},
+		{"null and bare aliases remain eligible", "/v1/chat/completions", `{"model":null,"name":"weak"}`, ""},
 		{"query percent and Unicode whitespace", "/props?other=%xx&%6dodel=%E2%80%83weak%2dapi+", `{}`, "weak-api"},
 		{"malformed query alias skipped", "/props?model=weak-api%xx&model=medium-local", `{}`, "medium-local"},
 		{"semicolon query field skipped", "/props?model=weak-api;ignored&model=strong-api", `{}`, "strong-api"},
@@ -1093,7 +1093,7 @@ func bufferFixtureRemotePreparationBytes(t *testing.T, body string) int64 {
 		return 0
 	}
 	// The origin observes peer framing with syntax storage only; it does not
-	// fingerprint remote execution. Native NDJSON has no SSE payload grant.
+	// fingerprint remote execution. SSE additionally reserves its payload grant.
 	return streamFrameAllowance(request.protocol, int64(request.choices), streamFrameSyntaxBytes)
 }
 

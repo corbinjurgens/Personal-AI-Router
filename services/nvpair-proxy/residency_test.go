@@ -459,23 +459,6 @@ func TestResidentCapacityAggregateRefusal(t *testing.T) {
 	}, nodepolicy.ModelReasonNotInstalled)
 }
 
-// Engine-specific (Ollama implied :latest): two installed spellings of one
-// model are aliases, even with an equal digest.
-func TestResidentCapacityOllamaInstalledAliasesRefused(t *testing.T) {
-	h, in := residentHarnessFor(t, "ollama", "m:latest", "n:latest")
-	p := h.a.currentPolicy()
-	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "ollama", Model: "n:latest"})
-	h.a.setPolicy(p)
-	h.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m:latest", "m", "n:latest")})
-	result, err := h.a.prepareResident("proxy", in)
-	if err != nil || result.ReservationID != "" || len(result.Refusals) != 1 || result.Refusals[0].Reason != nodepolicy.ModelReasonUnqualified {
-		t.Fatalf("prepare=%+v error=%v, want %s", result, err, nodepolicy.ModelReasonUnqualified)
-	}
-	if h.a.currentActive() != 0 {
-		t.Fatal("refused batch consumed capacity")
-	}
-}
-
 func TestResidentCapacityDuplicatePayloadAndDeadline(t *testing.T) {
 	h, in := residentHarness(t, "m")
 	clock := useStrictClock(h.a)
@@ -527,12 +510,9 @@ func TestResidentCapacityMemorySumCannotOverflow(t *testing.T) {
 }
 
 func TestServedResidentPrepareBindingRefusals(t *testing.T) {
-	for _, field := range []string{"proxy", "revision", "manager", "identity", "normalization"} {
+	for _, field := range []string{"proxy", "revision", "manager", "identity"} {
 		t.Run(field, func(t *testing.T) {
 			h, in := residentHarness(t, "m")
-			if field == "normalization" {
-				h, in = residentHarnessFor(t, "ollama", "m:latest")
-			}
 			switch field {
 			case "proxy":
 				in.ProxyRunID = "old-proxy"
@@ -542,8 +522,6 @@ func TestServedResidentPrepareBindingRefusals(t *testing.T) {
 				in.ManagerIncarnation = ""
 			case "identity":
 				in.Identity.EngineRunID = "old-engine"
-			case "normalization":
-				in.Model = "m"
 			}
 			result, err := h.a.prepareResident("proxy", in)
 			if field == "proxy" {
@@ -1528,16 +1506,5 @@ func TestServedResidentRecoveryRPC(t *testing.T) {
 	}
 	if err := json.Unmarshal(response.Result, &observed); err != nil || !observed.Settled || h.a.currentActive() != 0 {
 		t.Fatalf("observe=%s error=%v active=%d", response.Result, err, h.a.currentActive())
-	}
-}
-
-// Engine-specific (Ollama implied :latest): the untagged spelling of the
-// resident model is not the canonical one the grant is bound to.
-func TestServedResidentPrepareBindingRefusesUntaggedOllamaName(t *testing.T) {
-	h, in := residentHarnessFor(t, "ollama", "m:latest")
-	in.Model = "m"
-	result, err := h.a.prepareResident("proxy", in)
-	if err != nil || result.ReservationID != "" || len(result.Refusals) != 1 || result.Refusals[0].Reason != nodepolicy.ModelReasonUnqualified || h.a.currentActive() != 0 {
-		t.Fatalf("binding accepted: result=%+v error=%v", result, err)
 	}
 }

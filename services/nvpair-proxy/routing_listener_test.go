@@ -379,7 +379,7 @@ func TestRoutingListener_BindsLoopbackOnly(t *testing.T) {
 
 func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t *testing.T) {
 	const selfID = "self-uuid"
-	tc := ollamaCase(t)
+	tc := llamacppCase(t)
 	models := append([]string{"mid:7b"}, allAliases...)
 	newFixture := func(t *testing.T) (*Proxy, *recordingWriter, *recordingEngine) {
 		t.Helper()
@@ -414,7 +414,7 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 	t.Run("control: the same request through the facade reaches the engine", func(t *testing.T) {
 		p, _, local := newFixture(t)
 		rec := httptest.NewRecorder()
-		p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"mid:7b"}`)))
+		p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"mid:7b"}`)))
 		if rec.Code != http.StatusOK || local.hits() != 1 {
 			t.Fatalf("control: status %d with %d engine hits, want 200 and 1", rec.Code, local.hits())
 		}
@@ -426,7 +426,6 @@ func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t
 		port := boundPort(p)
 		for _, path := range []string{
 			"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/messages",
-			"/api/generate", "/api/chat", "/api/embeddings", "/api/embed",
 		} {
 			got := call(t, port, http.MethodPost, path, nil)
 			if got.status != http.StatusNotFound {
@@ -515,13 +514,12 @@ func TestRoutingListener_RejectsMethodsAndPaths(t *testing.T) {
 	test("model detail path", http.MethodGet, "/v1/models/weak", http.StatusNotFound, "not_found")
 	test("trailing slash on the list", http.MethodGet, "/v1/models/", http.StatusNotFound, "not_found")
 	test("trailing slash on an inference route", http.MethodPost, "/v1/chat/completions/", http.StatusNotFound, "not_found")
-	test("engine native model list", http.MethodGet, "/api/tags", http.StatusNotFound, "not_found")
 	test("llama.cpp model list", http.MethodGet, "/models", http.StatusNotFound, "not_found")
-	test("engine passthrough", http.MethodPost, "/api/show", http.StatusNotFound, "not_found")
+	test("engine passthrough", http.MethodPost, "/props", http.StatusNotFound, "not_found")
 	test("root", http.MethodGet, "/", http.StatusNotFound, "not_found")
 
 	t.Run("query string on an inference route", func(t *testing.T) {
-		for _, target := range []string{"/v1/chat/completions?x=1", "/v1/chat/completions?", "/api/chat?model=weak-api"} {
+		for _, target := range []string{"/v1/chat/completions?x=1", "/v1/chat/completions?", "/v1/chat/completions?model=weak-api"} {
 			got := call(t, port, http.MethodPost, target, nil)
 			if got.status != http.StatusBadRequest || got.code(t) != "query_not_allowed" {
 				t.Errorf("POST %s = %d %s, want 400 query_not_allowed", target, got.status, got.body)
@@ -843,7 +841,7 @@ func holdAddress(t *testing.T, address, dial, marker string) (int, func() answer
 			if _, err := ln.(*net.TCPListener).SyscallConn(); err != nil {
 				t.Fatalf("foreign holder's listener was closed: %v", err)
 			}
-			got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/api/chat")
+			got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/v1/chat/completions")
 			if err != nil {
 				t.Fatalf("ask the holder: %v", err)
 			}
@@ -852,7 +850,7 @@ func holdAddress(t *testing.T, address, dial, marker string) (int, func() answer
 		// Wildcard listeners may be shadowed by an unrelated specific-address
 		// listener. Establish identity before the action, then retain this exact
 		// connection so later address reuse cannot redirect the assertion.
-		if got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/api/chat"); err != nil || got.status != http.StatusOK || string(got.body) != marker {
+		if got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/v1/chat/completions"); err != nil || got.status != http.StatusOK || string(got.body) != marker {
 			_ = conn.Close()
 			srv.Close()
 			continue

@@ -300,7 +300,7 @@ func TestHandleHTTP_StopsAtDispatchBudget(t *testing.T) {
 
 // TestHandleHTTP_NonInferenceIsNotRetriedBeyondItsCandidates keeps the retry
 // budget off state-changing control-plane routes (spec §5.1). A 5xx is
-// retryable regardless of route, so without the bound a failed POST /api/pull
+// retryable regardless of route, so without the bound a failed POST /props
 // would be replayed into repeated model downloads. One owner means one
 // dispatch.
 func TestHandleHTTP_NonInferenceIsNotRetriedBeyondItsCandidates(t *testing.T) {

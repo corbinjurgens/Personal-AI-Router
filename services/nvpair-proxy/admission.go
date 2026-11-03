@@ -7,8 +7,8 @@ package main
 //
 // One controller per process, shared by every facade, because the limits it
 // enforces are the machine's: one GPU, one memory pool, one set of resident
-// models across every engine. A per-facade controller would let Ollama and
-// LM Studio each believe they had the machine to themselves, which is the
+// models across every engine. A per-facade controller would let engine facades
+// each believe they had the machine to themselves, which is the
 // same reasoning that puts the reservation map on the process (spec.md §3.1).
 //
 // It runs on the destination side: in the cluster ingress for work a peer

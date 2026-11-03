@@ -128,7 +128,7 @@ type RequestStartedEvent struct {
 // rejection path (no forward happened) and upstream-error path
 // (ModifyResponse is never called on connection/dial failures). This
 // is the "is the node snappy?" signal — distinct from Duration,
-// which for streaming Ollama responses is dominated by token
+// which for streaming engine responses is dominated by token
 // generation time and so doesn't really reflect latency at all.
 type RequestEvent struct {
 	ID       string `json:"id"`
@@ -514,7 +514,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	// inference requests still in flight rather than letting them run to
 	// completion: cancelling the proxy's root context propagates to every
 	// in-flight request context — and thus the upstream reverse-proxy
-	// connection — so the target Ollama sees the client disconnect and stops
+	// connection — so the target engine sees the client disconnect and stops
 	// generating instead of burning the GPU on a result nobody will read.
 	cancel()
 
@@ -672,7 +672,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 	out := make([]candidate, 0, len(nodes))
 	// Dedup by resolved backend host: the same physical node can appear under two
 	// IDs (e.g. a manually-added entry and its relay-discovered record), and
-	// routing to the same Ollama twice is wasteful.
+	// routing to the same engine twice is wasteful.
 	seenHost := make(map[string]bool, len(nodes))
 	// placed tracks node IDs already considered so the priority-ordered and
 	// fallback passes don't reconsider one (scheduler ordering).
@@ -1168,8 +1168,8 @@ func nodeURL(n Node) *url.URL {
 // else it advertised. Re-sorting here by address class is what previously put a
 // two-host direct-connect link ahead of a peer's real LAN address.
 //
-// Any local-interface address is rewritten to loopback (Ollama binds loopback
-// only) and floated to the front because it's unambiguously reachable.
+// Any local-interface address is rewritten to loopback and floated to the
+// front so engines bound only to loopback remain reachable.
 func nodeCandidates(n Node) []string {
 	port := strconv.Itoa(n.Port)
 	sorted := netpick.Candidates(n.TXT, n.Addresses)
@@ -1212,7 +1212,7 @@ var (
 	localAddrsMu sync.RWMutex
 	// localAddrs is the set of IPs currently bound to this host's interfaces.
 	// It's used to decide whether a discovered node is actually us, so we can
-	// dial loopback instead of our own external IP (Ollama binds loopback
+	// dial loopback instead of our own external IP (engine binds loopback
 	// only). The initial value is a one-shot enumeration; startLocalAddrWatch
 	// then keeps it in sync with live interface changes, so a late VPN/dock
 	// interface or a sleep/wake IP reassignment can't strand us dialing a
@@ -1351,11 +1351,9 @@ func (p *Proxy) setPriorityLocked(priority schedulerwire.Priority) int {
 	return len(cleaned)
 }
 
-// subscribedToNode projects a relay DirectoryNode onto the proxy's routable Node
-// for the ol service, returning false when the node doesn't advertise ol or has
-// no dialable address. The engine port comes from the ol service key (the real
-// Ollama port the broker's engine poller registered, not the proxy's listen
-// port).
+// subscribedToNode projects a relay DirectoryNode onto the facade's routable
+// Node, returning false when its engine service or dialable address is absent.
+// The target port comes from that engine's advertised service.
 func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 	svc, ok := n.Services[p.DiscoveryService]
 	if !ok || n.IP == "" {
@@ -1379,10 +1377,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		TXT:         n.AddressTXT(),
 		IP:          n.IP,
 		ClusterUUID: n.ClusterUUID,
-		// Filter on this node's Ollama models only, not the cross-engine union, so
-		// a model that a dual-engine node serves solely via LM Studio isn't
-		// accepted as an Ollama owner here (falls back to the union for a peer
-		// that sends no attribution — see DirectoryNode.EngineModels).
+		// Use this facade's attributed inventory rather than another engine's models.
 		Models: append([]string(nil), n.EngineModels(p.Name)...),
 		Loaded: append([]string(nil), n.LoadedByEngine[p.Name]...),
 	}

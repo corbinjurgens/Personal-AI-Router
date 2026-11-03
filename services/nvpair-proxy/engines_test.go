@@ -30,11 +30,11 @@ func TestNormalizeModelPreservesNamingAndAliases(t *testing.T) {
 			}
 		})
 	}
-	test("reserved weak alias", " weak ", "weak", impliedLatestTag)
-	test("reserved strong alias", "strong", "strong", impliedLatestTag)
-	test("registry name", " registry:5000/org/model ", "registry:5000/org/model:latest", impliedLatestTag)
-	test("explicit tag", "org/model:v1", "org/model:v1", impliedLatestTag)
-	test("explicit digest", "org/model@sha256:abc", "org/model@sha256:abc", impliedLatestTag)
+	test("reserved weak alias", " weak ", "weak", exactID)
+	test("reserved strong alias", "strong", "strong", exactID)
+	test("registry name", " registry:5000/org/model ", "registry:5000/org/model", exactID)
+	test("explicit tag", "org/model:v1", "org/model:v1", exactID)
+	test("explicit digest", "org/model@sha256:abc", "org/model@sha256:abc", exactID)
 	test("exact identifier", " org/model ", "org/model", exactID)
 }
 
@@ -72,10 +72,7 @@ func TestLlamaCPPModelListRoutes(t *testing.T) {
 	}
 }
 
-// Routes is a classifier, not an allowlist. handlePlain forwards every
-// loopback path into handleHTTP with no filtering, so a path the table does
-// not mention must still reach the upstream verbatim — that is how /api/show,
-// /api/pull, /api/ps, /api/version and OPTIONS preflights keep working.
+// Routes is a classifier. Unlisted engine controls and OPTIONS pass through.
 func TestRoleForClassifiesOnlyDeclaredRoutes(t *testing.T) {
 	ollama, ok := profileFor("ollama")
 	if !ok {
@@ -98,28 +95,21 @@ func TestRoleForClassifiesOnlyDeclaredRoutes(t *testing.T) {
 		wantRole routeRole
 		wantOK   bool
 	}{
-		{"ollama native chat", ollama, "POST", "/api/chat", roleInferencePOST, true},
 		{"ollama openai chat", ollama, "POST", "/v1/chat/completions", roleInferencePOST, true},
 		{"ollama anthropic messages", ollama, "POST", "/v1/messages", roleInferencePOST, true},
-		{"ollama native list", ollama, "GET", "/api/tags", roleModelListNativeGET, true},
 		{"ollama openai list", ollama, "GET", "/v1/models", roleModelListOpenAIGET, true},
-		{"ollama passthrough", ollama, "POST", "/api/pull", 0, false},
-		{"ollama version passthrough", ollama, "GET", "/api/version", 0, false},
 		{"ollama models passthrough", ollama, http.MethodGet, "/models", 0, false},
 
 		{"lmstudio chat", lmstudio, "POST", "/v1/chat/completions", roleInferencePOST, true},
 		{"lmstudio anthropic messages", lmstudio, "POST", "/v1/messages", roleInferencePOST, true},
 		{"lmstudio list", lmstudio, "GET", "/v1/models", roleModelListOpenAIGET, true},
 		{"lmstudio models passthrough", lmstudio, http.MethodGet, "/models", 0, false},
-		// LM Studio serves no native Ollama routes, so /api/chat is not
-		// inference for it — it is forwarded verbatim like any other path.
-		{"lmstudio has no native routes", lmstudio, "POST", "/api/chat", 0, false},
 
 		// The method is part of the classification. Without it a POST to the
 		// model-list path would be served as a list, and a GET to an
 		// inference path would emit a workload.
 		{"wrong method on list", ollama, "POST", "/v1/models", 0, false},
-		{"wrong method on inference", ollama, "GET", "/api/chat", 0, false},
+		{"wrong method on inference", ollama, "GET", "/v1/chat/completions", 0, false},
 		{"llamacpp models post passthrough", llamacpp, http.MethodPost, "/models", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -131,92 +121,6 @@ func TestRoleForClassifiesOnlyDeclaredRoutes(t *testing.T) {
 				t.Fatalf("roleFor(%s %s) role = %v, want %v", tc.method, tc.path, role, tc.wantRole)
 			}
 		})
-	}
-}
-
-func TestIsInferenceRequestFollowsTheProfile(t *testing.T) {
-	ollama, _ := profileFor("ollama")
-	lmstudio, _ := profileFor("lmstudio")
-
-	if !isInferenceRequest(ollama, "POST", "/api/generate") {
-		t.Error("ollama /api/generate must be inference")
-	}
-	if isInferenceRequest(lmstudio, "POST", "/api/generate") {
-		t.Error("lmstudio serves no native routes, so /api/generate is not inference for it")
-	}
-	if isInferenceRequest(ollama, "GET", "/api/tags") {
-		t.Error("a model list is not inference")
-	}
-}
-
-// One naming convention governs both the federated list's dedupe key and the
-// routing gate. If they disagreed the proxy could advertise a model it then
-// refuses to route.
-func TestModelNaming(t *testing.T) {
-	ollama, _ := profileFor("ollama")
-	lmstudio, _ := profileFor("lmstudio")
-
-	for _, tc := range []struct {
-		profile engineProfile
-		in      string
-		want    string
-	}{
-		{ollama, "llama3", "llama3:latest"},
-		{ollama, "llama3:latest", "llama3:latest"},
-		{ollama, "llama3:8b", "llama3:8b"},
-		{ollama, "registry.example/llama3", "registry.example/llama3:latest"},
-		{ollama, "llama3@sha256:abc", "llama3@sha256:abc"},
-		{ollama, "", ""},
-
-		// The nine reserved aliases are not model identifiers, so the implied
-		// tag is never appended; names that merely resemble one still are.
-		{ollama, "weak", "weak"},
-		{ollama, "medium-api", "medium-api"},
-		{ollama, "strong-local", "strong-local"},
-		{ollama, "  weak-api ", "weak-api"},
-		{ollama, "weaker", "weaker:latest"},
-		{ollama, "Weak", "Weak:latest"},
-		{ollama, "weak-api-x", "weak-api-x:latest"},
-		{ollama, "weak:latest", "weak:latest"},
-
-		{lmstudio, "qwen3-8b", "qwen3-8b"},
-		{lmstudio, "qwen3-8b:latest", "qwen3-8b:latest"},
-		{lmstudio, "", ""},
-	} {
-		if got := tc.profile.normalizeModel(tc.in); got != tc.want {
-			t.Errorf("%s normalizeModel(%q) = %q, want %q", tc.profile.Name, tc.in, got, tc.want)
-		}
-	}
-}
-
-func TestNodeAdvertisesModelUsesTheProfilesNaming(t *testing.T) {
-	ollama, _ := profileFor("ollama")
-	lmstudio, _ := profileFor("lmstudio")
-
-	tagged := Node{Models: []string{"llama3:latest"}}
-	if !nodeAdvertisesModel(ollama, tagged, "llama3") {
-		t.Error("ollama must treat an untagged request as the :latest tag")
-	}
-	if nodeAdvertisesModel(lmstudio, tagged, "llama3") {
-		t.Error("lmstudio matches identifiers exactly, so llama3 is not llama3:latest")
-	}
-	if nodeAdvertisesModel(ollama, Node{Models: []string{"llama3:latest"}}, "") {
-		t.Error("an empty request model advertises nothing")
-	}
-}
-
-// A real model named weak:latest does not answer the reserved alias "weak",
-// which the implied-tag rule would otherwise equate with it.
-func TestNodeAdvertisesModelDoesNotMatchAnAliasToATaggedModel(t *testing.T) {
-	ollama, _ := profileFor("ollama")
-	node := Node{Models: []string{"weak:latest", "weak-api:latest"}}
-	for _, alias := range []string{"weak", "weak-api", "weak-local"} {
-		if nodeAdvertisesModel(ollama, node, alias) {
-			t.Errorf("alias %q matched a model advertised by the node", alias)
-		}
-	}
-	if !nodeAdvertisesModel(ollama, node, "weak:latest") {
-		t.Error("the concrete model weak:latest must still match itself")
 	}
 }
 
@@ -297,10 +201,7 @@ func TestChooseStartupPort(t *testing.T) {
 		{"broker override wins", ollama, 11434, true, 11500, true, 11434},
 		{"no persisted value", ollama, 11435, false, 0, false, 11435},
 		{"lmstudio restores persisted", lmstudio, 1234, false, 1300, true, 1300},
-		// 1235 is where engine-manager runs a managed LM Studio, so restoring
-		// it would put the proxy on the engine's own port.
-		{"lmstudio refuses the engine's port", lmstudio, 1234, false, 1235, true, 1234},
-		// Ollama reserves nothing, so the equivalent value is honoured.
+		{"lmstudio reserves nothing", lmstudio, 1234, false, 1235, true, 1235},
 		{"ollama reserves nothing", ollama, 11434, false, 11435, true, 11435},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

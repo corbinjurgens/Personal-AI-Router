@@ -38,33 +38,33 @@ func TestModelControlsIngress(t *testing.T) {
 			}
 		})
 	}
-	test("escaped newline", "/api/chat", "", `{"model":"a\nb"}`, true)
-	test("escaped folded name", "/api/show", "", `{"N\u0041ME":"a\u0000b"}`, true)
-	test("DEL", "/api/chat", "", `{"model":"a\u007fb"}`, true)
-	test("C1 lower boundary", "/api/chat", "", `{"model":"a\u0080b"}`, true)
-	test("C1 upper boundary", "/api/chat", "", `{"model":"a\u009fb"}`, true)
-	test("raw invalid UTF8", "/api/chat", "", "{\"model\":\"a"+string([]byte{0xff})+"b\"}", true)
-	test("empty identifier", "/api/show", "", `{"name":""}`, true)
-	test("invalid earlier duplicate", "/api/chat", "", `{"model":"a\nb","model":"good"}`, true)
-	test("completed invalid prefix", "/api/show", "", `{"name":"a\nb","later":`, true)
+	test("escaped newline", "/v1/chat/completions", "", `{"model":"a\nb"}`, true)
+	test("escaped folded name", "/props", "", `{"N\u0041ME":"a\u0000b"}`, true)
+	test("DEL", "/v1/chat/completions", "", `{"model":"a\u007fb"}`, true)
+	test("C1 lower boundary", "/v1/chat/completions", "", `{"model":"a\u0080b"}`, true)
+	test("C1 upper boundary", "/v1/chat/completions", "", `{"model":"a\u009fb"}`, true)
+	test("raw invalid UTF8", "/v1/chat/completions", "", "{\"model\":\"a"+string([]byte{0xff})+"b\"}", true)
+	test("empty identifier", "/props", "", `{"name":""}`, true)
+	test("invalid earlier duplicate", "/v1/chat/completions", "", `{"model":"a\nb","model":"good"}`, true)
+	test("completed invalid prefix", "/props", "", `{"name":"a\nb","later":`, true)
 	test("escaped query", "/props", "mo%64el=a%0Ab", "", true)
 	test("invalid query UTF8", "/props", "model=a%FFb", "", true)
 	test("query DEL", "/props", "model=a%7Fb", "", true)
 	test("query C1", "/props", "model=a%C2%85b", "", true)
 	test("model detail control", "/v1/models/a%0Ab", "", "", true)
-	test("native detail C1", "/api/v0/models/a%C2%85b", "", "", true)
+	test("native detail C1", "/v1/models/a%C2%85b", "", "", true)
 	test("model detail UTF8", "/v1/models/a%FFb", "", "", true)
-	test("256 byte ingress", "/api/chat", "", `{"model":"`+strings.Repeat("a", 256)+`"}`, false)
-	test("257 byte ingress", "/api/chat", "", `{"model":"`+strings.Repeat("a", 257)+`"}`, true)
-	test("ordinary Unicode and spaces", "/api/chat", "", `{"model":" 組/model:tag "}`, false)
-	test("opaque fields", "/api/chat", "", "{\"model\":\"good\",\"prompt\":\"a\\nb\",\"nested\":{\"model\":\"bad\\n\"},\"opaque\":\""+string([]byte{0xff})+"\"}", false)
+	test("256 byte ingress", "/v1/chat/completions", "", `{"model":"`+strings.Repeat("a", 256)+`"}`, false)
+	test("257 byte ingress", "/v1/chat/completions", "", `{"model":"`+strings.Repeat("a", 257)+`"}`, true)
+	test("ordinary Unicode and spaces", "/v1/chat/completions", "", `{"model":" 組/model:tag "}`, false)
+	test("opaque fields", "/v1/chat/completions", "", "{\"model\":\"good\",\"prompt\":\"a\\nb\",\"nested\":{\"model\":\"bad\\n\"},\"opaque\":\""+string([]byte{0xff})+"\"}", false)
 	test("invalid percent remains ignored", "/props", "model=bad%zz", "", false)
 }
 
 func TestModelControlsIngressRawBuffer(t *testing.T) {
 	test := func(name, body string, reject bool) {
 		t.Run(name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body))
+			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 			_, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, defaultMaxRequestBytes)
 			if reject {
 				if err == nil || err.Error() != "invalid model identifier" || model != "" {
@@ -109,9 +109,9 @@ func TestModelControlsIngressFacade(t *testing.T) {
 			}
 		})
 	}
-	test("valid model and opaque content", http.MethodPost, "/api/chat", `{"model":"good:tag","messages":[{"content":"a\nb"}],"opaque":{"model":"bad\u0085"}}`, http.StatusOK, 1)
-	test("body control", http.MethodPost, "/api/chat", `{"model":"sentinel\nmodel"}`, http.StatusBadRequest, 0)
-	test("control operation name", http.MethodPost, "/api/show", `{"name":"sentinel\u0085model"}`, http.StatusBadRequest, 0)
+	test("valid model and opaque content", http.MethodPost, "/v1/chat/completions", `{"model":"good:tag","messages":[{"content":"a\nb"}],"opaque":{"model":"bad\u0085"}}`, http.StatusOK, 1)
+	test("body control", http.MethodPost, "/v1/chat/completions", `{"model":"sentinel\nmodel"}`, http.StatusBadRequest, 0)
+	test("control operation name", http.MethodPost, "/props", `{"name":"sentinel\u0085model"}`, http.StatusBadRequest, 0)
 	test("query control", http.MethodGet, "/props?model=sentinel%0Amodel", "", http.StatusBadRequest, 0)
 	test("detail control", http.MethodGet, "/v1/models/sentinel%7Fmodel", "", http.StatusBadRequest, 0)
 }
@@ -178,10 +178,10 @@ func TestModelControlsIngressEarlyBodyErrorDoesNotPublishPath(t *testing.T) {
 		})
 	}
 	test("passthrough escaped body and DEL path", http.MethodGet, "/v1/models/path-sentinel%7Fmodel", `{"name":"body-sentinel\nmodel"}`, false)
-	test("passthrough raw UTF8 body and C1 path", http.MethodGet, "/api/v0/models/path-sentinel%C2%85model", "{\"name\":\"body-sentinel"+string([]byte{0xff})+"\"}", false)
+	test("passthrough raw UTF8 body and C1 path", http.MethodGet, "/v1/models/path-sentinel%C2%85model", "{\"name\":\"body-sentinel"+string([]byte{0xff})+"\"}", false)
 	test("passthrough raw UTF8 body and raw UTF8 path", http.MethodGet, "/v1/models/path-sentinel%FFmodel", "{\"model\":\"body-sentinel"+string([]byte{0xff})+"\"}", false)
 	test("shared owner escaped body and DEL path", http.MethodPost, "/v1/models/path-sentinel%7Fmodel", `{"model":"body-sentinel\nmodel"}`, true)
-	test("shared owner raw UTF8 body and C1 path", http.MethodPost, "/api/v0/models/path-sentinel%C2%85model", "{\"model\":\"body-sentinel"+string([]byte{0xff})+"\"}", true)
+	test("shared owner raw UTF8 body and C1 path", http.MethodPost, "/v1/models/path-sentinel%C2%85model", "{\"model\":\"body-sentinel"+string([]byte{0xff})+"\"}", true)
 }
 
 func TestModelControlsSelectionInventory(t *testing.T) {
@@ -192,11 +192,7 @@ func TestModelControlsSelectionInventory(t *testing.T) {
 			t.Fatal("invalid inventory became a selectable normalized model")
 		}
 	}
-	// Engine-specific (Ollama implied :latest): normalization appends the tag,
-	// which would push a 512-byte identifier over the bound.
-	if nodeAdvertisesModel(ollamaCase(t).profile, Node{Models: []string{strings.Repeat("a", 512)}}, strings.Repeat("a", 512)) {
-		t.Fatal("normalization selected an identifier over 512 bytes")
-	}
+
 	d := NewDiscovery()
 	d.SetSubscribed([]Node{{ID: "subscribed", Models: append(slices.Clone(bad), "good"), Loaded: append(slices.Clone(bad), "good")}})
 	d.AddManual(Node{ID: "manual", Models: append(slices.Clone(bad), "good"), Loaded: append(slices.Clone(bad), "good")})
@@ -321,8 +317,6 @@ func TestModelControlsSelectionShortAliasConcreteBound(t *testing.T) {
 	test("local 513 bytes", strings.Repeat("a", 509)+":tag", false, false, lcpp)
 	test("role 513 bytes", strings.Repeat("a", 509)+":tag", true, false, lcpp)
 	test("role multibyte 513 bytes", strings.Repeat("界", 169)+"aa:tag", true, false, lcpp)
-	// Engine-specific (Ollama implied :latest): the appended tag exceeds 512.
-	test("normalization exceeds 512", strings.Repeat("a", 512), false, false, ollamaCase(t))
 	test("role control before trim", "seed:tag\n", true, false, lcpp)
 }
 
@@ -385,9 +379,6 @@ func TestModelControlsSelectionModelList(t *testing.T) {
 				t.Fatal(err)
 			}
 			rows := result.Data
-			if role == roleModelListNativeGET {
-				rows = result.Models
-			}
 			if len(rows) != want {
 				t.Fatalf("list rows = %s, want %d entries", rec.Body.Bytes(), want)
 			}
@@ -407,12 +398,7 @@ func TestModelControlsSelectionModelList(t *testing.T) {
 		})
 	}
 	test("OpenAI mixed raw entries", `{"data":[{"id":"bad`+string([]byte{0xff})+`"},{"id":"bad\n"},{"id":"good"}]}`, roleModelListOpenAIGET, 1, anyProfile(t))
-	test("native invalid name cannot hide behind model", `{"models":[{"model":"good","name":"bad\n"},{"model":"bad\n","name":"good"},{"model":"good"}]}`, roleModelListNativeGET, 1, ollamaCase(t).profile)
-	test("native absent model uses valid name", `{"models":[{"name":"good"}]}`, roleModelListNativeGET, 1, ollamaCase(t).profile)
-	test("native null model cannot fall back", `{"models":[{"model":null,"name":"good"},{"model":"good"}]}`, roleModelListNativeGET, 1, ollamaCase(t).profile)
 	test("all bad is successful empty", `{"data":[{"id":"bad\u0085"}]}`, roleModelListOpenAIGET, 0, anyProfile(t))
-	// Engine-specific (Ollama implied :latest): the appended tag exceeds 512.
-	test("normalized overlong entry", `{"models":[{"model":"`+strings.Repeat("a", 512)+`"},{"model":"good"}]}`, roleModelListNativeGET, 1, ollamaCase(t).profile)
 }
 
 func TestModelControlsSelectionModelListFailureSemantics(t *testing.T) {
@@ -543,7 +529,6 @@ func TestModelControlsSelectionModelListFailureSemantics(t *testing.T) {
 		})
 	}
 	dialect("OpenAI", "/v1/models", "/models", "data", `{"id":"good"}`, `{"name":"bad\n"}`, llamacppCase(t).profile)
-	dialect("native", "/api/tags", "/api/tags", "models", `{"model":"good"}`, `{"id":"bad\n"}`, ollamaCase(t).profile)
 }
 
 func TestModelControlsStrictCapabilityIdentityThroughProjectionAndOverlay(t *testing.T) {

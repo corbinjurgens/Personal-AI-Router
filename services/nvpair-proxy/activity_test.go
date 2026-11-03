@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,13 +120,16 @@ func TestRepeatedChunksAreCoalescedIntoOneReport(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		chunks := 40
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			for i := 0; i < chunks; i++ {
-				_, _ = w.Write([]byte(`{"response":"x"}` + "\n"))
+				_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n")
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}
+			}
+			if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+				t.Errorf("finish activity stream: %v", err)
 			}
 		}))
 		defer upstream.Close()

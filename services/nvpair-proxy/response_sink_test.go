@@ -157,7 +157,7 @@ func TestResponseSink(t *testing.T) {
 	t.Run("bootstrap refusal body uses one clean ending", func(t *testing.T) {
 		w := httptest.NewRecorder()
 		sink := newResponseSink(w, nil)
-		body := sink.interruptedBody(streamProtocolNDJSON, streamInterruptReasonBudget)
+		body := sink.interruptedBody(streamProtocolJSON, streamInterruptReasonBudget)
 		if _, err := io.Copy(sink, body); err != nil {
 			t.Fatal(err)
 		}
@@ -167,7 +167,7 @@ func TestResponseSink(t *testing.T) {
 		if err := sink.FlushError(); err != nil {
 			t.Fatal(err)
 		}
-		if err := sink.interrupt(streamProtocolNDJSON, streamInterruptReasonBudget); err != nil {
+		if err := sink.interrupt(streamProtocolJSON, streamInterruptReasonBudget); err != nil {
 			t.Fatal(err)
 		}
 		want := "{\"error\":\"stream interrupted: stream frame buffer exhausted\"}\n"
@@ -219,11 +219,8 @@ func TestResponseSink(t *testing.T) {
 	})
 
 	t.Run("authenticated peer ending survives exactly once", func(t *testing.T) {
-		for _, protocol := range []streamProtocol{streamProtocolSSE, streamProtocolNDJSON} {
+		for _, protocol := range []streamProtocol{streamProtocolSSE} {
 			payload := wantSSEInterruption(streamInterruptReasonIdle)
-			if protocol == streamProtocolNDJSON {
-				payload = wantNDJSONInterruption(streamInterruptReasonIdle)
-			}
 			w := httptest.NewRecorder()
 			sink := newResponseSink(w, nil)
 			budget := newFrameBudget(1 << 20)

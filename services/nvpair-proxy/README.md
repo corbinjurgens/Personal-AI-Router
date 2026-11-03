@@ -90,9 +90,9 @@ uncertain-capacity reconciliation rules.
 Streaming measurements consume typed numeric metadata from the existing SC
 response reader. Its completion verdict remains authoritative. The llama.cpp
 and Strata Chat adapters preserve engine-reported decode rates and intervals
-separately from visible output tokens; Ollama retains its native count/duration
-semantics. Nonstream bodies pass through without numeric observation. No first
-token time is inferred from headers, body bytes or final timings.
+separately from visible output tokens. Nonstream bodies pass through without
+numeric observation. No first token time is inferred from headers, body bytes
+or final timings.
 The aggregate `Entry.outputTokens` is the total of known engine-reported output
 counts from successful, SC-complete local executions in that entry. It is
 qualified independently of decode rates: usage-only completion can contribute
@@ -214,10 +214,10 @@ Then, over the control channel, for each engine to front:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"facade/enable",
- "params":{"engine":"ollama","port":11434,"ignorePersistedPort":true}}
+ "params":{"engine":"llamacpp","port":8080,"ignorePersistedPort":true}}
 ```
 
-The response is `{"engine":"ollama","port":11434}`, reporting the port actually
+The response is `{"engine":"llamacpp","port":8080}`, reporting the port actually
 bound — enable is a request, and the child's persisted-port restore can override
 the port asked for. Enabling an engine that is already up is an idempotent
 success, so a redelivered enable never tears down a working listener.
@@ -256,11 +256,11 @@ An engine that is not built in, such as a llama.cpp fork registered as
 `llamacpp-custom` or a Strata user manifest, needs no entry here. Its facade
 profile is built from its descriptor: each declared protocol selects a coded
 route set (`protocolRoutes` in `engines.go`), with `llamacpp-router`'s
-`/v1/models` rewrite applied before a plain `/v1/models`. `ollama-api`,
-`openai-v1` or `openai-chat` must be among them, because each supplies an
+`/v1/models` rewrite applied before a plain `/v1/models`. `openai-v1` or
+`openai-chat` must be among them, because each supplies an
 inference route and a model list; `anthropic-messages` and `llamacpp-router`
-only add routes. The descriptor's model naming selects exact or implied-tag
-normalization. The engine has no standalone or reserved port and no host alias.
+only add routes. Model identifiers match exactly. The engine has no standalone
+or reserved port and no host alias.
 Its discovery service key is `e-<id>`, its facade-scoped messages are addressed
 `e-<id>:<method>`, and the port its facade first binds is persisted in
 `<id>-proxy-port.json` so it stays there across restarts. Peers that advertise
@@ -269,10 +269,10 @@ built-in engine. Node policy, drain, residency, intent and strict capacity
 accept any `engines.ValidRoutingID`; an engine with no facade here simply has no
 local candidates.
 
-| | `"engine":"ollama"` | `"engine":"lmstudio"` | `"engine":"llamacpp"` |
-|---|---|---|---|
-| Facade id — error-ID prefix and broker relay namespace | `ollama-proxy` | `lmstudio-proxy` | `llamacpp-proxy` |
-| Discovery service key | `ol` | `lm` | `lc` |
+| | `"engine":"llamacpp"` |
+|---|---|
+| Facade id — error-ID prefix and broker relay namespace | `llamacpp-proxy` |
+| Discovery service key | `lc` |
 
 The **log component, supervisor label, and TUI health crash key are not in that
 table**: they name the process (`nvpair-proxy`), not a facade, because one
@@ -281,21 +281,20 @@ Facade-scoped log records carry an `engine` field instead. The supervisor label
 and the health crash key are matched against each other, so they move together
 — see `nvpair-shared/engines` and `spec.md` §9.
 
-| | `"engine":"ollama"` | `"engine":"lmstudio"` | `"engine":"llamacpp"` |
-|---|---|---|---|
-| Engine's own client-facing port | 11434 | 1234 | 8080 |
-| Where PAIR relocates the engine | 11435 | 1235 | 8081 |
-| Standalone port, used when `port` is omitted | 11435 | 1234 | 8080 |
-| Persisted-port file (declared, not derived) | `proxy-port.json` | `lmstudio-proxy-port.json` | `llamacpp-proxy-port.json` |
-| Model-list routes | `GET /api/tags` (native), `GET /v1/models` (OpenAI) | `GET /v1/models` (OpenAI) | `GET /models`, `GET /v1/models` (OpenAI; both query upstream `/models`) |
-| Inference routes | `/api/generate`, `/api/chat`, `/api/embeddings`, `/api/embed`, plus the OpenAI and Anthropic Messages sets | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/messages` | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` |
-| Model naming | untagged means `:latest`, so `llama3` and `llama3:latest` are one model | identifiers compared byte for byte | identifiers compared byte for byte |
+| | `"engine":"llamacpp"` |
+|---|---|
+| Engine's own client-facing port | 8080 |
+| Where PAIR relocates the engine | 8081 |
+| Standalone port, used when `port` is omitted | 8080 |
+| Persisted-port file (declared, not derived) | `llamacpp-proxy-port.json` |
+| Model-list routes | `GET /models`, `GET /v1/models` (OpenAI; both query upstream `/models`) |
+| Inference routes | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings` |
+| Model naming | identifiers compared byte for byte |
 
 The route table is a **classifier, not an allowlist**. An unlisted path is
-forwarded verbatim, which is how `/api/show`, `/api/pull`, `/api/ps`,
-`/api/version` and `OPTIONS` preflights keep working.
+forwarded verbatim, including engine controls and `OPTIONS` preflights.
 
-The broker enables all three facades by default. Local llama.cpp-compatible
+The broker enables table-engine facades by default. Local llama.cpp-compatible
 clients use `8080`, while the managed `llama-server` stays on `8081`.
 `--proxy-engines` can restrict a standalone broker or TUI to a subset.
 
@@ -342,17 +341,15 @@ new requests can use a restored session. The proxy's existing dispatch policy
 continues to own retries before its commitment point. No listener is added.
 
 **Origin stream integrity (SC-a).** After the first body byte commits an
-inference attempt, the origin forwards complete SSE events or NDJSON objects
+inference attempt, the origin forwards complete SSE events
 with their original bytes and delimiters. Supported routes are OpenAI
 `/v1/chat/completions` and `/v1/completions` with `stream:true` or an SSE response
-content type, and native Ollama `/api/chat` and `/api/generate` with
-`stream:true` or the native default of true. Framing uses the effective body
+content type. Framing uses the effective body
 dispatched by each attempt, after its profile defaults. Explicit `stream:false`
 keeps the raw non-streaming path. A single `stream:null` is accepted without rewriting
 request bytes and has the same framing meaning as omission on that route.
 OpenAI's omitted flag defaults false; SSE content type
-can still select management. Native streaming accepts `application/json` and
-`application/x-ndjson`. Other routes, including Responses and Anthropic, remain
+can still select management. Other routes, including Responses and Anthropic, remain
 unmanaged even when they return SSE.
 
 Paired ingress reports its effective framing settings in the internal response
@@ -375,7 +372,7 @@ both origin and destination engine dispatch, including when the client asks
 for gzip. An engine that still compresses a managed stream fails closed.
 
 Successful managed streaming requires protocol completion: OpenAI `[DONE]`, or
-all requested choices' finish reasons followed by clean EOF; Ollama `done:true`.
+all requested choices' finish reasons followed by clean EOF.
 The next complete valid event must arrive within 60 seconds, including SSE
 heartbeat comments; partial byte drips do not refresh that idle interval.
 Frames use volatile memory only, with a 1 MiB raw-frame limit. Frame reservations
@@ -397,7 +394,7 @@ defaults and responses that acquire fresh reader grants.
 An interrupted/malformed stream, idle expiry, overflow, exhausted frame budget,
 empty declared stream or wrong streaming media type ends with a protocol error.
 The origin discards a torn trailing frame, emits an OpenAI error event followed
-by `[DONE]` or an Ollama error object, and finishes HTTP framing normally.
+by `[DONE]`, and finishes HTTP framing normally.
 Already forwarded upstream error objects remain failures without a duplicate
 error. HTTP status remains committed (typically 200); the workload instead ends
 `failed` through `workload:errored`, with a bounded operational reason and node.
@@ -425,7 +422,7 @@ elsewhere or stop this router's listeners.
 
 SC-a never dispatches again after commit. A pause, peer or engine loss mid-stream
 ends a managed OpenAI stream with an error frame plus `[DONE]`, not a pause,
-until SC-b (Ollama uses its error object). Endings are best effort when delivery
+until SC-b. Endings are best effort when delivery
 fails. Qualified same-model continuation
 (SC-b) and real-engine/native acceptance remain pending. Origin-local history
 is available to consumer banks independently; its presentation remains separate.
@@ -449,10 +446,6 @@ save failure before replacement keeps the old listener and saved port. If the
 new file has already replaced the old one but durability cannot be confirmed
 (`ErrReplaced`), the proxy keeps the new listener and port, emits `ready`, and
 still reports the save error. Memory and disk therefore agree in either case.
-
-LM Studio additionally refuses to restore port 1235 even if it is stored: that
-is where engine-manager runs a managed LM Studio, so a proxy restoring it would
-sit on the engine's own port. The stored value predates the current default.
 
 **Browser clients (CORS).** PAIR does not enable CORS or add default browser permissions. Configure origins through the engine; its built-in defaults and user configuration remain authoritative. Ordinary forwarded responses preserve the upstream status, body, and CORS headers, including missing headers. A denial is never replaced with a successful OPTIONS response or retried to find permission elsewhere. Proxy-generated errors carry their actual status without CORS permission headers, so browser JavaScript may see a generic CORS failure while curl and diagnostics show the real error.
 
@@ -693,23 +686,22 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
 - **Hybrid aliases.** The nine names `weak`, `medium`, `strong` and each with a
   `-api` or `-local` suffix are reserved exact model names: matching is
   byte-for-byte after trimming surrounding whitespace, so `weak-api:latest`,
-  `Weak-API` and `org/weak-api` are ordinary model names. The Ollama implied
-  `:latest` tag is never appended to a reserved name. `/v1/models` on a facade
+  `Weak-API` and `org/weak-api` are ordinary model names. `/v1/models` on a facade
   lists every tier that has at least one entry of either kind, that this node's
   roles declare, or that a node in one of this process's facade overlays
   declares, as the bare tier and both variants, including a tier whose entries
   are all API deployments, as synthetic records that name nothing of the policy. They are merged with the
   upstream models; when no upstream answers and tiers are configured the
   synthetic records are still returned instead of `503`, and without
-  configured tiers the statuses are unchanged. The native Ollama list gains
-  none. **Listed `-api` and `-local` aliases are not inference-ready until
+  configured tiers the statuses are unchanged.
+  **Listed `-api` and `-local` aliases are not inference-ready until
   Phase 4.** A request is answered `400`
   `{"error":...,"code":"feature_unavailable","reason":"alias_not_inference_ready"|"unsupported_alias_use","model":"<alias>"}`
   before the CORS preflight, candidate resolution, admission, wake,
   reservation, workload events or any engine request when it names a `-api` or
   `-local` alias in any of: a top-level JSON body key equal under case folding
   to `model` or `name` (repeated keys included), a `model` query parameter, or
-  the remainder of a `/v1/models/` or `/api/v0/models/` path; or when it names
+  the remainder of a `/v1/models/` path; or when it names
   a bare tier in the body `model` on a route that is not a classified inference
   route (Responses, an unclassified native or passthrough route), or with
   surrounding whitespace. Nothing else is checked: nested keys, other fields and
@@ -739,8 +731,7 @@ for the independent `localOnly` edit lock, desktop controls and precedence examp
     including a tier whose entries are all API and a tier this node's own roles
     declare; peers' declarations are not seen here. No upstream request is made.
   - Every inference route any engine profile declares (`POST /v1/chat/completions`,
-    `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `/api/generate`,
-    `/api/chat`, `/api/embeddings`, `/api/embed`): enters the common inference
+    `/v1/completions`, `/v1/embeddings`, `/v1/messages`): enters the common inference
     owner after the Host, Origin, path, method, query and preflight gates.
     Owned buffering uses the effective individual request limit; all top-level
     model identifiers are checked before selection. One exact reserved alias

@@ -32,7 +32,7 @@ func TestSetLoopbackAliasValidation(t *testing.T) {
 		{"localhost:0", true, ""},
 		{"not-an-address", true, ""},
 	} {
-		p := newTestProxy(ollamaOnlyProfile(t), NewCodec(rwNop{}), NewDiscovery(), 11434)
+		p := newTestProxy(hostAliasProfile(t), NewCodec(rwNop{}), NewDiscovery(), 11434)
 		if err := p.soleFacade().setLoopbackAlias(tc.address); (err != nil) != tc.wantErr {
 			t.Errorf("setLoopbackAlias(%q) error = %v, wantErr %v", tc.address, err, tc.wantErr)
 		} else if err == nil && p.soleFacade().aliasAddr != tc.wantAddr {
@@ -54,7 +54,7 @@ func TestLoopbackAliasUsesPrimaryRouterAndSurvivesPrimaryRebind(t *testing.T) {
 	disc.AddManual(nodeForModel(t, "upstream", upstream.URL, "test"))
 	primaryPort := freeTCPPort(t)
 	aliasPort := freeTCPPort(t)
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(rec), disc, primaryPort)
+	p := newTestProxy(hostAliasProfile(t), NewCodec(rec), disc, primaryPort)
 	if err := p.soleFacade().setLoopbackAlias(fmt.Sprintf("127.0.0.1:%d", aliasPort)); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestLoopbackAliasUsesPrimaryRouterAndSurvivesPrimaryRebind(t *testing.T) {
 
 	assertRouted := func(port int) {
 		t.Helper()
-		resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/api/chat", port), "application/json", strings.NewReader(`{"model":"test"}`))
+		resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", port), "application/json", strings.NewReader(`{"model":"test"}`))
 		if err != nil {
 			t.Fatalf("POST through port %d: %v", port, err)
 		}
@@ -113,7 +113,7 @@ func TestOccupiedLoopbackAliasLeavesOwnerAndPrimaryRunning(t *testing.T) {
 	aliasPort := owner.Listener.Addr().(*net.TCPAddr).Port
 
 	primaryPort := freeTCPPort(t)
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(rec), NewDiscovery(), primaryPort)
+	p := newTestProxy(hostAliasProfile(t), NewCodec(rec), NewDiscovery(), primaryPort)
 	if err := p.soleFacade().setLoopbackAlias(fmt.Sprintf("127.0.0.1:%d", aliasPort)); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestAliasPortIsAProxySelfTarget(t *testing.T) {
 	disc := NewDiscovery()
 	disc.AddManual(Node{ID: "alias-self", Addresses: []string{"127.0.0.1"}, Port: aliasPort})
 	disc.AddManual(Node{ID: "real", Addresses: []string{"192.0.2.10"}, Port: primaryPort})
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(rwNop{}), disc, primaryPort)
+	p := newTestProxy(hostAliasProfile(t), NewCodec(rwNop{}), disc, primaryPort)
 	if err := p.soleFacade().setLoopbackAlias(fmt.Sprintf("127.0.0.1:%d", aliasPort)); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestAliasSelfTargetMatchesBoundLoopbackAddressNotPortAlone(t *testing.T) {
 	for primaryPort == aliasPort {
 		primaryPort = freeTCPPort(t)
 	}
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(rwNop{}), disc, primaryPort)
+	p := newTestProxy(hostAliasProfile(t), NewCodec(rwNop{}), disc, primaryPort)
 	if err := p.soleFacade().setLoopbackAlias(fmt.Sprintf("127.0.0.2:%d", aliasPort)); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestFailedAliasBindDoesNotClaimOwnersEndpointAsSelf(t *testing.T) {
 	for primaryPort == aliasPort {
 		primaryPort = freeTCPPort(t)
 	}
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(rwNop{}), disc, primaryPort)
+	p := newTestProxy(hostAliasProfile(t), NewCodec(rwNop{}), disc, primaryPort)
 	if err := p.soleFacade().setLoopbackAlias(fmt.Sprintf("127.0.0.1:%d", aliasPort)); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestLoopbackAliasOwnsBothLocalhostFamilies(t *testing.T) {
 		t.Fatal("could not find a port free on both loopback families")
 	}
 
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(rwNop{}), NewDiscovery(), freeTCPPort(t))
+	p := newTestProxy(hostAliasProfile(t), NewCodec(rwNop{}), NewDiscovery(), freeTCPPort(t))
 	if err := p.soleFacade().setLoopbackAlias(fmt.Sprintf("127.0.0.1:%d", port)); err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestDualAliasBindIsAtomic(t *testing.T) {
 	}
 	_ = probe.Close()
 
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(rwNop{}), NewDiscovery(), freeTCPPort(t))
+	p := newTestProxy(hostAliasProfile(t), NewCodec(rwNop{}), NewDiscovery(), freeTCPPort(t))
 	if err := p.soleFacade().setLoopbackAlias(fmt.Sprintf("127.0.0.1:%d", port)); err != nil {
 		t.Fatal(err)
 	}
@@ -346,4 +346,13 @@ func mustLoopbackListener(t *testing.T) net.Listener {
 		t.Fatal(err)
 	}
 	return ln
+}
+
+func hostAliasProfile(t *testing.T) engineProfile {
+	t.Helper()
+	p, ok := profileFor("ollama")
+	if !ok || !p.SupportsHostAlias {
+		t.Fatal("host alias profile missing")
+	}
+	return p
 }

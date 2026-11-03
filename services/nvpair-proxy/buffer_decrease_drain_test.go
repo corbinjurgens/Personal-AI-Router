@@ -51,7 +51,6 @@ func TestBufferDecreaseAdmittedStreamDrains(t *testing.T) {
 	}{
 		{"SSE numeric", streamProtocolSSE, []string{"data: {\"choices\":[],\"usage\":{\"completion_tokens\":2}}\n\n", "data: {\"choices\":[],\"usage\":{\"completion_tokens\":2}}\n\n", "data: [DONE]\n\n"}},
 		{"multiline SSE", streamProtocolSSE, []string{"data: {\"choices\":[],\n data-ignored: x\ndata: \"usage\":{\"completion_tokens\":2}}\n\n", "data: {\"choices\":[],\ndata: \"usage\":{\"completion_tokens\":2}}\n\n", "data: [DONE]\n\n"}},
-		{"NDJSON numeric", streamProtocolNDJSON, []string{"{\"done\":false,\"eval_count\":3}\n", "{\"done\":false,\"eval_count\":3}\n", "{\"done\":true,\"eval_count\":3}\n"}},
 	} {
 		for _, boundary := range []string{"after first frame", "before first read", "after admission before reader"} {
 			t.Run(fixture.name+"/"+boundary, func(t *testing.T) {
@@ -101,10 +100,7 @@ func TestBufferDecreaseAdmittedStreamDrains(t *testing.T) {
 					reduce()
 				}
 				calls := 0
-				qualification := performanceExtractQualification{EngineFamily: "ollama", APIPath: "/v1/chat/completions", Streaming: true}
-				if fixture.protocol == streamProtocolNDJSON {
-					qualification.APIPath = "/api/generate"
-				}
+				qualification := performanceExtractQualification{EngineFamily: "llamacpp", APIPath: "/v1/chat/completions", Streaming: true, SchemaID: performanceExtractLlamaSchema}
 				reader, err := newStreamFrameReader(streamFrameConfig{Protocol: fixture.protocol, Upstream: body, Parent: prepared, Extract: func(payload []byte) performanceExtractMetadata {
 					calls++
 					return extractPerformancePayload(payload, qualification)
@@ -166,9 +162,6 @@ func TestBufferDecreaseAdmittedStreamDrains(t *testing.T) {
 					t.Fatalf("numeric observations = %d, want %d", calls, wantCalls)
 				}
 				wantTokens := int64(2)
-				if fixture.protocol == streamProtocolNDJSON {
-					wantTokens = 3
-				}
 				if tokens := reader.Result().Numeric.OutputTokens; tokens == nil || *tokens != wantTokens {
 					t.Fatalf("numeric output tokens = %v, want %d", tokens, wantTokens)
 				}

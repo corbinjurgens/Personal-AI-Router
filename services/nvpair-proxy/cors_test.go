@@ -3,16 +3,13 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/clustertrusttest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -21,9 +18,6 @@ import (
 )
 
 func corsModels(tc engineCase) string {
-	if tc.profile.Name == "ollama" {
-		return `{"models":[{"name":"private-model"}]}`
-	}
 	return `{"object":"list","data":[{"id":"private-model"}]}`
 }
 
@@ -428,98 +422,6 @@ func TestCORSBrowserFixture(t *testing.T) {
 			}
 		}
 	})
-}
-
-// TestCORSExternalEngineParity optionally compares a running engine with this
-// proxy implementation using read-only OPTIONS and GET requests.
-func TestCORSExternalEngineParity(t *testing.T) {
-	tc := ollamaCase(t)
-	base := os.Getenv("PAIR_CORS_PARITY_URL")
-	if executable := os.Getenv("PAIR_CORS_OLLAMA_EXECUTABLE"); base == "" && executable != "" {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		address := ln.Addr().String()
-		if err := ln.Close(); err != nil {
-			t.Fatal(err)
-		}
-		base = "http://" + address
-		ctx, cancel := context.WithCancel(context.Background())
-		command := exec.CommandContext(ctx, executable, "serve")
-		command.Env = append(os.Environ(), "OLLAMA_HOST="+address, "OLLAMA_ORIGINS=http://wrong.com", "OLLAMA_MODELS="+t.TempDir())
-		if err := command.Start(); err != nil {
-			cancel()
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { cancel(); _ = command.Wait() })
-		ready := false
-		client := &http.Client{Timeout: time.Second}
-		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
-			resp, err := client.Get(base + "/api/version")
-			if err == nil {
-				if err := resp.Body.Close(); err != nil {
-					t.Fatal(err)
-				}
-				if resp.StatusCode == 200 {
-					ready = true
-					break
-				}
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		if !ready {
-			t.Fatal("isolated Ollama did not become ready")
-		}
-	}
-	if base == "" {
-		t.Skip("external engine parity is opt-in")
-	}
-	d := NewDiscovery()
-	d.AddManual(nodeFor(t, "engine", base))
-	p := testProxy(tc.profile, d, tc.profile.StandalonePort).soleFacade()
-	proxy := httptest.NewServer(http.HandlerFunc(p.handlePlain))
-	defer proxy.Close()
-	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	for _, origin := range []string{"http://wrong.com", "http://example.com"} {
-		for _, method := range []string{"OPTIONS", "GET"} {
-			fetch := func(target string) (*http.Response, string) {
-				req, err := http.NewRequest(method, target+"/", nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				req.Header.Set("Origin", origin)
-				if method == "OPTIONS" {
-					req.Header.Set("Access-Control-Request-Method", "GET")
-				}
-				resp, err := client.Do(req)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer func() {
-					if err := resp.Body.Close(); err != nil {
-						t.Error(err)
-					}
-				}()
-				body, err := io.ReadAll(resp.Body)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return resp, string(body)
-			}
-			direct, directBody := fetch(base)
-			forwarded, body := fetch(proxy.URL)
-			if direct.StatusCode != forwarded.StatusCode || directBody != body {
-				t.Fatalf("%s %s: direct=%d proxy=%d body mismatch=%v", method, origin, direct.StatusCode, forwarded.StatusCode, directBody != body)
-			}
-			for _, name := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods", "Access-Control-Allow-Credentials", "Access-Control-Max-Age", "Access-Control-Expose-Headers", "Vary"} {
-				if strings.Join(direct.Header.Values(name), ",") != strings.Join(forwarded.Header.Values(name), ",") {
-					t.Fatalf("header %s changed", name)
-				}
-			}
-			t.Logf("%s origin=%s direct=%d proxy=%d allow-origin=%q", method, origin, direct.StatusCode, forwarded.StatusCode, forwarded.Header.Get("Access-Control-Allow-Origin"))
-		}
-	}
 }
 
 func TestCORSInvalidModelListIsNotPartiallyExposed(t *testing.T) {

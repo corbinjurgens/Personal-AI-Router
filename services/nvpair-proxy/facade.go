@@ -77,7 +77,7 @@ type facade struct {
 	discovery *Discovery
 
 	// selectedMu guards selectedID, the user's manual route pin. Per facade
-	// because pinning a node for Ollama says nothing about LM Studio.
+	// because pinning a node for one engine says nothing about another.
 	selectedMu sync.RWMutex
 	selectedID string
 

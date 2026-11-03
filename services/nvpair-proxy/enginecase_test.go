@@ -49,8 +49,8 @@ type engineCase struct {
 	emptyModelList string
 
 	// advertisedModel is how a node's discovery inventory spells the model a
-	// client reaches with requestedModel. For Ollama the two differ, because
-	// an untagged request means the :latest tag.
+	// client reaches with requestedModel. It matches
+	// requestedModel exactly.
 	advertisedModel string
 
 	// requestedModel is what a client asks for.
@@ -101,42 +101,6 @@ func customCase(t *testing.T) engineCase {
 		advertisedModel:  "qwen3-8b",
 		requestedModel:   "qwen3-8b",
 		descriptor:       &d,
-	}
-}
-
-func ollamaCase(t *testing.T) engineCase {
-	t.Helper()
-	p, ok := profileFor("ollama")
-	if !ok {
-		t.Fatal("ollama profile missing")
-	}
-	return engineCase{
-		profile:          p,
-		inferencePath:    "/api/chat",
-		nonInferencePath: "/api/version",
-		modelListPath:    "/api/tags",
-		emptyModelList:   `{"models":[]}`,
-		advertisedModel:  "qwen3:latest",
-		requestedModel:   "qwen3",
-	}
-}
-
-func lmstudioCase(t *testing.T) engineCase {
-	t.Helper()
-	p, ok := profileFor("lmstudio")
-	if !ok {
-		t.Fatal("lmstudio profile missing")
-	}
-	return engineCase{
-		profile:       p,
-		inferencePath: "/v1/chat/completions",
-		// LM Studio's own REST surface, unlisted in Routes and so forwarded
-		// verbatim.
-		nonInferencePath: "/api/v0/models",
-		modelListPath:    "/v1/models",
-		emptyModelList:   `{"object":"list","data":[]}`,
-		advertisedModel:  "qwen3-8b",
-		requestedModel:   "qwen3-8b",
 	}
 }
 
@@ -202,13 +166,4 @@ func otherEngine(t *testing.T, tc engineCase) engineProfile {
 	}
 	t.Fatal("no sibling engine to contrast against")
 	return engineProfile{}
-}
-
-// ollamaOnlyProfile is for bodies that are genuinely Ollama-scoped — the
-// OLLAMA_HOST alias, and the native /api/tags dialect LM Studio does not
-// serve. Using it rather than engineCases documents that the scoping is
-// deliberate.
-func ollamaOnlyProfile(t *testing.T) engineProfile {
-	t.Helper()
-	return ollamaCase(t).profile
 }

@@ -31,12 +31,12 @@ func stagedHybridPolicy(t *testing.T) nodepolicy.Policy {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	// These fixtures exercise Ollama's native routes as well as OpenAI routes.
+	// These fixtures exercise supported OpenAI routes.
 	pol.Tiers["medium"] = []nodepolicy.TierEntry{
 		{Kind: nodepolicy.EntryAPI, Deployment: "cloud-small"},
-		{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b"},
+		{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b"},
 	}
-	pol.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "big:70b"}}
+	pol.Tiers["strong"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "big:70b"}}
 	return pol
 }
 
@@ -110,16 +110,16 @@ func TestAliasRequestsAreRefusedBeforeAnySideEffect(t *testing.T) {
 		assertRefusedWithoutSideEffects(t, tc, fx, rec, model, wantReason)
 	}
 
-	t.Run("ollama", func(t *testing.T) {
-		tc := ollamaCase(t)
-		for _, path := range []string{"/api/chat", "/api/generate", "/api/embed", "/v1/chat/completions", "/v1/completions", "/v1/messages"} {
+	t.Run("llamacpp", func(t *testing.T) {
+		tc := llamacppCase(t)
+		for _, path := range []string{"/v1/chat/completions", "/v1/completions", "/v1/messages"} {
 			for _, alias := range suffixAliases {
 				t.Run(path+" "+alias, func(t *testing.T) { test(t, tc, path, alias, aliasReasonNotInferenceReady) })
 			}
 		}
 		// Not classified as inference, so the proxy would forward the alias
 		// to the engine as if it were a model.
-		for _, path := range []string{"/v1/responses", "/api/show", "/api/pull", "/api/unknown"} {
+		for _, path := range []string{"/v1/responses", "/props", "/unknown"} {
 			for _, alias := range allAliases {
 				reason := aliasReasonUnsupportedUse
 				if slices.Contains(suffixAliases, alias) {
@@ -145,20 +145,20 @@ func TestAliasRequestsAreRefusedBeforeAnySideEffect(t *testing.T) {
 	})
 
 	t.Run("padded name is still an alias", func(t *testing.T) {
-		tc := ollamaCase(t)
-		test(t, tc, "/api/chat", " weak-api ", aliasReasonNotInferenceReady)
-		test(t, tc, "/api/chat", " weak", aliasReasonUnsupportedUse)
-		test(t, tc, "/api/chat", "weak ", aliasReasonUnsupportedUse)
+		tc := llamacppCase(t)
+		test(t, tc, "/v1/chat/completions", " weak-api ", aliasReasonNotInferenceReady)
+		test(t, tc, "/v1/chat/completions", " weak", aliasReasonUnsupportedUse)
+		test(t, tc, "/v1/chat/completions", "weak ", aliasReasonUnsupportedUse)
 	})
 }
 
 // Names that merely resemble an alias are ordinary models and are forwarded.
 func TestAliasLookalikesAreOrdinaryModels(t *testing.T) {
-	tc := ollamaCase(t)
+	tc := llamacppCase(t)
 	models := []string{"Weak", "weak-api-x", "weaker", "weak:latest", "weak-api:latest"}
 	fx := newTierFixture(t, tc, stagedHybridPolicy(t), map[string][]string{"a": models}, nil)
 	for _, model := range models {
-		if rec := fx.do(t, "/api/chat", `{"model":"`+model+`"}`); rec.Code != http.StatusOK {
+		if rec := fx.do(t, "/v1/chat/completions", `{"model":"`+model+`"}`); rec.Code != http.StatusOK {
 			t.Errorf("model %q: status %d, want 200", model, rec.Code)
 		}
 	}
@@ -171,8 +171,8 @@ func TestAliasLookalikesAreOrdinaryModels(t *testing.T) {
 // byte for byte, whether or not disabled hybrid settings are staged.
 func TestBareTierIsUnchangedByStagedHybridSettings(t *testing.T) {
 	legacy := tierPolicy(map[string][]nodepolicy.TierEntry{
-		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b"}},
-		"strong": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "big:70b"}},
+		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "mid:7b"}},
+		"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "big:70b"}},
 	})
 	staged := stagedHybridPolicy(t)
 	if staged.Routing.Listener.Enabled {
@@ -188,7 +188,7 @@ func TestBareTierIsUnchangedByStagedHybridSettings(t *testing.T) {
 	}
 	run := func(t *testing.T, pol nodepolicy.Policy, path, model string) outcome {
 		t.Helper()
-		fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"mid:7b", "big:70b"}}, nil)
+		fx := newTierFixture(t, llamacppCase(t), pol, map[string][]string{"a": {"mid:7b", "big:70b"}}, nil)
 		rec := fx.do(t, path, `{"model":"`+model+`","prompt":"x"}`)
 		var methods []string
 		for _, f := range frames(t, fx.w) {
@@ -226,7 +226,6 @@ func TestBareTierIsUnchangedByStagedHybridSettings(t *testing.T) {
 		})
 	}
 	test("openai chat route", "/v1/chat/completions", "strong", http.StatusOK, "big:70b")
-	test("native chat route", "/api/chat", "strong", http.StatusOK, "big:70b")
 	test("medium skips the API entry", "/v1/chat/completions", "medium", http.StatusOK, "mid:7b")
 	// weak has only an API entry, so the request falls through to the
 	// stronger local entry exactly as it does when weak has no entry at all.
@@ -265,7 +264,7 @@ func aliasesOf(tiers ...string) []string {
 }
 
 func TestConfiguredAliases(t *testing.T) {
-	local := nodepolicy.TierEntry{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "m"}
+	local := nodepolicy.TierEntry{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "m"}
 	api := nodepolicy.TierEntry{Kind: nodepolicy.EntryAPI, Deployment: "d"}
 	test := func(name string, tiers map[string][]nodepolicy.TierEntry, want []string) {
 		t.Run(name, func(t *testing.T) {
@@ -288,7 +287,7 @@ func TestConfiguredAliases(t *testing.T) {
 	t.Run("declared tiers", func(t *testing.T) {
 		pol := nodepolicy.Default()
 		pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {local}}
-		pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "ollama", Model: "m"}}
+		pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp", Model: "m"}}
 		if got, want := configuredAliases(pol, nil), aliasesOf("weak", "strong"); !slices.Equal(got, want) {
 			t.Errorf("self roles: configuredAliases = %v, want %v", got, want)
 		}
@@ -330,11 +329,11 @@ func TestModelListOffersDeclaredTiers(t *testing.T) {
 // Declared roles are local candidates: a -api alias never reaches them, and
 // the suffixed aliases stay refused until hybrid dispatch exists.
 func TestSuffixedAliasesNeverReachDeclaredRoles(t *testing.T) {
-	tc := ollamaCase(t)
+	tc := llamacppCase(t)
 	for _, alias := range []string{"weak-api", "weak-local"} {
 		t.Run(alias, func(t *testing.T) {
 			fx := newTierFixture(t, tc, nodepolicy.Default(), map[string][]string{"a": {"small:1b"}}, nil)
-			fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "ollama", Model: "small:1b"}})
+			fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "llamacpp", Model: "small:1b"}})
 			rec := fx.do(t, "/v1/chat/completions", `{"model":"`+alias+`"}`)
 			assertRefusedWithoutSideEffects(t, tc, fx, rec, alias, aliasReasonNotInferenceReady)
 		})
@@ -464,60 +463,6 @@ func TestModelList_WithoutTiersKeepsItsStatuses(t *testing.T) {
 	}
 }
 
-// The native Ollama list has no alias records, so it stays 503 with every
-// upstream down even when tiers are configured.
-func TestModelList_NativeListStays503WhenDown(t *testing.T) {
-	tc := ollamaCase(t)
-	e := httptest.NewServer(http.NotFoundHandler())
-	url := e.URL
-	e.Close()
-	fx := &tierFixture{w: &recordingWriter{}, eng: map[string]*recordingEngine{}}
-	disc := NewDiscovery()
-	disc.AddManual(nodeFor(t, "n1", url))
-	fx.p = newTestProxy(tc.profile, NewCodec(fx.w), disc, tc.profile.FacadePort)
-	fx.p.admission.setPolicy(stagedHybridPolicy(t))
-	if rec := fx.listModels(t, "/api/tags"); rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503", rec.Code)
-	}
-}
-
-// The Ollama native list merges models by their normalized name, so a reserved
-// alias that an engine reports bare stays distinct from the same word tagged
-// ":latest", while an ordinary untagged name still merges with its tagged form.
-// No alias record is invented on the native list.
-func TestModelList_NativeListKeepsAReservedNameUntagged(t *testing.T) {
-	tc := ollamaCase(t)
-	e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"models":[{"model":"weak"},{"model":"weak:latest"},{"model":"llama3"},{"model":"llama3:latest"}]}`))
-	}))
-	t.Cleanup(e.Close)
-	fx := &tierFixture{w: &recordingWriter{}, eng: map[string]*recordingEngine{}}
-	disc := NewDiscovery()
-	disc.AddManual(nodeFor(t, "n1", e.URL))
-	fx.p = newTestProxy(tc.profile, NewCodec(fx.w), disc, tc.profile.FacadePort)
-	fx.p.admission.setPolicy(stagedHybridPolicy(t))
-
-	rec := fx.listModels(t, "/api/tags")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body)
-	}
-	var list struct {
-		Models []struct {
-			Model string `json:"model"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
-		t.Fatalf("decode %s: %v", rec.Body, err)
-	}
-	var got []string
-	for _, m := range list.Models {
-		got = append(got, m.Model)
-	}
-	if want := []string{"weak", "weak:latest", "llama3"}; !slices.Equal(got, want) {
-		t.Errorf("native model list = %v, want %v", got, want)
-	}
-}
-
 func (fx *tierFixture) request(t *testing.T, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -535,27 +480,27 @@ func TestAliasInOtherModelPlacesIsRefused(t *testing.T) {
 		assertRefusedWithoutSideEffects(t, tc, fx, rec, alias, aliasReasonNotInferenceReady)
 	}
 
-	t.Run("ollama", func(t *testing.T) {
-		tc := ollamaCase(t)
-		for _, path := range []string{"/api/pull", "/api/show", "/api/delete", "/api/create"} {
+	t.Run("llamacpp", func(t *testing.T) {
+		tc := llamacppCase(t)
+		for _, path := range []string{"/props"} {
 			t.Run(path+" name", func(t *testing.T) {
 				test(t, tc, http.MethodPost, path, `{"name":"strong-local"}`, "strong-local")
 			})
 		}
 		t.Run("padded name", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/api/show", `{"name":" weak-api "}`, "weak-api")
+			test(t, tc, http.MethodPost, "/props", `{"name":" weak-api "}`, "weak-api")
 		})
 		t.Run("case-variant Model beside a plain model", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/api/chat", `{"model":"mid:7b","Model":"weak-api"}`, "weak-api")
+			test(t, tc, http.MethodPost, "/v1/chat/completions", `{"model":"mid:7b","Model":"weak-api"}`, "weak-api")
 		})
 		t.Run("case-variant MODEL ahead of a plain model", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/api/chat", `{"MODEL":"medium-local","model":"mid:7b"}`, "medium-local")
+			test(t, tc, http.MethodPost, "/v1/chat/completions", `{"MODEL":"medium-local","model":"mid:7b"}`, "medium-local")
 		})
 		t.Run("case-variant NAME", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/api/pull", `{"NAME":"weak-local"}`, "weak-local")
+			test(t, tc, http.MethodPost, "/props", `{"NAME":"weak-local"}`, "weak-local")
 		})
 		t.Run("repeated model key", func(t *testing.T) {
-			test(t, tc, http.MethodPost, "/api/chat", `{"model":"weak-api","model":"mid:7b"}`, "weak-api")
+			test(t, tc, http.MethodPost, "/v1/chat/completions", `{"model":"weak-api","model":"mid:7b"}`, "weak-api")
 		})
 		t.Run("model query parameter", func(t *testing.T) {
 			test(t, tc, http.MethodGet, "/props?model=weak-api", ``, "weak-api")
@@ -567,8 +512,8 @@ func TestAliasInOtherModelPlacesIsRefused(t *testing.T) {
 		t.Run("v1 model path", func(t *testing.T) {
 			test(t, tc, http.MethodGet, "/v1/models/weak-api", ``, "weak-api")
 		})
-		t.Run("v0 model path", func(t *testing.T) {
-			test(t, tc, http.MethodGet, "/api/v0/models/strong-local", ``, "strong-local")
+		t.Run("strong model path", func(t *testing.T) {
+			test(t, tc, http.MethodGet, "/v1/models/strong-local", ``, "strong-local")
 		})
 		t.Run("escaped model path", func(t *testing.T) {
 			test(t, tc, http.MethodGet, "/v1/models/medium%2Dapi", ``, "medium-api")
@@ -590,15 +535,15 @@ func TestBareTierAndLookalikesInOtherModelPlacesAreForwarded(t *testing.T) {
 			}
 		})
 	}
-	ollama, custom := ollamaCase(t), customCase(t)
-	test("bare tier as name", ollama, http.MethodPost, "/api/pull", `{"name":"weak"}`)
-	test("bare tier as query model", ollama, http.MethodGet, "/props?model=medium", ``)
+	llama, custom := llamacppCase(t), customCase(t)
+	test("bare tier as name", llama, http.MethodPost, "/props", `{"name":"weak"}`)
+	test("bare tier as query model", llama, http.MethodGet, "/props?model=medium", ``)
 	test("bare tier as model path", custom, http.MethodGet, "/v1/models/strong", ``)
-	test("tagged alias as name", ollama, http.MethodPost, "/api/pull", `{"name":"weak-api:latest"}`)
-	test("case variant alias as name", ollama, http.MethodPost, "/api/pull", `{"name":"Weak-API"}`)
+	test("tagged alias as name", llama, http.MethodPost, "/props", `{"name":"weak-api:latest"}`)
+	test("case variant alias as name", llama, http.MethodPost, "/props", `{"name":"Weak-API"}`)
 	test("organization-qualified model path", custom, http.MethodGet, "/v1/models/org/weak-api", ``)
-	test("alias in an unrelated key", ollama, http.MethodPost, "/api/chat", `{"model":"mid:7b","prompt":"weak-api","title":"weak-local"}`)
-	test("alias as a nested model", ollama, http.MethodPost, "/api/chat", `{"model":"mid:7b","options":{"model":"weak-api"}}`)
+	test("alias in an unrelated key", llama, http.MethodPost, "/v1/chat/completions", `{"model":"mid:7b","prompt":"weak-api","title":"weak-local"}`)
+	test("alias as a nested model", llama, http.MethodPost, "/v1/chat/completions", `{"model":"mid:7b","options":{"model":"weak-api"}}`)
 }
 
 // spyRecorder snapshots proxy state at the moment a status is written, which
@@ -624,7 +569,7 @@ func (h held) none() bool { return h == held{} }
 // at the moment the 400 is written. The control request proves the snapshot
 // does see those effects.
 func TestAliasRefusalPrecedesPreflightReservationAndAdmission(t *testing.T) {
-	tc := ollamaCase(t)
+	tc := llamacppCase(t)
 	models := append([]string{"mid:7b"}, allAliases...)
 	for _, a := range allAliases {
 		models = append(models, a+":latest")
@@ -674,7 +619,7 @@ func TestAliasRefusalPrecedesPreflightReservationAndAdmission(t *testing.T) {
 		return rec.ResponseRecorder, at
 	}
 	chat := func(model string) *http.Request {
-		return httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"`+model+`"}`))
+		return httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+model+`"}`))
 	}
 
 	t.Run("control: a concrete model is reserved and admitted", func(t *testing.T) {
@@ -713,10 +658,10 @@ func TestAliasRefusalPrecedesPreflightReservationAndAdmission(t *testing.T) {
 	refused("healthy self", true, func() *http.Request { return chat("weak-api") })
 	refused("stopped self that a request would wake", false, func() *http.Request { return chat("strong-local") })
 	refused("name key", true, func() *http.Request {
-		return httptest.NewRequest(http.MethodPost, "/api/pull", strings.NewReader(`{"name":"medium-api"}`))
+		return httptest.NewRequest(http.MethodPost, "/props", strings.NewReader(`{"name":"medium-api"}`))
 	})
 	refused("preflight carrying an alias body", true, func() *http.Request {
-		r := httptest.NewRequest(http.MethodOptions, "/api/chat", strings.NewReader(`{"model":"weak-local"}`))
+		r := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", strings.NewReader(`{"model":"weak-local"}`))
 		r.Header.Set("Origin", "http://example.test")
 		r.Header.Set("Access-Control-Request-Method", "POST")
 		return r

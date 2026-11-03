@@ -14,7 +14,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -165,69 +164,6 @@ func newProxyReverseFixtureFor(t *testing.T, profile engineProfile, handler http
 	t.Cleanup(f.p.closeIdleTransports)
 	t.Cleanup(f.peer.closeIdleTransports)
 	return f
-}
-
-func TestProxyReverseNativeNonstreamPeer(t *testing.T) {
-	const payload = `{"model":"m:latest","response":"complete","done":true}`
-	test := func(name string, direct bool) {
-		t.Run(name, func(t *testing.T) {
-			f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var body struct {
-					Model  string `json:"model"`
-					Stream *bool  `json:"stream"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					t.Errorf("decode engine request: %v", err)
-					return
-				}
-				if r.Method != http.MethodPost || r.URL.Path != "/api/generate" || body.Model != "m:latest" || body.Stream == nil || *body.Stream {
-					t.Error("engine did not receive the native nonstreaming request")
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
-				if _, err := io.WriteString(w, payload); err != nil {
-					t.Errorf("write engine response: %v", err)
-				}
-			}))
-			f.directHealthy.Store(direct)
-			f.node.Models = []string{"m:latest"}
-			f.p.soleFacade().discovery.SetSubscribed([]Node{f.node})
-			proxy := httptest.NewServer(http.HandlerFunc(f.p.soleFacade().handleHTTP))
-			t.Cleanup(proxy.Close)
-			request := proxyReverseRequest(t, http.MethodPost, proxy.URL+"/api/generate",
-				strings.NewReader(`{"model":"m:latest","stream":false}`))
-			response, err := proxy.Client().Do(request)
-			if err != nil {
-				t.Fatalf("request native nonstreaming response: %v", err)
-			}
-			data, readErr := io.ReadAll(response.Body)
-			closeErr := response.Body.Close()
-			if readErr != nil {
-				t.Fatalf("read native nonstreaming response: %v", readErr)
-			}
-			if closeErr != nil {
-				t.Fatalf("close native nonstreaming response: %v", closeErr)
-			}
-			if response.StatusCode != http.StatusOK {
-				t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
-			}
-			if string(data) != payload {
-				t.Fatalf("response body changed: length = %d, want %d", len(data), len(payload))
-			}
-			if f.directCalls.Load() == 0 {
-				t.Fatal("peer direct transport was not attempted")
-			}
-			if direct && f.reverseCalls.Load() != 0 {
-				t.Fatalf("direct response used %d reverse calls, want 0", f.reverseCalls.Load())
-			}
-			if !direct && f.reverseCalls.Load() == 0 {
-				t.Fatal("peer reverse transport was not used")
-			}
-		})
-	}
-	test("direct", true)
-	test("reverse", false)
 }
 
 func TestProxyReverseCrossEngineTierUsesPeerService(t *testing.T) {
@@ -577,7 +513,7 @@ func TestProxyReverseManagedCancellation(t *testing.T) {
 func TestProxyReverseEffectiveFramingDefaults(t *testing.T) {
 	test := func(name, path, request, defaults, media, payload, reason string) {
 		t.Run(name, func(t *testing.T) {
-			engine := continuityEngine(path)
+			engine := "llamacpp"
 			f := newProxyReverseFixture(t, engine, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
@@ -620,7 +556,6 @@ func TestProxyReverseEffectiveFramingDefaults(t *testing.T) {
 	}
 	test("destination n two truncated", "/v1/chat/completions", `{"model":"fixture-model","stream":true}`, `{"n":2}`, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n", streamInterruptReasonPrematureEOF)
 	test("destination n two complete", "/v1/chat/completions", `{"model":"fixture-model","stream":true}`, `{"n":2}`, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"},{\"index\":1,\"finish_reason\":\"stop\"}]}\n\n", "")
-	test("destination disables streaming", "/api/generate", `{"model":"fixture-model"}`, `{"stream":false}`, "application/json", `{"response":"`+strings.Repeat("x", 1<<20)+`","done":true}`, "")
 }
 
 func TestProxyReverseRejectsIncompatibleFraming(t *testing.T) {
@@ -718,7 +653,7 @@ func TestProxyReverseFramingExcludesUnsupportedRoutes(t *testing.T) {
 	}))
 	proxy := httptest.NewServer(http.HandlerFunc(f.p.soleFacade().handleHTTP))
 	defer proxy.Close()
-	for _, path := range []string{"/v1/responses", "/api/version"} {
+	for _, path := range []string{"/v1/responses", "/health"} {
 		t.Run(path, func(t *testing.T) {
 			resp, err := proxy.Client().Post(proxy.URL+path, "application/json", strings.NewReader(`{"model":"fixture-model","stream":true}`))
 			if err != nil {
@@ -1052,7 +987,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 	stopHolding := func() { releaseOnce.Do(func() { close(release) }) }
 	var held atomic.Int32
 	fx := newProxyReverseFixture(t, "llamacpp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/tags" {
+		if r.URL.Path == "/v1/models" {
 			held.Add(1)
 			select {
 			case <-release:
@@ -1082,7 +1017,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 		occupying.Add(1)
 		go func() {
 			defer occupying.Done()
-			response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, candidate.url.String()+"/api/tags", nil))
+			response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, candidate.url.String()+"/v1/models", nil))
 			if err != nil {
 				return
 			}
@@ -1249,7 +1184,7 @@ func TestProxyReverseHybridPeerSlotRecomputesSentBudgets(t *testing.T) {
 				}
 			}()
 			for range 8 {
-				response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, cand.url.String()+"/api/tags", nil))
+				response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, cand.url.String()+"/v1/models", nil))
 				if err != nil {
 					t.Fatal(err)
 				}

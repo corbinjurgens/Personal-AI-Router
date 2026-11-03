@@ -261,16 +261,10 @@ func TestParseRequestNeeds(t *testing.T) {
 		{"empty tools", `{"model":"weak","tools":[]}`, "/v1/chat/completions", nil},
 		{"legacy functions", `{"model":"weak","functions":[{"name":"f"}]}`, "/v1/chat/completions", []string{"tools"}},
 		{"openai image part", `{"model":"weak","messages":[{"role":"user","content":[{"type":"text","text":"x"},{"type":"image_url","image_url":{"url":"data:"}}]}]}`, "/v1/chat/completions", []string{"vision"}},
-		{"ollama message images", `{"model":"weak","messages":[{"role":"user","content":"x","images":["aGk="]}]}`, "/api/chat", []string{"vision"}},
-		{"ollama generate images", `{"model":"weak","prompt":"x","images":["aGk="]}`, "/api/generate", []string{"vision"}},
 		{"json schema", `{"model":"weak","response_format":{"type":"json_schema","json_schema":{}}}`, "/v1/chat/completions", []string{"structured"}},
 		{"json object", `{"model":"weak","response_format":{"type":"json_object"}}`, "/v1/chat/completions", []string{"structured"}},
 		{"text format", `{"model":"weak","response_format":{"type":"text"}}`, "/v1/chat/completions", nil},
-		{"ollama format", `{"model":"weak","format":"json"}`, "/api/chat", []string{"structured"}},
-		{"ollama schema", `{"model":"weak","format":{"type":"object"}}`, "/api/chat", []string{"structured"}},
 		{"embeddings route", `{"model":"weak","input":"x"}`, "/v1/embeddings", []string{"embeddings"}},
-		{"ollama embed", `{"model":"weak","input":"x"}`, "/api/embed", []string{"embeddings"}},
-		{"everything", `{"model":"weak","tools":[{}],"format":"json","messages":[{"images":["x"]}]}`, "/api/chat", []string{"tools", "vision", "structured"}},
 	}
 	for _, c := range cases {
 		if got := caps(c.body, c.path); !slices.Equal(got, c.want) {
@@ -287,11 +281,11 @@ func TestParseRequestNeeds(t *testing.T) {
 		t.Errorf("context with max_completion_tokens = %d", got)
 	}
 	body = `{"model":"weak","options":{"num_predict":300}}`
-	if got := parseRequestNeeds([]byte(body), "/api/generate").contextTokens; got != len(body)/4+300 {
+	if got := parseRequestNeeds([]byte(body), "/v1/completions").contextTokens; got != len(body)/4+300 {
 		t.Errorf("context with num_predict = %d", got)
 	}
 	body = `{"model":"weak","options":{"num_predict":-1}}`
-	if got := parseRequestNeeds([]byte(body), "/api/generate").contextTokens; got != len(body)/4 {
+	if got := parseRequestNeeds([]byte(body), "/v1/completions").contextTokens; got != len(body)/4 {
 		t.Errorf("an unbounded num_predict must not inflate the estimate: %d", got)
 	}
 }
@@ -375,7 +369,7 @@ func TestParseRequestNeedsOwnedMessagesWorkspace(t *testing.T) {
 			owner := &ownedInferenceBuffers{scope: scope}
 			defer owner.close()
 			ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, owner)
-			needs, err := parseRequestNeedsOwned(ctx, []byte(`{"messages":[{"images":[1]}],"messages":[{}]}`), "/api/chat")
+			needs, err := parseRequestNeedsOwned(ctx, []byte(`{"messages":[{"images":[1]}],"messages":[{}]}`), "/v1/chat/completions")
 			if tc.limit {
 				bufferAssertLimit(t, err)
 			} else if err != nil || !slices.Contains(needs.caps, nodepolicy.CapVision) {
@@ -478,7 +472,7 @@ func TestValidateRequestIdentifiersJSONBound(t *testing.T) {
 		{name: "nonstring model ignored", body: `{"model":[` + quoted(strings.Repeat("a", 257)) + `]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodPost, "/api/show", nil)
+			r := httptest.NewRequest(http.MethodPost, "/props", nil)
 			err := validateRequestIdentifiers(r, []byte(tc.body))
 			var identifierError *requestIdentifierError
 			if tc.reject {
@@ -514,8 +508,6 @@ func TestValidateRequestIdentifiersQueryAndPathBound(t *testing.T) {
 		{name: "query key case remains exact", target: "/props", query: "Model=" + strings.Repeat("a", 257)},
 		{name: "model path exact 256", target: "/v1/models/" + strings.Repeat("a", 256)},
 		{name: "model path 257", target: "/v1/models/" + strings.Repeat("a", 257), reject: true},
-		{name: "native model path exact 256", target: "/api/v0/models/" + url.PathEscape(strings.Repeat("あ", 85)+"a")},
-		{name: "native model path 257", target: "/api/v0/models/" + url.PathEscape(strings.Repeat("あ", 85)+"aa"), reject: true},
 		{name: "padded alias path exact 256", target: "/v1/models/" + strings.Repeat("%20", 248) + "weak-api"},
 		{name: "padded alias path 257 before trimming", target: "/v1/models/" + strings.Repeat("%20", 249) + "weak-api", reject: true},
 	} {
@@ -1005,28 +997,6 @@ func TestTier_CrossEngineSelfRouting(t *testing.T) {
 	assertAdmissionRejection(t, rec, nodepolicy.RejectDraining)
 }
 
-// Engine-specific (Ollama native /api route): a native route never crosses
-// engines, so a tier request on /api/chat is not served by the other engine.
-func TestTier_NativeRouteNeverCrossesEngines(t *testing.T) {
-	w := &recordingWriter{}
-	p, oll, custom := twoEngineProxyFor(t, w, ollamaCase(t).profile)
-	customEngine := newRecordingEngine(t, http.StatusOK)
-	custom.discovery.AddManual(selfNode("self", custom.profile.FacadePort, "qwen3-8b"))
-	setBackend(t, custom, customEngine.URL, true)
-	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
-	setBackend(t, oll, newRecordingEngine(t, http.StatusOK).URL, true)
-
-	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "qwen3-8b"}}}
-	p.admission.setPolicy(pol)
-
-	rec := httptest.NewRecorder()
-	oll.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"strong"}`)))
-	if rec.Code != http.StatusNotFound || customEngine.hits() != 0 {
-		t.Fatalf("native route crossed engines: status %d, custom hits %d", rec.Code, customEngine.hits())
-	}
-}
-
 // A peer candidate on another engine targets that peer's facade for that
 // engine: the port the other facade's discovery overlay carries.
 func TestTier_CrossEnginePeerUsesThatEnginesPort(t *testing.T) {
@@ -1084,25 +1054,6 @@ func TestModelList_OffersTiers(t *testing.T) {
 	}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("model list = %v", ids)
-	}
-}
-
-func TestModelList_NativeShapeGetsNoTiers(t *testing.T) {
-	tc := ollamaCase(t)
-	e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:latest","model":"qwen3:latest"}]}`))
-	}))
-	defer e.Close()
-	disc := NewDiscovery()
-	disc.AddManual(nodeFor(t, "n1", e.URL))
-	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
-	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "qwen3"}}}
-	p.admission.setPolicy(pol)
-	rec := httptest.NewRecorder()
-	p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tags", nil))
-	if strings.Contains(rec.Body.String(), "weak") {
-		t.Fatalf("native model list gained a tier: %s", rec.Body)
 	}
 }
 
@@ -1516,34 +1467,6 @@ func TestTierRoles_SelfDeclarationCrossEngine(t *testing.T) {
 	lcpp.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"strong"}`)))
 	if rec.Code != http.StatusOK || customEngine.hits() != 1 || lcppEngine.hits() != 0 {
 		t.Fatalf("status %d, custom hits %d, llamacpp hits %d", rec.Code, customEngine.hits(), lcppEngine.hits())
-	}
-}
-
-// Engine-specific (Ollama native /api route): once a self declaration replaces
-// the router's Ollama entry, a native route neither crosses engines nor still
-// applies that entry to this node.
-func TestTierRoles_SelfDeclarationNativeRouteStaysOnItsEngine(t *testing.T) {
-	w := &recordingWriter{}
-	p, oll, custom := twoEngineProxyFor(t, w, ollamaCase(t).profile)
-	customEngine := newRecordingEngine(t, http.StatusOK)
-	ollEngine := newRecordingEngine(t, http.StatusOK)
-	custom.discovery.AddManual(selfNode("self", custom.profile.FacadePort, "qwen3-8b"))
-	setBackend(t, custom, customEngine.URL, true)
-	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
-	setBackend(t, oll, ollEngine.URL, true)
-
-	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "llama3"}}}
-	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "llamacpp-custom", Model: "qwen3-8b"}}
-	if err := pol.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	p.admission.setPolicy(pol)
-
-	rec := httptest.NewRecorder()
-	oll.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"strong"}`)))
-	if rec.Code != http.StatusNotFound || ollEngine.hits() != 0 || customEngine.hits() != 0 {
-		t.Fatalf("native route: status %d, ollama hits %d, custom hits %d, want 404 and none", rec.Code, ollEngine.hits(), customEngine.hits())
 	}
 }
 

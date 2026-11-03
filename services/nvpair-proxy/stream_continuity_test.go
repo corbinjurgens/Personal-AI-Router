@@ -23,7 +23,6 @@ import (
 )
 
 const continuitySSEEvent = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"intact\"}}]}\n\n"
-const continuityNDJSONEvent = "{\"response\":\"intact\",\"done\":false}\n"
 
 // Every case goes through a real origin server. Waiting for returned joins the
 // handler's terminal and release defers before inspecting its notifications.
@@ -40,7 +39,7 @@ func newContinuityFixture(t *testing.T, upstream string, idle time.Duration) *co
 	w := &recordingWriter{}
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "node-a", upstream, "m"))
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(w), disc, 0)
+	p := newTestProxy(customCase(t).profile, NewCodec(w), disc, 0)
 	p.SetPriority([]string{"node-a"})
 	fx := &continuityFixture{p: p, w: w, returned: make(chan struct{}, 8)}
 	fx.origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,28 +158,6 @@ func assertContinuityError(t *testing.T, protocol streamProtocol, data []byte, r
 		if done != 1 {
 			t.Fatalf("client DONE count = %d, want 1", done)
 		}
-	} else {
-		dec := json.NewDecoder(bytes.NewReader(data))
-		for {
-			var object struct {
-				Error string
-				Done  bool
-			}
-			if err := dec.Decode(&object); err == io.EOF {
-				break
-			} else if err != nil {
-				t.Fatalf("client NDJSON contains malformed JSON: %v", err)
-			}
-			if object.Done {
-				t.Fatal("interrupted stream fabricated done:true")
-			}
-			if object.Error != "" {
-				errors++
-				if object.Error != wantMessage {
-					t.Fatalf("client error = %q, want %q", object.Error, wantMessage)
-				}
-			}
-		}
 	}
 	if errors != 1 {
 		t.Fatalf("client error count = %d, want 1", errors)
@@ -238,7 +215,6 @@ func TestStreamContinuityRealWireCut(t *testing.T) {
 		})
 	}
 	test("SSE", "/v1/chat/completions", "text/event-stream", continuitySSEEvent, `data: {"TORN_SENTINEL":"`, streamProtocolSSE)
-	test("NDJSON", "/api/chat", "application/x-ndjson", continuityNDJSONEvent, `{"TORN_SENTINEL":"`, streamProtocolNDJSON)
 }
 
 func TestStreamContinuityProtocolSelection(t *testing.T) {
@@ -277,7 +253,7 @@ func TestStreamContinuityProtocolSelection(t *testing.T) {
 			if resp.Header.Get("Content-Type") != media || resp.Header.Get("Access-Control-Allow-Origin") != "https://app.example" {
 				t.Fatalf("response provenance/CORS/media changed: %v", resp.Header)
 			}
-			if isInferenceRequest(ollamaOnlyProfile(t), http.MethodPost, path) && (resp.Header.Get(nodepolicy.NodeHeader) != "node-a" || resp.Header.Get(nodepolicy.ModelHeader) != "m" || resp.Header.Get(nodepolicy.EngineHeader) != "ollama") {
+			if isInferenceRequest(customCase(t).profile, http.MethodPost, path) && (resp.Header.Get(nodepolicy.NodeHeader) != "node-a" || resp.Header.Get(nodepolicy.ModelHeader) != "m" || resp.Header.Get(nodepolicy.EngineHeader) != "llamacpp-custom") {
 				t.Fatalf("inference provenance changed: %v", resp.Header)
 			}
 			if protocol != streamProtocolUnknown {
@@ -294,7 +270,7 @@ func TestStreamContinuityProtocolSelection(t *testing.T) {
 				if string(data) != payload {
 					t.Fatal("complete/raw response bytes changed")
 				}
-				if isInferenceRequest(ollamaOnlyProfile(t), http.MethodPost, path) {
+				if isInferenceRequest(customCase(t).profile, http.MethodPost, path) {
 					fx.terminal(t, "completed", "")
 				} else if len(notificationsOf(t, fx.w, workloadCompletedMethod)) != 0 {
 					t.Fatal("unclassified route emitted an inference workload")
@@ -312,18 +288,9 @@ func TestStreamContinuityProtocolSelection(t *testing.T) {
 	test("OpenAI null raw", "/v1/chat/completions", `,"stream":null`, "application/json", `{"choices":[]}`, streamProtocolUnknown, "")
 	test("OpenAI null SSE", "/v1/completions", `,"stream":null`, "text/event-stream", continuitySSEEvent, streamProtocolSSE, streamInterruptReasonPrematureEOF)
 	test("OpenAI explicit false overrides media", "/v1/chat/completions", explicitFalse, "text/event-stream", "raw response", streamProtocolUnknown, "")
-	test("Ollama default json", "/api/chat", "", "application/json", continuityNDJSONEvent+`{"done":true}`, streamProtocolNDJSON, "")
-	test("Ollama chat null", "/api/chat", `,"stream":null`, "application/json", continuityNDJSONEvent, streamProtocolNDJSON, streamInterruptReasonPrematureEOF)
-	test("Ollama generate null", "/api/generate", `,"stream":null`, "application/x-ndjson", "{\"done\":true}\n", streamProtocolNDJSON, "")
-	test("Ollama generate declared", "/api/generate", explicitTrue, "application/x-ndjson", "{\"done\":true}\n", streamProtocolNDJSON, "")
-	test("Ollama explicit false", "/api/generate", explicitFalse, "application/json", `{"response":"single"}`, streamProtocolUnknown, "")
 	test("OpenAI wrong media", "/v1/chat/completions", explicitTrue, "application/json", `{"choices":[]}`, streamProtocolSSE, streamInterruptReasonMalformed)
-	test("Ollama wrong media", "/api/chat", "", "text/plain", `{"done":true}`, streamProtocolNDJSON, streamInterruptReasonMalformed)
 	test("OpenAI empty stream", "/v1/completions", explicitTrue, "text/event-stream", "", streamProtocolSSE, streamInterruptReasonPrematureEOF)
-	test("Ollama empty stream", "/api/chat", "", "application/json", "", streamProtocolNDJSON, streamInterruptReasonPrematureEOF)
 	test("malformed SSE", "/v1/chat/completions", explicitTrue, "text/event-stream", "data: bad-json\n\n", streamProtocolSSE, streamInterruptReasonMalformed)
-	test("malformed NDJSON", "/api/chat", "", "application/x-ndjson", "bad-json\n", streamProtocolNDJSON, streamInterruptReasonMalformed)
-	test("premature clean EOF", "/api/chat", "", "application/json", continuityNDJSONEvent, streamProtocolNDJSON, streamInterruptReasonPrematureEOF)
 	test("Anthropic stays raw", "/v1/messages", explicitTrue, "text/event-stream", "event: message_stop\ndata: {}\n\n", streamProtocolUnknown, "")
 	test("Responses stays raw", "/v1/responses", explicitTrue, "text/event-stream", "event: response.completed\ndata: {}\n\n", streamProtocolUnknown, "")
 }
@@ -335,7 +302,7 @@ func TestStreamContinuityRejectsInvalidStreamFlag(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
 			defer upstream.Close()
 			fx := newContinuityFixture(t, upstream.URL, time.Second)
-			resp, _, err := fx.request(t, "/api/chat", `{"model":"m","stream":`+flag+`}`)
+			resp, _, err := fx.request(t, "/v1/chat/completions", `{"model":"m","stream":`+flag+`}`)
 			if err != nil || resp.StatusCode != http.StatusBadRequest || hits.Load() != 0 {
 				t.Fatalf("status=%d read=%v dispatches=%d", resp.StatusCode, err, hits.Load())
 			}
@@ -369,7 +336,7 @@ func TestNonInferenceRequestOnInferencePathPreservesRequest(t *testing.T) {
 	fac.discovery.AddManual(selfNode("node-a", fac.port, "m"))
 	setBackend(t, fac, upstream.URL, true)
 
-	r, err := http.NewRequest(http.MethodGet, fx.origin.URL+"/api/chat", strings.NewReader(requestBody))
+	r, err := http.NewRequest(http.MethodGet, fx.origin.URL+"/v1/chat/completions", strings.NewReader(requestBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +388,7 @@ func TestStreamContinuityEffectiveLocalDefaults(t *testing.T) {
 			fac.discovery.AddManual(selfNode("node-a", fac.port, "m"))
 			setBackend(t, fac, upstream.URL, true)
 			pol := nodepolicy.Default()
-			pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(defaults)}}
+			pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "llamacpp-custom", Model: "m", RequestOptions: json.RawMessage(defaults)}}
 			fx.p.admission.setPolicy(pol)
 			resp, data, err := fx.request(t, path, request)
 			if err != nil || resp.StatusCode != http.StatusOK {
@@ -445,7 +412,6 @@ func TestStreamContinuityEffectiveLocalDefaults(t *testing.T) {
 		})
 	}
 	test("all default choices required", "/v1/chat/completions", `{"model":"m","stream":true}`, `{"n":2}`, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n", streamInterruptReasonPrematureEOF)
-	test("default disables native streaming", "/api/chat", `{"model":"m"}`, `{"stream":false}`, "application/json", `{"response":"`+strings.Repeat("x", 1<<20)+`","done":true}`, "")
 	test("default declares OpenAI streaming", "/v1/completions", `{"model":"m"}`, `{"stream":true}`, "application/json", `{"choices":[]}`, streamInterruptReasonMalformed)
 }
 
@@ -529,9 +495,9 @@ func TestStreamContinuityStrictLocalHidesPeerMetadata(t *testing.T) {
 
 func TestStreamContinuityStripsIntegrityTrailers(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Trailer", "Digest, Content-Digest, X-Fixture")
-		if _, err := io.WriteString(w, continuityNDJSONEvent); err != nil {
+		if _, err := io.WriteString(w, continuitySSEEvent); err != nil {
 			t.Errorf("write upstream frame: %v", err)
 			return
 		}
@@ -541,11 +507,11 @@ func TestStreamContinuityStripsIntegrityTrailers(t *testing.T) {
 	}))
 	defer upstream.Close()
 	fx := newContinuityFixture(t, upstream.URL, time.Second)
-	resp, data, err := fx.request(t, "/api/chat", `{"model":"m"}`)
+	resp, data, err := fx.request(t, "/v1/chat/completions", `{"model":"m"}`)
 	if err != nil {
 		t.Fatalf("read managed response: %v", err)
 	}
-	assertContinuityError(t, streamProtocolNDJSON, data, streamInterruptReasonPrematureEOF)
+	assertContinuityError(t, streamProtocolSSE, data, streamInterruptReasonPrematureEOF)
 	if resp.Trailer.Get("Digest") != "" || resp.Trailer.Get("Content-Digest") != "" || resp.Trailer.Get("X-Fixture") != "preserved" {
 		t.Fatalf("managed trailers = %v; want only unrelated fixture metadata", resp.Trailer)
 	}
@@ -633,7 +599,6 @@ func TestStreamContinuityUpstreamErrorAndLogs(t *testing.T) {
 		})
 	}
 	test("SSE", "/v1/chat/completions", "text/event-stream", "data: {\"error\":{\"message\":\""+sentinel+"\"}}\n\n")
-	test("NDJSON", "/api/chat", "application/json", "{\"error\":\""+sentinel+"\"}\n")
 	if strings.Contains(logs.String(), sentinel) {
 		t.Fatal("request or response content leaked into operational logs")
 	}

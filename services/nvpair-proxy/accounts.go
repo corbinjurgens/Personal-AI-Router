@@ -734,7 +734,7 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 					if errors.Is(attemptErr, errChatBudget) {
 						reason = streamInterruptReasonBudget
 					}
-					protocol := streamProtocolNDJSON
+					protocol := streamProtocolJSON
 					if prepared.Stream {
 						protocol = streamProtocolSSE
 					}

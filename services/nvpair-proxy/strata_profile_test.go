@@ -307,7 +307,7 @@ func TestStrataRouteClassification(t *testing.T) {
 }
 
 // Strata model ids are exact: the proxy must not treat "m" and "m:latest" as one
-// model, as it does for Ollama.
+// model, as it does for engine.
 func TestStrataModelIDsAreExact(t *testing.T) {
 	profile := strataProfile(t)
 	for _, id := range []string{"qwen3-30b-a3b", "org/qwen3:Q4_K_M", "qwen3-30b-a3b:latest"} {

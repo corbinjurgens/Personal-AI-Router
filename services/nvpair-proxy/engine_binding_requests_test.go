@@ -485,7 +485,6 @@ func TestEngineBindingRequestsUnboundAndNativeStayEngineLocal(t *testing.T) {
 		})
 	}
 	test("unbound OpenAI name", routeChatCompletions, false, llamacppCase(t).profile)
-	test("bound name on native Ollama protocol", "/api/generate", true, ollamaCase(t).profile)
 }
 
 func TestEngineBindingRequestsDirectConflictingIngressRefuses(t *testing.T) {

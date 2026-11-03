@@ -332,7 +332,7 @@ func (p *Proxy) reportStrictReadiness() {
 
 // AdmitStrict shares the concrete path's lock, in-flight counts, residency,
 // notifications and tickets. Engine IDs are canonical built-in IDs; models use
-// the existing engine adapter normalization (Ollama adds :latest, LM Studio exact).
+// the existing engine adapter normalization (exact model identifiers).
 // generation is the installation qualifyStrict validated the request against;
 // a model reinstalled since, by a policy, identity or qualification change,
 // is unavailable to it.
