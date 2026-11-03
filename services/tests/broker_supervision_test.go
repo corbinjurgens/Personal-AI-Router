@@ -171,14 +171,14 @@ func TestFixtureBrokerLlamaCPPSelection(t *testing.T) {
 	}
 	check("default engine set", []string{"--proxy-path", "private-proxy"}, true)
 	check("explicit llama.cpp", []string{"--proxy-engines", "llamacpp"}, true)
-	check("inline mixed selection", []string{"--proxy-engines=ollama, llamacpp"}, true)
+	check("inline mixed selection", []string{"--proxy-engines=llamacpp-custom, llamacpp"}, true)
 	check("single hyphen selector", []string{"-proxy-engines", "llamacpp"}, true)
 	check("single hyphen inline selector", []string{"-proxy-engines=llamacpp"}, true)
-	check("managed engines only", []string{"--proxy-engines", "ollama,lmstudio"}, false)
+	check("descriptor engine only", []string{"--proxy-engines", "llamacpp-custom"}, false)
 	check("empty selector", []string{"--proxy-engines="}, false)
-	check("last selector disables llama.cpp", []string{"--proxy-engines=llamacpp", "--proxy-engines", "ollama"}, false)
+	check("last selector disables llama.cpp", []string{"--proxy-engines=llamacpp", "--proxy-engines", "llamacpp-custom"}, false)
 	check("last selector enables llama.cpp", []string{"--proxy-engines=", "--proxy-engines", "llamacpp"}, true)
-	check("flag terminator preserves selection", []string{"--proxy-engines=ollama", "--", "--proxy-engines=llamacpp"}, false)
+	check("flag terminator preserves selection", []string{"--proxy-engines=llamacpp-custom", "--", "--proxy-engines=llamacpp"}, false)
 	check("missing selector value", []string{"--proxy-engines"}, false)
 }
 
@@ -274,17 +274,17 @@ var proxyPidRe = regexp.MustCompile(`proxy started.*\bpid=(\d+)`)
 func TestBrokerCrashSurfacingAndRestart(t *testing.T) {
 	configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
 	proxyPort := freePort(t)
-	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"ollama": proxyPort})
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"llamacpp": proxyPort})
 
 	stdin, msgs, stderr, cleanup := startBrokerWithDirs(t, configDir, clusterDir,
 		"--errors-path", errorsBin,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 	)
 	t.Cleanup(cleanup)
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-	if port := waitProxyReady(t, stdin, msgs, 15*time.Second); port != proxyPort {
-		t.Fatalf("Ollama proxy port=%d want private port=%d", port, proxyPort)
+	if port := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second); port != proxyPort {
+		t.Fatalf("llama.cpp proxy port=%d want private port=%d", port, proxyPort)
 	}
 
 	// The proxy logs "proxy started ... pid=N" at startup (before app:ready),
@@ -317,8 +317,8 @@ func TestBrokerCrashSurfacingAndRestart(t *testing.T) {
 		t.Fatalf("proxy was not restarted: same pid %d", pid2)
 	}
 	t.Logf("proxy auto-restarted: pid %d -> %d", pid1, pid2)
-	if port := waitProxyReady(t, stdin, msgs, 15*time.Second); port != proxyPort {
-		t.Fatalf("restarted Ollama proxy port=%d want private port=%d", port, proxyPort)
+	if port := waitEngineProxyReady(t, "llamacpp-proxy", stdin, msgs, 15*time.Second); port != proxyPort {
+		t.Fatalf("restarted llama.cpp proxy port=%d want private port=%d", port, proxyPort)
 	}
 }
 
@@ -409,17 +409,19 @@ func TestAllDefaultEnginesAreServedByOneProxyProcess(t *testing.T) {
 // workers during teardown. This guards the regression where Ctrl+C left
 // the broker hung and self-restarting its children.
 func TestBrokerShutsDownOnSignal(t *testing.T) {
+	configDir, clusterDir := t.TempDir(), t.TempDir()
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"llamacpp": freePort(t)})
 	args := append([]string{
 		"--scanner-path", scannerBin,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
-		"--cluster-dir", t.TempDir(),
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
+		"--cluster-dir", clusterDir,
 	}, reserveFixtureServicePorts(t).args()...)
 	cmd, err := fixtureBrokerCommand(brokerBin, args...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	configureBrokerSignalTarget(cmd)
-	cmd.Env = privateEngineEnv(t, t.TempDir())
+	cmd.Env = privateEngineEnv(t, configDir)
 	cmd.Stderr = os.Stderr
 	// Keep stdin OPEN for the lifetime of the test so shutdown is driven
 	// purely by the signal, not by stdin EOF (closing stdin would shut the
@@ -473,7 +475,7 @@ func TestBrokerShutsDownOnSignal(t *testing.T) {
 // TestBrokerSpawnsAllModules points the broker at every worker binary and
 // asserts each one is spawned (its "started" log line) and the broker
 // reaches app:ready. The advertiser is excluded — it's poll-driven and
-// only starts once local ollama is detected.
+// only starts once a local engine is detected.
 func TestBrokerSpawnsAllModules(t *testing.T) {
 	configDir := t.TempDir()
 	configBase := configDir
@@ -484,7 +486,7 @@ func TestBrokerSpawnsAllModules(t *testing.T) {
 	stdin, msgs, stderr, cleanup := startBrokerWithConfigDir(t, configDir,
 		"--errors-path", errorsBin,
 		"--node-info-path", nodeInfoBin,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 		"--workload-manager-path", workloadMgrBin,
 		"--engine-manager-path", engineMgrBin,
 		"--manual-nodes-path", manualNodesBin,
@@ -564,29 +566,29 @@ func TestBrokerEngineRelay(t *testing.T) {
 	t.Logf("engine:get-installed returned %d engine(s)", len(result.Engines))
 }
 
-// proxyStatus queries ollama-proxy:get-status through the broker and returns the
+// proxyStatus queries llamacpp-proxy:get-status through the broker and returns the
 // proxy's readiness + bound port (the broker's captured view of the proxy's
 // last "ready").
 func proxyStatus(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Message, id int) (bool, int) {
 	t.Helper()
-	sendReq(t, stdin, id, "ollama-proxy:get-status")
+	sendReq(t, stdin, id, "llamacpp-proxy:get-status")
 	resp := waitForResponse(t, msgs, 5*time.Second)
 	if resp.Error != nil {
-		t.Fatalf("ollama-proxy:get-status errored: %d %s", resp.Error.Code, resp.Error.Message)
+		t.Fatalf("llamacpp-proxy:get-status errored: %d %s", resp.Error.Code, resp.Error.Message)
 	}
 	var s struct {
 		Ready bool `json:"ready"`
 		Port  int  `json:"port"`
 	}
 	if err := json.Unmarshal(resp.Result, &s); err != nil {
-		t.Fatalf("parse ollama-proxy:get-status: %v\nraw: %s", err, resp.Result)
+		t.Fatalf("parse llamacpp-proxy:get-status: %v\nraw: %s", err, resp.Result)
 	}
 	return s.Ready, s.Port
 }
 
-// TestBrokerProxySetPortRebinds drives ollama-proxy:set-port through the broker
+// TestBrokerProxySetPortRebinds drives llamacpp-proxy:set-port through the broker
 // and asserts the proxy live-rebinds onto the new port (reflected by
-// ollama-proxy:get-status). The broker is given a private config dir so the proxy's
+// llamacpp-proxy:get-status). The broker is given a private config dir so the proxy's
 // persisted port doesn't touch the developer's real config. With no engine
 // running, the requested port is free, so the broker relays it unchanged (no
 // bump) — exercising the interception + relay + rebind wiring end to end.
@@ -603,19 +605,19 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 	}
 	// A port-only settings edit preserves the manager's server port. Keep it
 	// valid but stopped, without enabling detection, launch or health probes.
-	absent := filepath.Join(cfg, "absent-ollama")
-	jointWriteJSON(t, filepath.Join(jointAppDir(cfg), "engines", "ollama.json"), map[string]any{
-		"engine": "ollama", "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
-			"detect": []string{absent}, "models_dir": filepath.Join(cfg, "absent-models", "ollama"),
+	absent := filepath.Join(cfg, "absent-llamacpp")
+	jointWriteJSON(t, filepath.Join(jointAppDir(cfg), "engines", "llamacpp.json"), map[string]any{
+		"engine": "llamacpp", "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
+			"detect": []string{absent}, "models_dir": filepath.Join(cfg, "absent-models", "llamacpp"),
 			"runtime": map[string]any{
 				"port": serverPort, "bin": absent, "cli": absent, "ready": nil, "health": nil, "auth_statuses": []int{},
 			},
 		}},
 	})
-	writePrivateBrokerEngineSettings(t, cfg, clusterDir, map[string]int{"ollama": proxyPort})
+	writePrivateBrokerEngineSettings(t, cfg, clusterDir, map[string]int{"llamacpp": proxyPort})
 	args := append([]string{
 		"--scanner-path", scannerBin,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
+		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp",
 		"--engine-manager-path", engineMgrBin,
 	}, ports.args()...)
 	args = append(args, "--cluster-dir", clusterDir)
@@ -659,7 +661,7 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 	for {
 		if ready, port := proxyStatus(t, stdin, msgs, id); ready {
 			if port != proxyPort {
-				t.Fatalf("initial Ollama proxy port=%d want private port=%d", port, proxyPort)
+				t.Fatalf("initial llama.cpp proxy port=%d want private port=%d", port, proxyPort)
 			}
 			break
 		}
@@ -674,25 +676,25 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 	if target == proxyPort || target == serverPort {
 		t.Fatalf("rebind target %d must differ from the initial facade and stopped-engine port", target)
 	}
-	req := fmt.Sprintf(`{"jsonrpc":"2.0","id":860,"method":"ollama-proxy:set-port","params":{"port":%d}}`, target) + "\n"
+	req := fmt.Sprintf(`{"jsonrpc":"2.0","id":860,"method":"llamacpp-proxy:set-port","params":{"port":%d}}`, target) + "\n"
 	if _, err := stdin.Write([]byte(req)); err != nil {
-		t.Fatalf("write ollama-proxy:set-port: %v", err)
+		t.Fatalf("write llamacpp-proxy:set-port: %v", err)
 	}
 	resp := waitForResponse(t, msgs, 10*time.Second)
 	if resp.Error != nil {
-		t.Fatalf("ollama-proxy:set-port errored: %d %s", resp.Error.Code, resp.Error.Message)
+		t.Fatalf("llamacpp-proxy:set-port errored: %d %s", resp.Error.Code, resp.Error.Message)
 	}
 	var sp struct {
 		Port int `json:"port"`
 	}
 	if err := json.Unmarshal(resp.Result, &sp); err != nil {
-		t.Fatalf("parse ollama-proxy:set-port result: %v\nraw: %s", err, resp.Result)
+		t.Fatalf("parse llamacpp-proxy:set-port result: %v\nraw: %s", err, resp.Result)
 	}
 	if sp.Port != target {
 		t.Fatalf("set-port result port = %d, want %d (no engine running, so no bump expected)", sp.Port, target)
 	}
 
-	// ollama-proxy:get-status must now reflect the rebound port.
+	// llamacpp-proxy:get-status must now reflect the rebound port.
 	id = 870
 	deadline = time.Now().Add(10 * time.Second)
 	for {
@@ -702,7 +704,7 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 		}
 		id++
 		if time.Now().After(deadline) {
-			t.Fatalf("ollama-proxy:get-status never reported the rebound port %d", target)
+			t.Fatalf("llamacpp-proxy:get-status never reported the rebound port %d", target)
 		}
 		time.Sleep(300 * time.Millisecond)
 	}

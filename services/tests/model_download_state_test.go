@@ -483,7 +483,7 @@ func newDownloadProcessFixture(t *testing.T, reverse bool) *downloadProcessFixtu
 	inert := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	t.Cleanup(inert.Close)
 	jointIsolateEngines(t, s.configDir, portOfURL(t, inert.URL))
-	writePrivateBrokerEngineSettings(t, s.configDir, s.clusterDir, map[string]int{"llamacpp": temporaryClusterPort(t), "ollama": temporaryClusterPort(t)})
+	writePrivateBrokerEngineSettings(t, s.configDir, s.clusterDir, map[string]int{"llamacpp": temporaryClusterPort(t), "llamacpp-custom": temporaryClusterPort(t)})
 	policy := nodepolicy.Default()
 	policy.Revision = "12"
 	jointWriteJSON(t, s.policyPath(), policy)
