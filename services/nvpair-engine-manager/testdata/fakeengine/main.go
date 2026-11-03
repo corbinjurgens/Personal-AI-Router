@@ -327,6 +327,13 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 	})
+	// OpenAI-compatible chat: one fixed non-streaming completion.
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		b := decodeBody(r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"model": bstr(b, "model"), "object": "chat.completion",
+			"choices": []map[string]any{{"index": 0, "message": map[string]string{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}}})
+	})
 	// Test-control: delay every /api/tags answer by {"ms":N}, so a test can
 	// change state while an inventory request is in flight.
 	mux.HandleFunc("/testctl/tags-delay", func(w http.ResponseWriter, r *http.Request) {
@@ -379,7 +386,7 @@ func main() {
 	allowed := map[string]string{
 		"/": http.MethodGet, "/api/version": http.MethodGet,
 		"/api/tags": http.MethodGet, "/api/ps": http.MethodGet,
-		"/v1/models": http.MethodGet,
+		"/v1/models": http.MethodGet, "/v1/chat/completions": http.MethodPost,
 		"/api/error": http.MethodGet, "/exit": http.MethodGet,
 		"/models": http.MethodPost, "/models/sse": http.MethodGet,
 		"/api/generate":       http.MethodPost,
