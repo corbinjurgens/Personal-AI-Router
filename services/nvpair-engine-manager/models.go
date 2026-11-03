@@ -371,7 +371,7 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 		if !loadedOK[i] {
 			continue
 		}
-		entries := e.memoryEvidenceEntries(memoryCapture, name, loadedRaw[i])
+		entries := e.memoryEvidenceEntries(memoryCapture, name)
 		entries = memoryUnknownLoadedNames(memoryCapture, name, loaded[i], entries)
 		memoryEntries = append(memoryEntries, entries...)
 	}
