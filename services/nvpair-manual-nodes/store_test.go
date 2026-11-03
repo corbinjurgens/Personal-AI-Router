@@ -108,7 +108,7 @@ func TestReplayRestoresSavedEntries(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	configureHealthyNode(rt, "node.local", []string{"llama3"}, sampleInfo())
+	configureHealthyNode(rt, "node.local", sampleInfo())
 
 	m.replay()
 
@@ -148,8 +148,7 @@ func TestRunReplaysAfterReady(t *testing.T) {
 	rt := newFakeRoundTripper()
 	mgr.client.Transport = rt
 	mgr.tlsClient.Transport = rt
-	configureHealthyNode(rt, address, []string{"replayed-ollama"}, sampleInfo())
-	configureHealthyLMStudio(rt, address, []string{"replayed-lmstudio"})
+	configureHealthyNode(rt, address, sampleInfo())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- mgr.Run(ctx) }()
@@ -185,9 +184,7 @@ func TestRunReplaysAfterReady(t *testing.T) {
 		}
 	}
 	if discovered.ID != "manual:name:loopback" || discovered.Address != address ||
-		!discovered.OllamaUp || !discovered.LMStudioUp || !discovered.NodeInfoUp ||
-		len(discovered.OllamaModels) != 1 || discovered.OllamaModels[0] != "replayed-ollama" ||
-		len(discovered.LMStudioModels) != 1 || discovered.LMStudioModels[0] != "replayed-lmstudio" ||
+		!discovered.NodeInfoUp ||
 		!discovered.TelemetryValid || discovered.MSSince != sampleInfo().MSSince {
 		t.Fatalf("completed intercepted replay = %+v", discovered)
 	}
@@ -200,9 +197,7 @@ func TestRunReplaysAfterReady(t *testing.T) {
 		}
 		list := decodeResult[map[string][]ManualNodeStatus](t, msg)
 		if len(list["nodes"]) != 1 || list["nodes"][0].ID != "manual:name:loopback" ||
-			list["nodes"][0].Address != address || !list["nodes"][0].NodeInfoUp ||
-			!sliceEqual(list["nodes"][0].OllamaModels, discovered.OllamaModels) ||
-			!sliceEqual(list["nodes"][0].LMStudioModels, discovered.LMStudioModels) {
+			list["nodes"][0].Address != address || !list["nodes"][0].NodeInfoUp || list["nodes"][0].MSSince != 137 {
 			t.Fatalf("nodes/list after restart = %+v", list)
 		}
 		return

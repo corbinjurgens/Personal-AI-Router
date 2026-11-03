@@ -21,11 +21,11 @@ import (
 // A facade, not a process: one nvpair-proxy serves them all, so readiness and
 // port are per-engine here while a crash is reported once against the process
 // (see serviceWorkers). The prefix is the per-engine ComponentName, because
-// addressing "ollama-proxy:nodes/list" means that engine regardless of which
+// addressing "llamacpp-proxy:nodes/list" means that engine regardless of which
 // process happens to serve it.
 type proxyEngine struct {
-	label  string // "Ollama" / "LM Studio"
-	prefix string // "ollama-proxy" / "lmstudio-proxy"
+	label  string // engine display label
+	prefix string // engine component name
 	// engine is the engine-manager engine name this facade fronts, used to line
 	// a facade up with the engine it serves.
 	engine string

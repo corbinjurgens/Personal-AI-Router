@@ -38,8 +38,8 @@ const (
 	probeTimeout  = 3 * time.Second
 
 	// probeFailThreshold is the number of CONSECUTIVE probes (at
-	// probeInterval = 10s, so 30 s of unreachability) where neither
-	// Ollama nor node-info answered before we surface the node as
+	// probeInterval = 10s, so 30 s of unreachability) where
+	// node-info has not answered before we surface the node as
 	// "probe failed" through the errors pipeline. This surfaces an error;
 	// it does not evict, so it is deliberately shorter than the ~60 s
 	// shared/discovery waits before dropping an mDNS node.
@@ -60,7 +60,7 @@ type GPUInfo struct {
 
 // CPUInfo and MemoryInfo mirror the top-level objects nvpair-node-info
 // now emits. Pointer-optional so manually-added nodes that aren't
-// actually running nvpair-node-info (Ollama-only routing targets) don't
+// responding to nvpair-node-info probes don't
 // falsely surface as having an unknown CPU + zero memory — the whole
 // object stays absent until we see one in a real response.
 type CPUInfo struct {
@@ -238,24 +238,15 @@ type ManualNodeStatus struct {
 	ID                string                     `json:"id"`
 	Name              string                     `json:"name,omitempty"`
 	Address           string                     `json:"address"`
-	OllamaUp          bool                       `json:"ollama_up"`
-	OllamaPort        int                        `json:"ollama_port"`
-	OllamaModels      []string                   `json:"ollama_models,omitzero"`
-	// LM Studio is probed on its default OpenAI-API port the same way Ollama
-	// is on 11434, so a manually-added node running LM Studio can be bridged
-	// into lmstudio-proxy by a supervising broker.
-	LMStudioUp     bool        `json:"lmstudio_up"`
-	LMStudioPort   int         `json:"lmstudio_port"`
-	LMStudioModels []string    `json:"lmstudio_models,omitzero"`
-	NodeInfoUp     bool        `json:"node_info_up"`
-	NodeInfoPort   int         `json:"node_info_port"`
-	TLSEnabled     bool        `json:"tls_enabled,omitempty"`
-	MTLSRequired   bool        `json:"mtls_required,omitempty"`
-	GPUs           []GPUInfo   `json:"gpus,omitempty"`
-	CPU            *CPUInfo    `json:"cpu,omitempty"`
-	Memory         *MemoryInfo `json:"memory,omitempty"`
-	TelemetryValid bool        `json:"telemetryValid"`
-	MSSince        int64       `json:"msSince"`
+	NodeInfoUp        bool                       `json:"node_info_up"`
+	NodeInfoPort      int                        `json:"node_info_port"`
+	TLSEnabled        bool                       `json:"tls_enabled,omitempty"`
+	MTLSRequired      bool                       `json:"mtls_required,omitempty"`
+	GPUs              []GPUInfo                  `json:"gpus,omitempty"`
+	CPU               *CPUInfo                   `json:"cpu,omitempty"`
+	Memory            *MemoryInfo                `json:"memory,omitempty"`
+	TelemetryValid    bool                       `json:"telemetryValid"`
+	MSSince           int64                      `json:"msSince"`
 	// HostUUID is the remote's stable per-host identity from node-info, so a
 	// manual node carries the same permanent identity the rest of the system
 	// keys on. Empty when node-info didn't report one.
@@ -271,9 +262,8 @@ type trackedNode struct {
 	entry   ManualEntry
 	status  ManualNodeStatus
 
-	// consecutiveFails counts back-to-back probes where neither
-	// service answered (OllamaUp && NodeInfoUp both false). Reset
-	// to 0 on any probe where at least one service responded.
+	// consecutiveFails counts back-to-back probes where node-info did not
+	// answer. Reset to 0 on any successful node-info probe.
 	// Used to gate probe-failed errors:report emits at
 	// probeFailThreshold so a single transient failure doesn't
 	// generate UI noise.
@@ -285,8 +275,7 @@ type Manager struct {
 	cancel     context.CancelFunc
 	probePorts probePorts
 
-	// client is the plain-HTTP probe client (Ollama on :11434 and
-	// nvpair-node-info's HTTP listener). tlsClient is used only when
+	// client is the plain-HTTP node-info probe client. tlsClient is used only when
 	// the entry sets TLSPort > 0; if the operator hasn't given us
 	// any TLS material via flags, tlsClient still works because
 	// the default *http.Client respects the system trust store
@@ -399,15 +388,6 @@ func (m *Manager) probeNode(tn *trackedNode) {
 	addr := entry.Address
 	id := nodeID(entry)
 
-	var ollamaUp, lmStudioUp bool
-	var ollamaModels, lmStudioModels []string
-	if m.probePorts.ollama > 0 {
-		ollamaUp, ollamaModels = m.probeOllama(addr, m.probePorts.ollama)
-	}
-	if m.probePorts.lmstudio > 0 {
-		lmStudioUp, lmStudioModels = m.probeLMStudio(addr, m.probePorts.lmstudio)
-	}
-
 	// Pick scheme + port + client based on the entry's TLS hint.
 	// The operator decides which scheme this manual node uses; we
 	// don't probe both. TLSPort > 0 means HTTPS on that port via
@@ -445,12 +425,6 @@ func (m *Manager) probeNode(tn *trackedNode) {
 		ID:                id,
 		Name:              entry.Name,
 		Address:           addr,
-		OllamaUp:          ollamaUp,
-		OllamaPort:        m.probePorts.ollama,
-		OllamaModels:      ollamaModels,
-		LMStudioUp:        lmStudioUp,
-		LMStudioPort:      m.probePorts.lmstudio,
-		LMStudioModels:    lmStudioModels,
 		NodeInfoUp:        nodeInfoUp,
 		NodeInfoPort:      nodeInfoPort,
 		TLSEnabled:        entry.TLSPort > 0,
@@ -463,7 +437,7 @@ func (m *Manager) probeNode(tn *trackedNode) {
 		HostUUID:          info.HostUUID,
 	}
 
-	reachable := newStatus.OllamaUp || newStatus.LMStudioUp || newStatus.NodeInfoUp
+	reachable := newStatus.NodeInfoUp
 
 	m.mu.Lock()
 	if m.nodes[id] != tn {
@@ -474,7 +448,7 @@ func (m *Manager) probeNode(tn *trackedNode) {
 	prev := tn.status
 	prevFails := tn.consecutiveFails
 	// A failed node-info probe returns no HostUUID; preserve the last-learned one
-	// so a transient node-info blip (while Ollama stays reachable) doesn't rekey
+	// so a transient node-info blip doesn't rekey
 	// a live node UUID -> manual-id -> UUID — the broker keys the discovery store
 	// by HostUUID.
 	if !nodeInfoUp && newStatus.HostUUID == "" {
@@ -489,15 +463,9 @@ func (m *Manager) probeNode(tn *trackedNode) {
 	curFails := tn.consecutiveFails
 	m.mu.Unlock()
 
-	changed := prev.OllamaUp != newStatus.OllamaUp ||
-		prev.LMStudioUp != newStatus.LMStudioUp ||
-		prev.NodeInfoUp != newStatus.NodeInfoUp ||
+	changed := prev.NodeInfoUp != newStatus.NodeInfoUp ||
 		prev.HostUUID != newStatus.HostUUID ||
 		prev.ServiceBuildID != newStatus.ServiceBuildID ||
-		(prev.OllamaModels == nil) != (newStatus.OllamaModels == nil) ||
-		(prev.LMStudioModels == nil) != (newStatus.LMStudioModels == nil) ||
-		!sliceEqual(prev.OllamaModels, newStatus.OllamaModels) ||
-		!sliceEqual(prev.LMStudioModels, newStatus.LMStudioModels) ||
 		!gpusEqual(prev.GPUs, newStatus.GPUs) ||
 		!cpuEqual(prev.CPU, newStatus.CPU) ||
 		!memoryEqual(prev.Memory, newStatus.Memory) ||
@@ -507,8 +475,8 @@ func (m *Manager) probeNode(tn *trackedNode) {
 	if changed || newStatus.MemoryObservation != nil {
 		slog.Info("manual node state changed",
 			"node_id", id, "addr", addr,
-			"ollama_up", newStatus.OllamaUp, "node_info_up", newStatus.NodeInfoUp,
-			"models", len(newStatus.OllamaModels), "gpus", len(newStatus.GPUs))
+			"node_info_up", newStatus.NodeInfoUp,
+			"gpus", len(newStatus.GPUs))
 		m.ifCurrent(tn, func() error {
 			newStatus.MemoryHop = noderec.NewMemoryHop(strconv.Itoa(os.Getpid()), manualMemoryClock)
 			newStatus.MemoryObservation = newStatus.MemoryObservation.Advance(newStatus.memoryBoot, newStatus.memoryClockErr, manualMemoryClock)
@@ -517,7 +485,7 @@ func (m *Manager) probeNode(tn *trackedNode) {
 	} else {
 		slog.Debug("manual node probe stable",
 			"node_id", id, "addr", addr,
-			"ollama_up", newStatus.OllamaUp, "node_info_up", newStatus.NodeInfoUp)
+			"node_info_up", newStatus.NodeInfoUp)
 	}
 
 	// Surface the consecutive-failure transition through the errors
@@ -579,143 +547,6 @@ func probeFailedID(nodeID string) string {
 	return "manual-nodes:probe-failed:" + nodeID
 }
 
-// lmStudioPort is LM Studio's default OpenAI-API server port, probed the same
-// way Ollama is hardcoded to 11434. A manual node is remote, so (like Ollama)
-// we assume the engine's default port rather than resolving it via the engine
-// manager (which only governs the local engine).
-const lmStudioPort = 1234
-
-// probeLMStudio checks LM Studio's OpenAI-compatible server on addr:port. A
-// single GET /v1/models doubles as the liveness check and the model list (the
-// response is {"data":[{"id":"..."}],...}). Returns whether it is up and the
-// model ids it serves.
-func (m *Manager) probeLMStudio(addr string, port int) (bool, []string) {
-	url := "http://" + net.JoinHostPort(addr, strconv.Itoa(port)) + "/v1/models"
-	start := time.Now()
-	resp, err := m.client.Get(url)
-	if err != nil {
-		slog.Debug("manual probe lmstudio failed",
-			"addr", addr, "port", port, "duration_ms", time.Since(start).Milliseconds(), "err", err)
-		return false, nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		slog.Debug("manual probe lmstudio non-OK",
-			"addr", addr, "port", port, "status", resp.StatusCode,
-			"duration_ms", time.Since(start).Milliseconds())
-		return false, nil
-	}
-	var result struct {
-		Data []struct {
-			ID json.RawMessage `json:"id"`
-		} `json:"data"`
-	}
-	decoder := json.NewDecoder(resp.Body)
-	if err := decoder.Decode(&result); err != nil {
-		// Reachable, but the model list didn't parse — still report it up.
-		slog.Debug("manual probe lmstudio up (models parse failed)",
-			"addr", addr, "port", port)
-		return true, nil
-	}
-	var trailing json.RawMessage
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return true, nil
-	}
-	models := make([]string, 0, len(result.Data))
-	for _, d := range result.Data {
-		model, err := decodeManualModelName(d.ID)
-		if err != nil {
-			return true, nil
-		}
-		if model != "" {
-			models = append(models, model)
-		}
-	}
-	slog.Debug("manual probe lmstudio up",
-		"addr", addr, "port", port, "models", len(models),
-		"duration_ms", time.Since(start).Milliseconds())
-	return true, models
-}
-
-func (m *Manager) probeOllama(addr string, port int) (bool, []string) {
-	url := "http://" + net.JoinHostPort(addr, strconv.Itoa(port)) + "/"
-	start := time.Now()
-	resp, err := m.client.Get(url)
-	if err != nil {
-		slog.Debug("manual probe ollama failed",
-			"addr", addr, "port", port, "duration_ms", time.Since(start).Milliseconds(), "err", err)
-		return false, nil
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		slog.Debug("manual probe ollama non-OK",
-			"addr", addr, "port", port, "status", resp.StatusCode,
-			"duration_ms", time.Since(start).Milliseconds())
-		return false, nil
-	}
-
-	models := m.fetchOllamaModels(addr, port)
-	slog.Debug("manual probe ollama up",
-		"addr", addr, "port", port, "models", len(models),
-		"duration_ms", time.Since(start).Milliseconds())
-	return true, models
-}
-
-func (m *Manager) fetchOllamaModels(addr string, port int) []string {
-	url := "http://" + net.JoinHostPort(addr, strconv.Itoa(port)) + "/api/tags"
-	resp, err := m.client.Get(url)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-
-	var result struct {
-		Models []struct {
-			Name json.RawMessage `json:"name"`
-		} `json:"models"`
-	}
-	decoder := json.NewDecoder(resp.Body)
-	if err := decoder.Decode(&result); err != nil {
-		return nil
-	}
-	var trailing json.RawMessage
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil
-	}
-	names := make([]string, 0, len(result.Models))
-	for _, entry := range result.Models {
-		name, err := decodeManualModelName(entry.Name)
-		if err != nil {
-			return nil
-		}
-		if name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
-// Missing/invalid identifiers never acquire a fallback name. Validate raw bytes
-// before string decoding can repair UTF-8, while retaining document failure for
-// unrelated nonstring values. The shared validator owns every identifier rule.
-func decodeManualModelName(raw json.RawMessage) (string, error) {
-	if len(raw) == 0 {
-		return "", nil
-	}
-	valid := nodepolicy.ValidateModelIdentifierJSON(raw) == nil
-	var model string
-	if err := json.Unmarshal(raw, &model); err != nil {
-		return "", err
-	}
-	if !valid {
-		return "", nil
-	}
-	return model, nil
-}
-
 func (m *Manager) probeNodeInfo(client *http.Client, scheme, addr string, port int) (bool, NodeInfoResponse) {
 	boot, clockErr := manualMemoryClock()
 	url := scheme + "://" + net.JoinHostPort(addr, strconv.Itoa(port)) + "/v1/node-info"
@@ -765,8 +596,6 @@ func (m *Manager) addNode(entry ManualEntry) ManualNodeStatus {
 		ID:           id,
 		Name:         entry.Name,
 		Address:      entry.Address,
-		OllamaPort:   m.probePorts.ollama,
-		LMStudioPort: m.probePorts.lmstudio,
 		NodeInfoPort: nodeInfoPort,
 		TLSEnabled:   entry.TLSPort > 0,
 		MTLSRequired: entry.TLSPort > 0 && entry.MTLS,
@@ -944,18 +773,6 @@ func nodeID(entry ManualEntry) string {
 	return "manual:" + entry.Address
 }
 
-func sliceEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func gpusEqual(a, b []GPUInfo) bool {
 	if len(a) != len(b) {
 		return false
@@ -976,7 +793,7 @@ func gpusEqual(a, b []GPUInfo) bool {
 // doesn't report that subsystem); exactly one being nil is a real
 // change (the node started or stopped reporting it, e.g. an OS-level
 // upgrade of nvpair-node-info); both non-nil compares the underlying
-// struct by value. This mirrors what sliceEqual / gpusEqual do for
+// struct by value. This mirrors what gpusEqual does for
 // their respective fields — any change, including a utilization tick
 // moving from 41% to 42%, fires a node/updated event so downstream
 // consumers can refresh their view.

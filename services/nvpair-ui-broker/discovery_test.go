@@ -234,9 +234,8 @@ func TestMemoryTelemetryManualRetirementSerializesAdmittedCallback(t *testing.T)
 	}
 }
 
-// Consume the manual worker's existing status fields through its real broker
-// dispatcher, store mutation hook, subscription and ordinary client response.
-func TestModelControlsManualAttributionWireTransitions(t *testing.T) {
+// Consume node-info metadata through the real broker subscription and response.
+func TestManualNodeInfoWireProjection(t *testing.T) {
 	b := newManualTestBroker()
 	var clientWire bytes.Buffer
 	codec := NewCodec(&clientWire)
@@ -258,32 +257,11 @@ func TestModelControlsManualAttributionWireTransitions(t *testing.T) {
 	if initial.Method != "discovery:nodes-changed" || string(initial.Params) != "[]" {
 		t.Fatal("fresh subscription did not start with the empty store")
 	}
-	for _, tc := range []struct {
-		name, fields string
-		attribution  map[string][]string
-		flat         []string
-	}{
-		{"unknown omitted", ``, nil, nil},
-		{"unknown null", `,"ollama_models":null,"lmstudio_models":null`, nil, nil},
-		{"Ollama observed empty", `,"ollama_models":[]`, map[string][]string{"ollama": {}}, nil},
-		{"Ollama empty repeat", `,"ollama_models":[]`, map[string][]string{"ollama": {}}, nil},
-		{"empty to unknown", ``, nil, nil},
-		{"LM Studio observed empty", `,"lmstudio_models":[]`, map[string][]string{"lmstudio": {}}, nil},
-		{"both observed empty", `,"ollama_models":[],"lmstudio_models":[]`, map[string][]string{"ollama": {}, "lmstudio": {}}, nil},
-		{"empty Ollama and useful LM Studio", `,"ollama_models":[],"lmstudio_models":["first","last"]`, map[string][]string{"ollama": {}, "lmstudio": {"first", "last"}}, []string{"first", "last"}},
-		{"useful Ollama and empty LM Studio", `,"ollama_models":["first","last"],"lmstudio_models":[]`, map[string][]string{"ollama": {"first", "last"}, "lmstudio": {}}, []string{"first", "last"}},
-		{"unknown sibling has no invented key", `,"ollama_models":null,"lmstudio_models":["first","last"]`, map[string][]string{"lmstudio": {"first", "last"}}, []string{"first", "last"}},
-		{"populated siblings preserve flat order", `,"ollama_models":["first","shared"],"lmstudio_models":["shared","last"]`, map[string][]string{"ollama": {"first", "shared"}, "lmstudio": {"shared", "last"}}, []string{"first", "shared", "last"}},
-		{"return to unknown", ``, nil, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			raw := json.RawMessage(`{"id":"manual-presence","address":"127.0.0.1","hostUuid":"manual-owner","node_info_port":14318,"ollama_up":true,"ollama_port":11434,"lmstudio_up":true,"lmstudio_port":1234,"node_info_up":true,"telemetryValid":true,"msSince":7` + tc.fields + `}`)
+	for _, method := range []string{"node/discovered", "node/updated"} {
+		t.Run(method, func(t *testing.T) {
+			raw := json.RawMessage(`{"id":"manual-presence","address":"127.0.0.1","hostUuid":"manual-owner","node_info_port":14318,"node_info_up":true,"telemetryValid":true,"msSince":7}`)
 			var workerWire bytes.Buffer
 			workerCodec := NewCodec(&workerWire)
-			method := "node/updated"
-			if tc.name == "unknown omitted" {
-				method = "node/discovered"
-			}
 			if err := workerCodec.Notify(method, raw); err != nil {
 				t.Fatal(err)
 			}
@@ -293,7 +271,7 @@ func TestModelControlsManualAttributionWireTransitions(t *testing.T) {
 			}
 			b.forwardManualNodesNotification(frame.Method, frame.Params)
 			status := b.manualNodeStatuses["manual-presence"].status
-			if !status.OllamaUp || !status.LMStudioUp || !status.TelemetryValid || status.MSSince != 7 {
+			if !status.TelemetryValid || status.MSSince != 7 {
 				t.Fatal("manual notification changed ordinary status metadata")
 			}
 			assertClient := func(raw json.RawMessage) {
@@ -303,7 +281,7 @@ func TestModelControlsManualAttributionWireTransitions(t *testing.T) {
 					t.Fatal(err)
 				}
 				if len(nodes) != 1 || nodes[0].ID != "manual-presence" || nodes[0].HostUUID != "manual-owner" || nodes[0].IPAddress != "127.0.0.1" || nodes[0].Port != 14318 ||
-					!reflect.DeepEqual(nodes[0].ModelsByEngine, tc.attribution) || !reflect.DeepEqual(nodes[0].Models, tc.flat) || nodes[0].LoadedByEngine != nil {
+					nodes[0].ModelsByEngine != nil || nodes[0].Models != nil || nodes[0].LoadedByEngine != nil {
 					t.Fatalf("manual status/store/client wire lost inventory or metadata: %s", raw)
 				}
 				var fields []map[string]json.RawMessage
@@ -311,8 +289,8 @@ func TestModelControlsManualAttributionWireTransitions(t *testing.T) {
 					t.Fatal(err)
 				}
 				_, present := fields[0]["modelsByEngine"]
-				if present != (tc.attribution != nil) {
-					t.Fatal("client wire manufactured or omitted manual attribution")
+				if present {
+					t.Fatal("client wire manufactured manual attribution")
 				}
 			}
 			changed, err := codec.Read()

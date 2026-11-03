@@ -37,7 +37,7 @@ func validateFixtureBrokerArgs(args []string) error {
 			}
 			value = args[i]
 		}
-		if name == "manual-ollama-port" || name == "manual-lmstudio-port" || name == "manual-node-info-port" {
+		if name == "manual-node-info-port" {
 			parsed, err := strconv.ParseInt(value, 0, strconv.IntSize)
 			if err != nil {
 				return fmt.Errorf("fixture flag --%s: %w", name, err)
@@ -149,7 +149,7 @@ func TestFixtureLaunchRejectsProductionMulticast(t *testing.T) {
 }
 
 func fixtureBrokerDefaults() []string {
-	return []string{"--scanner-mdns=false", "--manual-ollama-port=0", "--manual-lmstudio-port=0", "--manual-node-info-port=0"}
+	return []string{"--scanner-mdns=false", "--manual-node-info-port=0"}
 }
 
 func fixtureBrokerCommand(binary string, args ...string) (*exec.Cmd, error) {
@@ -226,11 +226,11 @@ func TestFixtureLaunchRejectsPortFallbackAndArgumentBypasses(t *testing.T) {
 		{"equals default override", []string{"--workload-manager-port=14320"}},
 		{"truncated port flag", []string{"--workload-manager-port"}},
 		{"positional stops Go flag parsing", []string{"unexpected", "--workload-manager-port=24003"}},
-		{"manual default probe override", []string{"--manual-ollama-port=11434"}},
+		{"manual default probe override", []string{"--manual-node-info-port=14318"}},
 		{"octal default listener", []string{"--workload-manager-port=033760"}},
-		{"octal default probe", []string{"--manual-ollama-port=026252"}},
+		{"octal default probe", []string{"--manual-node-info-port=033756"}},
 		{"hexadecimal default listener", []string{"--workload-manager-port=0x37f0"}},
-		{"hexadecimal default probe", []string{"--manual-ollama-port=0x2caa"}},
+		{"hexadecimal default probe", []string{"--manual-node-info-port=0x37ee"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if cmd, err := fixtureBrokerCommand("unused", append(plan.args(), tc.extra...)...); cmd != nil || err == nil {
@@ -244,7 +244,7 @@ func TestFixtureLaunchAcceptsPrivatePortsWithGoFlagSyntax(t *testing.T) {
 	plan := fixtureServicePorts{24001, 24002, 24003, 24004, 24005, 24006}
 	for _, value := range []string{"060651", "0o60651", "0x61a9", "0b110000110101001", "25_001"} {
 		t.Run(value, func(t *testing.T) {
-			args := append(plan.args(), "--workload-manager-port="+value, "--manual-ollama-port="+value)
+			args := append(plan.args(), "--workload-manager-port="+value, "--manual-node-info-port="+value)
 			if cmd, err := fixtureBrokerCommand("unused", args...); cmd == nil || err != nil {
 				t.Fatalf("private Go flag port rejected: %v, %v", cmd, err)
 			}

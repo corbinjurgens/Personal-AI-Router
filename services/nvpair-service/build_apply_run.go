@@ -1610,7 +1610,7 @@ func buildApplyFileSHA(ctx context.Context, path string) (string, error) {
 }
 
 func validateBuildApplyArguments(args []string, gui bool) error {
-	values := map[string]bool{"endpoint": true, "log-dir": true, "log-level": true, "broker-path": true, "ipc": true, "scanner-path": true, "scanner-mdns": true, "scanner-mdns-service": true, "manual-ollama-port": true, "manual-lmstudio-port": true, "manual-node-info-port": true, "node-info-path": true, "proxy-path": true, "proxy-engines": true, "workload-manager-path": true, "errors-path": true, "engine-manager-path": true, "engine-manager-http-port": true, "engine-manager-control-port": true, "engine-manager-control-host": true, "node-info-port": true, "errors-port": true, "workload-manager-port": true, "cluster-manager-port": true, "manual-nodes-path": true, "settings-path": true, "cluster-manager-path": true, "scheduler-path": true, "cluster-dir": true}
+	values := map[string]bool{"endpoint": true, "log-dir": true, "log-level": true, "broker-path": true, "ipc": true, "scanner-path": true, "scanner-mdns": true, "scanner-mdns-service": true, "manual-node-info-port": true, "node-info-path": true, "proxy-path": true, "proxy-engines": true, "workload-manager-path": true, "errors-path": true, "engine-manager-path": true, "engine-manager-http-port": true, "engine-manager-control-port": true, "engine-manager-control-host": true, "node-info-port": true, "errors-port": true, "workload-manager-port": true, "cluster-manager-port": true, "manual-nodes-path": true, "settings-path": true, "cluster-manager-path": true, "scheduler-path": true, "cluster-dir": true}
 	if gui {
 		values = map[string]bool{"user-data-dir": true, "profile-directory": true}
 	}

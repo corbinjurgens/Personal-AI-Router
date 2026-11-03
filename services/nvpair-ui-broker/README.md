@@ -1884,6 +1884,8 @@ Any `settings/*` request is forwarded to `nvpair-node-settings` and its response
 Relayed to `nvpair-manual-nodes`. `node/add` (`{ address, name?, tls_port?, mtls? }`) registers a user-added node and probes it; `node/remove` (`{ id }`) drops it; `nodes/list` returns the tracked manual nodes. Manually added nodes also surface in the shared `discovery:get-nodes` / `discovery:nodes-changed` snapshot — the broker merges `nvpair-manual-nodes`' `node/discovered|updated|removed` into the same store the scanner feeds. `nvpair-manual-nodes` persists its list to `manual-nodes.json` in the per-user data dir and replays it when it starts, so manual nodes survive a restart of the worker, the broker, or the machine without any client re-adding them: on a worker crash-and-restart the broker first evicts the orphaned entries, then merges each replayed entry back in as its `node/discovered` arrives. Error `-32000 "manual-nodes not available"` when no manual-nodes worker is supervised.
 
 Manual-node status projects into the discovery snapshot and scheduler telemetry.
+The worker probes node-info only, so these snapshots carry hardware and identity
+without manual engine health or model inventory.
 The broker does not add or remove inference proxy targets from those status
 notifications.
 
