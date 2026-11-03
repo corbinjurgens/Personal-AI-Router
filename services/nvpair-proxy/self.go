@@ -44,11 +44,11 @@ func (p *Proxy) selfIdentity(engine string) (nodeID string, models []string) {
 // this one when one of its addresses resolves to this facade's own listener,
 // the same test the self-forward guard applies.
 func (f *facade) noteSelfFromSnapshot(nodes []Node) {
-	selfPort, aliases := f.selfAddresses()
+	selfPort := f.selfPort()
 	for _, n := range nodes {
 		for _, hp := range nodeCandidates(n) {
 			u := &url.URL{Scheme: "http", Host: hp}
-			if isSelfTarget(u, selfPort) || isAnyAliasSelfTarget(u, aliases) {
+			if isSelfTarget(u, selfPort) {
 				f.host.noteSelf(n.ID, f.profile.Name, n.Models)
 				break
 			}

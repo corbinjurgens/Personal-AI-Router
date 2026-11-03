@@ -218,10 +218,8 @@ func (b *Broker) forwardErrorsClear(id string) {
 
 // stickyErrorIDs are the reports the broker caches until they are cleared and
 // replays whenever nvpair-errors (re)starts, because nvpair-errors holds errors
-// only in memory and the producer reports the condition once. Both are bind
-// failures their producer does not retry on a timer.
+// only in memory. These reports remain active until their producer clears them.
 var stickyErrorIDs = map[string]bool{
-	ollamaHostAliasBlockedID:      true,
 	routingListenerBlockedID:      true,
 	engineSwitchRecoveryBlockedID: true,
 }

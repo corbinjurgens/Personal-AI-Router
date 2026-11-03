@@ -497,8 +497,7 @@ func (b *Broker) startProxySupervisorLocked() {
 			"path", b.proxyPath, "err", err)
 		b.setProxySupervisor(nil)
 		// No facade will come up, so both engines take the terminal path:
-		// report the blocked claim where one was made, then finish, which
-		// is what returns the OLLAMA_HOST alias reservation.
+		// report the blocked claim where one was made, then release the gate.
 		if b.ollamaState().managedFacade.Load() {
 			b.blockManagedOllamaFacade("the proxy could not be started")
 		}

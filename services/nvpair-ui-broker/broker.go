@@ -247,15 +247,9 @@ type Broker struct {
 	// managedFacade, backendPort and startupPort now live per engine on
 	// engineProxyRuntime. What remains here is Ollama's deferred-move state,
 	// which only an adopted engine has.
-	managedOllamaBackend atomic.Int32
-	ollamaMoveInFlight   atomic.Bool
-	// ollamaHostAlias is one synchronized snapshot because engine-manager and
-	// proxy supervisors can respawn while startup is still committing (or
-	// rolling back) the inherited, local-http OLLAMA_HOST alias.
-	ollamaHostAliasMu                sync.RWMutex
-	ollamaHostAlias                  ollamaHostAlias
-	ollamaProxyGeneration            uint64 // guarded by ollamaHostAliasMu
-	ollamaHostAliasSyncMu            sync.Mutex
+	managedOllamaBackend             atomic.Int32
+	ollamaMoveInFlight               atomic.Bool
+	ollamaProxyGeneration            atomic.Uint64
 	stickyErrorsMu                   sync.Mutex
 	stickyErrors                     map[string]errors.ServiceError // see stickyErrorIDs
 	ollamaPortReady                  chan struct{}
@@ -1975,7 +1969,6 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 	if b.settingsSup != nil {
 		defer b.settingsSup.Stop()
 	}
-	b.prepareOllamaHostAliasCandidate()
 	b.engineMgrSup = b.startOptionalWorker("engine-manager", b.engineMgrPath, b.spawnEngineMgr, func() { b.setEngineMgr(nil); b.clearEngineRelaySub() })
 	if b.engineMgrSup != nil {
 		defer b.engineMgrSup.Stop()
@@ -2199,17 +2192,6 @@ func (b *Broker) forwardProxyNotificationForGeneration(generation uint64, method
 	method, addressed := facadeMethodFor(ollamaProxyProfile, method)
 	if !addressed {
 		return
-	}
-	// The alias warning is also the proxy's authoritative "bind did not win"
-	// receipt. Release the candidate reservation before forwarding the sticky
-	// warning so an existing Ollama owner can be adopted normally.
-	if method == methodErrorsReport {
-		var report errors.ServiceError
-		if json.Unmarshal(params, &report) == nil && report.ID == ollamaHostAliasBlockedID {
-			if !b.releaseOllamaHostAliasReservationForGeneration(generation) {
-				return
-			}
-		}
 	}
 	if b.dispatchErrorsNotif(ollamaProxyProfile.ComponentName(), method, params) {
 		return

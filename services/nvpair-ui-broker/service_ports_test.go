@@ -93,7 +93,7 @@ func cachedRegistrations(b *Broker) map[noderec.ServiceKey]int {
 }
 
 func TestServicePortsDefaultPlanKeepsWorkerArgvAndRegistrations(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	fixture := buildServicePortFixture(t)
 	base := t.TempDir()
 	clusterDir := filepath.Join(base, "cluster")
@@ -137,7 +137,7 @@ func TestServicePortsDefaultPlanKeepsWorkerArgvAndRegistrations(t *testing.T) {
 }
 
 func TestServicePortsAlternatePlanFlowsThroughSpawnRestartAndReplay(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	fixture := buildServicePortFixture(t)
 	b := NewBroker(nil, workerPaths{
 		scanner: fixture, nodeInfo: fixture, errors: fixture, workloadMgr: fixture, clusterMgr: fixture,
@@ -225,7 +225,7 @@ func TestServicePortsAlternatePlanFlowsThroughSpawnRestartAndReplay(t *testing.T
 }
 
 func TestServicePortsInvalidPlansRejectedBeforeAnyChild(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	fixture := buildServicePortFixture(t)
 	for _, tc := range []struct {
 		name  string
@@ -262,25 +262,25 @@ func TestServicePortsReservationsFollowTheConfiguredPlan(t *testing.T) {
 		port int
 		want string
 	}{
-		{port: 25318, want: "the node-info service uses port 25318"},
-		{port: 25319, want: "the errors service uses port 25319"},
-		{port: 25320, want: "the workload service uses port 25320"},
-		{port: 25321, want: "the cluster manager uses port 25321"},
+		{port: 25318, want: "the node-info service"},
+		{port: 25319, want: "the errors service"},
+		{port: 25320, want: "the workload service"},
+		{port: 25321, want: "the cluster manager"},
 		{port: 14318},
 		{port: 14319},
 		{port: 14320},
 		{port: 14321},
 	} {
 		t.Run(strconv.Itoa(tc.port), func(t *testing.T) {
-			if got := b.reservedOllamaHostAliasPort(tc.port, nil, nil); got != tc.want {
-				t.Fatalf("alias reservation = %q, want %q", got, tc.want)
+			if got := b.servicePorts().owner(tc.port); got != tc.want {
+				t.Fatalf("service reservation = %q, want %q", got, tc.want)
 			}
 		})
 	}
 
 	for _, port := range []int{25318, 25319, 25320, 25321} {
 		err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: port, ProxyPort: 25400}, settings.Snapshot{})
-		if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
+		if err == nil || err.Error() != "a selected port is reserved by a PAIR service or routing listener" {
 			t.Fatalf("settings validation for %d = %v, want PAIR reservation", port, err)
 		}
 	}

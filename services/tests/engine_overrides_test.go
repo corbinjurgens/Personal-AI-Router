@@ -67,7 +67,7 @@ func privateEngineEnv(t *testing.T, root string) []string {
 	t.Helper()
 	writeDisabledBuiltinEngineOverrides(t, root, jointAppDir(root))
 	return append(os.Environ(), "HOME="+root, "XDG_CONFIG_HOME="+root,
-		"APPDATA="+root, "LOCALAPPDATA="+root, "USERPROFILE="+root, "OLLAMA_HOST=")
+		"APPDATA="+root, "LOCALAPPDATA="+root, "USERPROFILE="+root)
 }
 
 // writePrivateBrokerEngineSettings isolates the broker's health route as well

@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -16,20 +17,15 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/appdir"
 	"nvpair-shared/errors"
 	"nvpair-shared/nodepolicy"
 )
 
-// The broker's table must cover exactly the shared engine set, in the same
-// order. Preparation order is load-bearing: Ollama goes first because its
-// preparation reserves any inherited OLLAMA_HOST alias that later engines have
-// to route around.
+// The broker's table must cover the shared engine set.
 func TestEngineProxyTableMatchesSharedEngines(t *testing.T) {
 	if len(engineProxyProfiles) == 0 {
 		t.Fatal("no engine proxy profiles")
-	}
-	if got := engineProxyProfiles[0].Name; got != "ollama" {
-		t.Fatalf("first profile = %q, want ollama prepared first", got)
 	}
 	for _, p := range engineProxyProfiles {
 		if p.FacadePort == p.EnginePortBase {
@@ -454,10 +450,10 @@ func TestRoutingListenerCollisionSurvivesAnErrorsRestart(t *testing.T) {
 	}
 }
 
-// Both sticky ids share the one cache and replay.
+// Sticky error ids share one cache and replay.
 func TestStickyErrorsReplayEveryCachedIDInOrder(t *testing.T) {
 	b := &Broker{nodeID: "local-node"}
-	ids := []string{routingListenerBlockedID, ollamaHostAliasBlockedID}
+	ids := []string{routingListenerBlockedID, engineSwitchRecoveryBlockedID}
 	for _, id := range ids {
 		b.forwardErrorsReport(errors.ServiceError{ID: id, Message: "m"})
 	}
@@ -478,7 +474,7 @@ func TestStickyErrorsReplayEveryCachedIDInOrder(t *testing.T) {
 			t.Fatalf("replayed %v, want both sticky ids", got)
 		}
 	}
-	if want := []string{"nvpair-proxy:routing-listener-blocked", "ollama-proxy:ollama-host-alias-blocked"}; got[0] != want[0] || got[1] != want[1] {
+	if want := []string{"engine-switch:recovery-blocked", "nvpair-proxy:routing-listener-blocked"}; got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("replayed %v, want %v", got, want)
 	}
 	select {
@@ -1394,5 +1390,101 @@ func TestFacadeSetPortRefusesTheListenersPort(t *testing.T) {
 	released := call(testListenerPort)
 	if released.Error != nil && strings.Contains(released.Error.Message, "routing listener") {
 		t.Fatalf("a disabled listener still holds its port: %+v", released.Error)
+	}
+}
+
+// Each proxy reads its sibling's persisted port from its own file, so a
+// third engine is covered by adding a table entry rather than another reader.
+func TestConfiguredEngineProxyPort(t *testing.T) {
+	isolateBrokerTestConfig(t)
+
+	for _, p := range engineProxyProfiles {
+		if got := configuredEngineProxyPort(p); got != p.FacadePort {
+			t.Fatalf("%s: missing persisted port = %d, want its facade %d", p.Name, got, p.FacadePort)
+		}
+	}
+
+	// Persisting one engine's port must not move another's.
+	stored := lmstudioProxyProfile.FacadePort + 6
+	path, err := appdir.Path(lmstudioProxyProfile.PortFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, fmt.Appendf(nil, `{"port":%d}`, stored), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := configuredEngineProxyPort(lmstudioProxyProfile); got != stored {
+		t.Fatalf("persisted port = %d, want %d", got, stored)
+	}
+	if got := configuredEngineProxyPort(ollamaProxyProfile); got != ollamaProxyProfile.FacadePort {
+		t.Fatalf("ollama port = %d, want its own facade %d; it read LM Studio's file",
+			got, ollamaProxyProfile.FacadePort)
+	}
+
+	// The fallback reservation set also includes the persisted sibling port.
+	b := &Broker{}
+	if reason := b.siblingEngineProxyPorts(ollamaProxyProfile)[stored]; reason == "" {
+		t.Fatalf("persisted sibling port %d is not reserved against fallback selection", stored)
+	}
+}
+
+// A proxy that bind-fails picks a fallback port, and that search must not land
+// on a port a *different* engine is configured to use. Nothing enforced this
+// before: the fallback excluded its own backend, so a stopped
+// sibling configured just above the search base was taken, and that engine then
+// silently failed to start on the next desired-state restore.
+//
+// Both directions are checked because the two engines have separate fallback
+// functions and fixing one is not evidence about the other.
+func TestProxyFallbackSkipsASiblingEnginesConfiguredPort(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		self     engineProxyProfile
+		sibling  engineProxyProfile
+		fallback func(*Broker, ...int) int
+	}{
+		{
+			name:     "ollama fallback avoids LM Studio",
+			self:     ollamaProxyProfile,
+			sibling:  lmstudioProxyProfile,
+			fallback: (*Broker).setOllamaProxyFallback,
+		},
+		{
+			name:     "lmstudio fallback avoids Ollama",
+			self:     lmstudioProxyProfile,
+			sibling:  ollamaProxyProfile,
+			fallback: (*Broker).setLMStudioProxyFallback,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateBrokerTestConfig(t)
+
+			// Put the sibling's persisted port inside the search range so a
+			// fallback that ignores siblings would hand it out.
+			stored := tc.self.EnginePortBase + 1
+			path, err := appdir.Path(tc.sibling.PortFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, fmt.Appendf(nil, `{"port":%d}`, stored), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			b := &Broker{}
+			useSyntheticBrokerPortChecks(t, b)
+			got := tc.fallback(b, tc.self.EnginePortBase)
+			if got == stored {
+				t.Fatalf("fallback chose %d, the port %s is configured on", got, tc.sibling.DisplayName)
+			}
+			if got == tc.sibling.FacadePort || got == tc.sibling.EnginePortBase {
+				t.Fatalf("fallback chose %d, one of %s's default ports", got, tc.sibling.DisplayName)
+			}
+		})
 	}
 }

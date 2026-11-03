@@ -396,56 +396,6 @@ func TestPanicDuringEnableWithdrawsOnlyThatFacade(t *testing.T) {
 	}
 }
 
-// Alias validation runs on the surface the broker actually uses. The addresses
-// arrive in facade/enable now rather than on argv, and the alias listener is a
-// plaintext one, so a weakened check here would put a LAN plaintext listener in
-// front of the router.
-func TestEnableFacadeRejectsUnsafeAliasAddresses(t *testing.T) {
-	redirectConfigDir(t)
-
-	// Engine-specific: only Ollama has an inherited host variable (OLLAMA_HOST)
-	// for the alias to stand in for.
-	aliasEngine, plainEngine := engines.NameOllama, engines.NameLlamaCPP
-	for _, name := range []string{aliasEngine, plainEngine} {
-		p, ok := profileFor(name)
-		if !ok {
-			t.Fatalf("no profile for %s", name)
-		}
-		if want := name == aliasEngine; p.SupportsHostAlias != want {
-			t.Fatalf("%s SupportsHostAlias = %v, want %v", name, p.SupportsHostAlias, want)
-		}
-	}
-
-	for _, tc := range []struct {
-		name   string
-		engine string
-		alias  string
-	}{
-		{"a LAN address", aliasEngine, "192.168.1.20:11433"},
-		{"the wildcard address", aliasEngine, "0.0.0.0:11433"},
-		{"an engine with no inherited host variable", plainEngine, "127.0.0.1:11433"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := newBoundProxy(NewCodec(rwNop{}))
-			p.serveCtx = t.Context()
-			t.Cleanup(func() { p.shutdown(t.Context()) })
-
-			if _, err := p.enableFacade(enableFacadeParams{
-				Engine:              tc.engine,
-				Port:                freeTCPPort(t),
-				AliasAddresses:      []string{tc.alias},
-				IgnorePersistedPort: true,
-			}); err == nil {
-				t.Fatalf("enable accepted alias %q for %s", tc.alias, tc.engine)
-			}
-			// Rejected outright, not enabled-then-partially-configured.
-			if f := p.facadeFor(tc.engine); f != nil {
-				t.Errorf("a rejected alias still left a %s facade enabled", tc.engine)
-			}
-		})
-	}
-}
-
 // Facade notifications are addressed, so the broker can attribute a bare
 // "ready" to an engine when several share the stream. Without the address the
 // two facades' events are indistinguishable on the wire.

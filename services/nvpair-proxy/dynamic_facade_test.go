@@ -60,7 +60,7 @@ func TestBuiltInProfilesAreUnchanged(t *testing.T) {
 			Routes: slices.Concat([]route{
 				{Path: "/v1/models", Role: roleModelListOpenAIGET},
 			}, openAI, []route{post("/v1/messages")}),
-			StandalonePort: 11435, ModelNaming: exactID, SupportsHostAlias: true,
+			StandalonePort: 11435, ModelNaming: exactID,
 		},
 		{
 			Engine:         engines.Engine{Name: "lmstudio", DisplayName: "LM Studio", DiscoveryService: "lm", FacadePort: 1234, EnginePortBase: 1235, PortFile: "lmstudio-proxy-port.json"},
@@ -95,8 +95,8 @@ func TestDynamicProfileFromDescriptor(t *testing.T) {
 		if p.Name != "llamacpp-custom" || p.DiscoveryService != "e-llamacpp-custom" || p.PortFile != "llamacpp-custom-proxy-port.json" || !p.dynamic() {
 			t.Fatalf("identity = %+v", p.Engine)
 		}
-		if p.StandalonePort != 0 || p.ReservedPersistedPort != 0 || p.SupportsHostAlias || p.FacadePort != 0 {
-			t.Fatalf("dynamic profile borrowed fixed ports or alias support: %+v", p)
+		if p.StandalonePort != 0 || p.ReservedPersistedPort != 0 || p.FacadePort != 0 {
+			t.Fatalf("dynamic profile borrowed fixed ports: %+v", p)
 		}
 		// The router list wins /v1/models even though openai-v1 is declared first.
 		if r, ok := p.routeFor(http.MethodGet, "/v1/models"); !ok || r.upstreamPath() != "/models" {
@@ -160,7 +160,6 @@ func TestEnableFacadeFailsClosed(t *testing.T) {
 		{"unknown descriptor version", enableFacadeParams{Engine: "llamacpp-custom", Port: 1, Descriptor: &newer}, "version"},
 		{"overlong id", enableFacadeParams{Engine: long.Engine, Port: 1, Descriptor: &long}, "at most"},
 		{"no port", enableFacadeParams{Engine: "llamacpp-custom", Descriptor: &custom}, "explicit facade port"},
-		{"alias on a dynamic engine", enableFacadeParams{Engine: "llamacpp-custom", Port: 1, Descriptor: &custom, AliasAddresses: []string{"127.0.0.2"}}, "alias"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := p.enableFacade(tc.params); err == nil || !strings.Contains(err.Error(), tc.want) {

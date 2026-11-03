@@ -31,8 +31,7 @@ func (b *Broker) finishLMStudioProxyTerminal() {
 }
 
 // lmstudioFacadeSpec is the enable request for LM Studio's facade, mirroring
-// ollamaFacadeSpec. It has no alias addresses: the alias stands in for an
-// inherited host variable, which only Ollama has.
+// ollamaFacadeSpec.
 func (b *Broker) lmstudioFacadeSpec() enableFacadeRequest {
 	spec := enableFacadeRequest{Engine: lmstudioProxyProfile.Name}
 	if port := int(b.lmstudioState().startupPort.Load()); port != 0 {

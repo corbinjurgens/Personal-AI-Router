@@ -85,59 +85,6 @@ func (rwDiscard) Read([]byte) (int, error)    { return 0, io.EOF }
 func (rwDiscard) Write(p []byte) (int, error) { return len(p), nil }
 func (rwDiscard) Close() error                { return nil }
 
-// Giving up the managed claim keeps the OLLAMA_HOST alias reservation, so a
-// spawn whose every facade failed still has it when the supervisor retries.
-//
-// This is the half of the block/finish split that the enabled==0 path depends
-// on: it may run the block, and must not run the finish. Releasing the alias
-// there was a regression, because the retry still needs it and engine-manager
-// could take that port in between, so an attempt that would otherwise have
-// succeeded comes up without the inherited endpoint.
-//
-// The call-site ordering itself is not reachable from a unit test — spawnProxy
-// launches a real binary — so this pins the property that makes the ordering
-// matter, and the sibling test below pins the other side of it.
-func TestBlockingAManagedFacadeKeepsTheAliasForTheRetry(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
-	b := &Broker{
-		nodeID:            "local-node",
-		ollamaPortReady:   make(chan struct{}),
-		lmstudioPortReady: make(chan struct{}),
-	}
-	useSyntheticBrokerPortChecks(t, b)
-	alias := ollamaHostAlias{Address: "127.0.0.1:11433", Port: 11433}
-	b.setOllamaHostAlias(alias)
-	b.ollamaState().managedFacade.Store(true)
-
-	b.blockManagedOllamaFacade("the Ollama proxy facade could not be brought up")
-
-	if got := b.currentOllamaHostAlias(); got.Port != alias.Port {
-		t.Errorf("blocking released the alias a retry still needs: %+v", got)
-	}
-}
-
-// An engine that failed inside a process that is staying gets terminal
-// treatment, which is what finally returns the alias.
-//
-// Without this the broker would hold a reservation for a facade that is never
-// coming back, and engine-manager could never be given that port.
-func TestSurvivingProcessReleasesTheAliasForAFailedFacade(t *testing.T) {
-	b := &Broker{
-		ollamaPortReady:   make(chan struct{}),
-		lmstudioPortReady: make(chan struct{}),
-	}
-	alias := ollamaHostAlias{Address: "127.0.0.1:11433", Port: 11433}
-	b.setOllamaHostAlias(alias)
-	if got := b.currentOllamaHostAlias(); got.Port != alias.Port {
-		t.Fatalf("alias not established for the test: %+v", got)
-	}
-
-	b.blockAndFinishEngineProxy(ollamaProxyProfile)
-	if got := b.currentOllamaHostAlias(); got.Port != 0 {
-		t.Errorf("terminal treatment did not release the alias: %+v", got)
-	}
-}
-
 // A facade that reported ready is kept when its enable call went unanswered,
 // and disowned when the child answered with a rejection.
 //

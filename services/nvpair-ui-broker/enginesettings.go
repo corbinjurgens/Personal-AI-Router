@@ -366,9 +366,6 @@ func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string,
 	for _, service := range b.servicePorts().entries() {
 		reserved[service.port] = true
 	}
-	if alias := b.currentOllamaHostAlias().Port; alias > 0 {
-		reserved[alias] = true
-	}
 	if listener := b.routingListenerPort(); listener > 0 {
 		reserved[listener] = true
 	}
@@ -381,7 +378,7 @@ func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string,
 		}
 	}
 	if reserved[config.ServerPort] || reserved[config.ProxyPort] {
-		return fmt.Errorf("a selected port is reserved by a PAIR service or proxy alias")
+		return fmt.Errorf("a selected port is reserved by a PAIR service or routing listener")
 	}
 	var installed struct {
 		Engines []struct {

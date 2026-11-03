@@ -466,7 +466,7 @@ func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
 	jointCopyExecutable(t, self, scannerPath)
 	scannerPort := temporaryClusterPort(t)
 	args := append([]string{"--scanner-path", scannerPath, "--engine-manager-path", enginePath, "--proxy-path", f.proxyControl.image, "--proxy-engines", "llamacpp", "--cluster-dir", filepath.Join(base, "cluster")}, f.ports.args()...)
-	env := append(f.proxyControl.env(), "OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+scannerPath, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort))
+	env := append(f.proxyControl.env(), "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+scannerPath, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort))
 	f.p = startInteropProcess(t, base, brokerBin, f.ports.engineManagerHTTP, env, args...)
 	for _, path := range []string{enginePath, scannerPath, proxyBin, f.proxyControl.image} {
 		canonical, err := canonicalServicePath(path)
@@ -528,7 +528,7 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 	}
 	allowedClient, deniedClient := reverseClient(allowed), reverseClient(denied)
 	jointIsolateEngines(t, denied.base, blockedPort)
-	deniedOrigin := startInteropProcess(t, denied.base, engineMgrBin, 0, []string{"OLLAMA_HOST="}, "--cluster-dir", filepath.Join(denied.base, "cluster"), "--loaded-poll-interval", "0")
+	deniedOrigin := startInteropProcess(t, denied.base, engineMgrBin, 0, nil, "--cluster-dir", filepath.Join(denied.base, "cluster"), "--loaded-poll-interval", "0")
 	waitForMethod(t, deniedOrigin.msgs, "engine:ready", 10*time.Second)
 	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
 		return callRPC(t, deniedOrigin.in, deniedOrigin.msgs, method, params, 10*time.Second)

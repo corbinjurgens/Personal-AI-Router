@@ -83,11 +83,6 @@ func TestManagedLMStudioFacadeSpec(t *testing.T) {
 		t.Fatalf("opt-out facade spec = %+v, want %+v (persisted-port behavior)", got, want)
 	}
 
-	// The alias stands in for an inherited host variable, which LM Studio does
-	// not have; the child rejects alias addresses for it outright.
-	if len(b.lmstudioFacadeSpec().AliasAddresses) != 0 {
-		t.Fatal("LM Studio facade spec carried alias addresses")
-	}
 }
 
 func TestManagedLMStudioReadyOpensGateAndPushesBackend(t *testing.T) {

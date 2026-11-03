@@ -516,9 +516,8 @@ terminal for it, exactly as when another facade is serving.
   refuses (`-32602`, message starting `routing.listener.port`) an enabled
   listener whose port a configured facade uses: its compatibility port or the
   one persisted in its place, the port planned for its next spawn, the port it
-  bound, or the inherited Ollama alias. `<engine>-proxy:set-port` and
-  `engine:set-port` refuse (`-32000`) the port of an enabled listener, like the
-  alias port. The node policy, the scheduler ranking and `log/set-level`
+  bound. `<engine>-proxy:set-port` and
+  `engine:set-port` refuse (`-32000`) the port of an enabled listener. The node policy, the scheduler ranking and `log/set-level`
   reach the proxy through the process, so they also reach one that serves no
   facade.
 
@@ -595,7 +594,7 @@ engine base port from the engine table (reserved even for an engine left out of
 `--proxy-engines`). Each worker receives, registers and replays exactly its
 planned port, including across supervised restarts and scanner respawns; a port
 at its default is left to the worker's identical flag default. The planned ports
-stay reserved against engine settings and the inherited `OLLAMA_HOST` alias,
+stay reserved against engine settings,
 and a default port that the plan moved elsewhere is released. These flags
 separate listeners only: another instance on one host still needs its own app
 data, cluster identity, IPC endpoint and engine facades.
@@ -695,7 +694,7 @@ The daemon folds those registrations into this host's single `_nvpair-node` reco
 
 **Descriptor engines.** After engine-manager starts and before facades are prepared, the broker reads `engine:descriptors` once and fronts every descriptor engine (any engine ID that is not built in, such as a `llamacpp-custom` fork manifest or a Strata user manifest) that is available on this host and that `engines.ProxyCanFront` accepts, at most `engines.MaxDynamicEngines` of them in ID order (`enginecatalog.go`). Each gets a facade in the one proxy process, enabled with its descriptor so the proxy can build its routes; a facade port planned from `engines.DynamicFacadePortBase` clear of every built-in engine port and every other descriptor engine's persisted or planned port (the proxy then persists where it landed); and the default advertisement loop, which reads its backend port from engine-manager's `engine:status` and probes its OpenAI or Ollama model list. While it is up the broker registers its `e-<id>` service: cluster-manager publishes it on the authenticated peer-services path and admits it on the reverse transport, and the scanner adds it to this node's own directory entry but keeps it out of the mDNS TXT record. When it stops, the registration is withdrawn from both. `--proxy-engines` names built-in engines only. The set is fixed for the broker's lifetime; a new manifest takes effect at the next start. Unknown, malformed, unavailable or unfrontable descriptors are not fronted, and descriptor engines have no engine settings or `<id>-proxy:` client relay yet.
 
-**`nvpair-proxy`** is one process that fronts every enabled engine. It starts with no engine and no listener; the broker then sends it a `facade/enable` per engine, carrying that engine's port and any alias addresses. A flag could not express this, because the broker plans a different port for each engine. Each facade forwards inference to a node it discovers on the network and speaks its own engine's dialect.
+**`nvpair-proxy`** is one process that fronts every enabled engine. It starts with no engine and no listener; the broker then sends it a `facade/enable` per engine, carrying that engine's port. A flag could not express this, because the broker plans a different port for each engine. Each facade forwards inference to a node it discovers on the network and speaks its own engine's dialect.
 
 One process for all of them is deliberate. Between scheduler snapshots a facade
 takes short-lived reservations for work it has dispatched, and those live in
@@ -708,7 +707,7 @@ Within the process the boundaries are finer — a facade that loses its bind
 race, cannot be moved to a free port, or panics while handling a request is
 withdrawn or answered with an error on its own, leaving the others serving.
 
-Ollama's standalone default is `:11435`; with managed port ownership enabled (the default), the broker starts settings and engine-manager first, claims `:11434` with that facade, and only then moves a stopped default-port Ollama backend to a free port. Custom backend ports are preserved. When the inherited `OLLAMA_HOST` names a distinct local plaintext port, the broker also gives the facade that normalized loopback-only alias so clients already using the variable enter the same routing path; `localhost` reserves both canonical loopback families atomically, while remote and HTTPS targets are ignored. The alias port is reserved against every configured engine, local or remote engine start override, every facade's control plane, and the managed Ollama and LM Studio backend port plans, so a backend that has to move can never land on the alias. A running Ollama or unknown owner on either requested port is never stopped or moved: the primary uses a safe fallback when needed, and an occupied alias remains with its owner while the broker reports a warning.
+Ollama's standalone default is `:11435`; with managed port ownership enabled (the default), the broker starts settings and engine-manager first, claims `:11434` with that facade, and only then moves a stopped default-port Ollama backend to a free port. Custom backend ports are preserved. A running Ollama or unknown owner on the requested port is never stopped or moved: the primary uses a safe fallback when needed.
 
 llama.cpp is a managed engine: engine-manager owns its lifecycle and starts it
 on its configured loopback port, `:8081` by default. The broker places its
@@ -730,7 +729,7 @@ forwarded to that engine's facade and the response relayed straight back, and
 every facade notification is re-emitted to subscribed clients under the same
 component namespace.
 
-Client namespaces are unchanged by the process collapse, but the wire inside is not. Because one process holds every facade, a message on that link carries the engine it concerns: the client's `ollama-proxy:` prefix comes off and a bare `ollama:` facade address goes on. The two are not interchangeable — `ollama-proxy:` is how a client addresses the component, `ollama:` is how a message addresses a facade inside the process — so the relay is a translation between them rather than a strip. Process-scoped methods (`log/set-level`, the scheduler's `node/set-priority`) carry no address, as do the proxy's own `errors:report` / `errors:clear` for the routing listener (`nvpair-proxy:routing-listener-blocked`), which the broker routes into the error pipeline once per process and, like the OLLAMA_HOST alias warning, caches until cleared and replays to a restarted `nvpair-errors`. `facade/enable` names its engine in the payload because it runs before that facade exists.
+Client namespaces are unchanged by the process collapse, but the wire inside is not. Because one process holds every facade, a message on that link carries the engine it concerns: the client's `ollama-proxy:` prefix comes off and a bare `ollama:` facade address goes on. The two are not interchangeable — `ollama-proxy:` is how a client addresses the component, `ollama:` is how a message addresses a facade inside the process — so the relay is a translation between them rather than a strip. Process-scoped methods (`log/set-level`, the scheduler's `node/set-priority`) carry no address, as do the proxy's own `errors:report` / `errors:clear` for the routing listener (`nvpair-proxy:routing-listener-blocked`), which the broker routes into the error pipeline once per process and caches until cleared and replays to a restarted `nvpair-errors`. `facade/enable` names its engine in the payload because it runs before that facade exists.
 
 Two classes of proxy notification are **not** re-emitted under any
 `<engine>-proxy:` namespace, because neither is a proxy control-plane event:
@@ -1736,7 +1735,7 @@ Two relay-specific error cases:
 
 Port preflight checks occupancy without dialing the occupant. On non-Windows
 hosts it probes IPv4/IPv6 wildcards and the loopback addresses used by managed
-launches and aliases (`127.0.0.1` and `::1`), immediately closing each temporary
+launches (`127.0.0.1` and `::1`), immediately closing each temporary
 listener. An unsupported IPv6 family is skipped; occupied addresses and other
 probe failures refuse the port. Windows retains its exclusive wildcard bind
 probe, which also rejects concrete-address holders and aborts before native
@@ -1745,7 +1744,7 @@ not reserve a port across the settings operation.
 
 **Intercepted, not relayed verbatim.** For every engine profile, a port-only caller — `nvpair-tui` is the one in tree — gets to move a single port without rendering the whole launch settings form, but the change still runs through the same authoritative settings operation the desktop editor uses, so a port set from the terminal cannot diverge from one set from the UI. The namespace selects the engine. The broker reads that engine's current settings, substitutes the requested proxy port, and applies the result while preserving the server port and launch arguments. Accepted settings are saved in the settings journal.
 
-A malformed request, missing port, or port outside `1`–`65535` is refused with error `-32602 "port must be between 1 and 65535"`. A **requested port that is already in use or reserved** by a PAIR service, another configured engine/proxy, or the engine's own server port is refused with error `-32000 "resolve settings errors and port conflicts before applying"`. The broker does not pick a different port on the caller's behalf. Retry with a free port. A request that collides with an inherited `OLLAMA_HOST` alias is refused with its own message naming that alias. The response echoes the requested port (`{"port": <requested>}`) once it is bound.
+A malformed request, missing port, or port outside `1`–`65535` is refused with error `-32602 "port must be between 1 and 65535"`. A **requested port that is already in use or reserved** by a PAIR service, another configured engine/proxy, or the engine's own server port is refused with error `-32000 "resolve settings errors and port conflicts before applying"`. The broker does not pick a different port on the caller's behalf. Retry with a free port. The response echoes the requested port (`{"port": <requested>}`) once it is bound.
 
 ```json
 {"jsonrpc":"2.0","id":9,"method":"ollama-proxy:set-port","params":{"port":11500}}

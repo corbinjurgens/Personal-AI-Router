@@ -132,14 +132,6 @@ func (b *Broker) finishOllamaProxyTerminal() {
 	b.ollamaState().managedFacade.Store(false)
 	b.managedOllamaBackend.Store(0)
 	b.ollamaMoveInFlight.Store(false)
-	// The inherited OLLAMA_HOST alias is reserved with engine-manager during
-	// preparation, before enablement is known, so every terminal path has to
-	// give it back. Releasing it here rather than at each call site is what
-	// makes that true: it was previously released on the two live-failure paths
-	// and missed on the disabled-engine one, which left the alias port refusing
-	// engine:set-port for the life of the process, citing a proxy alias that
-	// did not exist.
-	b.disableOllamaHostAliasReservation()
 	b.markOllamaPortReady()
 }
 
@@ -220,9 +212,6 @@ func (b *Broker) rebindOllamaProxy(p *proxyProcess, port int, from int) {
 // the managed facade is not in play. The engine's own configured port is
 // excluded here rather than at each call site, so no caller can forget it.
 func (b *Broker) setOllamaProxyFallback(excludedPorts ...int) int {
-	if aliasPort := b.currentOllamaHostAlias().Port; aliasPort > 0 {
-		excludedPorts = append(excludedPorts, aliasPort)
-	}
 	for port := range b.siblingEngineProxyPorts(ollamaProxyProfile) {
 		excludedPorts = append(excludedPorts, port)
 	}
@@ -252,11 +241,6 @@ func (b *Broker) prepareManagedOllamaFacadeWithPortCheck(portAvailable func(int)
 	if b.prepareExplicitEngineSettings("ollama") {
 		return
 	}
-	b.setOllamaHostAlias(ollamaHostAlias{})
-	// Resolve the worker inside the deferred method: engine-manager can respawn
-	// while the blocking settings/status calls below are preparing the alias.
-	defer b.syncCurrentEngineOllamaHostAliasReservation()
-
 	settings := b.getSettings()
 	if settings == nil {
 		b.cacheOllamaPortStatus()
@@ -314,7 +298,6 @@ func (b *Broker) prepareManagedOllamaFacadeWithPortCheck(portAvailable func(int)
 		return
 	}
 	b.ollamaState().backendPort.Store(int32(st.Port))
-	b.prepareOllamaHostAlias(policy.Value, st.Port)
 	if !policy.Value {
 		// Opting out after a managed run commonly leaves stopped Ollama on
 		// :11435. Start the proxy explicitly elsewhere so it cannot squat that
@@ -326,7 +309,7 @@ func (b *Broker) prepareManagedOllamaFacadeWithPortCheck(portAvailable func(int)
 		b.markOllamaPortReady()
 		return
 	}
-	plan := planManagedOllamaPorts(true, st, b.availableOffOllamaHostAlias(portAvailable))
+	plan := planManagedOllamaPorts(true, st, portAvailable)
 	if plan.Blocked != "" {
 		b.blockManagedOllamaFacade(plan.Blocked, st.Port)
 		return
@@ -378,18 +361,11 @@ func enginePortAssignmentRequest(method string, params json.RawMessage) (string,
 	}
 }
 
-// rejectProxyHeldPort refuses to give a port the proxy holds for itself to
-// an engine or a proxy: the inherited OLLAMA_HOST alias, and the port of the
-// routing listener the policy enables. Both are served by the proxy process, so
-// a facade or backend moved onto either would lose the bind or take it from the
-// other after the next proxy restart.
+// rejectProxyHeldPort refuses to assign the routing listener's port to an
+// engine or facade, which would lose the bind or take it after a proxy restart.
 func (b *Broker) rejectProxyHeldPort(msg *Message, port int, owner string) bool {
 	reason := ""
-	switch aliasPort := b.currentOllamaHostAlias().Port; {
-	case aliasPort > 0 && port == aliasPort:
-		reason = fmt.Sprintf("port %d is configured as the inherited OLLAMA_HOST proxy alias; change or unset OLLAMA_HOST and restart NVPAIR before assigning that port to %s",
-			port, owner)
-	case b.routingListenerPort() == port:
+	if b.routingListenerPort() == port {
 		reason = fmt.Sprintf("port %d is the routing listener's port; change routing.listener.port in the node policy before assigning that port to %s",
 			port, owner)
 	}
@@ -417,7 +393,7 @@ func (b *Broker) routingListenerPort() int {
 // facadePortOwner names the configured facade a port belongs to, or "". It
 // covers what the broker knows of each: the engine's compatibility port or the
 // one persisted in its place, the port planned for the next spawn, the port
-// the running facade bound, and the Ollama alias.
+// the running facade bound.
 func (b *Broker) facadePortOwner(port int) string {
 	for _, profile := range engineProxyProfiles {
 		if !b.proxyEnabled(profile) {
@@ -430,9 +406,6 @@ func (b *Broker) facadePortOwner(port int) string {
 		}
 		if port == configuredEngineProxyPort(profile) || port == planned || port == bound {
 			return fmt.Sprintf("the %s proxy", profile.DisplayName)
-		}
-		if profile.Name == ollamaProxyProfile.Name && port == b.currentOllamaHostAlias().Port {
-			return "the inherited OLLAMA_HOST proxy alias"
 		}
 	}
 	return ""
@@ -542,9 +515,6 @@ func (b *Broker) reconcileProxyPortOnReady(boundPort int) {
 		return
 	}
 	taken := b.runningEnginePorts()
-	if aliasPort := b.currentOllamaHostAlias().Port; aliasPort > 0 {
-		taken[aliasPort] = true
-	}
 	if !taken[boundPort] {
 		return
 	}

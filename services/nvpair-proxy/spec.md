@@ -442,7 +442,7 @@ is a genuine limitation, not a safety margin (§5.6).
 ## 3. Process model
 
 The process starts with **no engine and no listener**. The broker then sends one
-`facade/enable` per engine, carrying that engine's port and any alias addresses,
+`facade/enable` per engine, carrying that engine's port,
 and for a descriptor engine its descriptor (README, "Descriptor engines").
 
 A flag cannot express this. The broker plans a different port for each engine —
@@ -1327,11 +1327,6 @@ than an engine.
 
 Membership and pins are re-derived per request and on a watch, so joining or
 leaving a cluster needs no restart.
-
-An engine with an inherited host variable (today Ollama alone) may also be given
-loopback-only **alias** addresses, so clients already using that variable enter
-the same routing path. An occupied alias is non-fatal: the existing owner is
-untouched, the primary listener stays up, and a warning is reported.
 
 ## 8. Ports
 
@@ -2257,7 +2252,7 @@ port. Inference uses the existing request/workload notification contract.
   `nvpair-proxy:routing-listener-blocked` (severity `error`, action `none`).
   Each failed reconcile reports; there is no retry timer. The broker caches the
   report until the matching `errors:clear` and replays it to a restarted
-  `nvpair-errors`, as it does for the OLLAMA_HOST alias warning.
+  `nvpair-errors`.
   The revision still activates and acknowledges, so an unrelated setting is not
   held back by a port clash. Any later reconcile retries the bind. A bind,
   a no-op reconcile or a disable sends `errors:clear` for the same id the first

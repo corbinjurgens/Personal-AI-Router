@@ -176,14 +176,13 @@ func TestReconcileUnmanagedProxyPortLeavesFreePortAlone(t *testing.T) {
 }
 
 // The facade/enable request the broker hands an Ollama proxy. This is where the
-// port decision and the inherited OLLAMA_HOST alias travel now; the child's
+// port decision travels; the child's
 // argv carries only process-scoped flags, because a single-valued flag cannot
 // express a different port plan per engine.
 func TestOllamaFacadeSpec(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		startupPort int
-		alias       ollamaHostAlias
 		want        enableFacadeRequest
 	}{
 		{
@@ -202,23 +201,12 @@ func TestOllamaFacadeSpec(t *testing.T) {
 			startupPort: 0,
 			want:        enableFacadeRequest{Engine: "ollama"},
 		},
-		{
-			name:        "inherited OLLAMA_HOST alias is threaded through",
-			startupPort: managedOllamaFacadePort,
-			alias:       ollamaHostAlias{Address: "127.0.0.1:11433", AlternateAddress: "[::1]:11433"},
-			want: enableFacadeRequest{
-				Engine:              "ollama",
-				Port:                managedOllamaFacadePort,
-				IgnorePersistedPort: true,
-				AliasAddresses:      []string{"127.0.0.1:11433", "[::1]:11433"},
-			},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := &Broker{}
 			b.ollamaState().startupPort.Store(int32(tc.startupPort))
 
-			if got := b.ollamaFacadeSpec(tc.alias); !reflect.DeepEqual(got, tc.want) {
+			if got := b.ollamaFacadeSpec(); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("facade spec = %+v, want %+v", got, tc.want)
 			}
 		})
@@ -314,7 +302,7 @@ func TestFacadeBindRaceRetriesInProcess(t *testing.T) {
 }
 
 // A rejection no other port would fix must not be retried. Retrying an
-// unknown-engine or unsupported-alias enable would burn a port change and hide
+// unknown-engine enable would burn a port change and hide
 // the real cause behind a second identical failure.
 func TestFacadeEnableRejectionIsNotRetried(t *testing.T) {
 	proxyClient, proxyServer := net.Pipe()
@@ -338,7 +326,7 @@ func TestFacadeEnableRejectionIsNotRetried(t *testing.T) {
 				return
 			}
 			attempts <- spec
-			// -32602 is what an unknown engine or an unsupported alias returns.
+			// -32602 is what an unknown engine returns.
 			_ = codec.RespondError(msg.ID, -32602, "unknown engine \"nope\"")
 		}
 	}()
@@ -480,9 +468,7 @@ func TestBindFailureMovesTheNextSpawnOffTheContestedPort(t *testing.T) {
 // releases every request waiting behind it — while the replacement is still
 // deciding where to bind.
 //
-// LM Studio pinned this; Ollama's only stale-generation test covered the alias
-// release, leaving the readiness path uncovered on the engine whose gate also
-// gates engine:status and engine:get-installed.
+// The readiness gate also gates engine:status and engine:get-installed.
 func TestStaleProxyReadyDoesNotOpenTheOwnershipGate(t *testing.T) {
 	newBroker := func(t *testing.T) *Broker {
 		t.Helper()
@@ -508,7 +494,7 @@ func TestStaleProxyReadyDoesNotOpenTheOwnershipGate(t *testing.T) {
 
 	t.Run("stale generation is ignored", func(t *testing.T) {
 		b := newBroker(t)
-		stale, _ := b.beginOllamaProxyGeneration()
+		stale := b.beginOllamaProxyGeneration()
 		b.beginOllamaProxyGeneration() // the replacement
 
 		b.forwardProxyNotificationForGeneration(stale, "ready", ready)
@@ -520,7 +506,7 @@ func TestStaleProxyReadyDoesNotOpenTheOwnershipGate(t *testing.T) {
 	// ready, stale or not.
 	t.Run("current generation still settles ownership", func(t *testing.T) {
 		b := newBroker(t)
-		current, _ := b.beginOllamaProxyGeneration()
+		current := b.beginOllamaProxyGeneration()
 
 		b.forwardProxyNotificationForGeneration(current, "ready", ready)
 

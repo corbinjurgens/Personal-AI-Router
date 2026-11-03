@@ -280,7 +280,7 @@ operation and retain their response shape. Legacy lifecycle port overrides and
 automatic port reconciliation share the node lock and revision reconciliation.
 
 Validate both ports together against the unchanged counterpart, registered
-PAIR services, aliases, other configured engines/proxies and occupied listeners.
+PAIR services, other configured engines/proxies and occupied listeners.
 Only this engine's current running port and its proxy listener can be reused
 for a swap. Revalidation happens at Apply; OS bind remains the final arbiter of
 a competing process. Adopted process engines are read-only; command-mode

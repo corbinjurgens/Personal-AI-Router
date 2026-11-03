@@ -95,7 +95,6 @@ func (b *Broker) prepareExplicitEngineSettings(engine string) bool {
 	state.startupPort.Store(int32(config.ProxyPort))
 	if engine == "ollama" {
 		b.managedOllamaBackend.Store(0)
-		b.syncCurrentEngineOllamaHostAliasReservation()
 	}
 	return true
 }

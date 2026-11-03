@@ -460,7 +460,7 @@ func newPolicyJointFixture(t *testing.T, options ...policyJointFixtureOption) *p
 
 func (f *policyJointFixture) startOrigin(t *testing.T) {
 	t.Helper()
-	f.origin = startInteropProcess(t, f.originBase, f.originEngine, 0, []string{"OLLAMA_HOST="},
+	f.origin = startInteropProcess(t, f.originBase, f.originEngine, 0, nil,
 		"--cluster-dir", f.originCluster, "--loaded-poll-interval", "0", "--log-level", "error")
 	waitForMethod(t, f.origin.msgs, "engine:ready", 10*time.Second)
 	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
@@ -479,7 +479,7 @@ func (f *policyJointFixture) startTarget(t *testing.T) {
 	ports.engineManagerHTTP, ports.engineControl = f.ports[0], f.ports[1]
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", f.engine, "--proxy-engines=", "--cluster-dir", f.cluster, "--log-level", "error"}, ports.args()...)
 	f.target = startInteropProcess(t, f.base, brokerBin, f.ports[0],
-		[]string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.ports[2])},
+		[]string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.ports[2])},
 		args...)
 	f.target.paths = append(f.target.paths, f.engine, f.scanner)
 	f.target.ports = append(f.target.ports, f.ports[1:]...)

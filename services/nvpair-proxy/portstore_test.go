@@ -117,7 +117,7 @@ func TestSetPortPersistenceBoundary(t *testing.T) {
 			if replaced {
 				wantPort, closedPort, wantReady = portB, portA, 1
 			}
-			if got, _ := f.selfAddresses(); got != wantPort {
+			if got := f.selfPort(); got != wantPort {
 				t.Errorf("live port=%d, want %d", got, wantPort)
 			}
 			if got, ok := loadPersistedPort(tc.profile); !ok || got != wantPort {

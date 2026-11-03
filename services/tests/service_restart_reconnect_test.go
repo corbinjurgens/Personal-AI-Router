@@ -82,7 +82,7 @@ func TestServiceRestartReconnect(t *testing.T) {
 	t.Cleanup(func() { close(release) })
 
 	f := newProxyServiceFixture(t)
-	f.env = append(f.env, "USERPROFILE="+f.configDir, "OLLAMA_HOST=")
+	f.env = append(f.env, "USERPROFILE="+f.configDir)
 	managerPath := f.copyBinary(engineMgrBin)
 	f.inventory.paths = append(f.inventory.paths, managerPath)
 	writeRestartProofManifest(t, f, engine, portOfURL(t, upstream.URL))
@@ -594,7 +594,7 @@ func TestServiceRestartReconnectDesktop(t *testing.T) {
 	f.env = privateEnv
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(temporaryClusterPort(t)),
-		"USERPROFILE="+f.configDir, "OLLAMA_HOST=")
+		"USERPROFILE="+f.configDir)
 	managerPath := f.copyBinary(engineMgrBin)
 	clusterPath := f.copyBinary(clusterMgrBin)
 	f.inventory.paths = append(f.inventory.paths, managerPath, clusterPath)

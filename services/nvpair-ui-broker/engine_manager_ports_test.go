@@ -94,7 +94,7 @@ func TestEngineManagerControlHostInvalidConstructionDoesNotCreateIdentity(t *tes
 		{name: "malformed host with explicit identity directory", host: "256.0.0.1", explicitCluster: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			isolateOllamaHostTestConfig(t)
+			isolateBrokerTestConfig(t)
 			defaultRoot, err := appdir.Dir()
 			if err != nil {
 				t.Fatalf("resolve private app directory: %v", err)
@@ -132,7 +132,7 @@ func TestEngineManagerControlHostInvalidConstructionDoesNotCreateIdentity(t *tes
 }
 
 func TestEngineManagerControlHostCLIRejectsBeforeWorkerResolution(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	binary := buildEngineManagerPortTestBinary(t, "ports-cli", "nvpair-ui-broker", ".", ".")
 	for _, host := range []string{"", "localhost", "127.0.0.1:14323", "[::1]", "256.0.0.1"} {
 		t.Run("rejects "+host, func(t *testing.T) {
@@ -218,7 +218,7 @@ func TestEngineManagerPortsInvalidProgrammaticConfigurationDoesNotSpawn(t *testi
 }
 
 func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	engineBinary := buildPrivateEngineManagerPortFixture(t)
 	scannerBinary := buildServicePortFixture(t)
 	ports := make([]int, 2)
@@ -390,7 +390,7 @@ func TestEngineManagerPortsSettingsReserveConfiguredListeners(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
-			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
+			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or routing listener" {
 				t.Fatalf("settings validation error = %v, want PAIR reservation", err)
 			}
 		})
@@ -413,7 +413,7 @@ func TestEngineManagerPortsSettingsReserveTheRoutingListenerPort(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := b.validateSettingsPortsLocked(context.Background(), "llamacpp", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
-			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
+			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or routing listener" {
 				t.Fatalf("settings validation error = %v, want the routing listener port reserved", err)
 			}
 		})

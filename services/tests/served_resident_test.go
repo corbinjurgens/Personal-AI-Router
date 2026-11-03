@@ -787,7 +787,7 @@ func (f *srProcessFixture) start(t *testing.T) {
 	}
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", f.switchProxy.image, "--proxy-engines=" + proxyEngines, "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
 	args = append(args, f.residentFixtureWaitArgs()...)
-	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, append(f.switchProxy.env(), "OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort)), args...)
+	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, append(f.switchProxy.env(), "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort)), args...)
 	f.p.ports = append(f.p.ports, f.ports.engineControl, f.scannerPort, f.facadePort, f.switchEnginePort, f.switchFacadePort, f.switchProxy.port)
 	for _, path := range []string{engineMgrBin, proxyBin, f.switchProxy.image, f.scanner} {
 		canonical, err := canonicalServicePath(path)
@@ -1249,7 +1249,7 @@ func (f *srProcessFixture) startRelayed(t *testing.T) {
 	f.assertIsolationFiles(t)
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", f.image, "--proxy-path", f.image, "--proxy-engines=llamacpp", "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
 	args = append(args, f.residentFixtureWaitArgs()...)
-	env := []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort), "NVPAIR_SR_RELAY_IMAGE=" + f.image, "NVPAIR_SR_RELAY_MANAGER=" + engineMgrBin, "NVPAIR_SR_RELAY_PROXY=" + proxyBin, "NVPAIR_SR_RELAY_CONTROL=" + f.relay.server.URL}
+	env := []string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort), "NVPAIR_SR_RELAY_IMAGE=" + f.image, "NVPAIR_SR_RELAY_MANAGER=" + engineMgrBin, "NVPAIR_SR_RELAY_PROXY=" + proxyBin, "NVPAIR_SR_RELAY_CONTROL=" + f.relay.server.URL}
 	f.relay.mu.Lock()
 	f.relay.stopping = false
 	f.relay.mu.Unlock()

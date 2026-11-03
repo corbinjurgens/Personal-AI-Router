@@ -158,9 +158,6 @@ func TestStrataIsFrontedFromItsDescriptor(t *testing.T) {
 	if profile.DiscoveryService != "e-strata" || profile.PortFile != "strata-proxy-port.json" {
 		t.Fatalf("service key %q port file %q, want e-strata and strata-proxy-port.json", profile.DiscoveryService, profile.PortFile)
 	}
-	if profile.SupportsHostAlias {
-		t.Fatal("a dynamic engine has no inherited host variable for an alias")
-	}
 }
 
 func TestStrataEnableIsRefusedWithoutAFrontableDescriptor(t *testing.T) {

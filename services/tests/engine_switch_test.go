@@ -370,7 +370,7 @@ func switchProcessIdentityStopped(ctx context.Context, expected serviceProcessId
 func (f *switchProcessFixture) start(t *testing.T) {
 	t.Helper()
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", f.proxyControl.image, "--proxy-engines", "llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
-	env := append(f.proxyControl.env(), "OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort))
+	env := append(f.proxyControl.env(), "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(f.scannerPort))
 	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, env, args...)
 	f.p.ports = append(f.p.ports, f.scannerPort, f.sourcePort, f.targetPort, f.facadePort, f.targetFacadePort, f.proxyControl.port)
 	for _, path := range []string{f.scanner, engineMgrBin, proxyBin, f.proxyControl.image} {

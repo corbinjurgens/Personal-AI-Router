@@ -416,7 +416,7 @@ func (f *neServingFixture) start(t *testing.T) {
 	f.assertIsolationFiles(t)
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", proxyBin, "--proxy-engines=llamacpp", "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
 	args = append(args, f.residentFixtureWaitArgs()...)
-	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
+	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, []string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
 	f.p.ports = append(f.p.ports, f.ports.engineControl, f.scannerPort, f.facadePort)
 	for _, path := range []string{engineMgrBin, proxyBin, f.scanner} {
 		canonical, err := canonicalServicePath(path)

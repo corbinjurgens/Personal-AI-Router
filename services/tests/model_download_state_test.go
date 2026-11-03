@@ -455,7 +455,6 @@ func newDownloadProcessFixture(t *testing.T, reverse bool) *downloadProcessFixtu
 			t.Setenv(key, "")
 		}
 	}
-	t.Setenv("OLLAMA_HOST", "")
 	f := &downloadProcessFixture{router: newDownloadProcessRouter(t), controlCalls: make(map[task1RequestKey]int), pullIDs: make(map[string]int)}
 	f.router.onStartTimeout = f.logStartTimeout
 	f.service = newServiceFixture(t)

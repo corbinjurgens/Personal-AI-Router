@@ -92,13 +92,6 @@ type engineProfile struct {
 	// persisted-port file even if it is stored there, because it belongs to
 	// the engine rather than the proxy. Zero means no port is reserved.
 	ReservedPersistedPort int
-
-	// SupportsHostAlias reports whether facade/enable's aliasAddresses apply to
-	// this engine. Only Ollama has an inherited host variable (OLLAMA_HOST) for the
-	// alias to stand in for, and the warning the proxy raises when it cannot
-	// claim one names that variable. Gating on this makes the scoping
-	// enforced rather than left to the broker's restraint in passing the flag.
-	SupportsHostAlias bool
 }
 
 // openAIModelListRoutes is the OpenAI-compatible /v1/models list.
@@ -195,7 +188,6 @@ func buildProfiles() []engineProfile {
 			Routes:                slices.Concat(openAIModelListRoutes, openAIInferenceRoutes, anthropicInferenceRoutes),
 			ModelNaming:           exactID,
 			ReservedPersistedPort: 0,
-			SupportsHostAlias:     true,
 		},
 		{
 			Engine:                lmstudio,

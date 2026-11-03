@@ -74,7 +74,7 @@ func TestSelectDynamicEnginesFailsClosed(t *testing.T) {
 }
 
 func TestDynamicEnginesPlanFacadesClearOfEveryOtherPort(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	// A persisted port for strata is honoured by the proxy and kept off the plan
 	// for every other engine.
 	path, err := appdir.Path("strata-proxy-port.json")
@@ -131,7 +131,7 @@ func TestLoadDynamicEnginesFromEngineManager(t *testing.T) {
 		{"malformed", map[string]any{"engines": "nope"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			isolateOllamaHostTestConfig(t)
+			isolateBrokerTestConfig(t)
 			b := &Broker{proxyPath: "test-proxy"}
 			useSyntheticBrokerPortChecks(t, b)
 			worker, codec := newTestRPCWorkerPipe(t)
@@ -158,7 +158,7 @@ func TestLoadDynamicEnginesFromEngineManager(t *testing.T) {
 // The facade request carries the descriptor and the planned port, and a lost
 // bind race is retried in process on another planned port.
 func TestDynamicEngineFacadeEnableCarriesTheDescriptor(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	b := &Broker{proxyPath: "test-proxy"}
 	b.setDynamicEngines([]engines.Descriptor{customEngineDescriptor()}, func(int) bool { return true })
 	profile := b.dynamicEngineProfiles()[0]
@@ -173,7 +173,7 @@ func TestDynamicEngineFacadeEnableCarriesTheDescriptor(t *testing.T) {
 	attempts := make(chan enableFacadeRequest, 2)
 	serveFacadeEnable(t, proxyServer, map[int]bool{engines.DynamicFacadePortBase: true}, attempts)
 
-	if err := b.enableEngineFacadeWithPortCheck(context.Background(), proxy, profile, ollamaHostAlias{}, func(int) bool { return true }); err != nil {
+	if err := b.enableEngineFacadeWithPortCheck(context.Background(), proxy, profile, func(int) bool { return true }); err != nil {
 		t.Fatalf("enable descriptor engine facade: %v", err)
 	}
 	first, second := <-attempts, <-attempts
@@ -194,7 +194,7 @@ func TestDynamicEngineFacadeEnableCarriesTheDescriptor(t *testing.T) {
 // reverse paths and the proxy gets its loopback backend, addressed e-<id>:.
 // When it stops, the registration is withdrawn.
 func TestDynamicEngineAdvertisementRegistersAndWithdraws(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	engine := httptest.NewServer(fixtureRequestHandler(http.MethodGet, "/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			t.Errorf("health probe path = %s", r.URL.Path)

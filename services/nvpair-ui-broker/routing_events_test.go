@@ -166,7 +166,7 @@ func (w *historyRequiredReplyTransport) Close() error {
 func TestRoutingHistoryMainAssemblyInterruptsRequiredReplyOnCancellation(t *testing.T) {
 	test := func(name string, cancelRoot bool) {
 		t.Run(name, func(t *testing.T) {
-			isolateOllamaHostTestConfig(t)
+			isolateBrokerTestConfig(t)
 			scanner := buildServicePortFixture(t)
 			client, server := net.Pipe()
 			transport := &historyRequiredReplyTransport{

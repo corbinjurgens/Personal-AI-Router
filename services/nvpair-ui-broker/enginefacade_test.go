@@ -40,7 +40,7 @@ func brokerWithEngineProxyProfile(profile engineProxyProfile) *Broker {
 }
 
 func TestDefaultEngineFacadeRetriesAwayFromReservedPorts(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	profile := testDefaultEngineProxyProfile()
 	b := brokerWithEngineProxyProfile(profile)
 
@@ -58,7 +58,6 @@ func TestDefaultEngineFacadeRetriesAwayFromReservedPorts(t *testing.T) {
 		context.Background(),
 		proxy,
 		profile,
-		ollamaHostAlias{},
 		func(int) bool { return true },
 	)
 	if err != nil {

@@ -639,7 +639,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 
 	priority := p.PriorityList()
 
-	selfPort, aliasBoundAddresses := f.selfAddresses()
+	selfPort := f.selfPort()
 
 	// Re-derive membership and pins before resolving so a cluster joined or left,
 	// and a peer paired or removed, since the last request is reflected without a
@@ -689,7 +689,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 		self := false
 		preparation := model != "" && !nodeAdvertisesModel(f.profile, n, model)
 		switch {
-		case isSelfTarget(u, selfPort) || isAnyAliasSelfTarget(u, aliasBoundAddresses):
+		case isSelfTarget(u, selfPort):
 			pol := p.admission.currentPolicy()
 			if model != "" && !f.localBindingConsistent(pol, model) {
 				return
@@ -733,7 +733,7 @@ func (f *facade) resolveRouteCandidates(model string, inference bool) []candidat
 			return
 		}
 		// Defensive: the local backend must never resolve back to this proxy.
-		if isSelfTarget(u, selfPort) || isAnyAliasSelfTarget(u, aliasBoundAddresses) {
+		if isSelfTarget(u, selfPort) {
 			slog.Debug("resolveCandidates: skipping self-target node",
 				"node_id", n.ID, "target", u.Host)
 			return
@@ -1092,61 +1092,12 @@ func isSelfTarget(u *url.URL, selfPort int) bool {
 	return isLoopbackHost(host)
 }
 
-// isAliasSelfTarget reports whether u points to the alias listener that this
-// process actually owns. The configured alias is not enough: a failed bind
-// leaves another process owning that endpoint, and two distinct 127/8
-// addresses may legitimately use the same port.
-func isAliasSelfTarget(u *url.URL, boundAddress string) bool {
-	if boundAddress == "" {
-		return false
-	}
-	targetHost, targetPort, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		return false
-	}
-	boundHost, boundPort, err := net.SplitHostPort(boundAddress)
-	if err != nil || targetPort != boundPort {
-		return false
-	}
-	return equalLoopbackHosts(targetHost, boundHost)
-}
-
-func isAnyAliasSelfTarget(u *url.URL, boundAddresses []string) bool {
-	for _, address := range boundAddresses {
-		if isAliasSelfTarget(u, address) {
-			return true
-		}
-	}
-	return false
-}
-
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-func equalLoopbackHosts(a, b string) bool {
-	aLocalhost, bLocalhost := isLocalhostName(a), isLocalhostName(b)
-	if aLocalhost || bLocalhost {
-		if aLocalhost && bLocalhost {
-			return true
-		}
-		other := a
-		if aLocalhost {
-			other = b
-		}
-		ip := net.ParseIP(other)
-		return ip != nil && (ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback))
-	}
-	aIP, bIP := net.ParseIP(a), net.ParseIP(b)
-	return aIP != nil && bIP != nil && aIP.IsLoopback() && bIP.IsLoopback() && aIP.Equal(bIP)
-}
-
-func isLocalhostName(host string) bool {
-	return strings.EqualFold(strings.TrimSuffix(host, "."), "localhost")
 }
 
 // nodeURL returns the single best forward URL for a node (the first candidate
@@ -1534,7 +1485,7 @@ func (p *Proxy) handleMessage(msg *Message) {
 	case "facade/enable":
 		var params enableFacadeParams
 		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			p.codec.RespondError(msg.ID, -32602, "invalid params: expected {\"engine\",\"port\",\"aliasAddresses\",\"ignorePersistedPort\",\"descriptor\"}")
+			p.codec.RespondError(msg.ID, -32602, "invalid params: expected {\"engine\",\"port\",\"ignorePersistedPort\",\"descriptor\"}")
 			return
 		}
 		result, err := p.enableFacade(params)

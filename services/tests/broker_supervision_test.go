@@ -37,7 +37,7 @@ func startBrokerWith(t *testing.T, extraArgs ...string) (stdin io.WriteCloser, m
 
 // startBrokerWithEnv is startBrokerWith plus explicit environment overrides.
 // It is reserved for cross-process cases whose contract begins in the parent
-// process environment (for example an inherited OLLAMA_HOST).
+// process environment.
 func startBrokerWithEnv(t *testing.T, extraEnv []string, extraArgs ...string) (stdin io.WriteCloser, msgs <-chan jsonrpc.Message, stderrLines <-chan string, cleanup func()) {
 	t.Helper()
 	return startBrokerWithConfigDirAndEnv(t, t.TempDir(), extraEnv, extraArgs...)

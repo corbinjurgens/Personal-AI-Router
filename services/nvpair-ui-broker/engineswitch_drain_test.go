@@ -234,7 +234,7 @@ type nodeDrainHarness struct {
 
 func newNodeDrainHarness(t *testing.T) *nodeDrainHarness {
 	t.Helper()
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	b, _ := newPolicyBroker(t)
 	// Use the existing catalog owner, including descriptor engines outside the
 	// built-in table. Port planning is synthetic and never opens a listener.

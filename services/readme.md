@@ -26,10 +26,7 @@ establish inventory, engine health or strict readiness.
 
 Standalone, the Ollama proxy defaults to `http://localhost:11435`; under the
 broker it serves the Ollama-compatible `http://localhost:11434` when that port is
-free. If an inherited `OLLAMA_HOST` names a different local HTTP port, the broker
-can serve that loopback-only address from the same router when it is free —
-`localhost` is claimed on IPv4 and IPv6 together, and remote or HTTPS targets are
-never intercepted.
+free.
 
 The llama.cpp facade is enabled by default alongside Ollama and LM Studio. It
 exposes OpenAI-compatible traffic on `http://localhost:8080` while the managed

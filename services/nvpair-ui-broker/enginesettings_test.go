@@ -818,7 +818,7 @@ func TestSettingsJournalFailureAndInterruptedRecovery(t *testing.T) {
 	}
 }
 
-func TestSettingsPortValidationIncludesStoppedEnginesAndAliases(t *testing.T) {
+func TestSettingsPortValidationIncludesStoppedEngines(t *testing.T) {
 	h := newSettingsHarness(t)
 	p := h.request(t)
 	p.Settings.ProxyPort = p.Settings.ServerPort
@@ -840,14 +840,6 @@ func TestSettingsPortValidationIncludesStoppedEnginesAndAliases(t *testing.T) {
 	preview, err = h.b.previewEngineSettings(context.Background(), p, "")
 	if err != nil || len(preview.Errors) == 0 {
 		t.Fatalf("stopped engine reservation ignored: %v %v", preview, err)
-	}
-	h.otherEnginePort.Store(0)
-	h.b.ollamaHostAliasMu.Lock()
-	h.b.ollamaHostAlias.Port = p.Settings.ProxyPort
-	h.b.ollamaHostAliasMu.Unlock()
-	preview, err = h.b.previewEngineSettings(context.Background(), p, "")
-	if err != nil || len(preview.Errors) == 0 {
-		t.Fatalf("proxy alias reservation ignored: %v %v", preview, err)
 	}
 }
 

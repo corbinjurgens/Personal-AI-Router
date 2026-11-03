@@ -878,7 +878,6 @@ func captureWorkloadBroadcast(t *testing.T) []json.RawMessage {
 		"--workload-manager-path", bridge,
 	)
 	p := startInteropProcess(t, base, brokerBin, workerPort, []string{
-		"OLLAMA_HOST=",
 		"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(scannerPort),
 		"NVPAIR_TEST_WORKLOAD_BRIDGE=" + bridge,

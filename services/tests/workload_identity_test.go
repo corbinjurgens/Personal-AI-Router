@@ -385,7 +385,7 @@ func routingIdentityBroker(t *testing.T, clusterDir string, ports fixtureService
 	scanner := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
 	jointCopyExecutable(t, self, scanner)
 	stdin, messages, stderr, cleanup := startBrokerWithPorts(t, configDir, clusterDir,
-		[]string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
+		[]string{"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
 			"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(freePort(t))}, ports,
 		"--scanner-path", scanner, "--engine-manager-path", engineMgrBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "llamacpp", "--workload-manager-path", workloadMgrBin)

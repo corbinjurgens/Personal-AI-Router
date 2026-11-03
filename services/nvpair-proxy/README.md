@@ -16,7 +16,7 @@ socket).
 
 **One process, one facade per engine.** The process starts with no engine and no
 listener; the broker asks for each engine's facade with `facade/enable`, which
-carries that engine's port and alias addresses. A flag cannot express this,
+carries that engine's port. A flag cannot express this,
 because the broker plans a different port for each engine.
 
 They share a process on purpose. Between scheduler snapshots a facade takes
@@ -241,7 +241,6 @@ parameter, because one flag cannot carry multiple engines' plans.
 |-------|---------|-------------|
 | `engine` | *(required)* | Which engine to front: a built-in `ollama`, `lmstudio` or `llamacpp`, or a descriptor engine ID together with `descriptor`. An unknown name without a descriptor is rejected with the accepted values. |
 | `port` | per engine, see below | HTTP listen port for request forwarding. Must be 1–65535, or omitted for the engine's standalone default. `0` means "the default" rather than "pick an ephemeral port", and any other out-of-range value is rejected, because the facade announces the requested port in its `ready` notification and the broker would be told `0`. |
-| `aliasAddresses` | *(empty)* | Optional secondary `host:port` values for the same routing handler, one per loopback family so `localhost` resolves either way. Only literal loopback addresses are accepted; the broker uses this for a safe inherited local `OLLAMA_HOST`, and the aliases are not advertised to peers. Accepted only for an engine with an inherited host variable — today Ollama alone — and rejected for any other. |
 | `ignorePersistedPort` | `false` | Use `port` even when a saved port exists (used by broker-managed startup) |
 | `descriptor` | *(none)* | The engine's `nvpair-shared/engines.Descriptor`, required for a descriptor engine and refused for a built-in one. The facade is built from its protocols (see below); a descriptor that `engines.ProxyCanFront` rejects, or one naming another engine, is refused. A descriptor engine also needs an explicit `port`. |
 
@@ -260,7 +259,7 @@ route set (`protocolRoutes` in `engines.go`), with `llamacpp-router`'s
 `openai-chat` must be among them, because each supplies an
 inference route and a model list; `anthropic-messages` and `llamacpp-router`
 only add routes. Model identifiers match exactly. The engine has no standalone
-or reserved port and no host alias.
+or reserved port.
 Its discovery service key is `e-<id>`, its facade-scoped messages are addressed
 `e-<id>:<method>`, and the port its facade first binds is persisted in
 `<id>-proxy-port.json` so it stays there across restarts. Peers that advertise
@@ -306,13 +305,6 @@ every candidate node concurrently and merged into one de-duplicated inventory.
 On the llama.cpp facade, `GET /models` and `GET /v1/models` return the same
 fleet inventory across llama.cpp candidates, even when a node is selected.
 Point your client at the proxy and it handles routing.
-
-When the broker supplies `aliasAddresses`, the facade reserves that
-loopback-only endpoint before reporting ready and serves it through the same
-routing and workload-lifecycle handler. A `localhost` alias reserves `127.0.0.1`
-and `::1` atomically so client resolution cannot bypass the router. An occupied
-alias is non-fatal: its existing owner is untouched and the proxy reports an
-actionable warning while the primary listener stays available.
 
 **Cluster ingress.** The listener carries two personalities, demultiplexed by
 each connection's first byte. Plaintext HTTP is accepted only from loopback; a

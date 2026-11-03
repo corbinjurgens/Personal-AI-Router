@@ -145,12 +145,6 @@ func TestSettingsMigrationRejectsReservedPorts(t *testing.T) {
 	test("PAIR control port", func(h *settingsHarness, request settings.Request) int {
 		return engineControlPort
 	})
-	test("inherited Ollama host alias", func(h *settingsHarness, request settings.Request) int {
-		h.b.ollamaHostAliasMu.Lock()
-		h.b.ollamaHostAlias.Port = request.Settings.ProxyPort
-		h.b.ollamaHostAliasMu.Unlock()
-		return request.Settings.ProxyPort
-	})
 	test("stopped proxy saved port", func(h *settingsHarness, request settings.Request) int {
 		_, port := h.b.getLMStudioProxy().Status("lmstudio")
 		h.b.setLMStudioProxy(nil)

@@ -20,7 +20,7 @@ const (
 
 // servicePortPlan is the broker's immutable startup configuration for the local
 // service listeners it spawns, registers with discovery and reserves against
-// engine ports and the OLLAMA_HOST alias. One value per service: the port
+// engine ports. One value per service: the port
 // passed to the worker is the port registered, replayed and reserved.
 type servicePortPlan struct {
 	nodeInfo          int

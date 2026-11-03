@@ -207,7 +207,7 @@ func brokerWithEngineInventory(t *testing.T, ports map[string]int) *Broker {
 	return b
 }
 
-// isolateOllamaHostTestConfig points the per-user config dir at a temp dir so a
+// isolateBrokerTestConfig points the per-user config dir at a temp dir so a
 // test's persisted state cannot touch the developer's real configuration.
 //
 // All four variables are required. appdir consults LOCALAPPDATA only on
@@ -217,7 +217,7 @@ func brokerWithEngineInventory(t *testing.T, ports map[string]int) *Broker {
 // into the developer's real config dir and then failed on every subsequent run
 // against the value it had planted. CI never saw it because its config dir
 // starts empty.
-func isolateOllamaHostTestConfig(t *testing.T) {
+func isolateBrokerTestConfig(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("LOCALAPPDATA", dir)

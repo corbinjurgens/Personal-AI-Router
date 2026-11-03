@@ -344,97 +344,6 @@ func TestLMStudioSetPortUpdatesBackendCache(t *testing.T) {
 	}
 }
 
-func TestRelayRejectsEnginePortAssignmentToActiveOllamaHostAlias(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		method string
-		params string
-	}{
-		{name: "set Ollama port", method: "engine:set-port", params: `{"engine":"ollama","port":11433}`},
-		{name: "set LM Studio port", method: "engine:set-port", params: `{"engine":"lmstudio","port":11433}`},
-		{name: "start custom engine override", method: "engine:start", params: `{"engine":"custom","port":11433}`},
-		{name: "install and start custom engine override", method: "engine:install", params: `{"engine":"custom","port":11433,"start":true}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			brokerConn, clientConn := net.Pipe()
-			defer brokerConn.Close()
-			defer clientConn.Close()
-			b := &Broker{
-				codec:           NewCodec(brokerConn),
-				ollamaPortReady: make(chan struct{}),
-			}
-			b.setOllamaHostAlias(ollamaHostAlias{Port: 11433})
-			close(b.ollamaPortReady)
-			id := json.RawMessage(`7`)
-			response := make(chan *Message, 1)
-			readErr := make(chan error, 1)
-			go func() {
-				msg, err := NewCodec(clientConn).Read()
-				if err != nil {
-					readErr <- err
-					return
-				}
-				response <- msg
-			}()
-
-			b.relayToEngine(&Message{
-				JSONRPC: "2.0",
-				ID:      &id,
-				Method:  tc.method,
-				Params:  json.RawMessage(tc.params),
-			})
-
-			select {
-			case err := <-readErr:
-				t.Fatal(err)
-			case msg := <-response:
-				if msg.Error == nil || msg.Error.Code != -32000 || !strings.Contains(msg.Error.Message, "OLLAMA_HOST proxy alias") {
-					t.Fatalf("response = %+v, want alias-port rejection", msg)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("timed out waiting for alias-port rejection")
-			}
-		})
-	}
-}
-
-func TestBrokerRejectsLMStudioProxyPortAssignmentToActiveOllamaHostAlias(t *testing.T) {
-	brokerConn, clientConn := net.Pipe()
-	defer brokerConn.Close()
-	defer clientConn.Close()
-	b := &Broker{codec: NewCodec(brokerConn)}
-	b.setOllamaHostAlias(ollamaHostAlias{Port: 11433})
-	id := json.RawMessage(`8`)
-	response := make(chan *Message, 1)
-	readErr := make(chan error, 1)
-	go func() {
-		msg, err := NewCodec(clientConn).Read()
-		if err != nil {
-			readErr <- err
-			return
-		}
-		response <- msg
-	}()
-
-	b.handleMessage(&Message{
-		JSONRPC: "2.0",
-		ID:      &id,
-		Method:  "lmstudio-proxy:set-port",
-		Params:  json.RawMessage(`{"port":11433}`),
-	})
-
-	select {
-	case err := <-readErr:
-		t.Fatal(err)
-	case msg := <-response:
-		if msg.Error == nil || msg.Error.Code != -32000 || !strings.Contains(msg.Error.Message, "OLLAMA_HOST proxy alias") {
-			t.Fatalf("response = %+v, want alias-port rejection", msg)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for LM Studio alias-port rejection")
-	}
-}
-
 func TestRelayCachesActualOllamaPortFromResponse(t *testing.T) {
 	engineClient, engineServer := net.Pipe()
 	defer engineClient.Close()
@@ -625,7 +534,7 @@ func TestOllamaPresenceRequestWaitsForPortGate(t *testing.T) {
 }
 
 func TestBrokerFallbackUsesPrivatePortCheck(t *testing.T) {
-	isolateOllamaHostTestConfig(t)
+	isolateBrokerTestConfig(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("allocate private fallback endpoint: %v", err)

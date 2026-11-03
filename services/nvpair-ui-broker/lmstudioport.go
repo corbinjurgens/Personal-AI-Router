@@ -116,9 +116,6 @@ func (b *Broker) reportLMStudioPortOwnershipBlocked(reason string) {
 }
 
 func (b *Broker) setLMStudioProxyFallback(excludedPorts ...int) int {
-	if aliasPort := b.currentOllamaHostAlias().Port; aliasPort > 0 {
-		excludedPorts = append(excludedPorts, aliasPort)
-	}
 	for port := range b.siblingEngineProxyPorts(lmstudioProxyProfile) {
 		excludedPorts = append(excludedPorts, port)
 	}
@@ -199,9 +196,6 @@ func (b *Broker) prepareManagedLMStudioFacadeWithPortCheck(portAvailable func(in
 	if b.prepareExplicitEngineSettings("lmstudio") {
 		return
 	}
-	// Ollama's facade is prepared first, so an inherited OLLAMA_HOST alias is
-	// already reserved here and must stay out of LM Studio's backend search.
-	portAvailable = b.availableOffOllamaHostAlias(portAvailable)
 	settings := b.getSettings()
 	if settings == nil {
 		b.cacheLMStudioPortStatus()

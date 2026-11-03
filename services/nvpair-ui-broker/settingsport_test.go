@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -57,19 +56,6 @@ func TestBrokerProxySetPortRejectsInvalidPorts(t *testing.T) {
 						t.Fatalf("response = %+v, want invalid-port error", response)
 					}
 				})
-			}
-		})
-	}
-}
-
-func TestBrokerProxySetPortRejectsInheritedAlias(t *testing.T) {
-	for _, profile := range engineProxyProfiles {
-		t.Run(profile.Name, func(t *testing.T) {
-			b := &Broker{}
-			b.setOllamaHostAlias(ollamaHostAlias{Port: 11433})
-			response := callBrokerPortRequest(t, b, profile.ComponentName()+":set-port", json.RawMessage(`{"port":11433}`))
-			if response.Error == nil || response.Error.Code != -32000 || !strings.Contains(response.Error.Message, "OLLAMA_HOST proxy alias") {
-				t.Fatalf("response = %+v, want alias-port rejection", response)
 			}
 		})
 	}
