@@ -171,7 +171,7 @@ func mutationManifest(t *testing.T, engine string) *Manifest {
 	m.Actions = map[string]Action{
 		"list_models":   {HTTP: &ActionHTTP{Method: "GET", Path: "/api/tags"}},
 		"purge":         {HTTP: &ActionHTTP{Method: "DELETE", Path: "/api/delete"}},
-		pullModelAction: {HTTP: &ActionHTTP{Method: "POST", Path: "/api/pull"}},
+		pullModelAction: llamaPullAction(),
 	}
 	m.Operations = map[string]OperationBinding{
 		engines.OperationDelete: {Action: "purge"},
@@ -215,9 +215,12 @@ func mutationJSON(status int, body string) (*http.Response, error) {
 // through the returned fake transport.
 func mutationEngineFixture(t *testing.T, engine string) (*Executor, *mutationTransport) {
 	t.Helper()
+	pull := llamaPullTransport("download_finished", func(*http.Request, []byte) (*http.Response, error) {
+		return mutationJSON(http.StatusOK, `{"success":true}`)
+	})
 	transport := &mutationTransport{respond: func(r *http.Request) (*http.Response, error) {
-		if r.URL.Path == "/api/pull" {
-			return mutationJSON(http.StatusOK, `{"status":"success"}`+"\n")
+		if r.URL.Path == "/models" || r.URL.Path == "/models/sse" {
+			return pull.RoundTrip(r)
 		}
 		return mutationJSON(http.StatusOK, `{"ok":true}`)
 	}}
@@ -421,8 +424,8 @@ func TestModelMutationGuardBlocksStreamingPullUntilConfirmed(t *testing.T) {
 	broker.replyTo(t, m, req, true, "", 0)
 	<-done
 
-	if got := engine.seen(); len(got) != 1 || got[0] != "POST /api/pull" {
-		t.Fatalf("engine saw %v, want one POST of the pull action", got)
+	if got := engine.seen(); len(got) != 2 || got[0] != "GET /models/sse" || got[1] != "POST /models" {
+		t.Fatalf("engine saw %v, want the progress subscription and one POST of the pull action", got)
 	}
 	if !strings.Contains(out.String(), "success") {
 		t.Fatalf("pull response = %s, want the action's terminal result", out.String())
@@ -439,7 +442,7 @@ func TestModelMutationGuardBlocksDirectECEndpointsUntilConfirmed(t *testing.T) {
 		want string
 	}{
 		{"delete", controlDeletePath, `{"engine":"fake","model":"m:1"}`, "DELETE /api/delete"},
-		{"pull", controlPullPath, `{"engine":"fake","model":"m:1"}`, "POST /api/pull"},
+		{"pull", controlPullPath, `{"engine":"fake","model":"m:1"}`, "POST /models"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -469,8 +472,15 @@ func TestModelMutationGuardBlocksDirectECEndpointsUntilConfirmed(t *testing.T) {
 			broker.replyTo(t, m, reply, true, "", 0)
 			<-done
 
-			if got := engine.seen(); len(got) != 1 || got[0] != tc.want {
-				t.Fatalf("engine saw %v, want one %s", got, tc.want)
+			// The pull's progress subscription is a read, not an effect.
+			var effects []string
+			for _, request := range engine.seen() {
+				if request != "GET /models/sse" {
+					effects = append(effects, request)
+				}
+			}
+			if len(effects) != 1 || effects[0] != tc.want {
+				t.Fatalf("engine saw %v, want one %s", effects, tc.want)
 			}
 			if rec.Code != http.StatusOK {
 				t.Fatalf("%s status = %d, want 200", tc.name, rec.Code)

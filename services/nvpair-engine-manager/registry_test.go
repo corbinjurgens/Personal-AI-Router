@@ -525,6 +525,9 @@ func TestValidateRejects(t *testing.T) {
 				ProgressProtocol: "unknown",
 			}
 		}, "unsupported progress_protocol"},
+		{"HTTP pull without progress protocol", func(m *Manifest) {
+			m.Actions[pullModelAction] = Action{HTTP: &ActionHTTP{Method: "POST", Path: "/models"}}
+		}, "requires a progress_protocol"},
 		{"progress protocol on other action", func(m *Manifest) {
 			m.Actions["list_models"] = Action{
 				HTTP:             &ActionHTTP{Method: "GET", Path: "/models"},

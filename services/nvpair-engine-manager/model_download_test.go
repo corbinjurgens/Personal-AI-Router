@@ -45,26 +45,22 @@ func TestModelDownloadTargetLifecycleAndCancelledQueue(t *testing.T) {
 	started, finish := make(chan struct{}), make(chan struct{})
 	var release sync.Once
 	var effects atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-			http.NotFound(w, r)
-			return
-		}
+	server := newLlamaPullServer(t, llamaPullBehavior{Start: func(w http.ResponseWriter, _ *http.Request) {
 		effects.Add(1)
 		close(started)
 		<-finish
-		_, _ = fmt.Fprintln(w, `{"status":"success"}`)
-	}))
-	defer func() { release.Do(func() { close(finish) }); server.Close() }()
-	ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
-	first, err := ex.reserveModelPull(context.Background(), "fake", "first", json.RawMessage(`{"name":"first"}`))
+		_, _ = fmt.Fprint(w, `{"success":true}`)
+	}})
+	defer release.Do(func() { close(finish) })
+	ex := newHTTPPullTestExecutor(t, server.Server, llamaPullAction())
+	first, err := ex.reserveModelPull(context.Background(), "fake", "first", json.RawMessage(`{"model":"first"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	firstDone := make(chan error, 1)
 	go func() { _, err := first.run(context.Background()); firstDone <- err }()
 	<-started
-	second, err := ex.reserveModelPull(context.Background(), "fake", "second", json.RawMessage(`{"name":"second"}`))
+	second, err := ex.reserveModelPull(context.Background(), "fake", "second", json.RawMessage(`{"model":"second"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +76,7 @@ func TestModelDownloadTargetLifecycleAndCancelledQueue(t *testing.T) {
 			t.Fatalf("second inherited progress: %+v", entry)
 		}
 	}
-	if _, err := ex.reserveModelPull(context.Background(), "fake", "first", json.RawMessage(`{"name":"first"}`)); !errors.Is(err, errDownloadBusy) {
+	if _, err := ex.reserveModelPull(context.Background(), "fake", "first", json.RawMessage(`{"model":"first"}`)); !errors.Is(err, errDownloadBusy) {
 		t.Fatalf("duplicate = %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -114,21 +110,23 @@ func TestModelDownloadTargetLifecycleAndCancelledQueue(t *testing.T) {
 	}
 }
 
-func TestModelDownloadNDJSONRequiresNativeTerminal(t *testing.T) {
-	test := func(name, body, phase, reason string, blocked bool) {
+func TestModelDownloadSSERequiresNativeTerminal(t *testing.T) {
+	const model = "demo"
+	test := func(name string, behavior llamaPullBehavior, phase, reason string, blocked bool) {
 		t.Run(name, func(t *testing.T) {
 			var effects atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-					http.NotFound(w, r)
+			start := behavior.Start
+			behavior.Start = func(w http.ResponseWriter, r *http.Request) {
+				effects.Add(1)
+				if start != nil {
+					start(w, r)
 					return
 				}
-				effects.Add(1)
-				_, _ = fmt.Fprintln(w, body)
-			}))
-			defer server.Close()
-			ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
-			_, err := ex.PullModelStream(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`))
+				_, _ = fmt.Fprint(w, `{"success":true}`)
+			}
+			server := newLlamaPullServer(t, behavior)
+			ex := newHTTPPullTestExecutor(t, server.Server, llamaPullAction())
+			_, err := ex.PullModelStream(context.Background(), "fake", model, json.RawMessage(`{"model":"demo"}`))
 			if (err == nil) != (phase == "complete") {
 				t.Fatalf("error = %v", err)
 			}
@@ -155,25 +153,26 @@ func TestModelDownloadNDJSONRequiresNativeTerminal(t *testing.T) {
 			}
 		})
 	}
-	test("explicit success", `{"status":"success"}`, "complete", "", false)
-	test("percent one hundred is not completion", `{"status":"pulling","total":100,"completed":100}`, "unknown", "interrupted", true)
-	test("explicit native error", `{"error":"private vendor output"}`, "failed", "download_failed", true)
-	test("opaque response", "accepted", "unknown", "unsupported", true)
+	test("explicit finished", llamaPullBehavior{}, "complete", "", false)
+	test("percent one hundred is not completion", llamaPullBehavior{Events: func(string) []string {
+		return []string{llamaPullProgressEvent(model, 100, 100), llamaPullEndStream}
+	}}, "failed", "interrupted", true)
+	test("explicit native failure", llamaPullBehavior{Events: func(string) []string {
+		return []string{llamaPullEvent(model, "download_failed")}
+	}}, "failed", "download_failed", true)
+	test("acknowledgement without a success flag", llamaPullBehavior{Start: func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `accepted`)
+	}}, "unknown", "acceptance_unknown", true)
 }
 
 func TestModelDownloadPersistenceFailureHasZeroNativeEffects(t *testing.T) {
 	var effects atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-			http.NotFound(w, r)
-			return
-		}
+	server := newLlamaPullServer(t, llamaPullBehavior{Start: func(http.ResponseWriter, *http.Request) {
 		effects.Add(1)
-	}))
-	defer server.Close()
-	ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
+	}})
+	ex := newHTTPPullTestExecutor(t, server.Server, llamaPullAction())
 	ex.downloads.store.replace.Replace = func(string, string) error { return errors.New("injected") }
-	if _, err := ex.PullModelStream(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`)); err == nil {
+	if _, err := ex.PullModelStream(context.Background(), "fake", "demo", json.RawMessage(`{"model":"demo"}`)); err == nil {
 		t.Fatal("save failure accepted")
 	}
 	if effects.Load() != 0 {
@@ -373,23 +372,16 @@ func TestModelDownloadDeleteResolutionReservesRevisionBeforePersistence(t *testi
 }
 
 func TestModelDownloadTerminalSnapshotSurvivesSameKeyRetry(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/pull" {
-			http.NotFound(w, r)
-			return
-		}
-		_, _ = fmt.Fprintln(w, `{"status":"success"}`)
-	}))
-	defer server.Close()
-	ex := newHTTPPullTestExecutor(t, server, Action{HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/pull"}})
-	first, err := ex.reserveModelPull(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`))
+	server := newLlamaPullServer(t, llamaPullBehavior{})
+	ex := newHTTPPullTestExecutor(t, server.Server, llamaPullAction())
+	first, err := ex.reserveModelPull(context.Background(), "fake", "demo", json.RawMessage(`{"model":"demo"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := first.run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	next, err := ex.reserveModelPull(context.Background(), "fake", "demo", json.RawMessage(`{"name":"demo"}`))
+	next, err := ex.reserveModelPull(context.Background(), "fake", "demo", json.RawMessage(`{"model":"demo"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,7 +20,7 @@ import (
 // as is llama.cpp's query-parameter delete endpoint.
 func TestModelLifecycle(t *testing.T) {
 	m := testEngineManifest(fakeEngineBin) // already has list_models (GET /api/tags)
-	m.Actions["pull_model"] = Action{HTTP: &ActionHTTP{Method: "POST", Path: "/api/pull"}}
+	m.Actions["pull_model"] = llamaPullAction()
 	m.Actions["run_model"] = Action{HTTP: &ActionHTTP{Method: "POST", Path: "/api/generate"}}
 	m.Actions["unload_model"] = Action{HTTP: &ActionHTTP{Method: "POST", Path: "/api/generate"}}
 	m.Actions["loaded_models"] = Action{
@@ -55,7 +55,7 @@ func TestModelLifecycle(t *testing.T) {
 	if strings.Contains(list(), model) {
 		t.Fatalf("model %q unexpectedly present before pull", model)
 	}
-	act("pull_model", `{"name":"`+model+`"}`)
+	act("pull_model", `{"model":"`+model+`"}`)
 	if !strings.Contains(list(), model) {
 		t.Fatalf("model %q not listed after pull", model)
 	}

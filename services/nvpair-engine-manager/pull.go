@@ -11,13 +11,11 @@ package main
 // initiator). engine:action with action "pull_model" is routed here for exactly
 // this reason — a local pull streams progress just like a remote one.
 //
-// An HTTP pull action without a progress_protocol streams newline-delimited
-// JSON status objects ({"status":...,"total":N,"completed":M}); each line maps
-// to a progress event, coalesced so only changes in stage/percent are emitted (a
-// single layer streams many byte-progress lines at the same rendered percent).
-// llama.cpp instead acknowledges POST /models immediately and reports completion
-// on /models/sse; its manifest opts into that named adapter. CLI-driven pulls
-// return the final result without line progress.
+// An HTTP pull action declares a progress_protocol; llama.cpp acknowledges
+// POST /models immediately and reports completion on /models/sse, and its
+// manifest opts into that named adapter. Progress events are coalesced so only
+// changes in percent are emitted. CLI-driven pulls return the final result
+// without line progress.
 
 import (
 	"bufio"
@@ -484,80 +482,14 @@ func (e *Executor) runPullModel(ctx context.Context, st *engineState, engine, mo
 		return result, nil
 	}
 
-	// HTTP action: stream NDJSON progress.
+	// HTTP action: manifest validation requires a progress_protocol, and the
+	// only one is llama.cpp's asynchronous router download.
 	if !dispatchRun.running {
 		return nil, fmt.Errorf("engine %q is not running", engine)
 	}
 	pullCtx, watchdog := newPullProgressWatchdog(ctx, e.pullProgressTimeout)
 	defer watchdog.stop()
-	if act.ProgressProtocol == pullProgressProtocolLlamaCPPModelsSSE {
-		return e.pullModelLlamaCPPSSE(pullCtx, engine, model, act, port, params, watchdog)
-	}
-	path, err := resolvePlaceholders(act.HTTP.Path, map[string]string{"port": strconv.Itoa(port)})
-	if err != nil {
-		return nil, err
-	}
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
-	req, err := http.NewRequestWithContext(pullCtx, strings.ToUpper(act.HTTP.Method), url, bytes.NewReader(params))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if err := e.beforeModelPullEffect(pullCtx); err != nil {
-		return nil, err
-	}
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("pull %q: %w", model, watchdog.resolveError(pullCtx, err))
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		return nil, fmt.Errorf("pull %q: engine returned HTTP %d: %s", model, resp.StatusCode, strings.TrimSpace(string(data)))
-	}
-
-	// Coalesce redundant frames: a chatty engine streams many byte-progress
-	// lines per layer, most of which map to the same (stage, percent) pair. We
-	// keep the newest raw line for the terminal result but only notify/publish
-	// when the rendered stage or percent actually changes, bounding the event
-	// volume a subscriber (local UI or remote relay) has to absorb. lastPct=-1
-	// is a sentinel pullProgressFromLine never yields, so the first frame emits.
-	last := json.RawMessage("null")
-	sawProtocol := false
-	lastStage, lastPct := "", -1
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20) // status lines are small; cap generously
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 || !json.Valid(line) {
-			continue
-		}
-		last = append(json.RawMessage(nil), line...)
-		progress := decodePullStatusLine(line)
-		if progress.Error != "" {
-			return nil, pullFailure("failed", "download_failed", errors.New("engine reported download failure"))
-		}
-		if progress.Status == "success" {
-			return last, nil
-		}
-		if progress.Status != "" {
-			sawProtocol = true
-		}
-		watchdog.recordProgress(progress.progressKey(), progress.Completed)
-		ev := progress.event(engine)
-		if ev.Stage == lastStage && ev.Percent == lastPct {
-			continue
-		}
-		lastStage, lastPct = ev.Stage, ev.Percent
-		e.emitModelPullProgress(ctx, ev, progress.Total > 0)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("pull %q: %w", model, watchdog.resolveError(pullCtx, err))
-	}
-	if !sawProtocol {
-		return nil, pullFailure("unknown", "unsupported", errors.New("engine has no supported download terminal"))
-	}
-	return nil, pullFailure("unknown", "interrupted", errors.New("download stream ended before success"))
+	return e.pullModelLlamaCPPSSE(pullCtx, engine, model, act, port, params, watchdog)
 }
 
 // pullModelLlamaCPPSSE runs llama.cpp's asynchronous router download protocol.
@@ -855,40 +787,4 @@ func (e *Executor) reportPullFailed(engine, model string, err error) string {
 		Severity: "error", Action: "retry", EngineType: engine, Operation: "pull", ModelName: model,
 	})
 	return msg
-}
-
-// pullStatusLine is one NDJSON status object of a protocol-less HTTP pull.
-type pullStatusLine struct {
-	Error     string `json:"error"`
-	Status    string `json:"status"`
-	Digest    string `json:"digest"`
-	Total     int64  `json:"total"`
-	Completed int64  `json:"completed"`
-}
-
-func decodePullStatusLine(line []byte) pullStatusLine {
-	var progress pullStatusLine
-	_ = json.Unmarshal(line, &progress)
-	return progress
-}
-
-func (p pullStatusLine) progressKey() string {
-	if p.Digest != "" {
-		return p.Digest
-	}
-	return p.Status
-}
-
-func (p pullStatusLine) event(engine string) ProgressEvent {
-	pct := 0
-	if p.Total > 0 {
-		pct = int(p.Completed * 100 / p.Total)
-	}
-	return ProgressEvent{Engine: engine, Op: "pull", Stage: p.Status, Percent: pct, Message: p.Status}
-}
-
-// pullProgressFromLine maps a pull status line into a ProgressEvent,
-// computing a percentage when the line carries total/completed byte counts.
-func pullProgressFromLine(engine string, line []byte) ProgressEvent {
-	return decodePullStatusLine(line).event(engine)
 }

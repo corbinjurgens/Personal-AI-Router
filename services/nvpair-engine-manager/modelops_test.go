@@ -208,19 +208,18 @@ func TestTypedModelOperationsAreDispatched(t *testing.T) {
 // A remote pull that names only a model gets its params from the pull binding.
 func TestPullWithoutParamsUsesThePullBinding(t *testing.T) {
 	bodies := make(chan string, 1)
-	srv := httptest.NewServer(fixtureRequestHandler(http.MethodPost, "/api/pull", func(w http.ResponseWriter, r *http.Request) {
+	srv := newLlamaPullServer(t, llamaPullBehavior{Start: func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		bodies <- string(body)
-		_, _ = w.Write([]byte(`{"status":"success"}` + "\n"))
-	}))
-	defer srv.Close()
-	ex := newHTTPPullTestExecutor(t, srv, Action{HTTP: &ActionHTTP{Method: "POST", Path: "/api/pull"}})
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}})
+	ex := newHTTPPullTestExecutor(t, srv.Server, llamaPullAction())
 	m, _ := ex.reg.Get("fake")
-	m.Operations = map[string]OperationBinding{"pull": {Action: pullModelAction, ModelParam: "name"}}
+	m.Operations = map[string]OperationBinding{"pull": {Action: pullModelAction}}
 	if _, err := ex.PullModelStream(context.Background(), "fake", "tiny", nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := <-bodies; got != `{"name":"tiny"}` {
-		t.Fatalf("pull body = %s, want the bound name param", got)
+	if got := <-bodies; got != `{"model":"tiny"}` {
+		t.Fatalf("pull body = %s, want the bound model param", got)
 	}
 }

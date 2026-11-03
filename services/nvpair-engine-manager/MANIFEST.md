@@ -789,7 +789,7 @@ model, and the binding decides how the engine is asked:
 
 | Field | Required | Notes |
 |---|---|---|
-| `action` | yes | A declared action. `pull` must bind `pull_model`, which owns the streaming pull path. |
+| `action` | yes | A declared action. `pull` must bind `pull_model`, which owns the streaming pull path. An HTTP `pull_model` action must declare `"progress_protocol": "llamacpp-models-sse"`; a `cmd` pull needs none. |
 | `model_param` | no | Parameter carrying the model, default `model`: the JSON body or query key of an HTTP action, or the `{placeholder}` a `cmd` or `remove_path` action must template. Actions with `model_resolution` or `progress_protocol` read `model` and require it. |
 | `params` | no | Fixed scalar parameters sent with the model, such as Ollama's `"stream": false`. Query-parameter actions take strings only. Runner placeholders and the model param are rejected. |
 | `response_timeout_s` | no | How long, 1–1800 seconds, the engine may take to begin answering an HTTP action. It applies to every call of that action, `engine:action` included, and two operations sharing an action must agree on it. Not allowed on `pull`, which its progress watchdog bounds. A remote peer's load uses the readiness budget when this node binds a load budget above 30 seconds for the same engine id. |

@@ -1209,6 +1209,8 @@ func (a *Action) validate(name string) error {
 		if a.ProgressProtocol != pullProgressProtocolLlamaCPPModelsSSE {
 			return fmt.Errorf("action %q: unsupported progress_protocol %q", name, a.ProgressProtocol)
 		}
+	} else if name == pullModelAction && hasHTTP {
+		return fmt.Errorf("action %q: an HTTP pull_model action requires a progress_protocol (%q)", name, pullProgressProtocolLlamaCPPModelsSSE)
 	}
 	if a.Result != nil && (strings.TrimSpace(a.Result.Array) == "" || strings.TrimSpace(a.Result.Field) == "") {
 		return fmt.Errorf("action %q: result.array and result.field are required when result is set", name)

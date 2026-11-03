@@ -1663,8 +1663,9 @@ are independent. Ready inventory and identity digests exclude queued and unsafe
 content. The named llama.cpp SSE adapter projects only stable `unloaded`,
 `loading`, `loaded` and `sleeping` inventory statuses. Name membership, transient
 `downloaded`, percent 100 and accepted POST do not prove native completion.
-NDJSON pulls require `status:"success"`; llama.cpp requires matching
-`download_finished`; CLI pulls require successful exit without an explicit error.
+An HTTP pull requires a declared `progress_protocol` and completes only on
+llama.cpp's matching `download_finished`; CLI pulls require successful exit
+without an explicit error.
 
 `model-download-state.json` is a private, bounded unresolved-content journal,
 separate from desired engine intent. It retains unsafe PAIR attempts across

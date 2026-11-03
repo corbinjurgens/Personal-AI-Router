@@ -44,6 +44,23 @@ var (
 	tagsDelay time.Duration
 )
 
+// pullSubs are the open /models/sse streams a POST /models reports to.
+var (
+	pullMu   sync.Mutex
+	pullSubs = map[chan string]struct{}{}
+)
+
+func publishPullEvent(payload string) {
+	pullMu.Lock()
+	defer pullMu.Unlock()
+	for sub := range pullSubs {
+		select {
+		case sub <- payload:
+		default:
+		}
+	}
+}
+
 func modelDigest(name string) string {
 	modelsMu.Lock()
 	defer modelsMu.Unlock()
@@ -204,30 +221,52 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": ms})
 	})
-	mux.HandleFunc("/api/pull", func(w http.ResponseWriter, r *http.Request) {
-		if n := bstr(decodeBody(r), "name"); n != "" {
-			modelsMu.Lock()
-			models[n] = true
-			modelsMu.Unlock()
-		}
-		// Stream NDJSON status frames (a manifest line, two
-		// download frames carrying total/completed so the streaming pull path
-		// can compute a percentage, then a terminal success) so the
-		// engine:pull-progress path has real frames to relay. A buffered
-		// engine:action reader tolerates this too (it just concatenates).
-		w.Header().Set("Content-Type", "application/x-ndjson")
+	// llama.cpp router pull protocol: a client subscribes to /models/sse, POSTs
+	// /models, and the engine acknowledges at once and then reports two byte
+	// progress events and the terminal download_finished for that model.
+	mux.HandleFunc("/models/sse", func(w http.ResponseWriter, r *http.Request) {
+		sub := make(chan string, 16)
+		pullMu.Lock()
+		pullSubs[sub] = struct{}{}
+		pullMu.Unlock()
+		defer func() {
+			pullMu.Lock()
+			delete(pullSubs, sub)
+			pullMu.Unlock()
+		}()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(": ready\n\n"))
 		flusher, _ := w.(http.Flusher)
-		for _, line := range []string{
-			`{"status":"pulling manifest"}`,
-			`{"status":"pulling","total":100,"completed":40}`,
-			`{"status":"pulling","total":100,"completed":100}`,
-			`{"status":"success"}`,
-		} {
-			_, _ = w.Write([]byte(line + "\n"))
-			if flusher != nil {
-				flusher.Flush()
+		if flusher != nil {
+			flusher.Flush()
+		}
+		for {
+			select {
+			case payload := <-sub:
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			case <-r.Context().Done():
+				return
 			}
 		}
+	})
+	mux.HandleFunc("/models", func(w http.ResponseWriter, r *http.Request) {
+		n := bstr(decodeBody(r), "model")
+		if n == "" {
+			http.Error(w, "model is required", http.StatusBadRequest)
+			return
+		}
+		modelsMu.Lock()
+		models[n] = true
+		modelsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
+		for _, done := range []int{40, 100} {
+			publishPullEvent(fmt.Sprintf(`{"model":%q,"event":"download_progress","data":{"progress":{"model.gguf":{"done":%d,"total":100}}}}`, n, done))
+		}
+		publishPullEvent(fmt.Sprintf(`{"model":%q,"event":"download_finished","data":{}}`, n))
 	})
 	mux.HandleFunc("/api/delete", func(w http.ResponseWriter, r *http.Request) {
 		if n := bstr(decodeBody(r), "name"); n != "" {
@@ -342,7 +381,8 @@ func main() {
 		"/api/tags": http.MethodGet, "/api/ps": http.MethodGet,
 		"/v1/models": http.MethodGet,
 		"/api/error": http.MethodGet, "/exit": http.MethodGet,
-		"/api/pull": http.MethodPost, "/api/generate": http.MethodPost,
+		"/models": http.MethodPost, "/models/sse": http.MethodGet,
+		"/api/generate":       http.MethodPost,
 		"/testctl/tags-delay": http.MethodPost, "/testctl/digest": http.MethodPost,
 		"/testctl/loaded": http.MethodPost, "/api/delete": http.MethodDelete,
 	}
