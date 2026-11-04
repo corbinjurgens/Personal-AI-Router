@@ -43,10 +43,10 @@ payload. Internal lower limits let tests exercise complete economical fixtures
 at exact boundaries as well as full production declarations.
 
 Retained accounting is a conservative cumulative allocation charge, not a
-measurement of Go heap use. It includes result/shard descriptors (256 bytes per
+measurement of Go heap use. It includes result/shard descriptors (352 bytes per
 artifact), duplicate-key map storage (128 bytes per declared metadata entry),
 tensor descriptors and per-role duplicate-name maps (192 bytes per tensor),
-staged and retained name/architecture bytes (twice the length plus 32 bytes),
+staged and retained name/architecture/identity bytes (twice the length plus 32 bytes),
 numeric map entries (128 bytes plus key length plus 16 bytes) and numeric
 backing storage rounded up to a power of two. Tensor dimension storage includes
 16 bytes of rounding allowance, and layer pointers charge 16 bytes. Template
@@ -75,6 +75,15 @@ blocks can exceed the deadline until it returns. Errors include `ErrLimit`,
 `ErrInvalid` (with an explicit unsupported GGML type diagnostic), I/O errors
 and context errors. Facts are returned only on success. Missing metadata
 remains absent.
+
+`Shard.General` retains scalar string keys `general.name`, `general.basename`,
+`general.size_label`, `general.quantized_by` and `general.repo_url`, each bounded
+to 256 bytes of UTF-8 without NUL. Oversized or invalid identity strings and
+mistyped values (including arrays) are consumed and ignored. The global string,
+array, scanned and retained resource ceilings still apply, and I/O failures
+still fail decoding. `general.file_type` retains only a scalar uint32 (type 4),
+with a 16-byte pointer allocation charge; other types leave it absent. These
+optional identity rules do not relax validation of other metadata.
 
 Selected numeric keys are explicitly listed in `reader.go`, restricted to the
 reported architecture or the sampler keys. Before `general.architecture`

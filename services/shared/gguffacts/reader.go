@@ -109,14 +109,25 @@ func (d *decoder) number(n int) (uint64, error) {
 
 // text streams and validates UTF-8 without retaining discarded strings.
 func (d *decoder) text(max uint64, keep bool, digest bool) (string, [32]byte, error) {
+	return d.textValue(max, keep, digest, false)
+}
+
+// Optional identity text consumes malformed values completely while preserving
+// read, cancellation and resource failures. Other text retains strict validation.
+func (d *decoder) textValue(max uint64, keep bool, digest bool, optional bool) (string, [32]byte, error) {
 	var sum [32]byte
 	n, err := d.number(8)
 	if err != nil {
 		return "", sum, err
 	}
-	if n > max {
+	if optional && n > d.lim.str {
 		return "", sum, ErrLimit
 	}
+	invalid := n > max
+	if invalid && !optional {
+		return "", sum, ErrLimit
+	}
+	keep = keep && !invalid
 	if err := d.require(n); err != nil {
 		return "", sum, err
 	}
@@ -156,7 +167,10 @@ func (d *decoder) text(max uint64, keep bool, digest bool) (string, [32]byte, er
 			}
 			r, width := utf8.DecodeRune(buf[i:end])
 			if r == utf8.RuneError && width == 1 {
-				return "", sum, ErrInvalid
+				if !optional {
+					return "", sum, ErrInvalid
+				}
+				invalid = true
 			}
 			i += width
 		}
@@ -164,6 +178,9 @@ func (d *decoder) text(max uint64, keep bool, digest bool) (string, [32]byte, er
 	}
 	if carry != 0 {
 		return "", sum, ErrInvalid
+	}
+	if optional && (invalid || strings.IndexByte(string(out), 0) >= 0) {
+		return "", sum, nil
 	}
 	if digest {
 		copy(sum[:], h.Sum(nil))
@@ -237,7 +254,7 @@ func decode(ctx context.Context, artifacts []Artifact, lim limits) (Facts, error
 		}
 		lastRole = rank
 	}
-	if err := d.charge(uint64(len(artifacts)) * 256); err != nil {
+	if err := d.charge(uint64(len(artifacts)) * 352); err != nil {
 		return Facts{}, err
 	}
 	f := Facts{Shards: make([]Shard, len(artifacts))}
@@ -368,6 +385,20 @@ func (d *decoder) shard(role Role) (Shard, error) {
 }
 
 func (d *decoder) metadata(s *Shard, key string, typ uint32) error {
+	var identity *string
+	switch key {
+	case "general.name":
+		identity = &s.General.Name
+	case "general.basename":
+		identity = &s.General.Basename
+	case "general.size_label":
+		identity = &s.General.SizeLabel
+	case "general.quantized_by":
+		identity = &s.General.QuantizedBy
+	case "general.repo_url":
+		identity = &s.General.RepoURL
+	}
+	optional := identity != nil || key == "general.file_type"
 	array := typ == 9
 	var count uint64 = 1
 	if array {
@@ -409,6 +440,16 @@ func (d *decoder) metadata(s *Shard, key string, typ uint32) error {
 			return ErrInvalid
 		}
 		for i := uint64(0); i < count; i++ {
+			if optional {
+				v, _, e := d.textValue(d.lim.name, identity != nil && !array, false, true)
+				if e != nil {
+					return e
+				}
+				if identity != nil && !array {
+					*identity = v
+				}
+				continue
+			}
 			architecture := key == "general.architecture" && !array
 			template := isTemplate
 			max := d.lim.str
@@ -459,7 +500,7 @@ func (d *decoder) metadata(s *Shard, key string, typ uint32) error {
 	if err := d.require(bytes); err != nil {
 		return err
 	}
-	if !retain && key != "general.alignment" {
+	if !retain && key != "general.alignment" && !(key == "general.file_type" && !array && typ == 4) {
 		remaining := bytes
 		var buf [4096]byte
 		for remaining > 0 {
@@ -470,7 +511,7 @@ func (d *decoder) metadata(s *Shard, key string, typ uint32) error {
 			if e := d.read(buf[:int(n)]); e != nil {
 				return e
 			}
-			if typ == 7 {
+			if typ == 7 && !optional {
 				for _, value := range buf[:int(n)] {
 					if value > 1 {
 						return ErrInvalid
@@ -507,8 +548,15 @@ func (d *decoder) metadata(s *Shard, key string, typ uint32) error {
 		if e != nil {
 			return e
 		}
-		if typ == 7 && bits > 1 {
+		if typ == 7 && bits > 1 && !optional {
 			return ErrInvalid
+		}
+		if key == "general.file_type" && !array && typ == 4 {
+			if e := d.charge(16); e != nil {
+				return e
+			}
+			v := uint32(bits)
+			s.General.FileType = &v
 		}
 		if key == "general.alignment" {
 			if bits == 0 || bits&(bits-1) != 0 {
@@ -637,6 +685,10 @@ func (f Facts) Clone() Facts {
 	for i, s := range f.Shards {
 		out.Shards[i] = s
 		dst := &out.Shards[i]
+		if s.General.FileType != nil {
+			v := *s.General.FileType
+			dst.General.FileType = &v
+		}
 		dst.Numeric = make(map[string]Numeric, len(s.Numeric))
 		for k, v := range s.Numeric {
 			if v.Array != nil {

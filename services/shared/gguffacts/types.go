@@ -143,6 +143,17 @@ type Template struct {
 	SHA256 [32]byte
 }
 
+// General holds the bounded general.* identity keys a GGUF declares. Absent,
+// mistyped, over-long (> 256 bytes), NUL-containing or invalid UTF-8 values stay zero.
+type General struct {
+	Name        string  // general.name
+	Basename    string  // general.basename
+	SizeLabel   string  // general.size_label
+	QuantizedBy string  // general.quantized_by
+	RepoURL     string  // general.repo_url
+	FileType    *uint32 // general.file_type
+}
+
 // Shard contains only selected facts. Numeric keys are limited by the decoder
 // to its documented architecture/dimension and sampler allowlist; this is not
 // an unrestricted metadata store. Missing keys and counts mean unknown.
@@ -150,6 +161,7 @@ type Shard struct {
 	Role         Role
 	Version      uint32
 	Architecture string
+	General      General
 	Alignment    uint32
 	DataOffset   uint64
 	Numeric      map[string]Numeric

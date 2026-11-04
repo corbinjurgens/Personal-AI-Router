@@ -26,6 +26,124 @@ type fixture struct {
 	order binary.ByteOrder
 }
 
+func TestDecodeGeneralIdentity(t *testing.T) {
+	t.Run("valid scalar identity", func(t *testing.T) {
+		f := fixture{order: binary.LittleEndian}
+		f.header(3, 0, 6)
+		for _, entry := range []struct{ key, value string }{
+			{"general.name", "LFM2.5 24B A2B"},
+			{"general.basename", "LFM2.5"},
+			{"general.size_label", "24B-A2B"},
+			{"general.quantized_by", "Unsloth"},
+			{"general.repo_url", "https://huggingface.co/unsloth/LFM2.5-24B-A2B-GGUF"},
+		} {
+			f.key(entry.key, 8)
+			f.str(entry.value)
+		}
+		f.key("general.file_type", 4)
+		f.u32(15)
+		facts := requireDecode(t, &f, productionLimits)
+		fileType := uint32(15)
+		want := General{"LFM2.5 24B A2B", "LFM2.5", "24B-A2B", "Unsloth", "https://huggingface.co/unsloth/LFM2.5-24B-A2B-GGUF", &fileType}
+		if got := facts.Shards[0].General; !reflect.DeepEqual(got, want) {
+			t.Fatalf("identity=%+v want=%+v", got, want)
+		}
+		clone := facts.Clone()
+		*clone.Shards[0].General.FileType = 16
+		if *facts.Shards[0].General.FileType != 15 {
+			t.Fatal("clone changed the original file type")
+		}
+	})
+	t.Run("malformed optional fields preserve continuation", func(t *testing.T) {
+		f := fixture{order: binary.LittleEndian}
+		f.header(3, 0, 7)
+		f.key("general.name", 8)
+		f.str(strings.Repeat("a", 300))
+		f.key("general.basename", 8)
+		f.str("bad\x00name")
+		f.key("general.size_label", 8)
+		f.str("bad\xfftext")
+		f.key("general.quantized_by", 4)
+		f.u32(15)
+		f.key("general.repo_url", 9)
+		f.u32(8)
+		f.u64(2)
+		f.str("bad\xfftext")
+		f.str("ignored")
+		f.key("general.file_type", 8)
+		f.str("15")
+		f.key("general.architecture", 8)
+		f.str("llama")
+		facts := requireDecode(t, &f, productionLimits)
+		if got := facts.Shards[0]; got.General != (General{}) || got.Architecture != "llama" || facts.Usage.ScannedHeaderBytes != uint64(f.Len()) {
+			t.Fatalf("optional fields or continuation: shard=%+v usage=%+v", got, facts.Usage)
+		}
+		if clone := facts.Clone(); clone.Shards[0].General.FileType != nil {
+			t.Fatal("clone created an absent file type")
+		}
+	})
+	t.Run("file type array ignored", func(t *testing.T) {
+		f := fixture{order: binary.BigEndian}
+		f.header(3, 0, 2)
+		f.key("general.file_type", 9)
+		f.u32(4)
+		f.u64(1)
+		f.u32(15)
+		f.key("general.name", 8)
+		f.str(strings.Repeat("a", 256))
+		facts := requireDecode(t, &f, productionLimits)
+		if got := facts.Shards[0].General; got.FileType != nil || got.Name != strings.Repeat("a", 256) {
+			t.Fatalf("identity=%+v", got)
+		}
+	})
+	t.Run("optional text preserves truncation", func(t *testing.T) {
+		f := fixture{order: binary.LittleEndian}
+		f.header(3, 0, 1)
+		f.key("general.name", 8)
+		f.u64(300)
+		f.WriteString("short")
+		_, err := Decode(context.Background(), []Artifact{{Role: RoleMain, Reader: bytes.NewReader(f.Bytes()), Size: int64(f.Len()) + 300}})
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("error=%v want truncation", err)
+		}
+	})
+	t.Run("identity allocations respect retained budget", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			typ    uint32
+			charge uint64
+		}{
+			{"general.name", 8, uint64(2*len("identity") + 32)},
+			{"general.file_type", 4, 16},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := fixture{order: binary.LittleEndian}
+				if tc.typ == 8 {
+					f.str("identity")
+				} else {
+					f.u32(15)
+				}
+				lim := productionLimits
+				lim.retained = tc.charge - 1
+				d := decoder{ctx: context.Background(), lim: lim, r: bytes.NewReader(f.Bytes()), size: uint64(f.Len()), order: f.order}
+				s := Shard{}
+				if err := d.metadata(&s, tc.name, tc.typ); !errors.Is(err, ErrLimit) || s.General != (General{}) {
+					t.Fatalf("identity=%+v error=%v want retained limit", s.General, err)
+				}
+				lim.retained = tc.charge
+				d.lim, d.off = lim, 0
+				d.usage = Usage{}
+				if err := d.metadata(&s, tc.name, tc.typ); err != nil {
+					t.Fatal(err)
+				}
+				if d.usage.RetainedBytes != tc.charge {
+					t.Fatalf("retained=%d want=%d", d.usage.RetainedBytes, tc.charge)
+				}
+			})
+		}
+	})
+}
+
 func TestDecodeTokenShiftCount(t *testing.T) {
 	for _, arch := range []string{"rwkv6", "rwkv7"} {
 		t.Run(arch, func(t *testing.T) {
@@ -918,7 +1036,7 @@ func TestAllocationChargeCoversDescriptorsAndCapacity(t *testing.T) {
 	// The constants cover 32-bit and 64-bit layouts, including allocation
 	// rounding, duplicate maps, and the retained tensor slice. String staging
 	// and Numeric map entries are separately charged by the parser.
-	if unsafe.Sizeof(Shard{})+64 > 256 || unsafe.Sizeof(Tensor{})+64 > 192 || unsafe.Sizeof(Template{}) > 48 {
+	if unsafe.Sizeof(Shard{})+64 > 352 || unsafe.Sizeof(Tensor{})+64 > 192 || unsafe.Sizeof(Template{}) > 48 {
 		t.Fatal("descriptor charge must be updated for this layout")
 	}
 	f := fixture{order: binary.LittleEndian}
@@ -930,7 +1048,7 @@ func TestAllocationChargeCoversDescriptorsAndCapacity(t *testing.T) {
 	facts := requireDecode(t, &f, productionLimits)
 	// Artifact descriptors, duplicate map entries, staged keys, and each
 	// explicitly allocated template backing array (capacity 1, 2, then 4).
-	want := uint64(256 + 3*128 + (1+2+4)*48 + 3*16)
+	want := uint64(352 + 3*128 + (1+2+4)*48 + 3*16)
 	for _, key := range []string{"tokenizer.chat_template", "tokenizer.chat_template.a", "tokenizer.chat_template.b"} {
 		want += uint64(2*len(key) + 32)
 	}
@@ -1313,7 +1431,7 @@ func TestRetainedChargeBeforeDescriptorsAndMaps(t *testing.T) {
 		f := fixture{order: binary.LittleEndian}
 		f.header(3, 0, 0)
 		lim := productionLimits
-		lim.retained = 256
+		lim.retained = 352
 		requireDecode(t, &f, lim)
 		lim.retained--
 		requireLimitAt(t, &f, lim, 0)
@@ -1327,7 +1445,7 @@ func TestRetainedChargeBeforeDescriptorsAndMaps(t *testing.T) {
 		lim := productionLimits
 		// At the map/descriptor charge, the next name charge is the first
 		// limit. One less stops at the header before constructing the maps.
-		lim.retained = 256 + 128 + 192
+		lim.retained = 352 + 128 + 192
 		a, r := countedArtifact(&f, 32)
 		a.Size = aligned(f.Len()) + 4
 		if _, err := decode(context.Background(), []Artifact{a}, lim); !errors.Is(err, ErrLimit) || r.end != 32 || r.denied != 0 {
