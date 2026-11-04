@@ -188,7 +188,7 @@ describe('node availability presentation', () => {
             state: 'paused',
             pauseMode: 'configured'
         })
-        expect(container.textContent).not.toContain('Stop local models now')
+        expect(container.textContent).not.toContain('Halt')
         expect(container.textContent).toContain('routing elsewhere continues')
         expect(container.textContent).toContain('new client request')
     })
@@ -246,7 +246,7 @@ describe('node availability presentation', () => {
             )
         )
         await act(async () => {
-            button('Stop local models now').click()
+            button('Halt').click()
             button('Resume node: This PC').click()
         })
         expect(onRequest.mock.calls.map(call => call[0])).toEqual([
@@ -282,7 +282,7 @@ describe('node availability presentation', () => {
             expect(container.textContent).toContain('Resume on that device')
             expect(container.textContent).toContain('Paused by a managing peer')
             expect(container.querySelector('[aria-label="Resume node: Peer"]')).toBeNull()
-            expect(container.textContent).not.toContain('Stop local models now')
+            expect(container.textContent).not.toContain('Halt')
             await act(async () => button('Pause node: Peer').click())
             expect(onRequest).not.toHaveBeenCalled()
         }
@@ -309,7 +309,7 @@ describe('node availability presentation', () => {
 describe('mounted local stop controls', () => {
     it('mounts immediate stop directly on the Overview card for self only', async () => {
         await act(async () => root.render(<NodeCardDetails node={node('self', 'This PC')} />))
-        const stop = button('Stop local models now')
+        const stop = button('Halt')
         expect(stop.disabled).toBe(false)
         expect(stop.closest('[style*="grid-template-rows"]')).toBeNull()
         stop.focus()
@@ -322,7 +322,7 @@ describe('mounted local stop controls', () => {
         })
 
         await act(async () => root.render(<NodeCardDetails node={node('peer', 'Peer')} />))
-        expect(container.textContent).not.toContain('Stop local models now')
+        expect(container.textContent).not.toContain('Halt')
         expect(container.querySelector('[aria-label="Resume node: Peer"]')).toBeNull()
         await act(async () => button('Pause node: Peer').click())
         expect(setAvailability).toHaveBeenLastCalledWith({
@@ -336,7 +336,7 @@ describe('mounted local stop controls', () => {
     it('mounts immediate stop in Settings and changes actions with the selected target', async () => {
         useNodesStore.setState({ nodes: new Map([['peer', node('peer', 'Peer')]]) })
         await act(async () => root.render(<RoutingSettings />))
-        await act(async () => button('Stop local models now').click())
+        await act(async () => button('Halt').click())
         expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
             nodeId: undefined,
             state: 'paused',
@@ -348,7 +348,7 @@ describe('mounted local stop controls', () => {
         )
         if (!peer) throw new Error('Missing peer option')
         await act(async () => peer.click())
-        expect(container.textContent).not.toContain('Stop local models now')
+        expect(container.textContent).not.toContain('Halt')
         expect(container.querySelector('[aria-label="Resume node: Peer"]')).toBeNull()
         await act(async () => button('Pause node: Peer').click())
         expect(setAvailability).toHaveBeenLastCalledWith({
@@ -365,16 +365,16 @@ describe('mounted local stop controls', () => {
         )
         setAvailability.mockRejectedValueOnce(new Error('External engine remains running'))
         getPolicy.mockResolvedValue(documentFor('draining', '2', 'local'))
-        await act(async () => button('Stop local models now').click())
-        expect(button('Stop local models now').disabled).toBe(true)
+        await act(async () => button('Halt').click())
+        expect(button('Halt').disabled).toBe(true)
         await tick()
         expect(container.textContent).toContain('External engine remains running')
         expect(container.textContent).toContain('Pausing')
-        expect(button('Stop local models now').disabled).toBe(false)
+        expect(button('Halt').disabled).toBe(false)
         expect(button('Resume node: This PC').disabled).toBe(false)
         expect(setAvailability).toHaveBeenCalledTimes(1)
         getPolicy.mockResolvedValue(documentFor('paused', '2', 'local'))
-        await act(async () => button('Stop local models now').click())
+        await act(async () => button('Halt').click())
         await tick()
         expect(useNodeConfigurationStore.getState().availability.get('self')).toMatchObject({
             current: true,
@@ -404,8 +404,8 @@ describe('mounted local stop controls', () => {
         await act(async () =>
             root.render(<NodeAvailabilityControls targetId="self" name="This PC" online={online} />)
         )
-        expect(button('Stop local models now').disabled).toBe(true)
-        await act(async () => button('Stop local models now').click())
+        expect(button('Halt').disabled).toBe(true)
+        await act(async () => button('Halt').click())
         expect(setAvailability).not.toHaveBeenCalled()
     })
 })
@@ -471,7 +471,7 @@ describe('availability request modes', () => {
             root.render(<NodeAvailabilityControls targetId="self" name="This PC" online />)
         )
         await act(async () => button('Pause node: This PC').click())
-        expect(button('Stop local models now').disabled).toBe(true)
+        expect(button('Halt').disabled).toBe(true)
         await act(async () =>
             useNodeConfigurationStore.getState().requestAvailability('self', 'paused', 'immediate')
         )
@@ -481,16 +481,16 @@ describe('availability request modes', () => {
                 listener({ nodeId: 'self', availability: 'draining', pausedBy: 'local' })
             )
         )
-        expect(button('Stop local models now').disabled).toBe(false)
-        await act(async () => button('Stop local models now').click())
+        expect(button('Halt').disabled).toBe(false)
+        await act(async () => button('Halt').click())
         expect(setAvailability.mock.calls.map(call => call[0])).toEqual([
             { nodeId: undefined, state: 'paused', pauseMode: 'configured' },
             { nodeId: undefined, state: 'paused', pauseMode: 'immediate' }
         ])
-        expect(button('Stop local models now').disabled).toBe(true)
+        expect(button('Halt').disabled).toBe(true)
         expect(button('Resume node: This PC').disabled).toBe(false)
         await act(async () => {
-            button('Stop local models now').click()
+            button('Halt').click()
             void useNodeConfigurationStore
                 .getState()
                 .requestAvailability('self', 'paused', 'immediate')
@@ -533,9 +533,9 @@ describe('availability request modes', () => {
             root.render(<NodeAvailabilityControls targetId="self" name="This PC" online />)
         )
         await act(async () => button('Resume node: This PC').click())
-        expect(button('Stop local models now').disabled).toBe(true)
+        expect(button('Halt').disabled).toBe(true)
         await act(async () => {
-            button('Stop local models now').click()
+            button('Halt').click()
             void useNodeConfigurationStore
                 .getState()
                 .requestAvailability('self', 'paused', 'immediate')
@@ -562,7 +562,7 @@ describe('availability request modes', () => {
         await act(async () =>
             root.render(<NodeAvailabilityControls targetId="self" name="This PC" online />)
         )
-        await act(async () => button('Stop local models now').click())
+        await act(async () => button('Halt').click())
         expect(button('Resume node: This PC').disabled).toBe(false)
         getPolicy.mockResolvedValue(documentFor('available', '3'))
         await act(async () => button('Resume node: This PC').click())

@@ -6,6 +6,8 @@ import { Button, Flex, Panel, Tabs } from '@nvidia/foundations-react-core'
 import { AddCircle, Public } from '@/ui/components/icons'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import type { OverviewTab } from '@/shared/types/overview'
+import { useConnectionStore } from '@/ui/stores/connection.store'
+import HaltControl from './HaltControl'
 
 interface ContentBarProps {
     setAddNodeModalOpen?: (open: boolean) => void
@@ -23,6 +25,7 @@ function isOverviewTab(value: string): value is OverviewTab {
 
 function ContentBar({ setAddNodeModalOpen, setEndPointModalOpen }: ContentBarProps) {
     const activeTab = useOverviewUiStore(state => state.activeTab)
+    const selfId = useConnectionStore(state => state.selfId)
     const setActiveTab = useOverviewUiStore(state => state.setActiveTab)
 
     return (
@@ -40,6 +43,7 @@ function ContentBar({ setAddNodeModalOpen, setEndPointModalOpen }: ContentBarPro
                     />
 
                     <Flex align="center" justify="end" gap="2">
+                        {selfId && <HaltControl targetId={selfId} />}
                         {typeof setEndPointModalOpen === 'function' && (
                             <Button
                                 kind="tertiary"

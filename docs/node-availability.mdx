@@ -26,6 +26,14 @@ device: when both apply, the pause refusal is the one it receives.
 
 ## Pause and Resume
 
+The desktop toolbar offers **Halt** for this PC only. After confirmation, Halt
+stops running requests immediately and unloads models, using the existing local
+immediate pause. The toolbar shows **Resume** while this PC is paused or pausing.
+If another node initiated the pause, it shows “Paused by another node”. Other
+nodes cannot resume this PC. The tray calls the same action **Halt this PC**.
+Node cards also name the local immediate action **Halt**; remote nodes offer
+configured Pause only, never Halt.
+
 ### What Pause does
 
 Pause affects only work that this machine would execute. A request that enters a

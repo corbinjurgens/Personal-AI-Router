@@ -144,7 +144,7 @@ class TrayManager {
                 click: () => this.requestAvailability(pause.request)
             },
             {
-                label: 'Stop local models now',
+                label: 'Halt this PC',
                 enabled:
                     pause.enabled &&
                     (this.availabilityRequest === null ||

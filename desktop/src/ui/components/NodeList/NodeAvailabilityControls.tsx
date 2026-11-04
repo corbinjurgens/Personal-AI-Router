@@ -114,7 +114,7 @@ export function AvailabilityControls({
                         aria-busy={entry?.pendingPauseMode === 'immediate'}
                         onClick={() => onRequest({ state: 'paused', pauseMode: 'immediate' })}
                     >
-                        Stop local models now
+                        Halt
                     </Button>
                 )}
                 <Button
