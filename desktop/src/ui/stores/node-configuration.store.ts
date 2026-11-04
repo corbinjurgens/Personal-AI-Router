@@ -464,6 +464,13 @@ interface AvailabilityEntry {
     readError?: string
 }
 
+export function canResumeAvailability(entry: AvailabilityEntry | undefined, local: boolean) {
+    return (
+        (entry?.value === 'paused' || entry?.value === 'draining') &&
+        (local || entry.pauseMode === 'configured')
+    )
+}
+
 interface AvailabilityTarget {
     api: typeof window.pairApi.nodePolicy
     nodeId: string | undefined
@@ -1042,19 +1049,19 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             if (
                 !local &&
                 (get().management.get(targetId)?.state !== 'allowed' ||
-                    entry.value !== 'available' ||
-                    state !== 'paused')
+                    (state === 'available'
+                        ? !canResumeAvailability(entry, false)
+                        : entry.value !== 'available'))
             )
                 return
-            // Local Resume or immediate stop can supersede a configured drain.
+            // Resume or local immediate stop can supersede a configured drain.
             if (
                 entry.pending &&
                 !(
-                    local &&
                     entry.value === 'draining' &&
                     entry.pending === 'paused' &&
-                    (state === 'available' ||
-                        (mode === 'immediate' && entry.pendingPauseMode === 'configured'))
+                    ((state === 'available' && canResumeAvailability(entry, local)) ||
+                        (local && mode === 'immediate' && entry.pendingPauseMode === 'configured'))
                 )
             )
                 return

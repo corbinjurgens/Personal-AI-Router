@@ -476,7 +476,8 @@ func TestStopPauseControlsProcess(t *testing.T) {
 	t.Run("remote immediate and ungranted pause have zero physical effects", testStopPauseRemoteRefusals)
 	t.Run("local configured pause fences both managing peers", func(t *testing.T) { testStopPauseFence(t, "configured", false) })
 	t.Run("local immediate pause fences both managing peers", func(t *testing.T) { testStopPauseFence(t, "immediate", false) })
-	t.Run("managing peer configured pause fences every peer", func(t *testing.T) { testStopPauseFence(t, "configured", true) })
+	t.Run("managing peer configured pause fences other management", func(t *testing.T) { testStopPauseFence(t, "configured", true) })
+	t.Run("peer configured pause and resume use the public relay", testStopPausePeerResume)
 	t.Run("active local execution stops and later demand cannot execute", func(t *testing.T) { testStopPauseActive(t, false) })
 	t.Run("active pinned peer execution stops without onward routing", func(t *testing.T) { testStopPauseActive(t, true) })
 	t.Run("queued local demand is refused without later execution", func(t *testing.T) { testStopPauseQueue(t, false) })
@@ -489,6 +490,35 @@ func TestStopPauseControlsProcess(t *testing.T) {
 	t.Run("committed local stream fails and only a new client request retries", func(t *testing.T) { testStopPauseCommitted(t, false) })
 	t.Run("committed peer stream fails at origin without replay", func(t *testing.T) { testStopPauseCommitted(t, true) })
 	t.Run("paused origin retains existing remote execution", testStopPauseRemoteExecution)
+}
+
+func testStopPausePeerResume(t *testing.T) {
+	f, peer := newStopPausePair(t)
+	f.grant(t, peer.id, true)
+	decode := func(raw json.RawMessage, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, mode nodepolicy.PauseMode) {
+		t.Helper()
+		var result struct {
+			Availability nodepolicy.Availability `json:"availability"`
+			PausedBy     nodepolicy.PauseOrigin  `json:"pausedBy"`
+			PauseMode    nodepolicy.PauseMode    `json:"pauseMode"`
+		}
+		task2Decode(t, raw, &result)
+		if result.Availability != state || result.PausedBy != origin || result.PauseMode != mode {
+			t.Fatalf("peer result=%+v, want %s/%s/%s", result, state, origin, mode)
+		}
+	}
+	pause := peer.engine.rpcOK(t, "engine:remote-availability-set", map[string]string{"nodeId": f.nodeID, "state": "paused", "pauseMode": "configured"})
+	decode(pause, nodepolicy.Paused, nodepolicy.PausedByPeer, nodepolicy.PauseConfigured)
+	f.assertPaused(t, nodepolicy.PausedByPeer)
+	paused := fetchServicePolicy(t, f.client).Policy
+	resume := peer.engine.rpcOK(t, "engine:remote-availability-set", map[string]string{"nodeId": f.nodeID, "state": "available"})
+	decode(resume, nodepolicy.Available, "", "")
+	got := fetchServicePolicy(t, f.client)
+	if got.Availability != nodepolicy.Available || got.Policy.Availability != nodepolicy.Available ||
+		got.Policy.PausedBy != "" || got.Policy.PauseMode != "" || got.Policy.Revision == paused.Revision {
+		t.Fatalf("peer Resume target readback=%+v", got)
+	}
+	assertStoredPolicy(t, f.service.policyPath(), got.Policy)
 }
 
 func testStopPauseRemoteRefusals(t *testing.T) {
@@ -554,18 +584,21 @@ func testStopPauseFence(t *testing.T, mode string, peerOrigin bool) {
 	f.assertPaused(t, origin)
 	before := readPolicyBytes(t, f.service.policyPath())
 	// The ec registry authorizes before executing mutation handlers. Include
-	// nominally harmless remote stop/unload and both availability directions.
+	// nominally harmless remote stop/unload. Availability has its own rule.
 	for _, client := range []*http.Client{f.service.peer, f.service.allowed} {
 		for _, path := range []string{
 			"/v1/engines/start", "/v1/engines/stop", "/v1/engines/install",
 			"/v1/models/load", "/v1/models/unload", "/v1/models/pull", "/v1/models/delete", "/v1/models/copy",
-			"/v1/node-policy/set", "/v1/node-availability/set",
+			"/v1/node-policy/set",
 			"/v1/engine-settings/apply", "/v1/engine-switch/apply", "/v1/engine-switch/fence",
 		} {
 			stopPauseRefusal(t, f.peerHTTP(t, client, path, map[string]any{"engine": "llamacpp", "model": "switch-model", "state": "available"}, http.StatusConflict), "local_veto")
 		}
-		for _, state := range []string{"paused", "available"} {
-			stopPauseRefusal(t, f.peerHTTP(t, client, "/v1/node-availability/set", map[string]any{"nodeId": f.nodeID, "state": state}, http.StatusConflict), "local_veto")
+		// Repeating Pause is a successful no-op, including a completed local
+		// Halt. Its saved immediate mode and revision must survive unchanged.
+		f.peerHTTP(t, client, "/v1/node-availability/set", map[string]any{"nodeId": f.nodeID, "state": "paused"}, http.StatusOK)
+		if mode == "immediate" {
+			stopPauseRefusal(t, f.peerHTTP(t, client, "/v1/node-availability/set", map[string]any{"nodeId": f.nodeID, "state": "available"}, http.StatusConflict), "local_veto")
 		}
 		var readback struct {
 			Policy       nodepolicy.PeerPolicy   `json:"policy"`
@@ -580,11 +613,9 @@ func testStopPauseFence(t *testing.T, mode string, peerOrigin bool) {
 		t.Fatal("peer mutations changed fenced policy")
 	}
 	if peerOrigin {
-		for _, state := range []string{"paused", "available"} {
-			refused := peer.engine.rpc(t, "engine:remote-availability-set", map[string]string{"nodeId": f.nodeID, "state": state})
-			if refused.Error == nil || refused.Error.Code != -32011 {
-				t.Fatalf("initiating peer defeated its own Pause: %+v", refused)
-			}
+		peer.engine.rpcOK(t, "engine:remote-availability-set", map[string]string{"nodeId": f.nodeID, "state": "paused"})
+		if !bytes.Equal(before, readPolicyBytes(t, f.service.policyPath())) {
+			t.Fatal("initiating peer repeated Pause changed saved policy")
 		}
 	}
 	for _, method := range []string{"engine:start", "engine:load-model"} {

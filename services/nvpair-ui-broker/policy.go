@@ -150,12 +150,15 @@ type policyRuntime struct {
 	cancelActive bool
 	// localPauseRequested is set while the newest accepted availability
 	// request is a pause made on this node, from its acceptance until its
-	// transition ends, so a paired node's resume is refused even before that
-	// pause has been saved (setAvailability).
+	// transition ends. Other management callers retain this strict fence;
+	// availability requests separately distinguish configured Pause from Halt.
 	localPauseRequested bool
 	// pendingPauseRequested fences management from acceptance of either origin's
 	// pause until it is stored, or a local Resume takes effect. Guarded by mu.
 	pendingPauseRequested bool
+	// pendingPauseMode belongs to the accepted pause transition, including the
+	// interval before persistence. Resume clears it only when it takes effect.
+	pendingPauseMode nodepolicy.PauseMode
 	// Set with build admission under engineConfigMu -> mu. Safety Pause and
 	// local policy edits remain available, but Resume cannot cross maintenance.
 	buildApplyOperation string
@@ -849,7 +852,7 @@ func policyErrorCode(err error) int {
 }
 
 // localVetoError refuses peer management while this node is pausing or paused.
-// Only a resume made on this node lifts the boundary, for either pause origin.
+// Availability applies its mode-aware rule; other peer management requires Resume.
 type localVetoError struct{}
 
 func (*localVetoError) Error() string {
@@ -1102,8 +1105,7 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 		return map[string]any{"policy": policy.PeerProjection(), "modelConfiguration": b.modelConfigurationFor(policy)}, nil
 	}
 	// The peer sees what its policy:get shows of this node, which has no
-	// activation fields. A resume of a node paused on the node itself is
-	// refused (setAvailability).
+	// activation fields. setAvailability owns the mode-aware peer rule.
 	_, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedByPeer, req.Caller)
 	if err != nil {
 		return nil, err

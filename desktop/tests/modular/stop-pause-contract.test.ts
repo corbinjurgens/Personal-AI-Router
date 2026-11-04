@@ -260,8 +260,8 @@ describe('self-only tray immediate stop', () => {
     })
 
     it('sends the exact local immediate payload without opening a window', async () => {
-        expect(menuItem('Stop local models now').enabled).toBe(true)
-        menuItem('Stop local models now').click?.()
+        expect(menuItem('Halt this PC').enabled).toBe(true)
+        menuItem('Halt this PC').click?.()
         await vi.advanceTimersByTimeAsync(0)
         expect(supervisor.setAvailability).toHaveBeenCalledExactlyOnceWith({
             state: 'paused',
@@ -299,15 +299,15 @@ describe('self-only tray immediate stop', () => {
                     })
             )
         menuItem('Pause inference on this PC').click?.()
-        expect(menuItem('Stop local models now').enabled).toBe(false)
-        menuItem('Stop local models now').click?.()
+        expect(menuItem('Halt this PC').enabled).toBe(false)
+        menuItem('Halt this PC').click?.()
         expect(supervisor.setAvailability).toHaveBeenCalledTimes(1)
         report('draining')
-        expect(menuItem('Stop local models now').enabled).toBe(true)
-        menuItem('Stop local models now').click?.()
-        expect(menuItem('Stop local models now').enabled).toBe(false)
+        expect(menuItem('Halt this PC').enabled).toBe(true)
+        menuItem('Halt this PC').click?.()
+        expect(menuItem('Halt this PC').enabled).toBe(false)
         expect(menuItem('Resume inference on this PC (pausing)').enabled).toBe(true)
-        menuItem('Stop local models now').click?.()
+        menuItem('Halt this PC').click?.()
         expect(vi.mocked(supervisor.setAvailability).mock.calls.map(call => call[0])).toEqual([
             { state: 'paused', pauseMode: 'configured' },
             { state: 'paused', pauseMode: 'immediate' }
@@ -318,26 +318,26 @@ describe('self-only tray immediate stop', () => {
         expect(
             trayMocks.menu.some(entry => entry.label?.includes('Superseded configured pause'))
         ).toBe(false)
-        expect(menuItem('Stop local models now').enabled).toBe(false)
+        expect(menuItem('Halt this PC').enabled).toBe(false)
         finishImmediate()
         await vi.advanceTimersByTimeAsync(0)
-        expect(menuItem('Stop local models now').enabled).toBe(true)
+        expect(menuItem('Halt this PC').enabled).toBe(true)
     })
 
     it('retains incomplete-stop errors and offers local retry and Resume', async () => {
         vi.mocked(supervisor.setAvailability).mockRejectedValueOnce(
             new Error('Owned engine still running')
         )
-        menuItem('Stop local models now').click?.()
+        menuItem('Halt this PC').click?.()
         report('draining')
         await vi.advanceTimersByTimeAsync(0)
         expect(
             menuItem('Availability request failed: Error: Owned engine still running').enabled
         ).toBe(false)
-        expect(menuItem('Stop local models now').enabled).toBe(true)
+        expect(menuItem('Halt this PC').enabled).toBe(true)
         expect(menuItem('Retry pause on this PC').enabled).toBe(true)
         expect(menuItem('Resume inference on this PC (pausing)').enabled).toBe(true)
-        menuItem('Stop local models now').click?.()
+        menuItem('Halt this PC').click?.()
         await vi.advanceTimersByTimeAsync(0)
         expect(supervisor.setAvailability).toHaveBeenNthCalledWith(2, {
             state: 'paused',
@@ -358,7 +358,7 @@ describe('self-only tray immediate stop', () => {
                     failImmediate = reject
                 })
         )
-        menuItem('Stop local models now').click?.()
+        menuItem('Halt this PC').click?.()
         menuItem('Resume inference on this PC (pausing)').click?.()
         await vi.advanceTimersByTimeAsync(0)
         report('available')
@@ -385,8 +385,8 @@ describe('self-only tray immediate stop', () => {
                 })
         )
         menuItem('Resume inference on this PC (pausing)').click?.()
-        expect(menuItem('Stop local models now').enabled).toBe(false)
-        menuItem('Stop local models now').click?.()
+        expect(menuItem('Halt this PC').enabled).toBe(false)
+        menuItem('Halt this PC').click?.()
         expect(supervisor.setAvailability).toHaveBeenCalledExactlyOnceWith({ state: 'available' })
         if (!finishResume) throw new Error('Missing Resume callback')
         finishResume()
@@ -395,11 +395,11 @@ describe('self-only tray immediate stop', () => {
 
     it('requires self readback when availability is unknown and retains the stop error', async () => {
         vi.mocked(supervisor.setAvailability).mockRejectedValueOnce(new Error('Stop reply lost'))
-        menuItem('Stop local models now').click?.()
+        menuItem('Halt this PC').click?.()
         report(null)
         await vi.advanceTimersByTimeAsync(0)
-        expect(menuItem('Stop local models now').enabled).toBe(false)
-        menuItem('Stop local models now').click?.()
+        expect(menuItem('Halt this PC').enabled).toBe(false)
+        menuItem('Halt this PC').click?.()
         expect(supervisor.setAvailability).toHaveBeenCalledTimes(1)
         expect(menuItem('Availability request failed: Error: Stop reply lost').enabled).toBe(false)
         vi.mocked(supervisor.refreshAvailability).mockImplementationOnce(async () =>
@@ -409,7 +409,7 @@ describe('self-only tray immediate stop', () => {
         await vi.advanceTimersByTimeAsync(0)
         expect(supervisor.refreshAvailability).toHaveBeenCalledExactlyOnceWith()
         expect(menuItem('Availability request failed: Error: Stop reply lost').enabled).toBe(false)
-        expect(menuItem('Stop local models now').enabled).toBe(true)
+        expect(menuItem('Halt this PC').enabled).toBe(true)
         expect(trayMocks.createTrayWindow).not.toHaveBeenCalled()
     })
 })

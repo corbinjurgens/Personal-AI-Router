@@ -3082,7 +3082,7 @@ func TestAvailabilityRelayedLandedReplacementAdoptsPolicy(t *testing.T) {
 				rb.b.replayPolicyToProxy(context.Background(), rb.b.policyProxy())
 				waitBrokerLeaseAnnouncement(t, rb.b.nodePolicyRuntime())
 				if to == nodepolicy.Available {
-					// A peer-origin pause fences every peer, including its initiator.
+					// Configured Pause can be resumed by its managing peer.
 					if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer); err != nil {
 						t.Fatalf("prepare paused node: %v", err)
 					}
@@ -3096,25 +3096,7 @@ func TestAvailabilityRelayedLandedReplacementAdoptsPolicy(t *testing.T) {
 					want.PauseMode = nodepolicy.PauseConfigured
 				}
 				setReplacer(rb.b, boundary.rep)
-				var errText string
-				if to == nodepolicy.Available {
-					before, beforeBytes := rb.b.localPolicy(), rb.fileBytes(t)
-					reply := rb.relayReply(t, "set-availability", map[string]any{"state": to})
-					if reply.ErrorCode != codeLocalVeto || reply.Error != "This node is paused. Resume it on this node before managing it remotely." {
-						t.Fatalf("peer resume = %+v, want pause refusal before publication", reply)
-					}
-					if !reflect.DeepEqual(rb.b.localPolicy(), before) || !bytes.Equal(rb.fileBytes(t), beforeBytes) || len(rb.proxy.snapshot()) != callStart || len(rb.out.frames()) != frameStart {
-						t.Fatal("refused peer resume changed the policy, file, proxy or notifications")
-					}
-					// Only local Resume reaches the writer, so exercise the landed
-					// replacement warning through that authorized path.
-					_, err := rb.b.setAvailability(context.Background(), to, nodepolicy.PausedLocally)
-					if err != nil {
-						errText = err.Error()
-					}
-				} else {
-					_, errText = rb.relay(t, "set-availability", map[string]any{"state": to})
-				}
+				_, errText := rb.relay(t, "set-availability", map[string]any{"state": to})
 				setReplacer(rb.b, durablefile.Replacer{})
 				wantMessage := "the policy document with revision " + revision + " was saved and is being applied but may not survive a power loss: "
 				if !strings.HasPrefix(errText, wantMessage) || !strings.Contains(errText, errPublish.Error()) {

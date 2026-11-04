@@ -55,69 +55,56 @@ func requirePausedLocally(t *testing.T, engine *fakeWorker, want bool, what stri
 	}
 }
 
-func TestPeerResumeOfALocalPauseIsVetoed(t *testing.T) {
+func TestPeerResumeOfALocalConfiguredPause(t *testing.T) {
 	rb := newRoutedBroker(t)
 	if resp := rb.localAvailability(t, 1, nodepolicy.Paused); resp.Error != nil {
 		t.Fatalf("local pause: %+v", resp.Error)
 	}
 	requirePause(t, rb.b, nodepolicy.Paused, nodepolicy.PausedLocally)
 	requirePausedLocally(t, rb.engine, true, "the local pause was not projected to engine-manager as local")
-	paused := rb.b.localPolicy().Policy.Revision
-
 	reply := rb.relayReply(t, "set-availability", map[string]any{"state": nodepolicy.Available})
-	if reply.ErrorCode != codeLocalVeto || reply.Error != (&localVetoError{}).Error() {
-		t.Fatalf("relayed resume of a local pause = code %d %q, want %d local veto", reply.ErrorCode, reply.Error, codeLocalVeto)
-	}
-	requirePause(t, rb.b, nodepolicy.Paused, nodepolicy.PausedLocally)
-	if got := rb.b.localPolicy(); got.Policy.Revision != paused || got.Availability != nodepolicy.Paused {
-		t.Fatalf("vetoed resume changed revision %s -> %s or live %q", paused, got.Policy.Revision, got.Availability)
-	}
-
-	if resp := rb.localAvailability(t, 2, nodepolicy.Available); resp.Error != nil {
-		t.Fatalf("local resume after a vetoed peer resume: %+v", resp.Error)
+	if reply.ErrorCode != 0 || reply.Error != "" {
+		t.Fatalf("relayed resume of a configured local pause = %+v", reply)
 	}
 	requirePause(t, rb.b, nodepolicy.Available, "")
 	requirePausedLocally(t, rb.engine, false, "the local resume left the projection paused locally")
 }
 
-func TestPeerCannotResumePeerPause(t *testing.T) {
+func TestPeerCanRepeatAndResumePeerConfiguredPause(t *testing.T) {
 	rb := newRoutedBroker(t)
 	if _, errText := rb.relay(t, "set-availability", map[string]any{"state": nodepolicy.Paused}); errText != "" {
 		t.Fatalf("relayed pause: %s", errText)
 	}
 	requirePause(t, rb.b, nodepolicy.Paused, nodepolicy.PausedByPeer)
 	requirePausedLocally(t, rb.engine, false, "a peer pause was projected as local")
-	for _, state := range []nodepolicy.Availability{nodepolicy.Available, nodepolicy.Paused} {
-		before := rb.baseline(t)
-		reply := rb.relayReply(t, "set-availability", map[string]any{"state": state})
-		if reply.ErrorCode != codeLocalVeto || reply.Error != "This node is paused. Resume it on this node before managing it remotely." {
-			t.Fatalf("peer %s after its pause = code %d %q, want the pause refusal", state, reply.ErrorCode, reply.Error)
-		}
-		before.requireUnchanged(t)
-		requirePause(t, rb.b, nodepolicy.Paused, nodepolicy.PausedByPeer)
+	before := rb.baseline(t)
+	if reply := rb.relayReply(t, "set-availability", map[string]any{"state": nodepolicy.Paused}); reply.ErrorCode != 0 || reply.Error != "" {
+		t.Fatalf("repeated peer Pause = %+v", reply)
 	}
-	if resp := rb.localAvailability(t, 1, nodepolicy.Available); resp.Error != nil {
-		t.Fatalf("local resume of a peer pause: %+v", resp.Error)
+	before.requireUnchanged(t)
+	if reply := rb.relayReply(t, "set-availability", map[string]any{"state": nodepolicy.Available}); reply.ErrorCode != 0 || reply.Error != "" {
+		t.Fatalf("peer Resume = %+v", reply)
 	}
 	requirePause(t, rb.b, nodepolicy.Available, "")
 }
 
 func TestPauseProvenanceIsNeverDowngraded(t *testing.T) {
-	t.Run("peer pause over a local pause is refused without changes", func(t *testing.T) {
+	t.Run("peer pause over a local configured pause is accepted without changes", func(t *testing.T) {
 		rb := newRoutedBroker(t)
 		if resp := rb.localAvailability(t, 1, nodepolicy.Paused); resp.Error != nil {
 			t.Fatalf("local pause: %+v", resp.Error)
 		}
 		before := rb.baseline(t)
 		reply := rb.relayReply(t, "set-availability", map[string]any{"state": nodepolicy.Paused})
-		if reply.ErrorCode != codeLocalVeto || reply.Error != "This node is paused. Resume it on this node before managing it remotely." {
-			t.Fatalf("repeated peer pause = code %d %q, want the pause refusal", reply.ErrorCode, reply.Error)
+		if reply.ErrorCode != 0 || reply.Error != "" {
+			t.Fatalf("repeated peer pause = %+v", reply)
 		}
 		before.requireUnchanged(t)
 		requirePause(t, rb.b, nodepolicy.Paused, nodepolicy.PausedLocally)
-		if reply := rb.relayReply(t, "set-availability", map[string]any{"state": nodepolicy.Available}); reply.ErrorCode != codeLocalVeto {
-			t.Fatalf("relayed resume after a peer pause over a local one = code %d %q, want local veto", reply.ErrorCode, reply.Error)
+		if reply := rb.relayReply(t, "set-availability", map[string]any{"state": nodepolicy.Available}); reply.ErrorCode != 0 || reply.Error != "" {
+			t.Fatalf("relayed Resume after a repeated Pause = %+v", reply)
 		}
+		requirePause(t, rb.b, nodepolicy.Available, "")
 	})
 	t.Run("local pause over a peer pause becomes local", func(t *testing.T) {
 		rb := newRoutedBroker(t)
@@ -147,15 +134,15 @@ func TestPauseWithoutProvenanceCountsAsLocal(t *testing.T) {
 	requirePause(t, rb.b, nodepolicy.Available, "")
 }
 
-// A local pause that is accepted but has not reached the stored policy yet
+// A local Halt that is accepted but has not reached the stored policy yet
 // already vetoes a peer resume, which therefore cannot supersede it.
-func TestAcceptedLocalPauseVetoesPeerResumeBeforeItIsSaved(t *testing.T) {
+func TestAcceptedLocalHaltVetoesPeerResumeBeforeItIsSaved(t *testing.T) {
 	rb := newRoutedBroker(t)
 	r := rb.b.nodePolicyRuntime()
 	r.transitionMu.Lock()
 	paused := make(chan error, 1)
 	go func() {
-		_, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
+		_, err := rb.b.setAvailabilityRequestAs(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally, "", json.RawMessage(`"immediate"`))
 		paused <- err
 	}()
 	deadline := time.Now().Add(3 * time.Second)
@@ -172,7 +159,8 @@ func TestAcceptedLocalPauseVetoesPeerResumeBeforeItIsSaved(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	requirePause(t, rb.b, nodepolicy.Available, "")
+	// Halt persists before transitionMu, so the pending fence, rather than
+	// the timing of that write, must protect the still-incomplete transition.
 	_, err := rb.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedByPeer)
 	r.transitionMu.Unlock()
 	if policyErrorCode(err) != codeLocalVeto {

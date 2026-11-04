@@ -51,14 +51,16 @@ let cleanup: () => void
 function documentFor(
     availability: NodePolicyDocument['availability'],
     revision = '1',
-    pausedBy?: 'local' | 'peer'
+    pausedBy?: 'local' | 'peer',
+    pauseMode?: NodeAvailabilityRequest['pauseMode']
 ): NodePolicyDocument {
     return {
-        policy: JSON.stringify({ revision, availability, pausedBy }),
+        policy: JSON.stringify({ revision, availability, pausedBy, pauseMode }),
         revision,
         activation: null,
         availability,
         pausedBy,
+        pauseMode,
         recoveryRequired: false
     }
 }
@@ -257,7 +259,7 @@ describe('node availability presentation', () => {
     })
 
     it.each(['draining', 'paused'] satisfies NodePolicyDocument['availability'][])(
-        'offers no remote Resume or repeated Pause while %s',
+        'offers no remote Resume for an unknown pause mode while %s',
         async value => {
             const onRequest = vi.fn<(request: NodeAvailabilityRequest) => void>()
             await act(async () =>
@@ -285,6 +287,72 @@ describe('node availability presentation', () => {
             expect(container.textContent).not.toContain('Halt')
             await act(async () => button('Pause node: Peer').click())
             expect(onRequest).not.toHaveBeenCalled()
+        }
+    )
+
+    it.each([
+        { value: 'paused', pausedBy: 'local' },
+        { value: 'paused', pausedBy: 'peer' },
+        { value: 'draining', pausedBy: 'local' },
+        { value: 'draining', pausedBy: 'peer' }
+    ] satisfies Array<{
+        value: NodePolicyDocument['availability']
+        pausedBy: 'local' | 'peer'
+    }>)('offers remote Resume for configured $pausedBy $value', async ({ value, pausedBy }) => {
+        getPolicy.mockResolvedValue(documentFor(value, '2', pausedBy, 'configured'))
+        await act(async () =>
+            root.render(
+                <NodeAvailabilityControls targetId="peer" nodeId="peer" name="Peer" online />
+            )
+        )
+        expect(button('Resume node: Peer').disabled).toBe(false)
+        expect(container.textContent).not.toContain('Resume on that device')
+        getPolicy.mockResolvedValue(documentFor('available', '3'))
+        await act(async () => button('Resume node: Peer').click())
+        expect(setAvailability).toHaveBeenCalledExactlyOnceWith({
+            nodeId: 'peer',
+            state: 'available'
+        })
+        await tick()
+        expect(useNodeConfigurationStore.getState().availability.get('peer')).toMatchObject({
+            value: 'available',
+            current: true,
+            pauseMode: undefined
+        })
+    })
+
+    it.each(['paused', 'draining'] satisfies NodePolicyDocument['availability'][])(
+        'shows a local Halt on the remote node without Resume while %s',
+        async value => {
+            getPolicy.mockResolvedValue(documentFor(value, '2', 'local', 'immediate'))
+            await act(async () =>
+                root.render(
+                    <NodeAvailabilityControls targetId="peer" nodeId="peer" name="Peer" online />
+                )
+            )
+            expect(container.textContent).toContain('Halted on that node')
+            expect(container.querySelector('[aria-label="Resume node: Peer"]')).toBeNull()
+            await act(async () =>
+                useNodeConfigurationStore.getState().requestAvailability('peer', 'available')
+            )
+            expect(setAvailability).not.toHaveBeenCalled()
+        }
+    )
+
+    it.each(['peer', undefined] satisfies Array<'peer' | undefined>)(
+        'keeps immediate pause with %s provenance conservative',
+        async pausedBy => {
+            getPolicy.mockResolvedValue(documentFor('paused', '2', pausedBy, 'immediate'))
+            await act(async () =>
+                root.render(
+                    <NodeAvailabilityControls targetId="peer" nodeId="peer" name="Peer" online />
+                )
+            )
+            expect(container.querySelector('[aria-label="Resume node: Peer"]')).toBeNull()
+            await act(async () =>
+                useNodeConfigurationStore.getState().requestAvailability('peer', 'available')
+            )
+            expect(setAvailability).not.toHaveBeenCalled()
         }
     )
 

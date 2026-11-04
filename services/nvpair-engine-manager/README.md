@@ -1067,10 +1067,13 @@ After a fresh grant check, the common `ec` registry gate returns HTTP 503 for
 every mutation until the first projection. A known `managementBlocked` returns
 HTTP 409 `{"code":"local_veto","error":"This node is paused. Resume it on this node before managing it remotely."}`.
 This covers install, start, stop, load, unload, delete, pull, settings apply,
-switch apply, policy set and availability set, including peer Resume and repeated
-Pause by the initiating peer. Reads, read-only POSTs, events, model files and HEAD
+switch apply and policy set. Availability set alone passes the pause check to
+the broker, which permits configured Pause/Resume of either origin, refuses
+Resume of Halt, and accepts repeated Pause of completed local Halt as a no-op.
+Pin validation, the fresh grant, projection hydration and recovery checks still
+apply before availability reaches the broker. Reads, read-only POSTs, events, model files and HEAD
 remain admitted. Grant denial keeps `-32012` precedence; pause precedes lock for
-granted peers. Only a local Resume clears pause.
+granted peers. Only a local Resume clears Halt or a pause whose mode is unknown.
 
 Local start/load/switch also refuse known pause; local reads, configuration,
 lock/unlock, stop and unload remain usable. Accepted starts/loads are canceled

@@ -39,8 +39,9 @@ var pauseCancelSettle = 10 * time.Second
 // transition itself does not depend on ctx: a caller that stops waiting (a
 // disconnected client or peer) does not abandon a half-finished pause.
 //
-// origin records who asked. Either origin's accepted pause refuses all later
-// peer writes, including Resume and repeated Pause, before superseding work.
+// origin records who asked. Authorized peers may control configured pauses of
+// either origin. Build apply and pending/draining Halt refuse peer requests;
+// completed local Halt accepts repeated Pause as a no-op and refuses Resume.
 func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availability, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	return b.setAvailabilityAs(ctx, state, origin, "")
 }
@@ -56,11 +57,11 @@ func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availab
 func (b *Broker) setAvailabilityRequestAs(ctx context.Context, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, caller string, rawMode json.RawMessage) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	if err := b.authorizeRemoteManagementLocked(r, caller, "availability", ""); err != nil {
+	if err := b.authorizeRemoteManagementGrantLocked(r, caller, "availability", ""); err != nil {
 		r.mu.Unlock()
 		return "", err
 	}
-	if origin == nodepolicy.PausedByPeer && r.managementBlockedLocked() {
+	if origin == nodepolicy.PausedByPeer && r.peerAvailabilityBlockedLocked(state) {
 		r.mu.Unlock()
 		return "", &localVetoError{}
 	}
@@ -77,7 +78,30 @@ func (b *Broker) setAvailabilityRequestAs(ctx context.Context, state nodepolicy.
 		r.mu.Unlock()
 		return "", &invalidParamsError{errors.New("Immediate pause must be requested on this node.")}
 	}
+	if origin == nodepolicy.PausedByPeer && state == nodepolicy.Paused &&
+		r.current.Availability == nodepolicy.Paused && r.live == nodepolicy.Paused && !r.pendingPauseRequested {
+		// A peer cannot downgrade a Halt or replace provenance, cancel work,
+		// assign a revision or publish notifications by repeating Pause.
+		r.mu.Unlock()
+		return nodepolicy.Paused, nil
+	}
 	return b.setAvailabilityModeLocked(ctx, r, state, origin, mode)
+}
+
+// peerAvailabilityBlockedLocked is only the availability write boundary.
+// Other management keeps managementBlockedLocked's stricter pause fence.
+// Unknown/legacy saved or pending modes remain local-only until Resume.
+func (r *policyRuntime) peerAvailabilityBlockedLocked(state nodepolicy.Availability) bool {
+	if r.buildApplyOperation != "" || (r.pendingPauseRequested && r.pendingPauseMode != nodepolicy.PauseConfigured) {
+		return true
+	}
+	if r.current.Availability == nodepolicy.Paused && r.current.PauseMode != nodepolicy.PauseConfigured {
+		return !(state == nodepolicy.Paused && r.current.PauseMode == nodepolicy.PauseImmediate &&
+			r.current.PausedBy == nodepolicy.PausedLocally && r.live == nodepolicy.Paused &&
+			!r.pendingPauseRequested && !r.localPauseRequested)
+	}
+	return (r.live == nodepolicy.Draining || r.live == nodepolicy.Paused) &&
+		r.current.PauseMode != nodepolicy.PauseConfigured && r.pendingPauseMode != nodepolicy.PauseConfigured
 }
 
 // setAvailabilityModeLocked executes an accepted availability request.
@@ -112,6 +136,7 @@ func (r *policyRuntime) acceptAvailabilityLocked(state nodepolicy.Availability, 
 	}
 	if state == nodepolicy.Paused {
 		r.pendingPauseRequested = true
+		r.pendingPauseMode = mode
 		r.localPauseRequested = origin == nodepolicy.PausedLocally || r.localPauseRequested || pausedLocally(r.current)
 	}
 	r.transitionGen++
@@ -169,6 +194,7 @@ func (b *Broker) runAcceptedAvailability(ctx context.Context, r *policyRuntime, 
 			if r.transitionGen == gen {
 				r.localPauseRequested = false
 				r.pendingPauseRequested = false
+				r.pendingPauseMode = ""
 			}
 			r.mu.Unlock()
 			b.publishNodeProjection()
@@ -199,6 +225,7 @@ func (b *Broker) runAcceptedAvailability(ctx context.Context, r *policyRuntime, 
 			if state == nodepolicy.Paused {
 				r.localPauseRequested = false
 				r.pendingPauseRequested = false
+				r.pendingPauseMode = ""
 			}
 		}
 		r.mu.Unlock()
@@ -527,16 +554,14 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 // resumeNode makes the node available again and starts the engines a pause
 // stopped. Their saved intent was never changed, so engine:wake (and, after a
 // launch that skipped restoration, engine:restore-enabled) starts exactly the
-// ones saved On. A paired node's resume is checked against a local pause again
-// here, where it would take effect.
+// ones saved On. A paired node's resume is checked against the Halt/maintenance
+// boundary again here, where it would take effect.
 func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
-	// Local Resume may supersede a pause before physical completion. Retire its
+	// An authorized Resume may supersede a pause before physical completion. Retire its
 	// switch obligation only after conservative cleanup, without inventing a
 	// successful pause or preventing recovery from an incomplete shutdown.
-	if origin == nodepolicy.PausedLocally {
-		if err := b.supersedeSwitchPauseObligations(gen); err != nil {
-			return "", err
-		}
+	if err := b.supersedeSwitchPauseObligations(gen); err != nil {
+		return "", err
 	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
@@ -546,7 +571,7 @@ func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.P
 		r.mu.Unlock()
 		return "", errAvailabilitySuperseded
 	}
-	if origin == nodepolicy.PausedByPeer && r.managementBlockedLocked() {
+	if origin == nodepolicy.PausedByPeer && r.peerAvailabilityBlockedLocked(nodepolicy.Available) {
 		r.mu.Unlock()
 		return "", &localVetoError{}
 	}
@@ -554,6 +579,7 @@ func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.P
 		// A Resume can supersede a pause before it saves anything. This is
 		// still the authoritative transition that releases its pending fence.
 		r.pendingPauseRequested = false
+		r.pendingPauseMode = ""
 		r.localPauseRequested = false
 		r.mu.Unlock()
 		return nodepolicy.Available, nil
@@ -570,6 +596,7 @@ func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.P
 	}
 	r.live = nodepolicy.Available
 	r.pendingPauseRequested = false
+	r.pendingPauseMode = ""
 	r.localPauseRequested = false
 	r.cancelActive = false
 	slept := make([]string, 0, len(r.pauseSlept))

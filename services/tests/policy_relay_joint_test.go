@@ -207,14 +207,14 @@ func TestPolicyRelayJoint(t *testing.T) {
 		}
 		f.assertUnchanged(t, before)
 	})
-	// Pause locally after the ordinary policy writes: a paired node cannot
-	// resume it, and the node's own resume still can.
-	t.Run("local pause vetoes a relayed resume until the node resumes itself", func(t *testing.T) {
+	// Halt locally after the ordinary policy writes: a paired node cannot
+	// resume Halt, and the node's own Resume still can.
+	t.Run("local Halt vetoes a relayed resume until the node resumes itself", func(t *testing.T) {
 		// The fixture owns this unidentified listener. Close it before asking
 		// the manager to prove the absent engines stopped; an occupied unknown
 		// endpoint correctly makes physical Pause incomplete.
 		f.inert.Close()
-		local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "paused"}, 15*time.Second)
+		local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "paused", "pauseMode": "immediate"}, 15*time.Second)
 		if local.Error != nil {
 			t.Fatalf("local pause before relayed resume: %+v", local.Error)
 		}
@@ -224,6 +224,7 @@ func TestPolicyRelayJoint(t *testing.T) {
 		}
 		want := f.want
 		want.Availability, want.PausedBy, want.Revision = nodepolicy.Paused, nodepolicy.PausedLocally, paused.Revision
+		want.PauseMode = nodepolicy.PauseImmediate
 		if paused.Revision == f.want.Revision || !reflect.DeepEqual(paused, want) {
 			t.Fatal("local pause changed protected policy or failed to advance its revision")
 		}
@@ -249,7 +250,7 @@ func TestPolicyRelayJoint(t *testing.T) {
 			t.Fatalf("local resume after a vetoed relayed resume: %+v", local.Error)
 		}
 		var stored nodepolicy.Policy
-		if err := json.Unmarshal(readPolicyBytes(t, f.path), &stored); err != nil || stored.Availability != nodepolicy.Available || stored.PausedBy != "" {
+		if err := json.Unmarshal(readPolicyBytes(t, f.path), &stored); err != nil || stored.Availability != nodepolicy.Available || stored.PausedBy != "" || stored.PauseMode != "" {
 			t.Fatalf("local resume stored availability %q pausedBy %q (%v), want available with no provenance", stored.Availability, stored.PausedBy, err)
 		}
 	})
@@ -342,6 +343,7 @@ type policyJointFixtureOption func(*nodepolicy.Policy)
 func jointAvailable(policy *nodepolicy.Policy) {
 	policy.Availability = nodepolicy.Available
 	policy.PausedBy = ""
+	policy.PauseMode = ""
 }
 
 func newPolicyJointFixture(t *testing.T, options ...policyJointFixtureOption) *policyJointFixture {
@@ -397,7 +399,7 @@ func newPolicyJointFixture(t *testing.T, options ...policyJointFixtureOption) *p
 	f.path = filepath.Join(jointAppDir(f.base), "node-policy.json")
 	var err error
 	f.want, err = nodepolicy.Parse([]byte(`{
-		"version":2,"revision":"12","availability":"paused",
+		"version":2,"revision":"12","availability":"paused","pauseMode":"immediate",
 		"tiers":{
 			"weak":[{"kind":"api","deployment":"free-small"},{"kind":"local","engine":"llamacpp","model":"joint-local","contextTokens":8192,"capabilities":["tools"]},{"kind":"api","deployment":"paid-big"}],
 			"strong":[{"kind":"api","deployment":"paid-big"}]
@@ -560,7 +562,7 @@ func (f *policyJointFixture) cloudDraft(t *testing.T, params map[string]any, clo
 
 func jointExpectedPeer(p nodepolicy.Policy) nodepolicy.PeerPolicy {
 	return nodepolicy.PeerPolicy{
-		Version: 2, Revision: p.Revision, Availability: p.Availability,
+		Version: 2, Revision: p.Revision, Availability: p.Availability, PausedBy: p.PausedBy, PauseMode: p.PauseMode,
 		Pause: p.Pause, Admission: p.Admission, Idle: p.Idle, Profiles: p.Profiles, Roles: map[string]nodepolicy.Role{}, TierPolicy: p.TierPolicy,
 		ServedModels: p.ServedModels, ResidentModels: p.ResidentModels,
 		Tiers: map[string][]nodepolicy.TierEntry{"weak": {{Kind: "local", Engine: "llamacpp", Model: "joint-local", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{"tools"}}}},
@@ -572,6 +574,8 @@ func assertJointPeer(t *testing.T, raw []byte, want nodepolicy.Policy) {
 	var envelope struct {
 		Policy             nodepolicy.PeerPolicy          `json:"policy"`
 		Availability       nodepolicy.Availability        `json:"availability,omitempty"`
+		PausedBy           nodepolicy.PauseOrigin         `json:"pausedBy,omitempty"`
+		PauseMode          nodepolicy.PauseMode           `json:"pauseMode,omitempty"`
 		ModelConfiguration *nodepolicy.ModelConfiguration `json:"modelConfiguration"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -581,6 +585,9 @@ func assertJointPeer(t *testing.T, raw []byte, want nodepolicy.Policy) {
 	}
 	if !reflect.DeepEqual(envelope.Policy, jointExpectedPeer(want)) {
 		t.Fatal("peer policy differs from the independently spelled device/local-only projection")
+	}
+	if envelope.Availability != "" && (envelope.PausedBy != want.PausedBy || envelope.PauseMode != want.PauseMode) {
+		t.Fatalf("peer availability metadata=%s/%s, want %s/%s", envelope.PausedBy, envelope.PauseMode, want.PausedBy, want.PauseMode)
 	}
 	decodeFixtureModelConfiguration(t, raw, want.Revision)
 }

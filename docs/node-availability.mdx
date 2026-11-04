@@ -19,7 +19,7 @@ rules among the other trust boundaries.
 | --- | --- | --- | --- |
 | Saved Off | An engine's ordinary On/Off switch. It records intent. | The local device, or a paired device that has been granted management | Nothing on its own. A granted peer can still start or load into the engine. |
 | Engine lock | A durable per-engine flag, shown as a padlock beside the switch | Only a client on the device that runs the engine | Every start, model load and engine switch into that engine, from anyone |
-| Pause | A node-wide state | A client on the node, or a paired device that has been granted management | Work on this node, and every management change from other devices |
+| Pause | A node-wide state | A client on the node, or a paired device that has been granted management | Work on this node and peer management other than permitted availability changes |
 
 A lock is stronger than Off, and Pause is stronger than a lock for a paired
 device: when both apply, the pause refusal is the one it receives.
@@ -30,9 +30,10 @@ The desktop toolbar offers **Halt** for this PC only. After confirmation, Halt
 stops running requests immediately and unloads models, using the existing local
 immediate pause. The toolbar shows **Resume** while this PC is paused or pausing.
 If another node initiated the pause, it shows “Paused by another node”. Other
-nodes cannot resume this PC. The tray calls the same action **Halt this PC**.
+nodes cannot resume a local Halt. A managing peer may resume a configured Pause.
+The tray calls the same action **Halt this PC**.
 Node cards also name the local immediate action **Halt**; remote nodes offer
-configured Pause only, never Halt.
+configured Pause and, for a known configured pause, Resume. Remote nodes never offer Halt.
 
 ### What Pause does
 
@@ -62,8 +63,8 @@ for a pause that leaves engines running.
 
 If an engine does not stop, the node stays `draining` and the request fails
 with `-32000` and `Pause could not stop every engine:` followed by bounded
-detail. A pause made on the node itself can be retried; a retry from a paired
-device is refused (see below).
+detail. A pause made on the node itself can be retried. A managing peer may retry
+a configured Pause; pending or draining Halt still refuses peer requests.
 
 A newer availability request supersedes one still in progress, which then
 returns `superseded by a later node:set-availability request`. The latest
@@ -90,15 +91,24 @@ pause from a client on the node, `peer` for one relayed from a paired device.
 Resume clears it.
 
 - A paired device with management permission may Pause an available node.
-- A peer pause blocks the node in the same way as a local one. The device that
-  paused it cannot Resume it, and cannot repeat the Pause. Only a client on the
-  paused node can Resume.
+- A managing peer may Resume a known configured Pause, whether it was made
+  locally or by a peer, including while that configured pause is draining.
+- Repeating peer Pause on a completed pause succeeds without changing its mode,
+  origin or revision. Repeating Pause on a completed local Halt leaves the Halt
+  intact and sends no new notifications or cancellation.
+- Peer Resume of local Halt is refused, including after restart. Both peer
+  directions are refused during build apply or pending/draining Halt. Old saved
+  pauses repaired to `immediate`, including peer or unknown origins, remain
+  local-only until local Resume. Only a known `configured` mode enables peer Resume.
+- Other peer management, including engine-settings Apply, remains refused
+  during any pause. Every peer request rechecks its management grant first.
 - A local Pause over a peer pause makes the origin `local`.
 - Policy edits, whether local or relayed, never change `pausedBy`.
 
 In the desktop application, the Pause and Resume button is in the node's routing
-settings. If the target is a paired node that is paused or draining, the
-panel shows `This node is paused. Resume it on that node before making changes.`
+settings and node card. A paused or draining remote node with a confirmed
+configured mode offers Resume. A local Halt on that remote node shows
+`Halted on that node` without Resume. Unknown modes do not offer remote Resume.
 The terminal interface shows `Paused (local)` or `Paused (peer)`.
 
 ### Resume and restart
@@ -217,7 +227,8 @@ Four limits remain:
 
 Each node publishes a policy advertisement in its inventory document, which paired
 peers fetch over authenticated transport. The advertisement carries `pausedBy`
-(`local` or `peer`) while the node is paused. It does not carry the availability
+(`local` or `peer`) and `pauseMode` (`configured` or `immediate`) while paused.
+It does not carry the availability
 state, and it is a **hint**: the scanner refreshes it on a nominal 15-second
 cadence, and if a refresh fails, the last good hint is kept until a refresh
 succeeds.
@@ -247,8 +258,9 @@ destination:
   `Retry-After: 30`, and the router fails over to its next candidate while another
   dispatch is permitted. On the final permitted attempt the router relays that
   503, even if other candidates remain.
-- A management change never consults the hint. The target decides from its own
-  state, so a peer that has not yet seen the pause still receives `-32011`.
+- A management change never uses the hint as authority. The target decides from
+  its own state, so forbidden management still receives `-32011` even if the peer
+  has not seen the pause. Availability follows the mode-aware rule above.
 - A hint that says paused after the node has resumed only keeps the node out of
   inference routing until a refresh replaces it.
 

@@ -1552,9 +1552,13 @@ route registry classification: every incoming mutation returns HTTP 503 until
 projection is known, then HTTP 409 with `code:local_veto` while
 `managementBlocked` is true. The exact message is `This node is paused. Resume it on this node before managing it remotely.` Grant denial retains `-32012`
 precedence, and pause precedes lock for a granted peer. Install, start, stop,
-load, unload, delete, pull, settings apply, switch apply, policy set and
-availability set are fenced. This includes the pause initiator's Resume and
-repeated Pause; only the owning node may Resume. Reads return before this check,
+load, unload, delete, pull, settings apply, switch apply and policy set are fenced.
+Availability set alone delegates the pause decision to the broker, after pin,
+fresh grant, projection hydration and recovery checks. The broker allows peers
+to control configured pauses of either origin; Halt Resume, pending/draining
+Halt and build apply remain refused. Repeated peer Pause of completed local
+Halt succeeds without effects. Unknown or legacy pause mode remains local-only
+until local Resume. Reads return before this check,
 including GET/HEAD, read-only POST preview/status/get, event streams and model
 files. No second production route registry is introduced.
 
