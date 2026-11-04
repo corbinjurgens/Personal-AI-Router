@@ -54,7 +54,20 @@ export const migrateAppData = (): void => {
     )
 }
 
+let systemAppData: string | null = null
+
+/**
+ * The per-user roaming app-data folder that Windows itself reads (Start Menu
+ * shortcuts live under it). `setPaths` redirects Electron's `appData` to the PAIR
+ * root, so callers that need the real folder must use this instead of
+ * `app.getPath('appData')`. Before `setPaths` has run, Electron's value is
+ * still the original.
+ */
+export const getSystemAppData = (): string => systemAppData ?? app.getPath('appData')
+
 export const setPaths = async (): Promise<void> => {
+    systemAppData = app.getPath('appData')
+
     // make it stick even in dev
     app.commandLine.appendSwitch('user-data-dir', APP_DIR)
     app.commandLine.appendSwitch('disk-cache-dir', path.join(APP_DIR, 'cache'))
