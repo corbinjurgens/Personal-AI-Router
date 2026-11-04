@@ -2,8 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest'
-import { copyModelSettings, defaultModelCopyFields } from '@/shared/utils/node-policy-model-copy'
+import {
+    copyModelSettings,
+    defaultModelCopyFields,
+    defaultPortableLoadFields,
+    portableLoadPatch
+} from '@/shared/utils/node-policy-model-copy'
 import { parseModelSettings } from '@/shared/utils/node-policy-model-settings'
+import type { RequestedLoad } from '@/shared/types/model-config'
 
 const source = { engine: 'llamacpp', model: 'source' }
 const target = { engine: 'llamacpp', model: 'target' }
@@ -21,6 +27,38 @@ function copied(text: string, fields: string[], mode = false): string {
 }
 
 describe('selective model settings copy', () => {
+    it('selects portable CPU experts and detaches the copied setting', () => {
+        const requested = { cpuExperts: { mode: 'layers', layers: 12 } } satisfies RequestedLoad
+        expect(
+            defaultPortableLoadFields(
+                {
+                    engine: 'llamacpp',
+                    modelId: 'source',
+                    status: 'resolved',
+                    estimate: { status: 'unknown' },
+                    options: [
+                        {
+                            field: 'cpuExperts',
+                            label: 'CPU experts',
+                            kind: 'enum',
+                            supported: true,
+                            portable: true
+                        }
+                    ]
+                },
+                requested
+            )
+        ).toEqual(['cpuExperts'])
+        const patch = portableLoadPatch(requested, ['cpuExperts'])
+        expect(patch).toEqual({ set: { cpuExperts: { mode: 'layers', layers: 12 } }, clear: [] })
+        requested.cpuExperts.layers = 3
+        expect(patch.set.cpuExperts?.layers).toBe(12)
+        expect(portableLoadPatch({}, ['cpuExperts'])).toEqual({ set: {}, clear: ['cpuExperts'] })
+        expect(portableLoadPatch({ cpuExperts: { mode: 'none' } }, ['cpuExperts'])).toEqual({
+            set: { cpuExperts: { mode: 'none' } },
+            clear: []
+        })
+    })
     it('defaults to configured numeric leaves', () => {
         expect(
             defaultModelCopyFields(sourceText, source, { engine: 'llamacpp', model: 'other' })

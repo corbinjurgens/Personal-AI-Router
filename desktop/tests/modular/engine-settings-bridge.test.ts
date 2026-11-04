@@ -92,6 +92,96 @@ const baseline = {
 }
 
 describe('working-set settings decoding', () => {
+    it('preserves inherited CPU expert placement', () => {
+        const snapshot = parseEngineSettings({
+            ...baseline,
+            settings: {
+                ...baseline.settings,
+                modelLoads: [{ modelId: 'exact/model', requested: {} }]
+            }
+        })
+        expect(snapshot.settings.modelLoads?.[0]?.requested.cpuExperts).toBeUndefined()
+    })
+    it('retains resolved CPU experts and rejects a changed explicit placement', () => {
+        const allocation = {
+            perSlotContext: 8192,
+            totalContext: 8192,
+            slots: 1,
+            gpu: { mode: 'cpu' },
+            options: { cpuExperts: { mode: 'layers', layers: 12 } },
+            artifacts: [
+                {
+                    role: 'model',
+                    path: 'model.gguf',
+                    resolvedTarget: 'model.gguf',
+                    size: '64',
+                    mtimeNs: '1',
+                    sampleSha256: 'a'.repeat(64)
+                }
+            ],
+            nativeBuildId: 'fixture',
+            sourceInputDigest: 'b'.repeat(64),
+            presetDigest: 'c'.repeat(64)
+        }
+        const settings = (mode: string, layers: number) => ({
+            ...baseline,
+            settings: {
+                ...baseline.settings,
+                modelLoads: [
+                    {
+                        modelId: 'exact/model',
+                        requested: { cpuExperts: { mode, layers } },
+                        resolved: allocation
+                    }
+                ]
+            }
+        })
+        expect(
+            parseEngineSettings(settings('layers', 12)).settings.modelLoads?.[0]?.resolved?.options
+                .cpuExperts
+        ).toEqual({ mode: 'layers', layers: 12 })
+        expect(() => parseEngineSettings(settings('layers', 3))).toThrow(
+            'Resolution changed CPU expert placement.'
+        )
+    })
+    it.each<JsonValue>([
+        { mode: 'none' },
+        { mode: 'all' },
+        { mode: 'layers', layers: 0 },
+        { mode: 'layers', layers: 2147483647 }
+    ])('retains CPU expert placement $mode $layers', cpuExperts => {
+        const snapshot = parseEngineSettings({
+            ...baseline,
+            settings: {
+                ...baseline.settings,
+                modelLoads: [{ modelId: 'exact/model', requested: { cpuExperts } }]
+            }
+        })
+        expect(snapshot.settings.modelLoads?.[0]?.requested.cpuExperts).toEqual(cpuExperts)
+    })
+    it.each<JsonValue>([
+        null,
+        {},
+        { mode: 'unknown' },
+        { mode: 'all', layers: 0 },
+        { mode: 'none', extra: true },
+        { mode: 'layers' },
+        { mode: 'layers', layers: null },
+        { mode: 'layers', layers: -1 },
+        { mode: 'layers', layers: 1.5 },
+        { mode: 'layers', layers: 2147483648 },
+        { mode: 'layers', layers: '12' }
+    ])('rejects malformed CPU expert placement %j', cpuExperts => {
+        expect(() =>
+            parseEngineSettings({
+                ...baseline,
+                settings: {
+                    ...baseline.settings,
+                    modelLoads: [{ modelId: 'exact/model', requested: { cpuExperts } }]
+                }
+            })
+        ).toThrow()
+    })
     it.each(['applied', 'unverified', 'not-running', 'unenforced-adopted'])(
         'preserves the limit and %s status',
         status => {

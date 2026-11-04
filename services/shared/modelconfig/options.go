@@ -99,6 +99,20 @@ func (r RequestedLoad) Validate() error {
 			return fmt.Errorf("context.mode: invalid value")
 		}
 	}
+	if r.CPUExperts != nil {
+		switch r.CPUExperts.Mode {
+		case "none", "all":
+			if r.CPUExperts.Layers != nil {
+				return fmt.Errorf("cpuExperts.layers: only valid for layers")
+			}
+		case "layers":
+			if r.CPUExperts.Layers == nil || *r.CPUExperts.Layers < 0 {
+				return fmt.Errorf("cpuExperts.layers: must be nonnegative")
+			}
+		default:
+			return fmt.Errorf("cpuExperts.mode: invalid value")
+		}
+	}
 	if r.Slots != nil && *r.Slots <= 0 {
 		return fmt.Errorf("slots: must be positive")
 	}
@@ -150,6 +164,7 @@ func (r RequestedLoad) Validate() error {
 func (r RequestedLoad) selectedFields() map[string]bool {
 	return map[string]bool{
 		"context": r.Context != nil, "slots": r.Slots != nil, "gpu": r.GPU != nil,
+		"cpuExperts": r.CPUExperts != nil,
 		"cacheTypeK": r.CacheTypeK != nil, "cacheTypeV": r.CacheTypeV != nil,
 		"flashAttention": r.FlashAttention != nil, "batchSize": r.BatchSize != nil,
 		"ubatchSize": r.UBatchSize != nil, "threads": r.Threads != nil,
@@ -163,6 +178,10 @@ func (r RequestedLoad) Clone() RequestedLoad {
 	r.Context = clonePointer(r.Context)
 	r.Slots = clonePointer(r.Slots)
 	r.GPU = clonePointer(r.GPU)
+	r.CPUExperts = clonePointer(r.CPUExperts)
+	if r.CPUExperts != nil {
+		r.CPUExperts.Layers = clonePointer(r.CPUExperts.Layers)
+	}
 	if r.GPU != nil {
 		r.GPU.Layers = clonePointer(r.GPU.Layers)
 	}

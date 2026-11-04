@@ -34,6 +34,7 @@ export const loadFields: Array<keyof RequestedLoad> = [
     'context',
     'slots',
     'gpu',
+    'cpuExperts',
     'cacheTypeK',
     'cacheTypeV',
     'flashAttention',

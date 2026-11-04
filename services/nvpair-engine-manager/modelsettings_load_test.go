@@ -649,6 +649,10 @@ func TestModelSettingsLoadConflictingSourcesRefused(t *testing.T) {
 		c.Args = append(c.Args, "--models-preset", f.source)
 	})
 	test("CLI threads", func(t *testing.T, f modelLoadFixture, c *launchCommand) { c.Args = append(c.Args, "--threads", "8") })
+	test("CLI CPU experts", func(t *testing.T, f modelLoadFixture, c *launchCommand) { c.Args = append(c.Args, "--cpu-moe") })
+	test("CLI CPU expert layers", func(t *testing.T, f modelLoadFixture, c *launchCommand) { c.Args = append(c.Args, "--n-cpu-moe", "2") })
+	test("explicit CPU expert environment", func(t *testing.T, f modelLoadFixture, c *launchCommand) { c.Env["LLAMA_ARG_CPU_MOE"] = "true" })
+	test("inherited CPU expert environment", func(t *testing.T, f modelLoadFixture, c *launchCommand) { t.Setenv("LLAMA_ARG_N_CPU_MOE", "2") })
 }
 
 func TestModelSettingsLoadPreSpawnContentSourceReplacementRefuses(t *testing.T) {
@@ -1124,7 +1128,10 @@ func TestModelSettingsLoadConfigurePersistenceFailureRetainsOldRuntime(t *testin
 		t.Fatal(err)
 	}
 	threads := int32(6)
-	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Threads: &threads}})
+	// Include the nested placement option in the existing transaction failure
+	// fixture: no new requested/effective state may survive a failed save.
+	experts := &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}
+	preview := previewModelLoadFixture(t, f, "weak-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{Threads: &threads, CPUExperts: experts}})
 	failure := errors.New("synthetic override preparation failure")
 	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(dir, base string, _ os.FileMode) (durablefile.File, error) {
 		if dir == f.ex.overrideDir {
@@ -1395,7 +1402,123 @@ func TestModelSettingsLoadConversionRejectsCompleteRouter(t *testing.T) {
 	test("unified KV", "kv-unified = true\n")
 }
 
-func TestModelSettingsLoadConversionRefusesCPUExpertPlacement(t *testing.T) {
+func TestModelSettingsLoadConversionCPUExpertsRoundTrip(t *testing.T) {
+	f := newModelLoadFixture(t)
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, f.source, append(data, []byte("\nn-cpu-moe = 2\n")...))
+	conversion, err := f.ex.previewTypedLlamaConversion(context.Background(), f.st, f.command, f.rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := conversion.Runtime
+	load := rt.ModelLoads[0]
+	if load.ModelID != "medium-model" || load.Requested.CPUExperts == nil || load.Requested.CPUExperts.Mode != "layers" || load.Requested.CPUExperts.Layers == nil || *load.Requested.CPUExperts.Layers != 2 {
+		t.Fatalf("conversion lost expert layers: %+v", load)
+	}
+	prepared, err := compilePreparedServing(f.st, typedFixtureCommand(t, f, rt), rt, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sections, err := parseLlamaServingPreset(prepared.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sections["medium-model"]["n-cpu-moe"] != "2" || sections["medium-model"]["cpu-moe"] != "" || sections["weak-model"]["n-cpu-moe"] != "" {
+		t.Fatalf("converted native options changed: %+v", sections)
+	}
+	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadCPUExpertsFiniteOptions(t *testing.T) {
+	blocks := int32(24)
+	for _, tc := range []struct {
+		name        string
+		experts     *modelconfig.CPUExperts
+		all, layers string
+	}{
+		{"inherited", nil, "", ""},
+		{"none", &modelconfig.CPUExperts{Mode: "none"}, "", ""},
+		{"all", &modelconfig.CPUExperts{Mode: "all"}, "true", ""},
+		{"layers twelve", &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(12))}, "", "12"},
+		{"layers zero", &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(0))}, "", "0"},
+		{"layers full", &modelconfig.CPUExperts{Mode: "layers", Layers: &blocks}, "", "24"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requested := modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "cpu"}, CPUExperts: tc.experts}
+			options, resolved, err := typedLlamaModelOptions("exact", requested, &blocks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if options["cpu-moe"] != tc.all || options["n-cpu-moe"] != tc.layers || !reflect.DeepEqual(resolved.Options.CPUExperts, tc.experts) {
+				t.Fatalf("native=%v resolved=%+v", options, resolved.Options)
+			}
+			if tc.experts != nil && resolved.Options.CPUExperts == tc.experts {
+				t.Fatal("finite resolution retains caller's CPU expert pointer")
+			}
+			effective := modelEffectiveLoadOptions(resolved.Options)
+			if !reflect.DeepEqual(effective.CPUExperts, tc.experts) || tc.experts != nil && effective.CPUExperts == resolved.Options.CPUExperts {
+				t.Fatal("effective options dropped CPU experts or retained an alias")
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name    string
+		experts *modelconfig.CPUExperts
+		blocks  *int32
+	}{
+		{"over block count", &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(25))}, &blocks},
+		{"output layer is not a block", &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(24))}, keyTestPointer(int32(23))},
+		{"missing block count", &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(0))}, nil},
+		{"negative layers", &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(-1))}, &blocks},
+		{"missing layers", &modelconfig.CPUExperts{Mode: "layers"}, &blocks},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := typedLlamaModelOptions("exact", modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "cpu"}, CPUExperts: tc.experts}, tc.blocks)
+			var field *ServingFieldError
+			if !errors.As(err, &field) || field.Field != "modelLoads.cpuExperts.layers" {
+				t.Fatalf("want CPU expert layers field error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestModelSettingsLoadCPUExpertsSaveReloadClear(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch modelconfig.LoadPatch
+		want  *modelconfig.CPUExperts
+	}{
+		{"save layers", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{CPUExperts: &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}}}, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}},
+		{"explicit none", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{CPUExperts: &modelconfig.CPUExperts{Mode: "none"}}}, &modelconfig.CPUExperts{Mode: "none"}},
+		{"clear to inheritance", modelconfig.LoadPatch{Clear: []string{"cpuExperts"}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newModelLoadFixture(t)
+			f.st.plat.Runtime = convertModelLoadFixture(t, f)
+			initial := previewModelLoadFixture(t, f, "medium-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{CPUExperts: &modelconfig.CPUExperts{Mode: "all"}}})
+			if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: initial.Settings}, func() error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			preview := previewModelLoadFixture(t, f, "medium-model", tc.patch)
+			result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			reloaded := readModelLoadRuntimeOverride(t, f.ex)
+			if result.Running || !modelconfig.EqualLoads(result.ModelLoads, reloaded.ModelLoads) || !reflect.DeepEqual(reloaded.ModelLoads[0].Requested.CPUExperts, tc.want) || !reflect.DeepEqual(reloaded.ModelLoads[0].Resolved.Options.CPUExperts, tc.want) {
+				t.Fatalf("CPU expert intent or effective state changed: result=%+v reload=%+v", result, reloaded.ModelLoads)
+			}
+			if reloaded.ModelLoads[1].Requested.CPUExperts != nil {
+				t.Fatal("CPU expert edit changed sibling model")
+			}
+		})
+	}
+}
+
+func TestModelSettingsLoadCPUExpertsConversionRefusesOutOfRange(t *testing.T) {
 	f := newModelLoadFixture(t)
 	data, err := os.ReadFile(f.source)
 	if err != nil {
@@ -1403,11 +1526,60 @@ func TestModelSettingsLoadConversionRefusesCPUExpertPlacement(t *testing.T) {
 	}
 	writeTestFile(t, f.source, append(data, []byte("\nn-cpu-moe = 38\n")...))
 	_, err = f.ex.previewTypedLlamaConversion(context.Background(), f.st, f.command, f.rt)
-	var typed *ServingFieldError
-	if !errors.As(err, &typed) || typed.Field != "modelLoads.n-cpu-moe" {
-		t.Fatalf("want n-cpu-moe field refusal, got %v", err)
+	var field *ServingFieldError
+	if !errors.As(err, &field) || field.Field != "modelLoads.cpuExperts.layers" {
+		t.Fatalf("want bounded CPU expert layer error, got %v", err)
 	}
 	assertNoSettingsOverride(t, f.ex)
+}
+
+func TestModelSettingsLoadCPUExpertsInheritanceAndDetachment(t *testing.T) {
+	f := newModelLoadFixture(t)
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, f.source, []byte(strings.Replace(string(data), "[*]\n", "[*]\ncpu-moe = true\n", 1)))
+	rt := convertModelLoadFixture(t, f)
+	for _, load := range rt.ModelLoads {
+		if load.Requested.CPUExperts == nil || load.Requested.CPUExperts.Mode != "all" || load.Resolved.Options.CPUExperts == nil || load.Resolved.Options.CPUExperts.Mode != "all" {
+			t.Fatalf("lost inherited external expert placement: %+v", load)
+		}
+	}
+	patched, err := patchModelLoad(rt.ModelLoads, "medium-model", modelconfig.LoadPatch{Set: modelconfig.RequestedLoad{CPUExperts: &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	*patched[0].Requested.CPUExperts.Layers = 1
+	patched[0].Resolved.Options.CPUExperts.Mode = "none"
+	if rt.ModelLoads[0].Requested.CPUExperts.Mode != "all" || rt.ModelLoads[0].Resolved.Options.CPUExperts.Mode != "all" || patched[1].Requested.CPUExperts.Mode != "all" {
+		t.Fatal("patch or resolved clone changed inherited state")
+	}
+}
+
+func TestModelSettingsLoadCPUExpertsDescriptors(t *testing.T) {
+	options, err := llamaModelSettingsOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ native, field string }{{"cpu-moe", "cpuExperts"}, {"n-cpu-moe", "cpuExperts.layers"}} {
+		t.Run(tc.native, func(t *testing.T) {
+			i := slices.IndexFunc(options, func(o modelSettingsOption) bool { return o.Native.key == tc.native })
+			if i < 0 {
+				t.Fatal("missing expert placement descriptor")
+			}
+			d := options[i].Descriptor
+			if d.Field != tc.field || !d.Supported || !d.Portable || d.Owner != "model-load" || options[i].Native.unsupported {
+				t.Fatalf("unmapped descriptor: %+v", options[i])
+			}
+			if tc.native == "cpu-moe" && !slices.Equal(d.Values, []string{"none", "all", "layers"}) {
+				t.Fatalf("expert modes=%v", d.Values)
+			}
+			if tc.native == "n-cpu-moe" && (d.Minimum == nil || d.Minimum.String() != "0") {
+				t.Fatalf("expert layer minimum=%v", d.Minimum)
+			}
+		})
+	}
 }
 
 func TestModelSettingsLoadFiniteValidation(t *testing.T) {

@@ -171,11 +171,20 @@ function gpu(value: JsonValue | undefined): NonNullable<RequestedLoad['gpu']> {
         throw new Error('Invalid model GPU placement.')
     return { mode, layers }
 }
+function cpuExperts(value: JsonValue): NonNullable<RequestedLoad['cpuExperts']> {
+    const row = shape(value, ['mode', 'layers'])
+    const mode = choice(row.mode, ['none', 'all', 'layers'])
+    const layers = optionalInteger(row.layers, 0)
+    if (mode === 'layers' ? layers === undefined : layers !== undefined)
+        throw new Error('Invalid CPU expert placement.')
+    return mode === 'layers' ? { mode, layers } : { mode }
+}
 function requested(value: JsonValue | undefined): RequestedLoad {
     const row = shape(value, [
         'context',
         'slots',
         'gpu',
+        'cpuExperts',
         'cacheTypeK',
         'cacheTypeV',
         'flashAttention',
@@ -201,6 +210,7 @@ function requested(value: JsonValue | undefined): RequestedLoad {
         },
         slots: optionalInteger(row.slots),
         gpu: row.gpu === undefined ? undefined : gpu(row.gpu),
+        cpuExperts: row.cpuExperts === undefined ? undefined : cpuExperts(row.cpuExperts),
         cacheTypeK:
             row.cacheTypeK === undefined
                 ? undefined
@@ -386,6 +396,12 @@ function validateResolution(intent: RequestedLoad, actual: ResolvedLoad | undefi
         'sleepIdleSeconds',
         'cacheRAM'
     ]
+    if (
+        intent.cpuExperts &&
+        (intent.cpuExperts.mode !== actual.options.cpuExperts?.mode ||
+            intent.cpuExperts.layers !== actual.options.cpuExperts?.layers)
+    )
+        throw new Error('Resolution changed CPU expert placement.')
     for (const key of explicitFields) {
         if (intent[key] !== undefined && intent[key] !== actual.options[key])
             throw new Error('Resolution changed an explicit model option.')

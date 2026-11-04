@@ -111,6 +111,46 @@ func TestModelConfigurationKeyStableInputs(t *testing.T) {
 
 func keyTestPointer[T any](value T) *T { return &value }
 
+func TestModelConfigurationKeyCPUExperts(t *testing.T) {
+	in := estimateFixture("qwen3moe")
+	in.Memory = &modelEstimateMemory{Target: modelBufferTestTargetMemory()}
+	seen := map[string]string{}
+	for _, tc := range []struct {
+		name    string
+		experts *modelconfig.CPUExperts
+	}{
+		{"inherited", nil},
+		{"none", &modelconfig.CPUExperts{Mode: "none"}},
+		{"all", &modelconfig.CPUExperts{Mode: "all"}},
+		{"zero layers", &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(0))}},
+		{"one layer", &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(1))}},
+		{"two layers", &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in.Allocation.Options.CPUExperts = tc.experts
+			options := modelConfigurationOptions(*in.Allocation)
+			if !reflect.DeepEqual(options.CPUExperts, tc.experts) {
+				t.Fatal("effective options dropped CPU expert intent")
+			}
+			id := modelConfigurationOptionsID(options, []byte("same-native-snapshot"))
+			key := modelConfigurationKey(in, "same-native-source", id)
+			if key == "" {
+				t.Fatal("finite configuration has no key")
+			}
+			if previous, duplicate := seen[key]; duplicate {
+				t.Fatalf("%s reused %s configuration key", tc.name, previous)
+			}
+			seen[key] = tc.name
+			if options.CPUExperts != nil && options.CPUExperts.Layers != nil {
+				*options.CPUExperts.Layers = 99
+				if *tc.experts.Layers == 99 {
+					t.Fatal("configuration identity clone retained caller's layers pointer")
+				}
+			}
+		})
+	}
+}
+
 func writeKeyGGUF(t *testing.T, f inspectionFixture, arch string) {
 	t.Helper()
 	data := []byte("GGUF")
