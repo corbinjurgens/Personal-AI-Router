@@ -590,6 +590,19 @@ func (b *Broker) setEngineMgr(w *rpcWorker) {
 	b.workersMu.Unlock()
 }
 
+func (b *Broker) engineManagerExited(w *rpcWorker) {
+	c := b.switchCoordinator()
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	if b.engineMgr == w {
+		b.engineMgrRecovering = true
+	}
+	if c.activeManager == w && c.activeCancel != nil {
+		c.interrupted = true
+		c.activeCancel()
+	}
+}
+
 func (b *Broker) getEngineMgr() *rpcWorker {
 	b.workersMu.Lock()
 	defer b.workersMu.Unlock()
@@ -602,16 +615,54 @@ func (b *Broker) getEngineMgr() *rpcWorker {
 // The replacement stays hidden from ordinary callers until conservative switch
 // recovery has run. Cancellation above lets the active owner release its lock.
 func (b *Broker) recoverReplacementEngineMgr(w *rpcWorker) bool {
-	if !b.recoverEngineSwitch() {
-		return false
+	const attempts = 3
+	for attempt := 0; attempt < attempts; attempt++ {
+		b.workersMu.Lock()
+		current := b.engineMgr == w && w != nil
+		b.workersMu.Unlock()
+		if !current {
+			return false
+		}
+		select {
+		case <-w.Done():
+			return false
+		default:
+		}
+		if b.recoverEngineSwitchOn(w) {
+			b.workersMu.Lock()
+			current = b.engineMgr == w
+			select {
+			case <-w.Done():
+				current = false
+			default:
+			}
+			if current {
+				b.engineMgrRecovering = false
+			}
+			b.workersMu.Unlock()
+			if current {
+				b.forwardErrorsClear(engineSwitchRecoveryBlockedID)
+			}
+			return current
+		}
+		b.engineConfigMu.Lock()
+		permanent := b.switchCoordinator().err != nil
+		b.engineConfigMu.Unlock()
+		if permanent || attempt == attempts-1 {
+			b.reportEngineSwitchRecoveryBlocked()
+			return false
+		}
+		// Recovery retries only conservative inspection/reconcile/release on the
+		// pinned replacement. The ordinary manager surface remains fenced.
+		timer := time.NewTimer(time.Second << attempt)
+		select {
+		case <-w.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
 	}
-	b.workersMu.Lock()
-	defer b.workersMu.Unlock()
-	if b.engineMgr != w {
-		return false
-	}
-	b.engineMgrRecovering = false
-	return true
+	return false
 }
 
 func (b *Broker) restoreEnabledEngines(w *rpcWorker) {

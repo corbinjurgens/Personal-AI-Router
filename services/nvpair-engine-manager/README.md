@@ -560,6 +560,10 @@ local Off and local pause with `-32011`; local switches remain allowed.
 The veto takes neither the switch lock nor the engine operation lock, including
 for a remote reservation retained for recovery. Local Off of a reserved engine
 during a local switch remains a busy refusal.
+While a remote reservation remains unreleased, local Off of either engine or
+local pause also vetoes an already-committed target. Reconciliation records
+target Off and pending cleanup before stopping it; source is never restored.
+Restart reconciliation without an explicit veto preserves committed target On.
 
 The existing pinned ec listener exposes `/v1/engine-switch/apply` and `/status`,
 relaying to the target broker with `engine:switch-request/reply/cancel`. The

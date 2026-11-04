@@ -15,6 +15,12 @@ settings replay and enabled-engine restoration. Local Off reaches the manager's
 durable veto path during remote reservations without waiting for the transaction
 lock. Forward steps are pinned to the preparing manager incarnation; replacement
 interrupts the operation and gates the new manager until reconciliation finishes.
+Off/pause admission and terminal completion share a gate, so an admitted veto
+cannot produce a successful receipt while a stop response is pending. Worker
+exit is fenced before supervisor notification, with already-closed worker
+channels checked again at completion. Transient conservative recovery failures
+retry with bounded backoff on the same replacement; exhausted recovery remains
+hidden and reports a sticky error. Journal/storage uncertainty stays blocked.
 
 A Go service that exposes the NVIDIA Personal AI Router API to **UI processes**
 and other clients (CLIs, dashboards, mobile companions, scripts, tests, etc.).

@@ -221,8 +221,9 @@ func (b *Broker) forwardErrorsClear(id string) {
 // only in memory and the producer reports the condition once. Both are bind
 // failures their producer does not retry on a timer.
 var stickyErrorIDs = map[string]bool{
-	ollamaHostAliasBlockedID: true,
-	routingListenerBlockedID: true,
+	ollamaHostAliasBlockedID:      true,
+	routingListenerBlockedID:      true,
+	engineSwitchRecoveryBlockedID: true,
 }
 
 // routingListenerBlockedID is the proxy's routing-listener bind failure; the

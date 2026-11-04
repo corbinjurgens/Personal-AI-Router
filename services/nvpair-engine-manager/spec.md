@@ -467,6 +467,10 @@ refused busy without changing intent.
 The existing projection
 path cancels remote work on local pause. Local switching is allowed under these
 remote-only vetoes.
+Before a remote reservation is released, local Off of either engine or a local
+pause also cancels an already-committed target. Reconcile durably changes it to
+target Off with pending cleanup, then stops it without restoring source. In the
+absence of an explicit veto, restart reconciliation preserves committed On.
 
 Switch relay requests use independent IDs and a bounded pending map. Replies
 preserve numeric error codes; waiter cancellation sends `engine:switch-cancel`

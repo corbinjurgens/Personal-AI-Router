@@ -176,6 +176,11 @@ and reaches the manager's existing stop admission. That owner durably saves
 local Off and cancels remote startup before waiting for lifecycle locks. The
 switch fails with target Off and never restores source. Local Off during a local
 switch remains a busy refusal; unrelated engines do not veto the switch.
+The broker latches the veto for that accepted operation before waiting for the
+stop response. Its terminal-completion gate checks the latch, including after
+facade publication, and conservative cleanup produces a failure receipt.
+Off admission rechecks reservations while waiting for ordinary settings work;
+negative lookup and operation-lock acquisition are ordered with acceptance.
 
 Switch drain is strict and separate from the settings restart drain. Withdraw
 source discovery and its local inference endpoint, acknowledge source drain,
@@ -207,9 +212,11 @@ Startup loads the switch journal, marks nonterminal operations
 `failed-interrupted`, and conservatively reconciles manager reservations before
 settings replay and enabled-intent restoration. It never resumes switch steps
 or starts target as recovery. Conflicting pending settings/switch journals fail
-closed. A committed target On is preserved; an uncommitted partial target launch
-is cleaned up. Unknown cleanup remains visibly recovery-required. Terminal
-receipts remain historical facts; current observations are reported separately.
+closed. A committed target On is preserved unless a local Off/pause veto applies
+to the unreleased remote reservation; that veto cleans up target to Off too.
+An uncommitted partial target launch is cleaned up. Unknown cleanup remains
+visibly recovery-required. Terminal receipts remain historical facts; current
+observations are reported separately.
 
 Forward prepare/source-stop/target-start calls use the original worker handle
 and carry its explicit `managerIncarnation` in the internal operation envelope.
@@ -221,3 +228,17 @@ operation lock, then reconciles/releases authoritative checkpoint evidence on
 the replacement before exposing it to restore or other forward callers. Recovery
 never waits behind a live switch that is itself waiting for replacement recovery.
 Older checkpoints without the incarnation remain readable for cleanup only.
+The worker exit owner fences execution before closing its peer/Done channel or
+notifying the supervisor. Terminal persistence shares that fence's gate and
+also checks the pinned worker's already-closed Done channel. This orders observed
+exit against completion, rather than claiming atomicity with an unobservable
+physical crash.
+
+Transient inspection, reconcile and drain-release errors are separate from
+permanent journal/storage uncertainty. Replacement recovery retries conservative
+cleanup on the same still-current worker with bounded backoff; the replacement
+stays hidden throughout. Success clears only the retryable error and permits the
+remaining bring-up continuation. Exhaustion keeps the manager unavailable and
+reports sticky `engine-switch:recovery-blocked`; it never resumes switch steps or
+silently treats the blocked replacement as usable. Corruption and uncertain
+durability remain fenced.

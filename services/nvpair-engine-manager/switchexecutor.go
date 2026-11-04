@@ -514,6 +514,22 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 		}
 		return result
 	}
+	// An explicit veto while the broker still owns a remote reservation also
+	// cancels an already-committed target. Ordinary restart recovery preserves
+	// committed On; local Off/pause instead requires conservative target cleanup.
+	vetoedCommittedTarget := false
+	if reconcile && cp.Origin == settings.SwitchOriginRemote && cp.TargetCommitted {
+		paused, _ := e.nodeProjection.pausedLocally()
+		if (cp.Error != nil && cp.Error.Code == codeLocalVeto) || paused {
+			vetoedCommittedTarget = true
+			cp.TargetCommitted = false
+			cp.Target.Intent = settings.SwitchIntentOff
+			cp.Phase = settings.SwitchCheckpointStartPending
+			if cp.Error == nil || cp.Error.Code != codeLocalVeto {
+				cp.Error = switchFailure(codeLocalVeto, settings.SwitchErrorRemoteVeto, &localVetoError{reason: nodePausedVeto})
+			}
+		}
+	}
 	if reconcile && cp.Phase != settings.SwitchCheckpointStopPending && cp.Phase != settings.SwitchCheckpointStartPending {
 		for _, pair := range []struct {
 			name        string
@@ -600,7 +616,11 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			st.mu.Unlock()
 		}
 		cp.Phase = settings.SwitchCheckpointStartPending
-		if err := e.saveSwitch(cp, "", false); err != nil {
+		intentEngine := ""
+		if vetoedCommittedTarget {
+			intentEngine = engine
+		}
+		if err := e.saveSwitch(cp, intentEngine, false); err != nil {
 			return fail(settings.SwitchErrorStorage, err)
 		}
 		if reconcile {
