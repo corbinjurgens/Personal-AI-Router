@@ -21,12 +21,14 @@ import { createPairApi, type IClusterApi, type INodePolicyApi } from '@/ui/api/p
 import { ServiceCallError } from '@/ui/api/service-transport'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 
 vi.mock('@/ui/components/RoutingSettings/RoleEditor', () => ({ default: () => null }))
+vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
 vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
 vi.mock('@/ui/components/RoutingSettings/RoutingHistory', () => ({ default: () => null }))
 
@@ -195,6 +197,7 @@ async function mount(saved = documentFor()) {
 }
 
 beforeEach(() => {
+    useOverviewUiStore.setState({ settingsNodeId: null })
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     vi.stubGlobal('CSS', { supports: () => false })
     getPolicy.mockReset()

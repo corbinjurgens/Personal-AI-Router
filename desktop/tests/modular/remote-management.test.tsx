@@ -55,6 +55,7 @@ import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { EngineSettingsSection } from '@/ui/components/BackendRow/EngineSettingsSection'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
@@ -65,6 +66,7 @@ import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { emptyEngineStatus } from '@/shared/utils/engines'
 
 vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
+vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
 
 type BridgeState = ReturnType<typeof getModularBridgeState>
 
@@ -802,6 +804,7 @@ describe('permission controls', () => {
         })
     }
     beforeEach(() => {
+        useOverviewUiStore.setState({ settingsNodeId: null })
         vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
         vi.stubGlobal('CSS', { supports: () => true })
         Object.defineProperty(HTMLDialogElement.prototype, 'show', {

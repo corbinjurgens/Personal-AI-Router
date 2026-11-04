@@ -10,22 +10,21 @@ interface OverviewUiStore {
     activeTab: OverviewTab
     /** Active sub-tab when the Settings content is shown. */
     settingsSubTab: SettingsWindowTab
-    /** One-shot request to expand a node card's inline engine settings. */
-    focusNodeId: string | null
+    settingsNodeId: string | null
+    selectSettingsNode: (nodeId: string | null) => void
     setActiveTab: (tab: OverviewTab) => void
     /** Switch to the Settings tab, optionally selecting a sub-tab. */
     openSettings: (subTab?: SettingsWindowTab) => void
     setSettingsSubTab: (subTab: SettingsWindowTab) => void
-    /** Switch to the Overview tab and request a node card expand its engine settings. */
-    focusNodeEngineSettings: (nodeId: string) => void
-    /** Clear a pending focus request once a card has consumed it. */
-    consumeFocusNode: () => void
+    /** Open node settings for the requested node. */
+    focusNodeSettings: (nodeId: string) => void
 }
 
 export const useOverviewUiStore = create<OverviewUiStore>(set => ({
     activeTab: 'overview',
     settingsSubTab: 'cluster',
-    focusNodeId: null,
+    settingsNodeId: null,
+    selectSettingsNode: nodeId => set({ settingsNodeId: nodeId }),
 
     setActiveTab: tab => set({ activeTab: tab }),
 
@@ -37,7 +36,6 @@ export const useOverviewUiStore = create<OverviewUiStore>(set => ({
 
     setSettingsSubTab: subTab => set({ settingsSubTab: subTab }),
 
-    focusNodeEngineSettings: nodeId => set({ activeTab: 'overview', focusNodeId: nodeId }),
-
-    consumeFocusNode: () => set({ focusNodeId: null })
+    focusNodeSettings: nodeId =>
+        set({ activeTab: 'settings', settingsSubTab: 'routing', settingsNodeId: nodeId })
 }))

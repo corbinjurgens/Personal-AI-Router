@@ -20,11 +20,11 @@ import type {
 } from '@/shared/types/node-policy'
 import getErrorString from '@/shared/utils/get-error-string'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
-import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
+import NodeEngineSettings from '@/ui/components/NodeList/NodeEngineSettings'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import ModelEngineBindingsEditor from './ModelEngineBindingsEditor'
 import ModelSettingsPanel from '@/ui/components/ModelSettings/ModelSettingsPanel'
-import RoutingHistory from '@/ui/components/RoutingSettings/RoutingHistory'
 import NodeAvailabilityControls from '@/ui/components/NodeList/NodeAvailabilityControls'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
@@ -70,9 +70,14 @@ export default function RoutingSettings() {
     )
 
     // null is this PC: the service omits `nodeId` for it.
-    const [pickedNodeId, setPickedNodeId] = useState<string | null>(null)
-    const nodeId = peers.some(peer => peer.id === pickedNodeId) ? pickedNodeId : null
-    const nodeName = peers.find(peer => peer.id === nodeId)?.name ?? THIS_PC
+    const pickedNodeId = useOverviewUiStore(state => state.settingsNodeId)
+    const setPickedNodeId = useOverviewUiStore(state => state.selectSettingsNode)
+    const nodeId = pickedNodeId === selfId ? null : pickedNodeId
+    const selectedPeer = peers.find(peer => peer.id === nodeId)
+    const selfName = useNodesStore(state =>
+        selfId === null ? undefined : state.nodes.get(selfId)?.name
+    )
+    const nodeName = nodeId === null ? (selfName ?? THIS_PC) : (selectedPeer?.name ?? nodeId)
 
     const [text, setTextState] = useState('')
     const [settingsSnapshot, setSettingsSnapshot] = useState<NodePolicySnapshot | null>(null)
@@ -124,7 +129,7 @@ export default function RoutingSettings() {
     )
     const peerPaused = nodeId !== null && (availability === 'paused' || availability === 'draining')
     const targetOnline =
-        nodeId === null || peers.find(peer => peer.id === nodeId)?.status !== 'offline'
+        nodeId === null || (selectedPeer !== undefined && selectedPeer.status !== 'offline')
     const permissionReadOnly =
         !connected ||
         !targetOnline ||
@@ -373,7 +378,7 @@ export default function RoutingSettings() {
                 onSelect: () => setPickedNodeId(peer.id)
             }))
         ],
-        [peers]
+        [peers, setPickedNodeId]
     )
 
     // Save needs the revision the draft is based on, which a loaded policy supplies.
@@ -398,7 +403,7 @@ export default function RoutingSettings() {
 
             <div className="settings-card pair-paper p-4">
                 <Stack gap="4">
-                    <Text kind="body/semibold/md">Routing &amp; resources</Text>
+                    <Text kind="body/semibold/md">Settings for {nodeName}</Text>
 
                     <Flex align="center" gap="3" wrap="wrap">
                         <Text kind="body/regular/sm" className="text-subtle-color">
@@ -483,6 +488,13 @@ export default function RoutingSettings() {
                                 onReload: () => void load()
                             }}
                         />
+                    )}
+
+                    {targetId !== null && (
+                        <Stack gap="2">
+                            <Text kind="body/semibold/md">Engines</Text>
+                            <NodeEngineSettings key={targetId} nodeId={targetId} />
+                        </Stack>
                     )}
 
                     <Stack gap="2">
@@ -593,11 +605,6 @@ export default function RoutingSettings() {
                     </Text>
                 </Stack>
             </div>
-
-            <div className="settings-card pair-paper p-4">
-                <BulkNodeConfiguration />
-            </div>
-            <RoutingHistory />
         </Stack>
     )
 }

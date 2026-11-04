@@ -17,10 +17,7 @@ import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { EngineSwitchControls } from './EngineSwitchControls'
 
 /**
- * Inline engine editor for a single node, rendered inside the overview node
- * card's expandable "Engine settings" section. This is the reusable body that
- * used to live in the standalone Edit Node window — minus the window chrome
- * (AppBar / WindowDropDown / ErrorModal / background shell).
+ * Engine editor for a single node, hosted by the node settings page.
  */
 export default function NodeEngineSettings({ nodeId }: { nodeId: string }) {
     const node = useNodesStore(state => state.nodes.get(nodeId))

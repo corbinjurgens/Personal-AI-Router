@@ -37,8 +37,11 @@ import type { IClusterApi, INodePolicyApi } from '@/ui/api/pair-api'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { useNodeConfigurationStore, withRoles } from '@/ui/stores/node-configuration.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 import { workloadModelLabel } from '@/ui/utils/workload-labels'
 import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
+
+vi.mock('@/ui/components/NodeList/NodeEngineSettings', () => ({ default: () => null }))
 
 function strictFixtureObject(value: JsonValue | undefined): JsonObject {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -1467,6 +1470,7 @@ describe('routing settings editor', () => {
     let root: Root
 
     beforeEach(async () => {
+        useOverviewUiStore.setState({ settingsNodeId: null })
         vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
         // Each case starts a fresh app session; drafts intentionally survive component unmounts.
         useNodeConfigurationStore.setState({ policyDrafts: new Map(), availability: new Map() })

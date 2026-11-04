@@ -23,7 +23,6 @@ import NodeChartLegend from './NodeChartLegend'
 import { buildRadialChartMetrics, getMetricReading } from '@/ui/utils/build-radial-chart-metrics'
 import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-inference'
 import NodeEnginesInline from './NodeEnginesInline'
-import NodeEngineSettings from './NodeEngineSettings'
 import NodeDeclaredRoles from './NodeDeclaredRoles'
 import NodeAvailabilityControls from './NodeAvailabilityControls'
 
@@ -37,16 +36,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
     const nodeMetrics = useMetricsStore(state => state.nodeMetrics.get(node.id))
     const isLocal = useConnectionStore(state => state.selfId === node.id)
     const [isExpanded, setIsExpanded] = useState(false)
-    const [isEngineSettingsExpanded, setIsEngineSettingsExpanded] = useState(false)
-    // Mount the heavy engine editor only after the first expand so N node cards
-    // don't each render a full BackendRow stack while collapsed.
-    const [hasOpenedEngineSettings, setHasOpenedEngineSettings] = useState(false)
-    // The engine cards cast a 15px drop shadow that the accordion's
-    // overflow-hidden wrapper (needed to animate height) would clip. Flip the
-    // wrapper to overflow-visible only once the open transition settles.
-    const [engineSettingsOpenSettled, setEngineSettingsOpenSettled] = useState(false)
-    const focusNodeId = useOverviewUiStore(state => state.focusNodeId)
-    const consumeFocusNode = useOverviewUiStore(state => state.consumeFocusNode)
+    const focusNodeSettings = useOverviewUiStore(state => state.focusNodeSettings)
     // "Has a GPU" means "has an inference-ready GPU" per the backend readiness
     // list (or any GPU when the backend sends no list); see gpu-inference.ts.
     // A node with none renders the CPU + RAM fallback instead of a GPU ring.
@@ -135,45 +125,9 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
 
     const jobCount = useNodeActiveJobCount(node.id)
 
-    // Performance chart and engine settings are mutually exclusive — opening one
-    // collapses the other so only a single section is ever expanded per card.
     const togglePerformance = useCallback(() => {
-        setIsExpanded(prev => {
-            const next = !prev
-            if (next) setIsEngineSettingsExpanded(false)
-            return next
-        })
+        setIsExpanded(prev => !prev)
     }, [])
-
-    const toggleEngineSettings = useCallback(() => {
-        setIsEngineSettingsExpanded(prev => {
-            const next = !prev
-            if (next) {
-                setHasOpenedEngineSettings(true)
-                setIsExpanded(false)
-            }
-            return next
-        })
-    }, [])
-
-    // Respond to a cross-component request (cluster tab "Edit node", welcome
-    // modal, tray) to reveal this node's engine settings and scroll to it.
-    useEffect(() => {
-        if (focusNodeId !== node.id) return
-        setIsEngineSettingsExpanded(true)
-        setHasOpenedEngineSettings(true)
-        setIsExpanded(false)
-        consumeFocusNode()
-        requestAnimationFrame(() => {
-            containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-        })
-    }, [focusNodeId, node.id, consumeFocusNode])
-
-    // Re-clip while the accordion animates open or closed; the onTransitionEnd
-    // below re-enables overflow-visible once a fully-open transition finishes.
-    useEffect(() => {
-        setEngineSettingsOpenSettled(false)
-    }, [isEngineSettingsExpanded])
 
     const measure = useCallback(() => {
         if (!containerRef.current) return
@@ -225,15 +179,14 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                     <BarChartOutlined style={{ fontSize: 14 }} />
                 </Button>
             </DismissibleTooltip>
-            <DismissibleTooltip slotContent="Show engine settings" placement={placement}>
+            <DismissibleTooltip slotContent="Node settings" placement={placement}>
                 <Button
-                    kind={isEngineSettingsExpanded ? 'primary' : 'tertiary'}
+                    kind="tertiary"
                     color="neutral"
                     size="tiny"
                     className="px-2"
-                    onClick={toggleEngineSettings}
-                    aria-label="Engine settings"
-                    aria-expanded={isEngineSettingsExpanded}
+                    onClick={() => focusNodeSettings(node.id)}
+                    aria-label="Node settings"
                 >
                     <SettingsOutlined style={{ fontSize: 14 }} />
                 </Button>
@@ -340,35 +293,6 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                 >
                     <div className="overflow-hidden min-h-0">
                         <NodePerformance node={node} className="mt-5" />
-                    </div>
-                </div>
-                <div
-                    style={{
-                        display: 'grid',
-                        gridTemplateRows: isEngineSettingsExpanded ? '1fr' : '0fr',
-                        transition: 'grid-template-rows 0.25s ease'
-                    }}
-                    onTransitionEnd={event => {
-                        if (
-                            event.propertyName === 'grid-template-rows' &&
-                            isEngineSettingsExpanded
-                        ) {
-                            setEngineSettingsOpenSettled(true)
-                        }
-                    }}
-                >
-                    <div
-                        className={`min-h-0 ${
-                            isEngineSettingsExpanded && engineSettingsOpenSettled
-                                ? 'overflow-visible'
-                                : 'overflow-hidden'
-                        }`}
-                    >
-                        {hasOpenedEngineSettings && (
-                            <div className="mt-4">
-                                <NodeEngineSettings nodeId={node.id} />
-                            </div>
-                        )}
                     </div>
                 </div>
             </div>

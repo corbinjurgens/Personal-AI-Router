@@ -12,7 +12,7 @@ import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 
 const SETTINGS_NAV_ITEMS: ResponsiveNavItem[] = [
     { id: 'cluster', label: 'Cluster' },
-    { id: 'routing', label: 'Routing & resources' },
+    { id: 'routing', label: 'Node settings' },
     { id: 'service', label: 'Service' }
 ]
 

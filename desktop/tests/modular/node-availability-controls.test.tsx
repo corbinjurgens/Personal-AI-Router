@@ -307,7 +307,7 @@ describe('node availability presentation', () => {
 })
 
 describe('mounted local stop controls', () => {
-    it('mounts immediate stop outside the collapsed Overview engine settings for self only', async () => {
+    it('mounts immediate stop directly on the Overview card for self only', async () => {
         await act(async () => root.render(<NodeCardDetails node={node('self', 'This PC')} />))
         const stop = button('Stop local models now')
         expect(stop.disabled).toBe(false)

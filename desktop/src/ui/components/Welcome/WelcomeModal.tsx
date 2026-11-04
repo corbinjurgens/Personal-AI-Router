@@ -38,7 +38,7 @@ export function WelcomeModal({ open, onOpenChange, selfId }: WelcomeModalProps) 
     useBlurOnOpen(open)
     const statusByNode = useEngineStatusStore(s => s.statusByNode)
     const errors = useErrorsStore(s => s.errors)
-    const focusNodeEngineSettings = useOverviewUiStore(s => s.focusNodeEngineSettings)
+    const focusNodeSettings = useOverviewUiStore(s => s.focusNodeSettings)
 
     const [step, setStep] = useState(0)
     const [engineSelections, setEngineSelections] = useState<Partial<
@@ -104,10 +104,10 @@ export function WelcomeModal({ open, onOpenChange, selfId }: WelcomeModalProps) 
     const finishWelcome = useCallback(
         (focusSettings: boolean) => {
             onOpenChange(false)
-            if (focusSettings) focusNodeEngineSettings(selfId)
+            if (focusSettings) focusNodeSettings(selfId)
             void window.windowApi.completeFirstRun()
         },
-        [focusNodeEngineSettings, onOpenChange, selfId]
+        [focusNodeSettings, onOpenChange, selfId]
     )
 
     /** An in-flight install keeps running in the background after dismissal. */
