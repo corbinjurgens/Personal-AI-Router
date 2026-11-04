@@ -865,9 +865,9 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 	if gpu.Mode == "layers" {
 		options["gpu-layers"] = strconv.Itoa(int(*gpu.Layers))
 	}
-	// llama.cpp b11146 common/arg.cpp:2649-2665 maps only these finite
+	// llama.cpp b11146 common/arg.cpp:2755-2771 maps only these finite
 	// expert overrides. none deliberately emits neither native flag.
-	// https://github.com/ggml-org/llama.cpp/blob/b11146/common/arg.cpp#L2649-L2665
+	// https://github.com/ggml-org/llama.cpp/blob/b11146/common/arg.cpp#L2755-L2771
 	if experts := requested.CPUExperts; experts != nil {
 		switch experts.Mode {
 		case "all":

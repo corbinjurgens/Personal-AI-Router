@@ -1564,7 +1564,7 @@ func modelEstimateComputePortion(ctx context.Context, m modelEstimateModel, in m
 // The native overrides use regex_search, including fused gate_up and chexps,
 // and exclude shared experts and routing gates. Layer mode prefixes the pattern
 // with each exact block index in [0, N).
-// https://github.com/ggml-org/llama.cpp/blob/b11146/common/common.h#L1026-L1041
+// https://github.com/ggml-org/llama.cpp/blob/b11146/common/common.h#L1131-L1149
 var modelEstimateCPUExpertRegex = regexp.MustCompile(`\.ffn_(up|down|gate|gate_up)_(ch|)exps`)
 
 func modelEstimateCPUExpert(name string, experts *modelconfig.CPUExperts) bool {
