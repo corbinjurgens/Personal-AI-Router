@@ -645,7 +645,7 @@ func resolveLlamaArtifactsSelection(ctx context.Context, snapshot *engineState, 
 	if !artifactPathSafe(store.root) {
 		return modelFileList{}, false, errNoArtifactBinding
 	}
-	if err := validateLlamaModelID(model); err != nil {
+	if err := validateLlamaArtifactModelID(model); err != nil {
 		return modelFileList{}, false, errNoArtifactBinding
 	}
 	rt := snapshot.plat.Runtime

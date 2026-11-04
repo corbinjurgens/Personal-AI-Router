@@ -526,11 +526,23 @@ func llamaCanonicalModelID(id string) string {
 	return id[:colon+1] + string(upper)
 }
 
-func validateLlamaModelID(id string) error {
+// Artifact lookup preserves the exact ID instead of applying the serving
+// compiler's native canonicalization (which strips labels such as UD-).
+func validateLlamaArtifactModelID(id string) error {
 	if err := nodepolicy.ValidateModelIdentifier(id); err != nil {
 		return servingError(err.Error())
 	}
-	if id == "*" || id != strings.TrimSpace(id) || strings.ContainsAny(id, "[]#;\r\n\x00") || llamaCanonicalModelID(id) != id {
+	if id == "*" || id != strings.TrimSpace(id) || strings.ContainsAny(id, "[]#;\r\n\x00") {
+		return &ServingFieldError{Field: "serving.models.modelId", ModelID: id, Reason: "Use an exact canonical native preset model ID."}
+	}
+	return nil
+}
+
+func validateLlamaModelID(id string) error {
+	if err := validateLlamaArtifactModelID(id); err != nil {
+		return err
+	}
+	if llamaCanonicalModelID(id) != id {
 		return &ServingFieldError{Field: "serving.models.modelId", ModelID: id, Reason: "Use an exact canonical native preset model ID."}
 	}
 	return nil
@@ -693,7 +705,7 @@ func readLlamaArtifactPreset(data []byte) (map[string]llamaArtifactSection, erro
 				current.err = servingError("Duplicate preset section.")
 			} else {
 				current.options = map[string]string{}
-				if section != "*" && validateLlamaModelID(section) != nil {
+				if section != "*" && validateLlamaArtifactModelID(section) != nil {
 					current.err = servingError("Section name is not an exact model ID.")
 				}
 			}

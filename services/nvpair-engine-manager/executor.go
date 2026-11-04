@@ -120,6 +120,7 @@ type engineState struct {
 // layer runs the long ones (install, start) in goroutines so the read
 // loop stays responsive.
 type Executor struct {
+	modelIdentities     *modelIdentityInfo
 	modelInspection     modelInspectionState
 	modelEstimates      modelEstimateState
 	modelBuffers        modelBufferOwner
@@ -283,6 +284,7 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 	e.downloads = newModelDownloads(e.switchIncarnation, baseDir, naming)
 	e.modelBuffers.store = newModelBufferStore(baseDir)
 	e.modelMemoryProfiles = newModelMemoryProfiles(baseDir)
+	e.modelIdentities = newModelIdentityInfo(e)
 	return e
 }
 
