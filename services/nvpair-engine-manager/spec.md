@@ -1401,9 +1401,9 @@ Requests (caller → service):
 | `engine:load-model` | `{ engine, model }` | the engine's raw response, via the manifest's `load` operation binding |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response, via the manifest's `unload` operation binding |
 | `engine:delete-model` | `{ engine, model }` | the engine's raw response, via the manifest's `delete` operation binding |
-| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability, pausedBy? }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
+| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability, pausedBy?, pauseMode? }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
 | `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
-| `engine:remote-availability-set` | `{ nodeId, state, pauseMode? }` | the target broker's `{ availability, pausedBy? }` result; configured waits for drain, immediate is refused |
+| `engine:remote-availability-set` | `{ nodeId, state, pauseMode? }` | the target broker's `{ availability, pausedBy?, pauseMode? }` result; configured waits for drain, immediate is refused |
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |
 
@@ -1417,9 +1417,12 @@ not payload `nodeId`, determines locality. An accepted target-local immediate
 request fences execution and requests cancellation before the persistence barrier,
 supersedes the previous transition, and persists Pause. It starts controlled
 shutdown without the configured drain or cancel-settle wait; missing physical
-shutdown proof leaves the node draining and fenced. Timing is never persisted.
+shutdown proof leaves the node draining and fenced. The broker persists the
+accepted `pauseMode` with Pause and clears it on Resume. Stored pauses without
+a mode are repaired to `immediate`, preserving local-only Resume protection.
 The target's policy readback and availability result preserve actual
-`pausedBy` (`local`/`peer`, empty/omitted when unknown, cleared while available).
+`pausedBy` (`local`/`peer`, empty/omitted when unknown, cleared while available)
+and saved `pauseMode` (`configured`/`immediate`, omitted while available).
 Peer responses omit activation and origin-private routing fields.
 
 The `engineintent.Snapshot` shared wire type defines both intent payloads.
