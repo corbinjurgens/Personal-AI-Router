@@ -57,6 +57,45 @@ func TestRequestedLoadValidation(t *testing.T) {
 	}
 }
 
+func TestRequestedLoadCPUExpertsValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		experts *CPUExperts
+		valid   bool
+	}{
+		{"inherited", nil, true},
+		{"explicit none", &CPUExperts{Mode: "none"}, true},
+		{"all", &CPUExperts{Mode: "all"}, true},
+		{"zero layers", &CPUExperts{Mode: "layers", Layers: testPointer(int32(0))}, true},
+		{"finite layers", &CPUExperts{Mode: "layers", Layers: testPointer(int32(12))}, true},
+		{"missing layers", &CPUExperts{Mode: "layers"}, false},
+		{"negative layers", &CPUExperts{Mode: "layers", Layers: testPointer(int32(-1))}, false},
+		{"none with layers", &CPUExperts{Mode: "none", Layers: testPointer(int32(0))}, false},
+		{"all with layers", &CPUExperts{Mode: "all", Layers: testPointer(int32(12))}, false},
+		{"unknown mode", &CPUExperts{Mode: "auto"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := (RequestedLoad{CPUExperts: tc.experts}).Validate()
+			if (err == nil) != tc.valid {
+				t.Fatalf("validation error=%v, want valid=%v", err, tc.valid)
+			}
+		})
+	}
+}
+
+func TestRequestedLoadCPUExpertsCloneDetached(t *testing.T) {
+	original := RequestedLoad{CPUExperts: &CPUExperts{Mode: "layers", Layers: testPointer(int32(12))}}
+	clone := original.Clone()
+	*clone.CPUExperts.Layers = 2
+	clone.CPUExperts.Mode = "none"
+	if original.CPUExperts.Mode != "layers" || *original.CPUExperts.Layers != 12 {
+		t.Fatalf("clone changed original: %+v", original.CPUExperts)
+	}
+	if (RequestedLoad{}).Clone().CPUExperts != nil {
+		t.Fatal("clone materialized an inherited option")
+	}
+}
+
 func TestPolicyPatchGenerationUsesExistingRanges(t *testing.T) {
 	test := func(name, key, number string, valid bool) {
 		t.Run(name, func(t *testing.T) {

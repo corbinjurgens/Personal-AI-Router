@@ -1217,6 +1217,132 @@ func TestModelSettingsEstimateIncompleteSWAIsUnknown(t *testing.T) {
 	}
 }
 
+func TestModelSettingsEstimateCPUExpertsPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		gpu          int32
+		experts      *modelconfig.CPUExperts
+		host, device string
+	}{
+		{"inherited", 4, nil, "32", "3424"},
+		{"none", 4, &modelconfig.CPUExperts{Mode: "none"}, "32", "3424"},
+		{"zero", 4, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(0))}, "32", "3424"},
+		{"first block", 4, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(1))}, "480", "2976"},
+		{"first two blocks", 4, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}, "928", "2528"},
+		{"full blocks", 4, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(3))}, "1376", "2080"},
+		{"all", 4, &modelconfig.CPUExperts{Mode: "all"}, "1376", "2080"},
+		{"already host blocks", 2, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}, "2272", "1184"},
+		{"last offloaded block", 2, &modelconfig.CPUExperts{Mode: "all"}, "2720", "736"},
+		{"CPU all", 0, &modelconfig.CPUExperts{Mode: "all"}, "3456", "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateFixture("qwen3moe")
+			in.Facts.Shards[0].Numeric["qwen3moe.block_count"] = gguffacts.Numeric{Type: 4, Bits: 3}
+			in.Facts.Shards[0].Tensors = []gguffacts.Tensor{
+				{Name: "token_embd.weight", Type: 1, Dimensions: []uint64{16}, Bytes: 32},
+				{Name: "output.weight", Type: 1, Dimensions: []uint64{16}, Bytes: 32},
+				{Name: "output_norm.weight", Type: 1, Dimensions: []uint64{16}, Bytes: 32},
+			}
+			for layer := 0; layer < 3; layer++ {
+				for _, tensor := range []struct {
+					name            string
+					elements, bytes uint64
+				}{
+					{"ffn_up_exps.weight", 32, 64},
+					{"ffn_down_exps.weight", 48, 96},
+					{"ffn_gate_exps.weight", 64, 128},
+					{"ffn_gate_up_chexps.weight", 80, 160},
+					{"ffn_up_shexp.weight", 96, 192},
+					{"ffn_gate_inp.weight", 112, 224},
+					{"ffn_gate.weight", 128, 256},
+				} {
+					in.Facts.Shards[0].Tensors = append(in.Facts.Shards[0].Tensors, gguffacts.Tensor{Name: "blk." + strconv.Itoa(layer) + "." + tensor.name, Type: 1, Dimensions: []uint64{tensor.elements}, Bytes: tensor.bytes})
+				}
+			}
+			in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &tc.gpu}
+			in.Allocation.Options.CPUExperts = tc.experts
+			m, reason := modelEstimateAdapt(context.Background(), in.Facts)
+			if reason != "" {
+				t.Fatal(reason)
+			}
+			// 448 expert bytes per block move independently. The 672 bytes of
+			// shared experts, routing gate and dense FFN per block stay put.
+			out := modelconfig.Estimate{Components: []modelconfig.EstimateComponent{estimateComponent("weights", 3456, "synthetic tensor directory")}}
+			modelEstimatePlacement(&out, m, in)
+			if out.HostBytes != tc.host || out.DeviceBytes != tc.device {
+				t.Fatalf("weights host/device=%s/%s, want %s/%s", out.HostBytes, out.DeviceBytes, tc.host, tc.device)
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateCPUExpertsPattern(t *testing.T) {
+	first := &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(1))}
+	for _, name := range []string{"blk.0.ffn_up_exps.weight", "blk.0.ffn_down_chexps.weight", "blk.0.ffn_gate_exps.weight", "blk.0.ffn_gate_up_exps.weight", "blk.0.ffn_gate_up_chexps.weight"} {
+		t.Run(name, func(t *testing.T) {
+			if !modelEstimateCPUExpert(name, first) {
+				t.Fatal("pinned expert pattern was not selected")
+			}
+		})
+	}
+	for _, name := range []string{"blk.1.ffn_up_exps.weight", "blk.10.ffn_up_exps.weight", "blk.00.ffn_up_exps.weight", "blk.0.ffn_up_shexp.weight", "blk.0.ffn_gate_inp.weight", "blk.0.ffn_gate_inp_shexp.weight", "blk.0.ffn_gate.weight", "blk.0.other.ffn_up_exps.weight"} {
+		t.Run("excluded "+name, func(t *testing.T) {
+			if modelEstimateCPUExpert(name, first) {
+				t.Fatal("selected a tensor outside exact first-block expert pattern")
+			}
+		})
+	}
+}
+
+func TestModelSettingsEstimateCPUExpertsCompute(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		gpu     int32
+		experts *modelconfig.CPUExperts
+		status  string
+	}{
+		{"none", 3, &modelconfig.CPUExperts{Mode: "none"}, "partial"},
+		{"zero", 3, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(0))}, "partial"},
+		{"host blocks only", 2, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(1))}, "partial"},
+		{"split first block", 3, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(1))}, "unknown"},
+		{"split full blocks", 3, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(2))}, "unknown"},
+		{"all", 3, &modelconfig.CPUExperts{Mode: "all"}, "unknown"},
+		{"all already CPU", 0, &modelconfig.CPUExperts{Mode: "all"}, "partial"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := estimateComputeFixture("qwen3moe")
+			in.Allocation.GPU = modelconfig.GPU{Mode: "layers", Layers: &tc.gpu}
+			in.Allocation.Options.CPUExperts = tc.experts
+			in.Memory = &modelEstimateMemory{Map: &modelDeviceMap{Devices: []modelNativeDevice{{Kind: 1, Selector: "CUDA0"}}}}
+			out := estimateFixtureResult(t, in)
+			computeRows := 0
+			for _, c := range out.Components {
+				if c.Name != "compute-workspace" {
+					continue
+				}
+				computeRows++
+				if c.Status != tc.status {
+					t.Fatalf("compute=%+v, want %s", c, tc.status)
+				}
+				if tc.status == "unknown" {
+					if c.Bytes != "" || !strings.Contains(c.Reason, "CPU expert host/device compute and staging unpriced") {
+						t.Fatalf("split expert computation was priced or lost its reason: %+v", c)
+					}
+				} else if c.Bytes == "" || !strings.Contains(c.Reason, "unpriced") {
+					t.Fatalf("known graph portion lost partial accounting: %+v", c)
+				}
+			}
+			wantRows := 2
+			if tc.gpu == 0 {
+				wantRows = 1
+			}
+			if computeRows != wantRows {
+				t.Fatalf("compute rows=%d, want %d", computeRows, wantRows)
+			}
+		})
+	}
+}
+
 func TestModelSettingsEstimateTensorPlacement(t *testing.T) {
 	for _, tc := range []struct {
 		name                 string

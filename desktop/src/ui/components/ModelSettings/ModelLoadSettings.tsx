@@ -132,6 +132,24 @@ export default function ModelLoadSettings({
         ? undefined
         : (load?.set.context ?? requested.context)
     const effectiveGpu = load?.clear?.includes('gpu') ? undefined : (load?.set.gpu ?? requested.gpu)
+    const effectiveCpuExperts = load?.clear?.includes('cpuExperts')
+        ? undefined
+        : (load?.set.cpuExperts ?? requested.cpuExperts)
+    const cpuDescriptor = inspection?.options?.find(option => option.field === 'cpuExperts')
+    const cpuLayersDescriptor = inspection?.options?.find(
+        option => option.field === 'cpuExperts.layers'
+    )
+    const editCpuExperts = (value: RequestedLoad['cpuExperts']) => {
+        const set = { ...load?.set }
+        delete set.cpuExperts
+        const clear: Array<keyof RequestedLoad> = (load?.clear ?? []).filter(
+            field => field !== 'cpuExperts'
+        )
+        if (value) set.cpuExperts = value
+        else clear.push('cpuExperts')
+        validateField('cpuExperts.layers')
+        edit({ load: { set, clear } })
+    }
     const autoSelected = effectiveContext?.mode === 'auto' || effectiveGpu?.mode === 'auto'
     const draftIdentity = JSON.stringify(draft?.change)
     const invalid = Object.keys(validation).length > 0
@@ -151,8 +169,9 @@ export default function ModelLoadSettings({
         loadFields
             .filter(
                 field =>
+                    field !== 'cpuExperts' &&
                     ['context', 'slots', 'gpu', 'cacheTypeK', 'cacheTypeV'].includes(field) ===
-                    basic
+                        basic
             )
             .map(field => {
                 const descriptor = inspection?.options?.find(option => option.field === field)
@@ -292,6 +311,116 @@ export default function ModelLoadSettings({
                                 }}
                             />
                         )}
+                        {field === 'gpu' &&
+                            Number(inspection?.facts?.dimensions?.expert_count) > 0 && (
+                                <FormField
+                                    slotLabel="CPU expert placement"
+                                    slotHelp="None keeps normal placement. All puts routed experts on CPU. First N puts routed experts from the first N model layers on CPU. Shared experts keep normal placement."
+                                >
+                                    <Select
+                                        aria-label="CPU expert placement"
+                                        value={effectiveCpuExperts?.mode ?? ''}
+                                        disabled={
+                                            blocked ||
+                                            !cpuDescriptor?.supported ||
+                                            resolved?.kvUnified === true
+                                        }
+                                        items={[
+                                            { value: '', children: 'Inherited' },
+                                            ...(cpuDescriptor?.values ?? []).map(value => ({
+                                                value,
+                                                children:
+                                                    value === 'none'
+                                                        ? 'None'
+                                                        : value === 'all'
+                                                          ? 'All'
+                                                          : 'First N layers'
+                                            }))
+                                        ]}
+                                        onValueChange={value => {
+                                            setValues(previous => {
+                                                const next = { ...previous }
+                                                delete next['cpuExperts.layers']
+                                                return next
+                                            })
+                                            if (!value) editCpuExperts(undefined)
+                                            else if (value === 'none' || value === 'all')
+                                                editCpuExperts({ mode: value })
+                                            else if (value === 'layers')
+                                                editCpuExperts({
+                                                    mode: 'layers',
+                                                    layers: effectiveCpuExperts?.layers ?? 0
+                                                })
+                                        }}
+                                    />
+                                    {effectiveCpuExperts?.mode === 'layers' && (
+                                        <TextInput
+                                            aria-label="CPU expert layers"
+                                            type="number"
+                                            min={cpuLayersDescriptor?.minimum ?? 0}
+                                            max={
+                                                cpuLayersDescriptor?.maximum ??
+                                                inspection?.facts?.layerCount
+                                            }
+                                            value={
+                                                values['cpuExperts.layers'] ??
+                                                String(effectiveCpuExperts.layers ?? '')
+                                            }
+                                            disabled={
+                                                blocked ||
+                                                !cpuLayersDescriptor?.supported ||
+                                                resolved?.kvUnified === true
+                                            }
+                                            onValueChange={value => {
+                                                setValues(previous => ({
+                                                    ...previous,
+                                                    ['cpuExperts.layers']: value
+                                                }))
+                                                const layers = Number(value)
+                                                const maximum =
+                                                    cpuLayersDescriptor?.maximum ??
+                                                    inspection?.facts?.layerCount ??
+                                                    2147483647
+                                                if (
+                                                    !value ||
+                                                    !Number.isInteger(layers) ||
+                                                    layers < 0 ||
+                                                    layers > Math.min(maximum, 2147483647)
+                                                ) {
+                                                    validateField(
+                                                        'cpuExperts.layers',
+                                                        'Enter a nonnegative CPU expert layer count within the model range.'
+                                                    )
+                                                    useEngineSettingsStore
+                                                        .getState()
+                                                        .invalidateModel(key)
+                                                    return
+                                                }
+                                                editCpuExperts({ mode: 'layers', layers })
+                                            }}
+                                        />
+                                    )}
+                                    <Button
+                                        size="small"
+                                        kind="tertiary"
+                                        disabled={
+                                            blocked ||
+                                            !cpuDescriptor?.supported ||
+                                            resolved?.kvUnified === true
+                                        }
+                                        onClick={() => {
+                                            setValues(previous => {
+                                                const next = { ...previous }
+                                                delete next['cpuExperts.layers']
+                                                return next
+                                            })
+                                            editCpuExperts(undefined)
+                                        }}
+                                    >
+                                        Reset CPU expert placement to inherited
+                                    </Button>
+                                </FormField>
+                            )}
                     </FormField>
                 )
             })
@@ -502,7 +631,8 @@ export default function ModelLoadSettings({
                     option =>
                         !loadFields.some(field => field === option.field) &&
                         !option.field.startsWith('generation.') &&
-                        option.field !== 'gpu.layers'
+                        option.field !== 'gpu.layers' &&
+                        option.field !== 'cpuExperts.layers'
                 )
                 .map(option => (
                     <Text key={option.field} kind="body/regular/sm">

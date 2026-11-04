@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1511,6 +1512,16 @@ func modelEstimateComputePortion(ctx context.Context, m modelEstimateModel, in m
 			return u
 		}
 	}
+	// v0.27.0 file_estimate__llamacpp.go's OverriddenTensors path changes
+	// Weight/Parameter.ComputeOverridden only. Computation still follows whole
+	// GPU layers, so WithOverriddenTensors cannot price a split expert graph.
+	// https://github.com/gpustack/gguf-parser-go/blob/9257743a3c1775b882ba1b58ec7f5a856c2cc385/file_estimate__llamacpp.go
+	for _, tensor := range m.file.TensorInfos {
+		if modelEstimateCPUExpert(tensor.Name, a.Options.CPUExperts) && modelEstimateTensorOnDevice(tensor.Name, layers, uint64(offload)) {
+			u.Reason = "CPU expert host/device compute and staging unpriced: pinned library tensor overrides map weights only, not split expert computation"
+			return u
+		}
+	}
 	opts := []gguf.GGUFRunEstimateOption{gguf.WithLLaMACppContextSize(a.TotalContext), gguf.WithParallelSize(a.Slots), gguf.WithLLaMACppLogicalBatchSize(batch), gguf.WithLLaMACppPhysicalBatchSize(ubatch), gguf.WithLLaMACppCacheKeyType(kt), gguf.WithLLaMACppCacheValueType(vt), gguf.WithLLaMACppOffloadLayers(uint64(offload))}
 	if *a.Options.FlashAttention == "on" {
 		opts = append(opts, gguf.WithFlashAttention())
@@ -1548,6 +1559,43 @@ func modelEstimateComputePortion(ctx context.Context, m modelEstimateModel, in m
 		component.DomainID = "offload-unmapped"
 	}
 	return component
+}
+
+// The native overrides use regex_search, including fused gate_up and chexps,
+// and exclude shared experts and routing gates. Layer mode prefixes the pattern
+// with each exact block index in [0, N).
+// https://github.com/ggml-org/llama.cpp/blob/b11146/common/common.h#L1026-L1041
+var modelEstimateCPUExpertRegex = regexp.MustCompile(`\.ffn_(up|down|gate|gate_up)_(ch|)exps`)
+
+func modelEstimateCPUExpert(name string, experts *modelconfig.CPUExperts) bool {
+	if experts == nil || experts.Mode == "none" || !modelEstimateCPUExpertRegex.MatchString(name) {
+		return false
+	}
+	if experts.Mode == "all" {
+		return true
+	}
+	if experts.Mode != "layers" || experts.Layers == nil || *experts.Layers <= 0 {
+		return false
+	}
+	id, suffix, found := strings.Cut(strings.TrimPrefix(name, "blk."), ".")
+	layer, err := strconv.ParseUint(id, 10, 32)
+	match := modelEstimateCPUExpertRegex.FindStringIndex("." + suffix)
+	return strings.HasPrefix(name, "blk.") && found && err == nil && id == strconv.FormatUint(layer, 10) && layer < uint64(*experts.Layers) && match != nil && match[0] == 0
+}
+
+func modelEstimateTensorOnDevice(name string, layers, gpuLayers uint64) bool {
+	if gpuLayers == 0 {
+		return false
+	}
+	if name == "output.weight" || name == "output_norm.weight" {
+		return true
+	}
+	if strings.HasPrefix(name, "blk.") {
+		id, _, found := strings.Cut(strings.TrimPrefix(name, "blk."), ".")
+		layer, err := strconv.ParseUint(id, 10, 64)
+		return found && err == nil && layer < layers && layer >= layers-(gpuLayers-1)
+	}
+	return false
 }
 
 func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in modelEstimateInput) {
@@ -1594,10 +1642,6 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 			// output has index blocks. Thus ngl=1 selects output, then trailing
 			// blocks. Embeddings and unclassified tensors remain on host.
 			gpuLayers := uint64(*a.GPU.Layers)
-			var offloadBlocks uint64
-			if gpuLayers > 0 {
-				offloadBlocks = gpuLayers - 1
-			}
 			var h, d uint64
 			var embedding uint64
 			hasOutput := false
@@ -1618,15 +1662,7 @@ func modelEstimatePlacement(out *modelconfig.Estimate, m modelEstimateModel, in 
 				if tensor.Name == "token_embd.weight" {
 					embedding = bytes
 				}
-				onGPU := gpuLayers > 0 && (tensor.Name == "output.weight" || tensor.Name == "output_norm.weight")
-				if strings.HasPrefix(tensor.Name, "blk.") {
-					rest := strings.TrimPrefix(tensor.Name, "blk.")
-					id, _, found := strings.Cut(rest, ".")
-					layer, err := strconv.ParseUint(id, 10, 64)
-					if found && err == nil && layer < layers {
-						onGPU = layer >= layers-offloadBlocks
-					}
-				}
+				onGPU := modelEstimateTensorOnDevice(tensor.Name, layers, gpuLayers) && !modelEstimateCPUExpert(tensor.Name, a.Options.CPUExperts)
 				if onGPU {
 					d = modelEstimateAdd(d, bytes)
 				} else {

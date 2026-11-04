@@ -30,6 +30,46 @@ import (
 	"nvpair-shared/modelconfig"
 )
 
+func TestLlamaServingTypedCPUExpertFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		experts *modelconfig.CPUExperts
+		want    map[string]string
+	}{
+		{"layers twelve", []string{"--n-cpu-moe", "12"}, &modelconfig.CPUExperts{Mode: "layers", Layers: keyTestPointer(int32(12))}, map[string]string{"n-cpu-moe": "12"}},
+		{"all", []string{"--cpu-moe"}, &modelconfig.CPUExperts{Mode: "all"}, map[string]string{"cpu-moe": "true"}},
+		{"none", nil, &modelconfig.CPUExperts{Mode: "none"}, map[string]string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cli, _, err := llamaLaunchOptions(launchCommand{Args: tc.args}, nil)
+			if err != nil || !reflect.DeepEqual(cli, tc.want) {
+				t.Fatalf("canonical argv parsed as %v, want %v: %v", cli, tc.want, err)
+			}
+			blocks := int32(24)
+			options, _, err := typedLlamaModelOptions("exact", modelconfig.RequestedLoad{GPU: &modelconfig.GPU{Mode: "cpu"}, CPUExperts: tc.experts}, &blocks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := map[string]string{}
+			for _, key := range []string{"cpu-moe", "n-cpu-moe"} {
+				if value, exists := options[key]; exists {
+					native[key] = value
+				}
+			}
+			if !reflect.DeepEqual(native, tc.want) {
+				t.Fatalf("typed native options=%v, want %v", native, tc.want)
+			}
+		})
+	}
+	for _, key := range []string{"override-tensor", "spec-draft-cpu-moe", "spec-draft-n-cpu-moe"} {
+		i := slices.IndexFunc(llamaServingOptions, func(o llamaServingOption) bool { return o.key == key })
+		if i < 0 || !llamaServingOptions[i].unsupported {
+			t.Fatalf("unsupported control %s was enabled", key)
+		}
+	}
+}
+
 func TestLlamaServingReviewedUUIDReachesActualChild(t *testing.T) {
 	bin, err := os.Executable()
 	if err != nil {

@@ -14,6 +14,43 @@ import (
 
 func testPointer[T any](value T) *T { return &value }
 
+func TestDecodeModelChangeCPUExpertsSelection(t *testing.T) {
+	for _, selection := range []string{
+		`"set":{"cpuExperts":{"mode":"none"}}`,
+		`"set":{"cpuExperts":{"mode":"all"}}`,
+		`"set":{"cpuExperts":{"mode":"layers","layers":12}}`,
+		`"set":{},"clear":["cpuExperts"]`,
+	} {
+		t.Run(selection, func(t *testing.T) {
+			data := []byte(`{"modelId":"model","expectedPolicyRevision":"0","load":{` + selection + `}}`)
+			change, err := DecodeModelChange(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := DecodeModelChange(mustJSON(t, change))
+			if err != nil || !reflect.DeepEqual(again, change) {
+				t.Fatalf("selection changed across transport: %+v, %v", again, err)
+			}
+			if change.Load.Set.CPUExperts == nil && !reflect.DeepEqual(change.Load.Clear, []string{"cpuExperts"}) {
+				t.Fatal("lost CPU expert selection")
+			}
+		})
+	}
+	for _, selection := range []string{
+		`"set":{"cpuExperts":{"mode":"all"}},"clear":["cpuExperts"]`,
+		`"set":{"cpuExperts":null}`,
+		`"set":{"cpuExperts":{"mode":"layers","layers":1.5}}`,
+		`"set":{"cpuExperts":{"mode":"layers","layers":2147483648}}`,
+		`"set":{"cpuExperts":{"mode":"all","other":1}}`,
+	} {
+		t.Run("reject "+selection, func(t *testing.T) {
+			if _, err := DecodeModelChange([]byte(`{"modelId":"model","expectedPolicyRevision":"0","load":{` + selection + `}}`)); err == nil {
+				t.Fatal("accepted ambiguous CPU expert selection")
+			}
+		})
+	}
+}
+
 func TestPublicMemoryAuthorityRejected(t *testing.T) {
 	for _, field := range []string{"memory", "Memory", "deviceBinding", "nativeMap", "hop", "trusted", "settings"} {
 		t.Run(field, func(t *testing.T) {

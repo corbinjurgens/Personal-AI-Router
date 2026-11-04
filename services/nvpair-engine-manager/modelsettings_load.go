@@ -821,6 +821,9 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 		return nil, nil, modelLoadError(model, field, reason)
 	}
 	if err := requested.Validate(); err != nil {
+		if field, _, ok := strings.Cut(err.Error(), ":"); ok && strings.HasPrefix(field, "cpuExperts.") {
+			return fail(field, err.Error())
+		}
 		return fail("requested", err.Error())
 	}
 	tokens, slots := int32(8192), int32(1)
@@ -861,6 +864,20 @@ func typedLlamaModelOptions(model string, requested modelconfig.RequestedLoad, l
 	options := map[string]string{"ctx-size": strconv.Itoa(int(total)), "parallel": strconv.Itoa(int(slots)), "kv-unified": "false", "fit": "off", "sleep-idle-seconds": "300", "cache-ram": "512", "load-on-startup": "false", "gpu-layers": "0"}
 	if gpu.Mode == "layers" {
 		options["gpu-layers"] = strconv.Itoa(int(*gpu.Layers))
+	}
+	// llama.cpp b11146 common/arg.cpp:2649-2665 maps only these finite
+	// expert overrides. none deliberately emits neither native flag.
+	// https://github.com/ggml-org/llama.cpp/blob/b11146/common/arg.cpp#L2649-L2665
+	if experts := requested.CPUExperts; experts != nil {
+		switch experts.Mode {
+		case "all":
+			options["cpu-moe"] = "true"
+		case "layers":
+			if layers == nil || *experts.Layers > *layers {
+				return fail("cpuExperts.layers", "CPU expert placement requires a target block count and cannot exceed it.")
+			}
+			options["n-cpu-moe"] = strconv.Itoa(int(*experts.Layers))
+		}
 	}
 	for _, field := range []struct {
 		name, key string
@@ -1599,6 +1616,18 @@ func convertTypedLlamaOptions(model string, options map[string]string) (modelcon
 		}
 		switch key {
 		case "model", "model-draft":
+		case "cpu-moe":
+			b, err := llamaBool(value)
+			if err != nil || b != "true" || r.CPUExperts != nil {
+				return fail()
+			}
+			r.CPUExperts = &modelconfig.CPUExperts{Mode: "all"}
+		case "n-cpu-moe":
+			n, err := integer()
+			if err != nil || *n < 0 || r.CPUExperts != nil {
+				return fail()
+			}
+			r.CPUExperts = &modelconfig.CPUExperts{Mode: "layers", Layers: n}
 		case "ctx-size":
 			n, err := integer()
 			if err != nil {
@@ -1715,7 +1744,7 @@ func modelSettingsNativeLabels() map[string]string {
 		"override-tensor": "Tensor placement overrides", "cpu-moe": "CPU expert placement",
 		"n-cpu-moe": "CPU expert layers", "n-cpu-ffn": "CPU feed-forward layers",
 		"moe-cache-mib": "GPU expert cache (MiB)",
-		"kv-offload": "Offload KV cache", "op-offload": "Offload operations",
+		"kv-offload":    "Offload KV cache", "op-offload": "Offload operations",
 		"repack": "Weight repacking", "no-host": "Disable host buffers",
 		"load-mode": "Model loading mode", "lazy-mode": "Lazy loading mode",
 		"numa": "NUMA placement", "rpc": "Native RPC devices",
@@ -1792,6 +1821,12 @@ func llamaModelSettingsOptions() ([]modelSettingsOption, error) {
 		case "gpu-layers":
 			d = modelconfig.OptionDescriptor{Field: "gpu", Label: label, Kind: "enum", Values: []string{"native-default", "cpu", "layers"}, Supported: true, Portable: true, Owner: "model-load", Phase: "B", DefaultSource: "inherited native placement; unresolved", IdentityEffect: "placement", EstimateEffect: "host/device weights and KV"}
 			preset = "gpu-layers = 0 for CPU, checked finite layers; inherited native-default must resolve; Auto unavailable"
+		case "cpu-moe":
+			d = modelconfig.OptionDescriptor{Field: "cpuExperts", Label: "CPU expert placement", Kind: "enum", Values: []string{"none", "all", "layers"}, Supported: true, Portable: true, Owner: "model-load", Phase: "B", DefaultSource: "inherited native placement; no expert override", IdentityEffect: "expert placement", EstimateEffect: "host/device expert weights; changed expert compute mapping unpriced"}
+			preset = "none emits neither expert flag; all emits cpu-moe = true; layers emits n-cpu-moe = N"
+		case "n-cpu-moe":
+			d = modelSettingsInteger("cpuExperts.layers", label, "0", "", "required only for layers; bounded by target block count", "host/device expert weights; changed expert compute mapping unpriced")
+			preset = "n-cpu-moe = explicit nonnegative int32 not exceeding target block count"
 		case "cache-type-k", "cache-type-v":
 			field := "cacheTypeK"
 			if native.key == "cache-type-v" {

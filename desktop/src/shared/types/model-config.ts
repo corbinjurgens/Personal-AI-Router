@@ -7,6 +7,7 @@ export type RequestedLoad = {
     context?: { mode: 'fixed' | 'auto'; tokens?: number; floor?: number; cap?: number }
     slots?: number
     gpu?: { mode: 'native-default' | 'cpu' | 'layers' | 'auto'; layers?: number }
+    cpuExperts?: { mode: 'none' | 'all' | 'layers'; layers?: number }
     cacheTypeK?: 'f16' | 'bf16' | 'q8_0' | 'q4_0'
     cacheTypeV?: 'f16' | 'bf16' | 'q8_0' | 'q4_0'
     flashAttention?: 'inherit' | 'on' | 'off'
