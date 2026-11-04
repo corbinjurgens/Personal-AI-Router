@@ -143,6 +143,28 @@ func TestNEReadinessAcceptsExactEnvelopeBounds(t *testing.T) {
 	f.qualify(t)
 }
 
+func TestNEReadinessNameBasedPerformanceDoesNotGrantCapability(t *testing.T) {
+	f := newReadinessEnvelopeFixture(t, "llamacpp")
+	f.install(t)
+	if r := f.a.StrictReadiness(); r.Capability == nil || len(r.Capability.Models) != 1 {
+		t.Fatalf("digest-backed control lacks strict capability: %+v", r)
+	}
+	f.id.ModelDigests = map[string]string{}
+	f.id.Serving = nil
+	if err := f.id.Validate(); err != nil {
+		t.Fatalf("digest-less engine identity: %v", err)
+	}
+	f.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"llamacpp": f.id})
+	p := performanceProxy(t, "llamacpp")
+	p.admission = f.a
+	if _, _, ok := p.soleFacade().performanceFingerprint("m", routeChatCompletions, []byte(`{"model":"m","stream":true}`)); !ok {
+		t.Fatal("digest-less identity did not allow performance measurement")
+	}
+	if r := f.a.StrictReadiness(); r.Capability != nil && len(r.Capability.Models) != 0 {
+		t.Fatalf("name-based measurement granted strict capability: %+v", r)
+	}
+}
+
 func TestNEReadinessRejectsEnvelopeBoundsAndMissingMemory(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

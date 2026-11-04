@@ -42,15 +42,19 @@ This view only displays reported measurements. It does not run benchmarks,
 estimate throughput, rank nodes, sort by speed or change scheduling. The
 proxy records actual local inference attempts at their executing destination,
 including direct and reverse peer ingress. The forwarding origin does not count
-another local execution. Missing required engine/model identity suppresses
-samples; an empty measured-run section can therefore remain expected. Hardware
+another local execution. Missing required engine identity suppresses samples.
+Models without a content digest are measured under a name-based identity that
+grants no strict or hybrid eligibility. Replacing a model file under the same
+name within one engine run is not detected. An empty measured-run section can
+therefore remain expected. Hardware
 utilization history is independent of execution measurements.
 
 Streaming measurements use the proxy's existing response reader. llama.cpp and
 Strata Chat completions preserve reviewed engine-native timing semantics. Nonstream
 responses have unknown protocol/numeric evidence in this milestone. The serving
-fingerprint includes the joined engine runtime, settings, launch and model-content
-identity, effective request options, API and timing schema. Identity changes
+fingerprint includes the joined engine runtime, settings, launch and model
+identity (content digest when available, otherwise the normalized name with an
+explicit identity kind), effective request options, API and timing schema. Identity changes
 separate profiles; changes during execution drop the observation. No placeholder
 identity or response model field qualifies a measurement.
 

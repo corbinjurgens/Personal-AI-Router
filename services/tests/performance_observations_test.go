@@ -958,6 +958,48 @@ func observationAssertSummary(t *testing.T, summary performancewire.Summary, key
 	}
 }
 
+func TestPerformanceObservationDigestlessLlamaStoredByBroker(t *testing.T) {
+	upstream := observationUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(w, "data: "+observationLlamaFinal+"\n\ndata: [DONE]\n\n"); err != nil {
+			t.Error(err)
+		}
+	})
+	b, p := observationBrokerFixture(t, upstream.URL)
+	identity := observationIdentity("llamacpp")
+	id := identity.Engines["llamacpp"]
+	id.ModelDigests = map[string]string{}
+	if err := id.Validate(); err != nil {
+		t.Fatalf("digest-less fixture identity: %v", err)
+	}
+	identity.Engines["llamacpp"] = id
+	b.control(t, nodepolicy.MethodSetModelIdentity, identity)
+	resp := observationRequest(t, p, context.Background(), true, false)
+	observationRead(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("digest-less inference status=%d", resp.StatusCode)
+	}
+	sample := observationWaitBrokerSamples(t, b, 1)[0]
+	observationAssertRate(t, sample, p.host, "llamacpp", 40, 250000000)
+	canonical, err := json.Marshal(struct {
+		Run, Settings, Launch, Kind, Model, API, Schema string
+		Options                                         map[string]any
+	}{id.EngineRunID, id.SettingsFingerprint, id.LaunchDigest, "name", observationModel,
+		"/v1/chat/completions", "llamacpp:llamacpp-b12020-0ec4027a", map[string]any{"stream": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("%x", sha256.Sum256(canonical)); sample.Key.Fingerprint != want {
+		t.Fatalf("broker received fingerprint=%s, want name-based %s", sample.Key.Fingerprint, want)
+	}
+	observationWaitBrokerCoverage(t, b, sample.Key, 1, 1, 0, 0, 1)
+	projection := b.projection(t)
+	if projection.Local.Summary == nil {
+		t.Fatal("broker did not store the digest-less execution")
+	}
+	observationAssertSummary(t, *projection.Local.Summary, sample.Key, 1)
+}
+
 func TestPerformanceObservationBrokerPersistenceAndPublication(t *testing.T) {
 	base := t.TempDir()
 	cluster := filepath.Join(base, "cluster")

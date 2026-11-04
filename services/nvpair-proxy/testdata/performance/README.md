@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 All fixtures are synthetic documentation recordings or derived cases, retrieved
 2026-10-20. They contain no real user content, installed-engine capture, MSI
 execution evidence or native qualification. No approved versioned capture was
-available to this task. Content strings are empty; model identifiers and timestamps
+available to this task. These fixtures prove extraction, not installed-runtime
+qualification. Content strings are empty; model identifiers and timestamps
 are removed. JSON and stream fixtures carry their licensing/provenance here so
 their protocol bytes remain valid.
 
