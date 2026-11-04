@@ -249,7 +249,7 @@ function enqueueOverviewCommand(command: OverviewCommand, focus: boolean): void 
     deliverOverviewCommands()
 }
 
-/** Open/focus Overview and expand the given node's inline engine settings. */
+/** Open/focus Overview and show the given node's settings page. */
 export function focusNodeInOverview(nodeId: string): void {
     enqueueOverviewCommand({ type: 'focus-node', nodeId }, true)
 }
