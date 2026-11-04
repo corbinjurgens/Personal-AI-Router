@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { app } from 'electron'
+import fs from 'fs'
 import { platform } from 'os'
 import path from 'path'
 import { currentPlatform } from '@/shared/utils/platform'
@@ -65,7 +66,11 @@ export const setPaths = async (): Promise<void> => {
     app.setPath('logs', path.join(APP_DIR, 'logs'))
     app.setAppLogsPath(path.join(APP_DIR, 'logs'))
     app.setPath('crashDumps', path.join(APP_DIR, 'crash'))
-    app.setPath('temp', path.join(APP_DIR, 'tmp'))
+    const tempDir = path.join(APP_DIR, 'tmp')
+    // Electron does not create a redirected temp folder, and callers such as the
+    // Windows shortcut check resolve it with realpath, which throws ENOENT.
+    fs.mkdirSync(tempDir, { recursive: true })
+    app.setPath('temp', tempDir)
     app.setPath('userCache', path.join(APP_DIR, 'cache'))
 
     return
